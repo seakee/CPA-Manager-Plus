@@ -1,5 +1,5 @@
 import type { Dispatch, SetStateAction } from 'react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Outlet, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useUnsavedChangesGuard } from '@/hooks/useUnsavedChangesGuard';
@@ -17,6 +17,8 @@ import {
 import {
   coolingPolicyFromOverride,
   coolingPolicyToOverride,
+  toCommittedModelThinkingSnapshot,
+  type ModelAlias,
   type NotificationType,
   type ProviderKeyConfig,
 } from '@/types';
@@ -25,12 +27,13 @@ import type { ModelEntry, ProviderFormState } from '@/components/providers/types
 import { buildHeaderObject, headersToEntries, normalizeHeaderEntries } from '@/utils/headers';
 import { normalizeAuthIndex } from '@/utils/authIndex';
 import {
+  areJsonLikeValuesEqual,
   areKeyValueEntriesEqual,
   areModelEntriesEqual,
   areStringArraysEqual,
 } from '@/utils/compare';
 import { excludedModelsToText, parseExcludedModels } from '@/components/providers/utils';
-import { modelsToEntries } from '@/components/ui/modelInputListUtils';
+import { cloneModelEntry, isRecord, modelsToEntries } from '@/components/ui/modelInputListUtils';
 import {
   getCredentialWeightComparisonValue,
   getCredentialWeightError,
@@ -40,7 +43,10 @@ import {
   buildProviderDraftKey,
   parseProviderIndexParam,
 } from '@/features/aiProviders/model/routeParams';
-import type { ClaudeEditBaseline } from '@/stores/useClaudeEditDraftStore';
+import type {
+  ClaudeEditBaseline,
+  ClaudeModelBaselineEntry,
+} from '@/stores/useClaudeEditDraftStore';
 
 type LocationState = { fromAiProviders?: boolean } | null;
 
@@ -69,6 +75,7 @@ export type ClaudeEditOutletContext = {
 };
 
 const buildEmptyForm = (): ProviderFormState => ({
+  name: '',
   apiKey: '',
   authIndex: '',
   priority: undefined,
@@ -90,17 +97,72 @@ const getErrorMessage = (err: unknown) => {
   return '';
 };
 
-const normalizeClaudeModelEntries = (entries: ProviderFormState['modelEntries']) =>
-  (entries ?? []).reduce<ProviderFormState['modelEntries']>((acc, entry) => {
+type ClaudeExtendedModelEntry = ModelEntry &
+  Partial<Pick<ModelAlias, 'displayName' | 'maxContextLength' | 'isCompat'>>;
+
+const seedClaudeModelEntries = (models?: ModelAlias[]): ModelEntry[] => {
+  const entries = modelsToEntries(models);
+  if (!Array.isArray(models) || models.length === 0) return entries;
+  return entries.map((entry, idx) => {
+    const source = models[idx];
+    if (!source) return entry;
+    const extended: ClaudeExtendedModelEntry = { ...entry };
+    if (source.displayName !== undefined) extended.displayName = source.displayName;
+    if (source.maxContextLength !== undefined) extended.maxContextLength = source.maxContextLength;
+    if (source.isCompat !== undefined) extended.isCompat = source.isCompat;
+    return cloneModelEntry(entry, extended);
+  });
+};
+
+const normalizeClaudeModelEntries = (
+  entries: ProviderFormState['modelEntries']
+): ClaudeModelBaselineEntry[] =>
+  (entries ?? []).reduce<ClaudeModelBaselineEntry[]>((acc, entry) => {
     const name = String(entry?.name ?? '').trim();
     let alias = String(entry?.alias ?? '').trim();
     if (name) {
       alias = alias || name;
     }
     if (!name && !alias) return acc;
-    acc.push({ ...entry, name, alias });
+    const extended = entry as ClaudeExtendedModelEntry;
+    const cloned = cloneModelEntry(entry, { name, alias }) as ClaudeExtendedModelEntry;
+    cloned.priority =
+      typeof extended.priority === 'number' && Number.isFinite(extended.priority)
+        ? Math.trunc(extended.priority)
+        : undefined;
+    cloned.testModel = String(extended.testModel ?? '').trim() || undefined;
+    cloned.displayName = String(extended.displayName ?? '').trim() || undefined;
+    cloned.maxContextLength =
+      typeof extended.maxContextLength === 'number' && Number.isFinite(extended.maxContextLength)
+        ? Math.trunc(extended.maxContextLength)
+        : undefined;
+    cloned.isCompat = extended.isCompat === undefined ? undefined : Boolean(extended.isCompat);
+    acc.push(cloned);
     return acc;
   }, []);
+
+const areClaudeModelEntriesEqual = (
+  left: readonly ClaudeModelBaselineEntry[],
+  right: readonly ClaudeModelBaselineEntry[]
+): boolean => {
+  if (!areModelEntriesEqual(left, right)) return false;
+  for (let i = 0; i < left.length; i += 1) {
+    const a = left[i];
+    const b = right[i];
+    if (!a || !b) return false;
+    if (
+      (a.priority ?? null) !== (b.priority ?? null) ||
+      (a.testModel ?? '') !== (b.testModel ?? '') ||
+      Boolean(a.image) !== Boolean(b.image) ||
+      (a.displayName ?? '') !== (b.displayName ?? '') ||
+      (a.maxContextLength ?? null) !== (b.maxContextLength ?? null) ||
+      Boolean(a.isCompat) !== Boolean(b.isCompat)
+    ) {
+      return false;
+    }
+  }
+  return true;
+};
 
 const normalizeCloakConfig = (cloak: ProviderFormState['cloak']) => {
   if (!cloak) return null;
@@ -112,16 +174,29 @@ const normalizeCloakConfig = (cloak: ProviderFormState['cloak']) => {
   const sensitiveWords = Array.isArray(cloak.sensitiveWords)
     ? cloak.sensitiveWords.map((word) => String(word ?? '').trim()).filter(Boolean)
     : [];
+  const cacheUserId = typeof cloak.cacheUserId === 'boolean' ? cloak.cacheUserId : null;
+  const sensitiveWordsReplace = isRecord(cloak.sensitiveWordsReplace)
+    ? Object.entries(cloak.sensitiveWordsReplace)
+        .filter(([key, value]) => Boolean(key) && typeof value === 'string')
+        .map(([key, value]) => ({ key, value }))
+        .sort((a, b) => a.key.localeCompare(b.key))
+    : [];
+  const sensitivePatternsReplace = Array.isArray(cloak.sensitivePatternsReplace)
+    ? cloak.sensitivePatternsReplace.filter(isRecord).map((rule) => ({ ...rule }))
+    : [];
   return {
     mode,
     strictMode,
     sensitiveWords: sensitiveWords.length ? sensitiveWords : null,
+    cacheUserId,
+    sensitiveWordsReplace,
+    sensitivePatternsReplace,
   };
 };
 
 const buildClaudeBaseline = (form: ProviderFormState): ClaudeEditBaseline => ({
+  name: String(form.name ?? '').trim(),
   apiKey: String(form.apiKey ?? '').trim(),
-  authIndex: normalizeAuthIndex(form.authIndex) ?? '',
   priority:
     form.priority !== undefined && Number.isFinite(form.priority)
       ? Math.trunc(form.priority)
@@ -135,7 +210,7 @@ const buildClaudeBaseline = (form: ProviderFormState): ClaudeEditBaseline => ({
     typeof form.fingerprintProfile === 'string' ? form.fingerprintProfile : undefined,
   rebuildMidSystemMessage: Boolean(form.rebuildMidSystemMessage),
   headers: normalizeHeaderEntries(form.headers),
-  models: normalizeClaudeModelEntries(form.modelEntries),
+  models: normalizeClaudeModelEntries(form.modelEntries).map(toCommittedModelThinkingSnapshot),
   excludedModels: parseExcludedModels(form.excludedText ?? ''),
   cloak: normalizeCloakConfig(form.cloak),
 });
@@ -146,11 +221,22 @@ const areCloakConfigsEqual = (
 ) => {
   if (left === right) return true;
   if (!left || !right) return false;
-  if (left.mode !== right.mode || left.strictMode !== right.strictMode) return false;
-  if (left.sensitiveWords === null || right.sensitiveWords === null) {
-    return left.sensitiveWords === right.sensitiveWords;
+  if (
+    left.mode !== right.mode ||
+    left.strictMode !== right.strictMode ||
+    left.cacheUserId !== right.cacheUserId
+  ) {
+    return false;
   }
-  return areStringArraysEqual(left.sensitiveWords, right.sensitiveWords);
+  if (left.sensitiveWords === null || right.sensitiveWords === null) {
+    if (left.sensitiveWords !== right.sensitiveWords) return false;
+  } else if (!areStringArraysEqual(left.sensitiveWords, right.sensitiveWords)) {
+    return false;
+  }
+  if (!areKeyValueEntriesEqual(left.sensitiveWordsReplace, right.sensitiveWordsReplace)) {
+    return false;
+  }
+  return areJsonLikeValuesEqual(left.sensitivePatternsReplace, right.sensitivePatternsReplace);
 };
 
 export function AiProvidersClaudeEditLayout() {
@@ -169,14 +255,14 @@ export function AiProvidersClaudeEditLayout() {
 
   const config = useConfigStore((state) => state.config);
   const fetchConfig = useConfigStore((state) => state.fetchConfig);
-  const isCacheValid = useConfigStore((state) => state.isCacheValid);
   const updateConfigValue = useConfigStore((state) => state.updateConfigValue);
   const clearCache = useConfigStore((state) => state.clearCache);
+  const tRef = useRef(t);
+  tRef.current = t;
 
   const [configs, setConfigs] = useState<ProviderKeyConfig[]>(() => config?.claudeApiKeys ?? []);
-  const [loading, setLoading] = useState(() => !isCacheValid('claude-api-key'));
+  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-
   const draftKey = useMemo(() => {
     return buildProviderDraftKey('claude', editIndex, invalidIndexParam, params.index);
   }, [editIndex, invalidIndexParam, params.index]);
@@ -252,20 +338,17 @@ export function AiProvidersClaudeEditLayout() {
 
   useEffect(() => {
     let cancelled = false;
-    const hasValidCache = isCacheValid('claude-api-key');
-    if (!hasValidCache) {
-      setLoading(true);
-    }
+    setLoading(true);
 
-    fetchConfig('claude-api-key')
+    fetchConfig('claude-api-key', true)
       .then((value) => {
         if (cancelled) return;
         setConfigs(Array.isArray(value) ? (value as ProviderKeyConfig[]) : []);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        const message = getErrorMessage(err) || t('notification.refresh_failed');
-        showNotification(`${t('notification.load_failed')}: ${message}`, 'error');
+        const message = getErrorMessage(err) || tRef.current('notification.refresh_failed');
+        showNotification(`${tRef.current('notification.load_failed')}: ${message}`, 'error');
       })
       .finally(() => {
         if (cancelled) return;
@@ -275,7 +358,7 @@ export function AiProvidersClaudeEditLayout() {
     return () => {
       cancelled = true;
     };
-  }, [fetchConfig, isCacheValid, showNotification, t]);
+  }, [fetchConfig, showNotification]);
 
   useEffect(() => {
     if (loading) return;
@@ -284,9 +367,10 @@ export function AiProvidersClaudeEditLayout() {
     if (initialData) {
       const seededForm: ProviderFormState = {
         ...initialData,
+        name: initialData.name ?? '',
         disableCooling: coolingPolicyFromOverride(initialData.disableCooling),
         headers: headersToEntries(initialData.headers),
-        modelEntries: modelsToEntries(initialData.models),
+        modelEntries: seedClaudeModelEntries(initialData.models),
         excludedText: excludedModelsToText(initialData.excludedModels),
       };
       const available = seededForm.modelEntries.map((entry) => entry.name.trim()).filter(Boolean);
@@ -311,7 +395,7 @@ export function AiProvidersClaudeEditLayout() {
     });
   }, [draft?.initialized, draftKey, initDraft, initialData, loading]);
 
-  const resolvedLoading = !draft?.initialized;
+  const resolvedLoading = loading || !draft?.initialized;
   const baseline = draft?.baseline ?? null;
   const normalizedHeaders = useMemo(() => normalizeHeaderEntries(form.headers), [form.headers]);
   const normalizedModels = useMemo(
@@ -335,7 +419,7 @@ export function AiProvidersClaudeEditLayout() {
   }, [baseline, normalizedHeaders]);
   const isModelsDirty = useMemo(() => {
     if (!baseline) return false;
-    return !areModelEntriesEqual(baseline.models, normalizedModels);
+    return !areClaudeModelEntriesEqual(baseline.models, normalizedModels);
   }, [baseline, normalizedModels]);
   const isExcludedModelsDirty = useMemo(() => {
     if (!baseline) return false;
@@ -348,8 +432,8 @@ export function AiProvidersClaudeEditLayout() {
   const isDirty =
     Boolean(draft?.initialized) &&
     baseline !== null &&
-    (baseline.apiKey !== form.apiKey.trim() ||
-      baseline.authIndex !== (normalizeAuthIndex(form.authIndex) ?? '') ||
+    ((baseline.name ?? '') !== String(form.name ?? '').trim() ||
+      baseline.apiKey !== form.apiKey.trim() ||
       baseline.priority !== normalizedPriority ||
       baseline.weight !== comparableWeight ||
       baseline.prefix !== String(form.prefix ?? '').trim() ||
@@ -456,7 +540,11 @@ export function AiProvidersClaudeEditLayout() {
 
     setSaving(true);
     try {
+      const existingConfig = editIndex !== null ? configs[editIndex] : undefined;
+      const v8Source = existingConfig?.v8Source ?? form.v8Source;
       const payload: ProviderKeyConfig = {
+        ...(v8Source ? { v8Source } : {}),
+        name: form.name?.trim() || undefined,
         apiKey: form.apiKey.trim(),
         priority: form.priority !== undefined ? Math.trunc(form.priority) : undefined,
         weight: normalizeCredentialWeight(form.weight),

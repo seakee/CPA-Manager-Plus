@@ -21,9 +21,18 @@ type StylesModule = Record<string, string>;
 interface ProviderStatusBarProps {
   statusData: StatusBarData;
   styles?: StylesModule;
+  hideRate?: boolean;
+  trailingText?: string | null;
+  trailingTitle?: string;
 }
 
-export function ProviderStatusBar({ statusData, styles: stylesProp }: ProviderStatusBarProps) {
+export function ProviderStatusBar({
+  statusData,
+  styles: stylesProp,
+  hideRate = false,
+  trailingText,
+  trailingTitle,
+}: ProviderStatusBarProps) {
   const { t } = useTranslation();
   const s = (stylesProp || defaultStyles) as StylesModule;
   const [activeTooltip, setActiveTooltip] = useState<number | null>(null);
@@ -96,8 +105,13 @@ export function ProviderStatusBar({ statusData, styles: stylesProp }: ProviderSt
     );
   };
 
+  const isSingleTrack = hideRate && !trailingText;
   return (
-    <div className={s.statusBar}>
+    <div
+      className={`${s.statusBar} ${
+        isSingleTrack ? s.statusBarSolo : hideRate ? s.statusBarNoRate : ''
+      }`.trim()}
+    >
       <div className={s.statusBlocks} ref={blocksRef}>
         {statusData.blockDetails.map((detail, idx) => {
           const isIdle = detail.rate === -1;
@@ -121,9 +135,15 @@ export function ProviderStatusBar({ statusData, styles: stylesProp }: ProviderSt
           );
         })}
       </div>
-      <span className={`${s.statusRate} ${rateClass}`}>
-        {hasData ? formatSuccessRate(statusData.successRate) : '--'}
-      </span>
+      {!hideRate ? (
+        <span className={`${s.statusRate} ${rateClass}`}>
+          {hasData ? formatSuccessRate(statusData.successRate) : '--'}
+        </span>
+      ) : trailingText ? (
+        <span className={s.statusTrailingTime} title={trailingTitle}>
+          {trailingText}
+        </span>
+      ) : null}
     </div>
   );
 }

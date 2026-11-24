@@ -1,0 +1,766 @@
+@use '@/styles/variables.scss' as *;
+@use '@/styles/mixins.scss' as *;
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+  gap: 14px;
+  min-width: 0;
+  padding: 12px var(--list-panel-gutter-x, 16px);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 640px) {
+  .grid {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 12px var(--list-panel-gutter-x, 12px);
+  }
+}
+
+.card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+  border-radius: var(--app-radius-md);
+  background: var(--bg-primary);
+  box-shadow: var(--app-specular-highlight);
+  cursor: pointer;
+  transition:
+    transform 0.16s ease,
+    border-color 0.16s ease,
+    background-color 0.16s ease,
+    box-shadow 0.16s ease;
+
+  &:hover {
+    transform: translateY(-2px);
+    border-color: color-mix(in srgb, var(--primary-color) 32%, var(--border-color));
+    box-shadow: var(--app-specular-highlight);
+  }
+
+  &:focus-visible {
+    border-color: color-mix(in srgb, var(--primary-color) 42%, var(--border-color));
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary-color) 24%, transparent);
+    outline: none;
+  }
+}
+
+.cardSelectionMode {
+  cursor: pointer;
+}
+
+.cardSelected {
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 1px var(--primary-color);
+}
+
+.cardBulkSelected {
+  border-color: var(--primary-color);
+  background: color-mix(in srgb, var(--primary-color) 4%, var(--bg-primary));
+}
+
+.cardDisabled {
+  background: color-mix(in srgb, var(--bg-primary) 88%, var(--surface-subtle));
+  border-color: color-mix(in srgb, var(--border-color) 70%, transparent);
+  box-shadow: none;
+
+  &.cardSelected {
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 1px var(--primary-color);
+  }
+
+  &.cardBulkSelected {
+    border-color: var(--primary-color);
+    background: color-mix(in srgb, var(--primary-color) 5%, var(--bg-primary));
+  }
+}
+
+/* 1. Header */
+.cardHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.cardHeaderIdentity {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.cardCheckbox {
+  display: inline-flex;
+  align-items: center;
+  padding-top: 4px;
+  flex-shrink: 0;
+}
+
+.cardHeaderRight {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding-top: 2px;
+}
+
+.statusBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  padding: 0 8px;
+  border-radius: var(--app-radius-pill);
+  font-size: 11.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.badgeGood {
+  background: var(--data-badge-success-bg);
+  color: var(--data-badge-success-text);
+}
+
+.badgeWarn {
+  background: var(--data-badge-warning-bg);
+  color: var(--data-badge-warning-text);
+}
+
+.badgeBad {
+  background: var(--data-badge-danger-bg);
+  color: var(--data-badge-danger-text);
+}
+
+.badgeMuted {
+  background: var(--data-badge-neutral-bg);
+  color: var(--data-badge-neutral-text);
+}
+
+/* 2. Meta Strip + Single-line Endpoint */
+.cardMetaSection {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.cardMetaBadges {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.priorityPill {
+  @include button-reset;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 80%, transparent);
+  border-radius: var(--app-radius-xs);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    border-color $transition-fast,
+    background-color $transition-fast,
+    color $transition-fast;
+
+  strong {
+    color: var(--text-primary);
+    font-weight: 700;
+  }
+
+  &:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--primary-color) 40%, var(--border-color));
+    background: color-mix(in srgb, var(--primary-color) 6%, var(--bg-primary));
+    color: var(--primary-text);
+
+    strong {
+      color: var(--primary-text);
+    }
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+  }
+
+  &:disabled {
+    cursor: default;
+    opacity: 0.7;
+  }
+}
+
+.priorityPillNegative {
+  border-color: color-mix(in srgb, var(--danger-color) 35%, transparent);
+  color: var(--danger-color);
+
+  strong {
+    color: var(--danger-color);
+  }
+}
+
+.priorityPillInput {
+  display: inline-block;
+  width: 62px;
+  height: 22px;
+  min-height: 22px;
+  box-sizing: border-box;
+  padding: 0 5px;
+  margin: 0;
+  border: 1px solid var(--primary-color);
+  border-radius: var(--app-radius-xs);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 20px;
+  text-align: center;
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary-color) 20%, transparent);
+
+  &::-webkit-outer-spin-button,
+  &::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  -moz-appearance: textfield;
+}
+
+.metaPill {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: var(--app-radius-xs);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.metaPillInfo {
+  background: var(--data-badge-info-bg);
+  color: var(--data-badge-info-text);
+}
+
+.metaPillWarn {
+  background: var(--data-badge-warning-bg);
+  color: var(--data-badge-warning-text);
+}
+
+.metaPillNeutral {
+  background: var(--data-badge-neutral-bg);
+  color: var(--data-badge-neutral-text);
+}
+
+.prefixPill {
+  @include button-reset;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 22px;
+  padding: 0 7px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 76%, transparent);
+  border-radius: var(--app-radius-xs);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    border-color $transition-fast,
+    background-color $transition-fast,
+    color $transition-fast;
+
+  code {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  &:hover,
+  &:focus-visible {
+    border-color: color-mix(in srgb, var(--primary-color) 36%, transparent);
+    background: var(--app-accent-soft);
+    color: var(--primary-text);
+
+    code {
+      color: var(--primary-text);
+    }
+  }
+}
+
+.cardEndpointBar {
+  @include button-reset;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  margin: 0 -6px;
+  border-radius: var(--app-radius-xs);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  line-height: 1.25;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color $transition-fast,
+    color $transition-fast;
+
+  &:hover,
+  &:focus-visible {
+    background: var(--surface-subtle);
+    color: var(--text-primary);
+
+    .cardEndpointCopyHint {
+      opacity: 1;
+    }
+  }
+}
+
+.cardEndpointBarStatic {
+  cursor: default;
+
+  &:hover {
+    background: transparent;
+    color: var(--text-secondary);
+  }
+}
+
+.cardEndpointIcon {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+}
+
+.cardEndpointText {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--font-mono);
+  @include text-ellipsis;
+}
+
+.cardEndpointCopyHint {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  color: var(--primary-text);
+  font-size: 10.5px;
+  font-weight: 600;
+  opacity: 0;
+  transition: opacity $transition-fast;
+}
+
+/* Shared Section Header */
+.cardSectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.cardSectionTitle {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.cardSectionTitleStrong {
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.cardSectionMeta {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 3. Historical Usage 4-Tile KPI Grid */
+.cardHistorySection {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding-top: 9px;
+  border-top: 1px solid color-mix(in srgb, var(--border-color) 65%, transparent);
+}
+
+.cardHistoryGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  min-width: 0;
+}
+
+.historyMetric {
+  display: grid;
+  grid-template-columns: 17px minmax(0, 1fr);
+  align-items: center;
+  gap: 2px 4px;
+  min-width: 0;
+  min-height: 48px;
+  padding: 6px 5px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--bg-primary) 42%, transparent);
+  box-sizing: border-box;
+
+  strong {
+    grid-column: 1 / -1;
+    min-width: 0;
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.2;
+    @include text-ellipsis;
+  }
+}
+
+.historyMetricIcon {
+  display: inline-grid;
+  width: 17px;
+  height: 17px;
+  place-items: center;
+  border-radius: var(--app-radius-xs);
+  background: color-mix(in srgb, var(--text-secondary) 7%, transparent);
+  color: var(--text-secondary);
+}
+
+.historyMetricLabel {
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.15;
+  @include text-ellipsis;
+}
+
+.historyMetricRequests .historyMetricIcon {
+  background: color-mix(in srgb, var(--data-blue-base) 12%, transparent);
+  color: var(--primary-text);
+}
+
+.historyMetricTokens .historyMetricIcon {
+  background: color-mix(in srgb, var(--data-violet-base) 12%, transparent);
+  color: var(--data-violet-dark-2);
+}
+
+.historyMetricCost .historyMetricIcon {
+  background: color-mix(in srgb, var(--data-amber-base) 13%, transparent);
+  color: var(--status-display-warning);
+}
+
+.historyMetricSuccess .historyMetricIcon {
+  background: color-mix(in srgb, var(--data-green-base) 12%, transparent);
+  color: var(--status-display-success);
+}
+
+.historyMetric .metricValueGood {
+  color: var(--status-display-success);
+}
+
+.historyMetric .metricValueWarn {
+  color: var(--status-display-warning);
+}
+
+.historyMetric .metricValueBad {
+  color: var(--status-display-danger);
+}
+
+.historyMetric .metricValueMuted {
+  color: var(--text-tertiary);
+}
+/* 4. Recent Status */
+.cardRecentSection {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding-top: 9px;
+  border-top: 1px solid color-mix(in srgb, var(--border-color) 60%, transparent);
+}
+
+.cardRecentCounts {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.recentCountSuccess {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--status-display-success);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+
+  .metricDot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--status-graphic-success);
+  }
+}
+
+.recentCountFailure {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--text-secondary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+
+  .metricDot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: currentColor;
+    opacity: 0.55;
+  }
+}
+
+.recentCountFailureActive {
+  color: var(--status-display-danger);
+
+  .metricDot {
+    background: var(--status-graphic-danger);
+    opacity: 1;
+  }
+}
+
+.cardRecentBarRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.cardRecentBarWrap {
+  flex: 1 1 auto;
+  min-width: 0;
+
+  > div {
+    margin: 0;
+    gap: 0;
+  }
+}
+
+.recentTrailPill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  min-width: 44px;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: var(--app-radius-xs);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.recentTrailGood {
+  background: var(--data-badge-success-bg);
+  color: var(--data-badge-success-text);
+}
+
+.recentTrailWarn {
+  background: var(--data-badge-warning-bg);
+  color: var(--data-badge-warning-text);
+}
+
+.recentTrailBad {
+  background: var(--data-badge-danger-bg);
+  color: var(--data-badge-danger-text);
+}
+
+.recentTrailMuted {
+  background: var(--data-badge-neutral-bg);
+  color: var(--text-tertiary);
+}
+
+.cardFailureBanner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 4px 8px;
+  border-radius: var(--app-radius-xs);
+  background: var(--data-badge-danger-bg);
+  color: var(--data-badge-danger-text);
+  font-size: 10.5px;
+  line-height: 1.3;
+}
+
+.cardFailureBannerLabel {
+  flex-shrink: 0;
+  font-weight: 700;
+}
+
+.cardFailureBannerText {
+  flex: 1 1 auto;
+  min-width: 0;
+  @include text-ellipsis;
+}
+
+/* 5. Full-Width Models Section */
+.cardModelsSection {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  margin-top: auto;
+  padding-top: 9px;
+  border-top: 1px solid color-mix(in srgb, var(--border-color) 60%, transparent);
+}
+
+.cardModelsSummary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.cardModelsSummaryWarn {
+  color: var(--data-badge-warning-text);
+  font-weight: 600;
+}
+
+.metaSep {
+  margin-right: 4px;
+  color: var(--text-tertiary);
+  opacity: 0.6;
+}
+
+.cardModelsTriggerWrap {
+  min-width: 0;
+}
+
+/* 6. Footer */
+.cardFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 9px;
+  border-top: 1px solid color-mix(in srgb, var(--border-color) 65%, transparent);
+  min-width: 0;
+}
+
+.cardFooterLeft {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.cardFooterRight {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+}
+
+.cardDeleteButton:global(.btn.btn-xs) {
+  width: var(--control-height-xs);
+  min-width: var(--control-height-xs);
+  height: var(--control-height-xs);
+  min-height: var(--control-height-xs);
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--danger-color) 10%, var(--bg-primary));
+  color: var(--danger-color);
+
+  &:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--danger-color) 24%, transparent);
+    background: color-mix(in srgb, var(--danger-color) 16%, var(--bg-primary));
+    color: var(--danger-color);
+  }
+}
+
+.cardActionButton:global(.btn.btn-xs) {
+  width: var(--control-height-xs);
+  min-width: var(--control-height-xs);
+  height: var(--control-height-xs);
+  min-height: var(--control-height-xs);
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--primary-color) 7%, var(--bg-primary));
+  color: var(--primary-text);
+
+  &:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--primary-color) 22%, transparent);
+    background: color-mix(in srgb, var(--primary-color) 14%, var(--bg-primary));
+    color: var(--primary-text);
+  }
+}
+
+.cardDetailButton:global(.btn.btn-xs) {
+  flex: 0 0 auto;
+  min-width: 54px;
+  height: var(--control-height-xs);
+  min-height: var(--control-height-xs);
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--primary-color) 7%, var(--bg-primary));
+  color: var(--primary-text);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+
+  &:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--primary-color) 20%, transparent);
+    background: color-mix(in srgb, var(--primary-color) 13%, var(--bg-primary));
+  }
+}

@@ -1,4 +1,5 @@
-export { ProviderTable } from './ProviderTable';
+export { ProviderTable, type ProviderTableProps } from './ProviderTable';
+export { ProviderCardGrid, type ProviderCardGridProps } from './ProviderCardGrid';
 export { getProviderKindIcon, PROVIDER_KIND_LABELS } from './kindMeta';
 export {
   buildProviderRows,

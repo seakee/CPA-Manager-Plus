@@ -1,46 +1,148 @@
 @use '@/styles/variables.scss' as *;
 @use '@/styles/mixins.scss' as *;
 
-$toolbar-control-height: var(--control-height-sm);
+$filter-row-height: var(--control-height-sm);
+$action-row-height: var(--control-height-sm);
 
 .topRow {
-  @include mobile {
-    flex-direction: column;
-    align-items: stretch;
+  flex-wrap: nowrap;
+  align-items: center;
+
+  @media (max-width: 1360px) {
+    flex-wrap: wrap;
+  }
+}
+
+.leading {
+  flex: 1 1 560px;
+  min-width: 0;
+  overflow: hidden;
+
+  @media (max-width: 1360px) {
+    flex-basis: 100%;
   }
 }
 
 .actions {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  gap: 8px;
+
   @include mobile {
+    width: 100%;
     margin-left: 0;
-    justify-content: flex-start;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+}
+
+.toolbar {
+  min-width: 0;
+}
+
+.filterSummaryNote {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.actionButton.actionButton {
+  height: $action-row-height;
+  padding: 0 12px;
+  border-radius: var(--app-radius-sm);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+// 双类名提升优先级，覆盖 DropdownMenu 默认触发器样式
+.addButton.addButton {
+  height: $action-row-height;
+  padding: 0 14px;
+  border-radius: var(--app-radius-sm);
+  border-color: var(--primary-solid);
+  background: var(--primary-solid);
+  color: var(--primary-contrast);
+  font-size: 13px;
+  font-weight: 600;
+
+  &:hover:not(:disabled) {
+    border-color: var(--primary-solid-hover);
+    background: var(--primary-solid-hover);
+    color: var(--primary-contrast);
+  }
+
+  &:active:not(:disabled) {
+    border-color: var(--primary-solid-active);
+    background: var(--primary-solid-active);
+    color: var(--primary-contrast);
+  }
+
+  &:focus-visible:not(:disabled) {
+    border-color: var(--primary-solid);
+    background: var(--primary-solid);
+    color: var(--primary-contrast);
+    box-shadow: none;
+  }
+}
+
+.addMenuProviderIcon {
+  display: block;
+  width: 15px;
+  height: 15px;
+  object-fit: contain;
+}
+
+.kindTabsStrip {
+  width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar {
+    display: none;
   }
 }
 
 .kindTabs {
   max-width: 100%;
+  gap: 2px;
+
+  :global([role='tab']) {
+    min-width: 0;
+    padding: 0 8px;
+    font-size: 12.5px;
+  }
+
+  :global([role='tab'][aria-selected='true']) .kindTabBadge {
+    background: color-mix(in srgb, var(--primary-color) 18%, var(--bg-primary));
+    color: var(--primary-text);
+  }
 }
 
 .kindTabContent {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 5px;
   min-width: 0;
 }
+
 .kindTabIcon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   flex: 0 0 auto;
 }
 
 .kindTabProviderIcon {
   display: block;
-  width: 17px;
-  height: 17px;
+  width: 15px;
+  height: 15px;
   object-fit: contain;
 }
 
@@ -62,73 +164,56 @@ $toolbar-control-height: var(--control-height-sm);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 22px;
-  height: 20px;
-  padding: 0 8px;
+  min-width: 16px;
+  height: 17px;
+  padding: 0 4px;
   border-radius: var(--app-radius-pill);
-  background: color-mix(in srgb, var(--text-tertiary) 18%, var(--surface-subtle));
-  color: var(--text-primary);
-  font-size: 11px;
+  background: color-mix(in srgb, var(--text-tertiary) 15%, var(--surface-subtle));
+  color: var(--text-secondary);
+  font-size: 10.5px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   line-height: 1;
   white-space: nowrap;
 }
 
-.kindTabs :global([role='tab'][aria-selected='true']) .kindTabBadge {
-  background: color-mix(in srgb, var(--primary-color) 22%, var(--bg-primary));
-  color: var(--primary-text);
-}
-
-.controls {
+.filterRow {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
 }
 
-// 关键字搜索
-.searchBox {
-  position: relative;
-  display: flex;
-  align-items: center;
-  flex: 1 1 220px;
-  min-width: 180px;
-  max-width: 360px;
-  height: $toolbar-control-height;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--app-radius-sm);
-  background: var(--surface-subtle);
-  transition:
-    background-color $transition-fast,
-    border-color $transition-fast;
-
-  &:hover {
-    border-color: var(--primary-color);
-    background: var(--surface-subtle-hover);
+.searchWrap {
+  flex: 2 1 240px;
+  min-width: 200px;
+  max-width: 460px;
+  :global(.form-group) {
+    margin-bottom: 0;
   }
 
-  &:focus-within {
-    background: var(--surface-subtle-hover);
+  :global(.input-right-element) {
+    right: 6px;
   }
 
-  /* The container keeps a neutral border while the field is keyboard-focused: the ring
-     belongs to the focused control, so no second frame sits under it. */
-  &:has(> .searchInput:focus-visible) {
-    border-color: var(--border-subtle);
+  @include mobile {
+    max-width: none;
+    min-width: 0;
   }
+}
 
-  /* One ring per Tab stop: with a value the box holds two (field, clear), and each
-     marks itself so the focused action is identifiable. */
-  &:has(> .searchInput:focus-visible) .searchInput:focus-visible,
-  .searchClear:focus-visible {
-    outline: 2px solid var(--app-input-border-focus);
-    outline-offset: 1px;
-  }
+.searchInput:global(.input) {
+  box-sizing: border-box;
+  height: $filter-row-height;
+  min-height: $filter-row-height;
+  padding: 0 32px 0 12px;
+  font-size: 13px;
+  line-height: 1.25;
 
-  .searchClear:focus-visible {
-    background: var(--focus-bg);
-    color: var(--focus-text);
+  &::-webkit-search-cancel-button {
+    display: none;
   }
 }
 
@@ -136,77 +221,93 @@ $toolbar-control-height: var(--control-height-sm);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 0 10px 0 4px;
+  width: 24px;
+  height: 24px;
   color: var(--text-tertiary);
-  flex-shrink: 0;
-}
-
-.searchInput {
-  flex: 1;
-  min-width: 0;
-  height: $toolbar-control-height;
-  padding: 0 4px 0 12px;
-  border: 0;
-  background: transparent;
-  color: var(--text-primary);
-  outline: none;
-
-  &::placeholder {
-    color: var(--text-tertiary);
-  }
-
-  &::-webkit-search-cancel-button {
-    display: none;
-  }
+  pointer-events: none;
 }
 
 .searchClear {
   @include button-reset;
   @include flex-center;
-  width: 30px;
-  height: $toolbar-control-height;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--app-radius-xs);
   color: var(--text-secondary);
-  flex-shrink: 0;
+  transition:
+    background-color $transition-fast,
+    color $transition-fast;
 
-  &:hover {
+  &:hover:not(:disabled) {
+    background: var(--surface-subtle-hover);
     color: var(--text-primary);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--app-input-border-focus);
+    outline-offset: 1px;
   }
 }
 
-.filterGroup {
+.desktopControls {
   display: flex;
   align-items: center;
-  gap: $spacing-xs;
-  padding-left: 2px;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: 3 1 500px;
+  min-width: 0;
+
+  @include mobile {
+    display: none;
+  }
+}
+
+.filterSelect {
+  width: auto;
+  min-width: 124px;
+  max-width: 220px;
+  flex: 1 1 132px;
+
+  :global(button) {
+    box-sizing: border-box;
+    height: $filter-row-height;
+    min-height: $filter-row-height;
+    padding: 0 10px;
+    font-size: 13px;
+  }
 }
 
 // 模型多选筛选
 .modelMultiSelectWrapper {
   position: relative;
+  flex: 1.15 1 150px;
+  min-width: 136px;
+  max-width: 260px;
 }
-
 .modelFilterControl {
   display: flex;
   align-items: center;
-  width: 96px;
-  height: $toolbar-control-height;
-  border: 1px solid var(--border-subtle);
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 96px;
+  height: $filter-row-height;
+  min-height: $filter-row-height;
+  border: 1px solid var(--app-input-border);
   border-radius: var(--app-radius-sm);
-  background: var(--surface-subtle);
+  background: var(--app-input-bg);
   overflow: hidden;
   transition:
     background-color $transition-fast,
     border-color $transition-fast;
-
   &:hover {
-    border-color: var(--primary-color);
-    background: var(--surface-subtle-hover);
+    border-color: var(--border-hover);
+    background: var(--app-input-bg-focus);
   }
 }
 
 .modelFilterControlActive {
-  border-color: color-mix(in srgb, var(--primary-color) 46%, var(--border-subtle));
-  background: color-mix(in srgb, var(--primary-color) 8%, var(--surface-subtle));
+  border-color: color-mix(in srgb, var(--primary-color) 46%, var(--app-input-border));
+  background: color-mix(in srgb, var(--primary-color) 7%, var(--app-input-bg));
 }
 
 .modelFilterControlDisabled {
@@ -214,17 +315,13 @@ $toolbar-control-height: var(--control-height-sm);
   cursor: not-allowed;
 
   &:hover {
-    border-color: var(--border-subtle);
-    background: var(--surface-subtle);
+    border-color: var(--app-input-border);
+    background: var(--app-input-bg);
   }
 }
 
-/* The group can hold two Tab stops (open the list, clear the selection), so it never
-   draws a shared ring: the focused control marks itself instead, and the group border
-   stays neutral underneath it. Declared after the state rules so an applied filter does
-   not keep an accent border under the ring. */
 .modelFilterControl:has(> :focus-visible) {
-  border-color: var(--border-subtle);
+  border-color: var(--app-input-border);
 }
 
 .modelFilterTrigger {
@@ -233,7 +330,7 @@ $toolbar-control-height: var(--control-height-sm);
   gap: 6px;
   flex: 1 1 auto;
   min-width: 0;
-  height: $toolbar-control-height;
+  height: 100%;
   padding: 0 8px 0 10px;
   border: 0;
   background: transparent;
@@ -241,15 +338,12 @@ $toolbar-control-height: var(--control-height-sm);
   cursor: pointer;
   text-align: left;
 
-  /* Drawn inside the button, at the group's rounding, so the clipped group cannot cut
-     it and it still identifies which of the two controls holds focus. */
   &:focus-visible {
     outline: 2px solid var(--app-input-border-focus);
     outline-offset: -2px;
     border-radius: var(--app-radius-sm) 0 0 var(--app-radius-sm);
   }
 
-  /* Without an active filter the trigger is the group's only control. */
   &:only-child:focus-visible {
     border-radius: var(--app-radius-sm);
   }
@@ -298,7 +392,7 @@ $toolbar-control-height: var(--control-height-sm);
   align-items: center;
   justify-content: center;
   width: 30px;
-  height: $toolbar-control-height;
+  height: 100%;
   padding: 0;
   border: 0;
   border-left: 1px solid var(--border-primary);
@@ -307,8 +401,6 @@ $toolbar-control-height: var(--control-height-sm);
   cursor: pointer;
   flex-shrink: 0;
 
-  /* Its own Tab stop, so it draws its own ring — rounded on the right to match the
-     group, inward so the clipped group cannot cut it. */
   &:focus-visible {
     outline: 2px solid var(--app-input-border-focus);
     outline-offset: -2px;
@@ -394,246 +486,94 @@ $toolbar-control-height: var(--control-height-sm);
   font-size: 13px;
 }
 
-// 排序控件
-.sortControls {
-  position: relative;
-  display: flex;
-  align-items: center;
-  height: $toolbar-control-height;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--app-radius-sm);
-  background: var(--surface-subtle);
-  overflow: visible;
-  transition:
-    border-color $transition-fast,
-    background-color $transition-fast;
-
-  &:hover {
-    border-color: var(--primary-color);
-    background: var(--surface-subtle-hover);
-  }
-
-  &:focus-within {
-    background: var(--surface-subtle-hover);
-  }
-
-  /* The focused button draws the 2px ring; an accent border on the group would be a
-     second focus line right next to it. */
-  &:has(:focus-visible) {
-    border-color: var(--border-subtle);
-  }
-}
-
-.sortTrigger {
-  @include button-reset;
-  display: inline-flex;
-  align-items: center;
-  min-width: 86px;
-  height: $toolbar-control-height;
-  padding: 0 4px 0 12px;
-  background: transparent;
-  color: var(--text-primary);
-  cursor: pointer;
-
-  &:focus-visible {
-    outline: 2px solid var(--app-input-border-focus);
-    outline-offset: -2px;
-  }
-
-  &:disabled {
-    cursor: not-allowed;
-  }
-}
-
-.sortLabel {
-  flex: 1;
-  min-width: 0;
+.resetButton.resetButton {
+  box-sizing: border-box;
+  height: $filter-row-height;
+  min-height: $filter-row-height;
+  padding: 0 10px;
   font-size: 13px;
   font-weight: 600;
-  line-height: 1;
-  @include text-ellipsis;
 }
 
-.sortDirectionButton {
-  @include button-reset;
+.sortGroup {
+  margin-left: auto;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  width: $toolbar-control-height;
-  height: $toolbar-control-height;
-  border: 0;
-  border-radius: 0 var(--app-radius-sm) var(--app-radius-sm) 0;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition:
-    background-color $transition-fast,
-    color $transition-fast;
-
-  &:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--primary-color) 8%, transparent);
-    color: var(--primary-text);
-  }
-
-  /* Inside the segmented group, so the ring is drawn inside the button. */
-  &:focus-visible {
-    outline: 2px solid var(--app-input-border-focus);
-    outline-offset: -2px;
-  }
-
-  &:disabled {
-    cursor: not-allowed;
-  }
-}
-
-.sortDropdownList {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  z-index: $z-dropdown;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 100%;
-  padding: 4px;
-  border: 1px solid color-mix(in srgb, var(--primary-color) 22%, var(--border-primary));
-  border-radius: var(--app-radius-md);
-  background: var(--bg-primary);
-  /* floating layer: elevation allowed */
-  box-shadow: var(--floating-shadow-lg);
-}
-
-// Same accent border as `DropdownMenu`, including its dark-theme emphasis.
-:global([data-theme='dark']) .modelDropdownList,
-:global([data-theme='dark']) .sortDropdownList {
-  border-color: color-mix(in srgb, var(--primary-color) 30%, var(--border-primary));
-}
-
-.sortDropdownItem {
-  @include button-reset;
-  display: flex;
-  align-items: center;
-  width: 100%;
-  min-height: 30px;
-  padding: 0 10px;
-  border-radius: var(--app-radius-sm);
-  color: var(--text-secondary);
-  font-size: 13px;
-  font-weight: 500;
-  white-space: nowrap;
-  cursor: pointer;
-  text-align: left;
-
-  &:hover {
-    background: var(--surface-subtle-hover);
-    color: var(--text-primary);
-  }
-
-  /* Menu rows sit inside a padded floating layer, so the ring is drawn inside the row. */
-  &:focus-visible {
-    outline: 2px solid var(--app-input-border-focus);
-    outline-offset: -2px;
-    background: var(--surface-subtle-hover);
-    color: var(--text-primary);
-  }
-}
-
-.sortDropdownItemSelected {
-  color: var(--primary-text);
-  font-weight: 700;
-}
-
-.sortDropdownItemHighlighted {
-  background: var(--surface-subtle-hover);
-  color: var(--text-primary);
-}
-
-.sortDropdownItemSelected.sortDropdownItemHighlighted {
-  color: var(--primary-text);
-}
-
-.sortControls:focus-within {
-  .sortTrigger,
-  .sortDirectionButton {
-    background: transparent;
-  }
-}
-
-.sortDirectionIcon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
+  gap: 10px;
   flex-shrink: 0;
 }
 
-.healthCheckButton.healthCheckButton {
-  height: $toolbar-control-height;
+.sortControl.sortControl {
+  box-sizing: border-box;
+  height: $filter-row-height;
+  min-height: $filter-row-height;
+}
+
+.mobileFilterWrap {
+  display: none;
+  flex-shrink: 0;
+
+  @include mobile {
+    display: flex;
+    align-items: center;
+  }
+}
+
+.mobileFilterButton.mobileFilterButton {
+  box-sizing: border-box;
+  height: $filter-row-height;
+  min-height: $filter-row-height;
   padding: 0 12px;
-  border-radius: var(--app-radius-sm);
   font-size: 13px;
   font-weight: 600;
 }
 
-// 双类名提升优先级，覆盖 DropdownMenu 默认触发器样式
-.addButton.addButton {
-  height: $toolbar-control-height;
-  padding: 0 14px;
-  border-radius: var(--app-radius-sm);
-  border-color: var(--primary-solid);
+.mobileFilterCount {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: var(--app-radius-pill);
   background: var(--primary-solid);
   color: var(--primary-contrast);
-  font-size: 13px;
-  font-weight: 600;
-
-  &:hover:not(:disabled) {
-    border-color: var(--primary-solid-hover);
-    background: var(--primary-solid-hover);
-  }
-
-  &:active:not(:disabled) {
-    border-color: var(--primary-solid-active);
-    background: var(--primary-solid-active);
-  }
-
-  &:focus-visible:not(:disabled) {
-    border-color: var(--primary-solid);
-    background: var(--primary-solid);
-    color: var(--primary-contrast);
-    box-shadow: none;
-  }
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
 }
 
-@media (max-width: 560px) {
-  .controls {
-    gap: 8px;
-  }
+.mobileSheetField {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
 
-  .searchBox {
-    flex: 1 1 100%;
-    max-width: none;
-    min-width: 0;
-  }
+.mobileSheetFieldHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
 
-  .filterGroup {
-    flex: 1 1 0;
-    min-width: 0;
-    padding-left: 0;
-  }
+.mobileSheetFieldLabel {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
 
-  .modelMultiSelectWrapper,
-  .modelFilterControl {
-    width: 100%;
-  }
+.mobileSheetModelActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
 
-  .sortControls {
-    flex: 1 1 0;
-    min-width: 0;
-  }
-
-  .sortTrigger {
-    flex: 1 1 auto;
-    min-width: 0;
-  }
+.mobileSheetModelList {
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--app-radius-sm);
+  background: var(--surface-subtle);
 }

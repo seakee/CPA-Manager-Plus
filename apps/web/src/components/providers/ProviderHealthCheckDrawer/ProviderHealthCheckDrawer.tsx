@@ -22,10 +22,13 @@ interface ProviderHealthCheckGroup {
   items: ProviderHealthCheckItem[];
 }
 
-interface ProviderHealthCheckDrawerProps {
+export interface ProviderHealthCheckDrawerProps {
   open: boolean;
   rows: ProviderRow[];
+  allRows?: ProviderRow[];
   actionsDisabled: boolean;
+  scopeMode?: 'filtered' | 'selected' | 'single';
+  onOpenProviderConfig?: (row: ProviderRow) => void | Promise<void>;
   onClose: () => void;
   onApplyResultActions: (actions: Map<string, ProviderHealthCheckApplyAction>) => Promise<void>;
   onSetProviderEnabled: (providerKey: string, enabled: boolean) => Promise<void>;
@@ -70,14 +73,19 @@ const buildHealthCheckGroups = (items: ProviderHealthCheckItem[]): ProviderHealt
 export function ProviderHealthCheckDrawer({
   open,
   rows,
+  allRows,
   actionsDisabled,
+  scopeMode,
+  onOpenProviderConfig,
   onClose,
   onApplyResultActions,
   onSetProviderEnabled,
 }: ProviderHealthCheckDrawerProps) {
   const { t } = useTranslation();
   const rowsRef = useRef(rows);
+  const prevOpenRef = useRef(false);
   const runIdRef = useRef(0);
+  const [snapshotRows, setSnapshotRows] = useState<ProviderRow[]>(() => (open ? rows : []));
   const [items, setItems] = useState<ProviderHealthCheckItem[]>([]);
   const [running, setRunning] = useState(false);
   const [applying, setApplying] = useState(false);
@@ -88,16 +96,40 @@ export function ProviderHealthCheckDrawer({
     rowsRef.current = rows;
   }, [rows]);
 
+  const liveRowByKey = useMemo(() => {
+    const map = new Map<string, ProviderRow>();
+    allRows?.forEach((row) => map.set(row.key, row));
+    rows.forEach((row) => map.set(row.key, row));
+    return map;
+  }, [allRows, rows]);
+
+  const effectiveRows = useMemo(() => {
+    const base = snapshotRows.length > 0 ? snapshotRows : rows;
+    return base.map((row) => liveRowByKey.get(row.key) ?? row);
+  }, [liveRowByKey, rows, snapshotRows]);
+
+  const effectiveRowsRef = useRef(effectiveRows);
+  effectiveRowsRef.current = effectiveRows;
+
   useEffect(() => {
     if (!open) {
+      prevOpenRef.current = false;
       runIdRef.current += 1;
       setRunning(false);
       setApplying(false);
       setManualSwitchingKey(null);
+      setSnapshotRows([]);
+      setRerunIndex(0);
       return;
     }
 
-    const runRows = rowsRef.current;
+    const isFreshOpen = !prevOpenRef.current;
+    prevOpenRef.current = true;
+    const runRows = isFreshOpen || rerunIndex === 0 ? rowsRef.current : effectiveRowsRef.current;
+    if (isFreshOpen) {
+      setSnapshotRows(rowsRef.current);
+    }
+
     const initialItems = buildProviderHealthCheckItems(runRows);
     const runId = runIdRef.current + 1;
     runIdRef.current = runId;
@@ -138,15 +170,17 @@ export function ProviderHealthCheckDrawer({
   const complete = summary.total > 0 && summary.completed === summary.total && !running;
   const resultActions = useMemo(() => getProviderHealthCheckApplyActions(items), [items]);
   const groups = useMemo(() => buildHealthCheckGroups(items), [items]);
-
+  const rowByKey = useMemo(
+    () => new Map(effectiveRows.map((row) => [row.key, row])),
+    [effectiveRows]
+  );
   const providerEnabledByKey = useMemo(() => {
     const map = new Map<string, boolean>();
-    rows.forEach((row) => {
+    effectiveRows.forEach((row) => {
       map.set(row.key, row.enabled);
     });
     return map;
-  }, [rows]);
-
+  }, [effectiveRows]);
   const renderLocalizedText = (
     fallback: string,
     key?: string,
@@ -158,6 +192,12 @@ export function ProviderHealthCheckDrawer({
     setApplying(true);
     try {
       await onApplyResultActions(resultActions);
+      setSnapshotRows((prev) =>
+        prev.map((row) => {
+          const action = resultActions.get(row.key);
+          return action ? { ...row, enabled: action === 'enable' } : row;
+        })
+      );
     } finally {
       setApplying(false);
     }
@@ -173,6 +213,9 @@ export function ProviderHealthCheckDrawer({
         actions.set(providerKey, enabled ? 'enable' : 'disable');
       });
       await onApplyResultActions(actions);
+      setSnapshotRows((prev) =>
+        prev.map((row) => (actions.has(row.key) ? { ...row, enabled } : row))
+      );
     } finally {
       setApplying(false);
     }
@@ -183,6 +226,9 @@ export function ProviderHealthCheckDrawer({
     setManualSwitchingKey(providerKey);
     try {
       await onSetProviderEnabled(providerKey, enabled);
+      setSnapshotRows((prev) =>
+        prev.map((row) => (row.key === providerKey ? { ...row, enabled } : row))
+      );
     } finally {
       setManualSwitchingKey(null);
     }
@@ -232,6 +278,7 @@ export function ProviderHealthCheckDrawer({
     <Drawer
       open={open}
       onClose={onClose}
+      closeDisabled={running || applying}
       width={620}
       footer={footer}
       title={
@@ -242,6 +289,31 @@ export function ProviderHealthCheckDrawer({
       }
     >
       <div className={styles.root}>
+        {scopeMode === 'single' && effectiveRows[0] ? (
+          <div className={styles.scopeBanner} role="status">
+            <span className={styles.scopeBadge}>
+              {t('ai_providers.health_check_scope_single_badge', { defaultValue: '单渠道测活' })}
+            </span>
+            <span className={styles.scopeDesc}>
+              {t('ai_providers.health_check_scope_single_desc', {
+                defaultValue: `正在检测「${effectiveRows[0].label}」的连通性与可用模型`,
+                name: effectiveRows[0].label,
+              })}
+            </span>
+          </div>
+        ) : scopeMode === 'selected' ? (
+          <div className={styles.scopeBanner} role="status">
+            <span className={styles.scopeBadge}>
+              {t('ai_providers.health_check_scope_selected_badge', { defaultValue: '已选范围' })}
+            </span>
+            <span className={styles.scopeDesc}>
+              {t('ai_providers.health_check_scope_selected_desc', {
+                defaultValue: '当前仅对已勾选的 {{count}} 个提供商执行健康检查',
+                count: effectiveRows.length,
+              })}
+            </span>
+          </div>
+        ) : null}
         <section className={styles.progressSection}>
           <div className={styles.progressHeader}>
             <div>
@@ -279,14 +351,27 @@ export function ProviderHealthCheckDrawer({
               const groupSummary = summarizeProviderHealthCheckItems(group.items);
               const enabled = providerEnabledByKey.get(group.providerKey) ?? false;
               const switching = manualSwitchingKey === group.providerKey || applying;
+              const groupRow = rowByKey.get(group.providerKey);
               return (
                 <section key={group.providerKey} className={styles.resultGroup}>
                   <div className={styles.groupHeader}>
                     <div className={styles.groupTitle}>
                       <div className={styles.groupIdentity}>
                         <strong>{group.providerLabel}</strong>
-                        {group.providerSubtitle && (
-                          <span title={group.providerSubtitle}>{group.providerSubtitle}</span>
+                        {groupRow?.alias && groupRow.maskedKey && (
+                          <span className={styles.groupMetaCode}>{groupRow.maskedKey}</span>
+                        )}
+                        {groupRow?.alias && groupRow.hostLabel ? (
+                          <span
+                            className={styles.groupMetaHost}
+                            title={group.providerSubtitle || undefined}
+                          >
+                            {groupRow.hostLabel}
+                          </span>
+                        ) : (
+                          group.providerSubtitle && (
+                            <span title={group.providerSubtitle}>{group.providerSubtitle}</span>
+                          )
                         )}
                       </div>
                       <div className={styles.groupSummary}>
@@ -304,12 +389,24 @@ export function ProviderHealthCheckDrawer({
                         )}
                       </div>
                     </div>
-                    <ToggleSwitch
-                      checked={enabled}
-                      disabled={actionsDisabled || running || switching}
-                      onChange={(value) => void handleManualToggle(group.providerKey, value)}
-                      ariaLabel={t('ai_providers.health_check_manual_toggle')}
-                    />
+                    <div className={styles.groupControls}>
+                      {onOpenProviderConfig && groupRow && (
+                        <Button
+                          variant="secondary"
+                          size="xs"
+                          onClick={() => void onOpenProviderConfig(groupRow)}
+                          disabled={actionsDisabled || applying}
+                        >
+                          {t('ai_providers.health_check_open_config', { defaultValue: '配置' })}
+                        </Button>
+                      )}
+                      <ToggleSwitch
+                        checked={enabled}
+                        disabled={actionsDisabled || running || switching}
+                        onChange={(value) => void handleManualToggle(group.providerKey, value)}
+                        ariaLabel={t('ai_providers.health_check_manual_toggle')}
+                      />
+                    </div>
                   </div>
 
                   <div className={styles.groupRows}>

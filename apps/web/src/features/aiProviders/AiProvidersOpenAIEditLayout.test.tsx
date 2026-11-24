@@ -233,4 +233,67 @@ describe('AiProvidersOpenAIEditLayout dirty tracking', () => {
 
     act(() => renderer.unmount());
   });
+
+  it('keeps loading true until mount refresh settles when cache is valid and populates fresh data without re-fetching on language change', async () => {
+    const staleProvider: OpenAIProviderConfig = {
+      name: 'stale-provider',
+      baseUrl: 'https://stale.example/v1',
+      apiKeyEntries: [{ apiKey: 'stale-key' }],
+      models: [{ name: 'gpt-4o-mini' }],
+    };
+    const freshProvider: OpenAIProviderConfig = {
+      name: 'fresh-provider',
+      baseUrl: 'https://fresh.example/v1',
+      apiKeyEntries: [{ apiKey: 'fresh-key' }],
+      models: [{ name: 'gpt-4.1' }],
+    };
+    mocks.config = { openaiCompatibility: [staleProvider] };
+
+    let resolveFetch!: (value: OpenAIProviderConfig[]) => void;
+    mocks.getOpenAIProviders.mockImplementation(
+      () =>
+        new Promise<OpenAIProviderConfig[]>((resolve) => {
+          resolveFetch = resolve;
+        })
+    );
+
+    let renderer: ReactTestRenderer | undefined;
+    await act(async () => {
+      renderer = create(createElement(AiProvidersOpenAIEditLayout) as ReactElement);
+    });
+
+    const loadingContext = mocks.outletContext.current as unknown as
+      | (EditorContext & { loading: boolean })
+      | null;
+    expect(loadingContext?.loading).toBe(true);
+    expect(mocks.getOpenAIProviders).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveFetch([freshProvider]);
+    });
+    await flush();
+
+    const loadedContext = mocks.outletContext.current as unknown as
+      | (EditorContext & { loading: boolean })
+      | null;
+    expect(loadedContext?.loading).toBe(false);
+    expect(loadedContext?.form.name).toBe('fresh-provider');
+    expect(loadedContext?.form.baseUrl).toBe('https://fresh.example/v1');
+    expect(loadedContext?.form.apiKeyEntries[0]?.apiKey).toBe('fresh-key');
+
+    // Editing and re-rendering with a new `t` function reference must not re-fetch or clobber edits
+    await patchFirstEntry({ apiKey: 'user-edited-key' });
+    await act(async () => {
+      renderer!.update(createElement(AiProvidersOpenAIEditLayout) as ReactElement);
+    });
+    await flush();
+
+    expect(mocks.getOpenAIProviders).toHaveBeenCalledTimes(1);
+    expect(
+      (mocks.outletContext.current as unknown as EditorContext | null)?.form.apiKeyEntries[0]
+        ?.apiKey
+    ).toBe('user-edited-key');
+
+    act(() => renderer!.unmount());
+  });
 });

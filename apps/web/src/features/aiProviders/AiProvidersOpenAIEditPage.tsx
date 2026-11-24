@@ -9,8 +9,10 @@ import { ModelInputList } from '@/components/ui/ModelInputList';
 import { InfoTooltip } from '@/components/ui/InfoTooltip';
 import { hasInvalidThinkingLevels } from '@/components/ui/modelInputListUtils';
 import { Select } from '@/components/ui/Select';
+import { hasOpenDrawer, hasOpenModal } from '@/components/ui/overlayEscapeStack';
 import { CoolingPolicySelect } from '@/components/providers/CoolingPolicySelect';
 import { SecondaryScreenShell } from '@/components/common/SecondaryScreenShell';
+import { usePageTransitionLayer } from '@/components/common/PageTransitionLayer';
 import { OpenAIKeyTestStatusIndicator, type OpenAIFormApiKeyEntry } from '@/components/providers';
 import { useEdgeSwipeBack } from '@/hooks/useEdgeSwipeBack';
 import { useNotificationStore } from '@/stores';
@@ -78,19 +80,28 @@ export function AiProvidersOpenAIEditPage() {
     ? t('ai_providers.openai_edit_modal_title')
     : t('ai_providers.openai_add_modal_title');
 
+  const pageTransitionLayer = usePageTransitionLayer();
+  const isCurrentLayer = pageTransitionLayer ? pageTransitionLayer.isCurrentLayer : true;
   const swipeRef = useEdgeSwipeBack({ onBack: handleBack });
   const [isTestingKeys, setIsTestingKeys] = useState(false);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        handleBack();
+      if (
+        !isCurrentLayer ||
+        event.key !== 'Escape' ||
+        event.defaultPrevented ||
+        hasOpenModal() ||
+        hasOpenDrawer()
+      ) {
+        return;
       }
+      event.preventDefault();
+      handleBack();
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleBack]);
-
+  }, [handleBack, isCurrentLayer]);
   const hasInvalidWeight = form.apiKeyEntries.some((entry) =>
     getCredentialWeightError(entry.weight)
   );

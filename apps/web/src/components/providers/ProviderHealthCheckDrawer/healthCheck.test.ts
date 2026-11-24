@@ -280,4 +280,117 @@ describe('provider health check model', () => {
       false
     );
   });
+
+  it('uses provider alias in group label when name is configured on key-based providers', () => {
+    const rows = buildProviderRows({
+      gemini: [],
+      codex: [],
+      claude: [
+        {
+          name: 'Claude 主力池',
+          apiKey: 'sk-ant-key-123456',
+          baseUrl: 'https://claude.example.com',
+        },
+      ],
+      vertex: [],
+      openai: [],
+      usageByProvider: emptyUsageByProvider,
+    });
+
+    const items = buildProviderHealthCheckItems(rows);
+    expect(items).toHaveLength(1);
+    expect(items[0].providerLabel).toBe('Claude · Claude 主力池');
+  });
+
+  it('allows baseUrl-only keyless CPA v8 single-key providers (claude, codex, xai, gemini, interactions) without default auth headers', async () => {
+    mocks.fetchClaudeModelsViaApiCall.mockResolvedValueOnce([{ name: 'claude-sonnet-4' }]);
+    mocks.fetchV1ModelsViaApiCall
+      .mockResolvedValueOnce([{ name: 'gpt-5-codex' }])
+      .mockResolvedValueOnce([{ name: 'grok-3' }]);
+    mocks.fetchGeminiModelsViaApiCall
+      .mockResolvedValueOnce([{ name: 'gemini-2.5-pro' }])
+      .mockResolvedValueOnce([{ name: 'gemini-2.5-flash' }]);
+
+    const rows = buildProviderRows({
+      gemini: [{ apiKey: '', baseUrl: 'https://gemini-proxy.example' }],
+      interactions: [{ apiKey: '', baseUrl: 'https://interactions-proxy.example' }],
+      codex: [{ apiKey: '', baseUrl: 'https://codex-proxy.example' }],
+      xai: [{ apiKey: '', baseUrl: 'https://xai-proxy.example' }],
+      claude: [{ apiKey: '', baseUrl: 'https://claude-proxy.example' }],
+      vertex: [],
+      openai: [],
+      usageByProvider: emptyUsageByProvider,
+    });
+
+    const items = buildProviderHealthCheckItems(rows);
+    expect(items).toHaveLength(5);
+
+    for (const item of items) {
+      await expect(runProviderHealthCheckItem(rows, item)).resolves.toMatchObject({
+        status: 'success',
+        modelCount: 1,
+      });
+    }
+
+    expect(mocks.fetchGeminiModelsViaApiCall).toHaveBeenNthCalledWith(
+      1,
+      'https://gemini-proxy.example',
+      undefined,
+      {},
+      undefined,
+      undefined
+    );
+    expect(mocks.fetchGeminiModelsViaApiCall).toHaveBeenNthCalledWith(
+      2,
+      'https://interactions-proxy.example',
+      undefined,
+      {},
+      undefined,
+      undefined
+    );
+    expect(mocks.fetchV1ModelsViaApiCall).toHaveBeenNthCalledWith(
+      1,
+      'https://codex-proxy.example',
+      undefined,
+      {},
+      undefined,
+      undefined
+    );
+    expect(mocks.fetchV1ModelsViaApiCall).toHaveBeenNthCalledWith(
+      2,
+      'https://xai-proxy.example',
+      undefined,
+      {},
+      undefined,
+      undefined
+    );
+    expect(mocks.fetchClaudeModelsViaApiCall).toHaveBeenCalledWith(
+      'https://claude-proxy.example',
+      undefined,
+      {},
+      undefined,
+      undefined
+    );
+  });
+
+  it('still rejects empty baseUrl without credentials and keyless vertex providers', async () => {
+    const rows = buildProviderRows({
+      gemini: [{ apiKey: '', baseUrl: '' }],
+      codex: [],
+      claude: [],
+      vertex: [{ apiKey: '', baseUrl: 'https://vertex-proxy.example' }],
+      openai: [],
+      usageByProvider: emptyUsageByProvider,
+    });
+
+    const items = buildProviderHealthCheckItems(rows);
+    expect(items).toHaveLength(2);
+    for (const item of items) {
+      await expect(runProviderHealthCheckItem(rows, item)).resolves.toMatchObject({
+        status: 'error',
+        message: 'Missing API key or auth-index',
+        messageKey: 'ai_providers.health_check_error_missing_credential',
+      });
+    }
+  });
 });

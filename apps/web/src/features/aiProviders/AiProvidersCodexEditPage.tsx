@@ -8,12 +8,14 @@ import { Input } from '@/components/ui/Input';
 import { HeaderInputList } from '@/components/ui/HeaderInputList';
 import { ModelInputList } from '@/components/ui/ModelInputList';
 import { Modal } from '@/components/ui/Modal';
+import { hasOpenDrawer, hasOpenModal } from '@/components/ui/overlayEscapeStack';
 import { SelectionCheckbox } from '@/components/ui/SelectionCheckbox';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import { CoolingPolicySelect } from '@/components/providers/CoolingPolicySelect';
 import { useEdgeSwipeBack } from '@/hooks/useEdgeSwipeBack';
 import { useUnsavedChangesGuard } from '@/hooks/useUnsavedChangesGuard';
 import { SecondaryScreenShell } from '@/components/common/SecondaryScreenShell';
+import { usePageTransitionLayer } from '@/components/common/PageTransitionLayer';
 import { modelsApi, providersApi, apiCallApi, getApiCallErrorMessage } from '@/services/api';
 import { useAuthStore, useConfigStore, useNotificationStore } from '@/stores';
 import {
@@ -63,6 +65,7 @@ const CODEX_TEST_TIMEOUT_MS = 20_000;
 const EMPTY_DISCOVERED_MODELS: ModelInfo[] = [];
 
 const buildEmptyForm = (): ProviderFormState => ({
+  name: '',
   apiKey: '',
   priority: undefined,
   weight: undefined,
@@ -97,6 +100,7 @@ const normalizeModelEntries = (entries: ProviderFormState['modelEntries']) =>
   }, []);
 
 type CodexFormBaseline = {
+  name: string;
   apiKey: string;
   authIndex: string;
   priority: number | null;
@@ -112,6 +116,7 @@ type CodexFormBaseline = {
 };
 
 const buildCodexBaseline = (form: ProviderFormState): CodexFormBaseline => ({
+  name: String(form.name ?? '').trim(),
   apiKey: String(form.apiKey ?? '').trim(),
   authIndex: normalizeAuthIndex(form.authIndex) ?? '',
   priority:
@@ -141,17 +146,14 @@ export function AiProvidersCodexEditPage() {
 
   const config = useConfigStore((state) => state.config);
   const fetchConfig = useConfigStore((state) => state.fetchConfig);
-  const isCacheValid = useConfigStore((state) => state.isCacheValid);
   const updateConfigValue = useConfigStore((state) => state.updateConfigValue);
   const clearCache = useConfigStore((state) => state.clearCache);
+  const tRef = useRef(t);
+  tRef.current = t;
 
   const [configs, setConfigs] = useState<ProviderKeyConfig[]>(() => config?.codexApiKeys ?? []);
-  const [loading, setLoading] = useState(
-    () => !(isCacheValid('codex-api-key') || isCacheValid())
-  );
+  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const isCacheValidRef = useRef(isCacheValid);
-  isCacheValidRef.current = isCacheValid;
   const [error, setError] = useState('');
   const [form, setForm] = useState<ProviderFormState>(() => buildEmptyForm());
   const [baseline, setBaseline] = useState(() => buildCodexBaseline(buildEmptyForm()));
@@ -196,27 +198,34 @@ export function AiProvidersCodexEditPage() {
     navigate('/ai-providers', { replace: true });
   }, [location.state, navigate]);
 
+  const pageTransitionLayer = usePageTransitionLayer();
+  const isCurrentLayer = pageTransitionLayer ? pageTransitionLayer.isCurrentLayer : true;
   const swipeRef = useEdgeSwipeBack({ onBack: handleBack });
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        handleBack();
+      if (
+        !isCurrentLayer ||
+        event.key !== 'Escape' ||
+        event.defaultPrevented ||
+        hasOpenModal() ||
+        hasOpenDrawer()
+      ) {
+        return;
       }
+      event.preventDefault();
+      handleBack();
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleBack]);
+  }, [handleBack, isCurrentLayer]);
 
   useEffect(() => {
     let cancelled = false;
-    const hasValidCache = isCacheValidRef.current('codex-api-key') || isCacheValidRef.current();
-    if (!hasValidCache) {
-      setLoading(true);
-    }
+    setLoading(true);
     setError('');
 
-    fetchConfig('codex-api-key')
+    fetchConfig('codex-api-key', true)
       .then((value) => {
         if (cancelled) return;
         setConfigs(Array.isArray(value) ? (value as ProviderKeyConfig[]) : []);
@@ -224,7 +233,7 @@ export function AiProvidersCodexEditPage() {
       .catch((err: unknown) => {
         if (cancelled) return;
         const message = err instanceof Error ? err.message : '';
-        setError(message || t('notification.refresh_failed'));
+        setError(message || tRef.current('notification.refresh_failed'));
       })
       .finally(() => {
         if (cancelled) return;
@@ -234,13 +243,14 @@ export function AiProvidersCodexEditPage() {
     return () => {
       cancelled = true;
     };
-  }, [fetchConfig, t]);
+  }, [fetchConfig]);
   useEffect(() => {
     if (loading) return;
 
     if (initialData) {
       const nextForm: ProviderFormState = {
         ...initialData,
+        name: initialData.name ?? '',
         disableCooling: coolingPolicyFromOverride(initialData.disableCooling),
         websockets: Boolean(initialData.websockets),
         headers: headersToEntries(initialData.headers),
@@ -302,6 +312,7 @@ export function AiProvidersCodexEditPage() {
     [baseline.excludedModels, normalizedExcludedModels]
   );
   const isDirty =
+    baseline.name !== String(form.name ?? '').trim() ||
     baseline.apiKey !== form.apiKey.trim() ||
     baseline.authIndex !== (normalizeAuthIndex(form.authIndex) ?? '') ||
     baseline.priority !== normalizedPriority ||
@@ -695,7 +706,11 @@ export function AiProvidersCodexEditPage() {
     setSaving(true);
     setError('');
     try {
+      const existingConfig = editIndex !== null ? configs[editIndex] : undefined;
+      const v8Source = existingConfig?.v8Source ?? form.v8Source;
       const payload: ProviderKeyConfig = {
+        ...(v8Source ? { v8Source } : {}),
+        name: form.name?.trim() || undefined,
         apiKey: form.apiKey.trim(),
         priority: form.priority !== undefined ? Math.trunc(form.priority) : undefined,
         weight: normalizeCredentialWeight(form.weight),
@@ -803,6 +818,15 @@ export function AiProvidersCodexEditPage() {
           <div className="hint">{t('common.invalid_provider_index')}</div>
         ) : (
           <>
+            <Input
+              label={t('ai_providers.name_label', { defaultValue: '名称 / 别名' })}
+              placeholder={t('ai_providers.name_placeholder_optional', {
+                defaultValue: '可选，如主力池（留空自动生成）',
+              })}
+              value={form.name ?? ''}
+              onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
+              disabled={disableControls || saving}
+            />
             <Input
               label={t('ai_providers.codex_add_modal_key_label')}
               value={form.apiKey}

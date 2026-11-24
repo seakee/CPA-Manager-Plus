@@ -2,57 +2,574 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   buildProviderRows,
-  ClaudeEditDrawer,
-  CodexEditDrawer,
   filterAndSortProviderRows,
-  GeminiEditDrawer,
-  OpenAIEditDrawer,
   PROVIDER_KIND_LABELS,
-  ProviderDetailDrawer,
+  ProviderCardGrid,
   ProviderHealthCheckDrawer,
   ProviderTable,
   ProviderToolbar,
-  VertexEditDrawer,
+  ProviderWorkspaceDrawer,
   useProviderRecentRequests,
+  type ProviderDrawerTab,
   type ProviderHealthCheckApplyAction,
+  type ProviderHealthFilter,
   type ProviderKind,
   type ProviderKindFilter,
+  type ProviderLayoutMode,
   type ProviderRow,
+  type ProviderSavedIdentityHint,
   type ProviderSortDirection,
   type ProviderSortOption,
+  type ProviderStatusFilter,
 } from '@/components/providers';
+import { useProviderAccountHistory } from '@/components/providers/hooks/useProviderAccountHistory';
+import type { ProviderWorkspaceDrawerHandle } from '@/components/providers/ProviderWorkspaceDrawer';
+import { rowMatchesSavedAnchor } from '@/components/providers/ProviderWorkspaceDrawer/useProviderDrawerEditor';
 import {
   withDisableAllModelsRule,
   withoutDisableAllModelsRule,
 } from '@/components/providers/utils';
-import { PaginationFooter } from '@/components/common/PaginationFooter';
+import { FloatingActionDock } from '@/components/common/FloatingActionDock';
+import { LocalizedPaginationFooter } from '@/components/common/LocalizedPaginationFooter';
 import { usePageTransitionLayer } from '@/components/common/PageTransitionLayer';
+import { WorkspaceListPanel } from '@/components/common/WorkspaceListPanel';
 import { Button } from '@/components/ui/Button';
-import { Card } from '@/components/ui/Card';
+import { DropdownMenu } from '@/components/ui/DropdownMenu';
 import { EmptyState } from '@/components/ui/EmptyState';
-import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
+import { Input } from '@/components/ui/Input';
+import { Modal } from '@/components/ui/Modal';
+import { IconMoreVertical, IconTrash2 } from '@/components/ui/icons';
+import {
+  useClientPagination,
+  useHeaderRefresh,
+  useListSelection,
+  useMediaQuery,
+  usePersistedViewMode,
+} from '@/hooks';
 import { providersApi } from '@/services/api';
 import { getUsageServiceErrorCode } from '@/services/api/usageService';
 import { useAuthStore, useConfigStore, useNotificationStore, useThemeStore } from '@/stores';
+import type { GeminiKeyConfig, OpenAIProviderConfig, ProviderKeyConfig } from '@/types';
 import {
-  CloakConfig,
-  coolingPolicyToOverride,
-  type CoolingPolicy,
-  GeminiKeyConfig,
-  OpenAIProviderConfig,
-  ProviderKeyConfig,
-} from '@/types';
+  PROVIDER_WORKSPACE_PAGE_SIZE_OPTIONS,
+  readAiProvidersWorkspaceUiState,
+  writeAiProvidersWorkspaceUiState,
+} from './model/aiProvidersWorkspaceUiState';
 import { createConfigMutationLock } from './model/configMutationLock';
 import { buildProviderDeleteSecondConfirmation } from './model/deleteConfirmation';
 import styles from './AiProvidersPage.module.scss';
 
-const PROVIDER_TABLE_DEFAULT_PAGE_SIZE = 10;
-const PROVIDER_TABLE_PAGE_SIZE_OPTIONS = [10, 20, 50] as const;
+interface ProviderListsSnapshot {
+  gemini: GeminiKeyConfig[];
+  interactions: GeminiKeyConfig[];
+  codex: ProviderKeyConfig[];
+  xai: ProviderKeyConfig[];
+  claude: ProviderKeyConfig[];
+  vertex: ProviderKeyConfig[];
+  openai: OpenAIProviderConfig[];
+}
 
-const DEFAULT_CLOAK_CONFIG: CloakConfig = {
-  mode: 'auto',
-  strictMode: false,
-  sensitiveWords: [],
+const hasAnyV8SourceTag = (lists: ProviderListsSnapshot): boolean =>
+  [
+    ...lists.gemini,
+    ...lists.interactions,
+    ...lists.codex,
+    ...lists.xai,
+    ...lists.claude,
+    ...lists.vertex,
+    ...lists.openai,
+  ].some((entry) => Boolean(entry?.v8Source));
+
+const cloneProviderLists = (lists: ProviderListsSnapshot): ProviderListsSnapshot => ({
+  gemini: [...lists.gemini],
+  interactions: [...lists.interactions],
+  codex: [...lists.codex],
+  xai: [...lists.xai],
+  claude: [...lists.claude],
+  vertex: [...lists.vertex],
+  openai: [...lists.openai],
+});
+
+const createChangedMap = (onlyKind?: ProviderKind): Record<ProviderKind, boolean> => ({
+  gemini: onlyKind === 'gemini',
+  interactions: onlyKind === 'interactions',
+  codex: onlyKind === 'codex',
+  xai: onlyKind === 'xai',
+  claude: onlyKind === 'claude',
+  vertex: onlyKind === 'vertex',
+  openai: onlyKind === 'openai',
+});
+
+const normalizeIdentityText = (value?: string): string => String(value ?? '').trim();
+
+const readLatestV8ConfigEtag = (): string | undefined => {
+  if (
+    'getLatestV8ConfigEtag' in providersApi &&
+    typeof providersApi.getLatestV8ConfigEtag === 'function'
+  ) {
+    const value = providersApi.getLatestV8ConfigEtag();
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+  }
+  return undefined;
+};
+
+const extractWriteResultEtag = (res: unknown): string | undefined => {
+  if (res && typeof res === 'object' && 'etag' in res && typeof res.etag === 'string') {
+    return res.etag.trim() || undefined;
+  }
+  return undefined;
+};
+
+const findFirstV8EtagInList = (
+  items: ReadonlyArray<{ v8Source?: { etag?: string } }>
+): string | undefined => {
+  for (const item of items) {
+    const etag = typeof item?.v8Source?.etag === 'string' ? item.v8Source.etag.trim() : '';
+    if (etag) return etag;
+  }
+  return undefined;
+};
+
+const findFirstV8EtagInLists = (lists: ProviderListsSnapshot): string | undefined =>
+  findFirstV8EtagInList(lists.gemini) ??
+  findFirstV8EtagInList(lists.interactions) ??
+  findFirstV8EtagInList(lists.codex) ??
+  findFirstV8EtagInList(lists.xai) ??
+  findFirstV8EtagInList(lists.claude) ??
+  findFirstV8EtagInList(lists.vertex) ??
+  findFirstV8EtagInList(lists.openai);
+
+const findFirstV8EtagInChangedLists = (
+  lists: ProviderListsSnapshot,
+  changed: Record<ProviderKind, boolean>
+): string | undefined => {
+  const kinds: ProviderKind[] = [
+    'gemini',
+    'interactions',
+    'codex',
+    'xai',
+    'claude',
+    'vertex',
+    'openai',
+  ];
+  for (const kind of kinds) {
+    if (!changed[kind]) continue;
+    const etag = findFirstV8EtagInList(lists[kind]);
+    if (etag) return etag;
+  }
+  return undefined;
+};
+
+const getErrorStatus = (err: unknown): number | undefined => {
+  if (!err || typeof err !== 'object') return undefined;
+  if ('status' in err && typeof err.status === 'number') {
+    return err.status;
+  }
+  if (
+    'response' in err &&
+    err.response &&
+    typeof err.response === 'object' &&
+    'status' in err.response &&
+    typeof err.response.status === 'number'
+  ) {
+    return err.response.status;
+  }
+  return undefined;
+};
+
+const isPartialOrConflictError = (err: unknown): boolean => {
+  if (!err || typeof err !== 'object') return false;
+  const partial = 'partialCommitted' in err && err.partialCommitted === true;
+  return partial || getErrorStatus(err) === 412;
+};
+
+const findMatchingFreshRow = (rows: ProviderRow[], targetRow: ProviderRow): ProviderRow | null => {
+  const exact = rows.find((row) => row.key === targetRow.key);
+  if (exact) return exact;
+
+  const sameKind = rows.filter((row) => row.kind === targetRow.kind);
+  if (sameKind.length === 0) return null;
+
+  const targetAuthIndex = normalizeIdentityText(targetRow.raw.authIndex);
+  if (targetAuthIndex) {
+    const byAuth = sameKind.find(
+      (row) => normalizeIdentityText(row.raw.authIndex) === targetAuthIndex
+    );
+    if (byAuth) return byAuth;
+  }
+
+  if (targetRow.kind === 'openai') {
+    const targetName = normalizeIdentityText(targetRow.raw.name);
+    return (
+      sameKind.find((row) => normalizeIdentityText(row.raw.name) === targetName) ?? null
+    );
+  }
+
+  const targetApiKey = normalizeIdentityText(targetRow.raw.apiKey);
+  const targetBaseUrl = normalizeIdentityText(targetRow.baseUrl);
+  const targetName = normalizeIdentityText(targetRow.raw.name);
+
+  return (
+    sameKind.find(
+      (row) =>
+        row.kind !== 'openai' &&
+        normalizeIdentityText(row.raw.apiKey) === targetApiKey &&
+        normalizeIdentityText(row.baseUrl) === targetBaseUrl &&
+        normalizeIdentityText(row.raw.name) === targetName
+    ) ??
+    sameKind.find(
+      (row) =>
+        row.kind !== 'openai' &&
+        normalizeIdentityText(row.raw.apiKey) === targetApiKey &&
+        normalizeIdentityText(row.baseUrl) === targetBaseUrl
+    ) ??
+    null
+  );
+};
+
+const findReanchoredDrawerRow = (
+  nextRows: ProviderRow[],
+  kind: ProviderKind,
+  previousRow: ProviderRow | null,
+  savedIdentity: ProviderSavedIdentityHint
+): ProviderRow | null => {
+  const kindRows = nextRows.filter((row) => row.kind === kind);
+  if (kindRows.length === 0) return null;
+
+  const targetAuthIndex = normalizeIdentityText(savedIdentity.authIndex);
+  const targetName = normalizeIdentityText(savedIdentity.name);
+  const targetApiKey = normalizeIdentityText(savedIdentity.apiKey);
+  const targetBaseUrl = normalizeIdentityText(savedIdentity.baseUrl);
+  const targetProxyUrl = normalizeIdentityText(savedIdentity.proxyUrl);
+  const targetPrefix = normalizeIdentityText(savedIdentity.prefix);
+  const preferredIndex = savedIdentity.originalIndex ?? previousRow?.originalIndex;
+
+  const pickBest = (candidates: ProviderRow[]): ProviderRow | null => {
+    if (candidates.length === 0) return null;
+    if (candidates.length === 1) return candidates[0];
+    if (preferredIndex !== undefined) {
+      const sameIndex = candidates.find((row) => row.originalIndex === preferredIndex);
+      if (sameIndex) return sameIndex;
+    }
+    return candidates[0];
+  };
+
+  if (targetAuthIndex) {
+    const authMatches = kindRows.filter(
+      (row) => normalizeIdentityText(row.raw.authIndex) === targetAuthIndex
+    );
+    const best = pickBest(authMatches);
+    if (best) return best;
+  }
+
+  const v8Matches = savedIdentity.v8Source
+    ? kindRows.filter((row) => {
+        const src = row.raw.v8Source;
+        const targetSrc = savedIdentity.v8Source;
+        if (!src || !targetSrc) return false;
+        if (src.family !== targetSrc.family || src.groupIndex !== targetSrc.groupIndex) {
+          return false;
+        }
+        return kind === 'openai' ? true : (src.keyIndex ?? 0) === (targetSrc.keyIndex ?? 0);
+      })
+    : [];
+
+  if (v8Matches.length > 0) {
+    if (kind === 'openai') {
+      const refined = targetName
+        ? v8Matches.filter((row) => normalizeIdentityText(row.raw.name) === targetName)
+        : v8Matches;
+      const best = pickBest(refined.length > 0 ? refined : v8Matches);
+      if (best) return best;
+    } else {
+      const refined = v8Matches.filter((row) => {
+        if (row.kind === 'openai') return false;
+        if (targetApiKey && normalizeIdentityText(row.raw.apiKey) !== targetApiKey) {
+          return false;
+        }
+        if (targetBaseUrl && normalizeIdentityText(row.baseUrl) !== targetBaseUrl) {
+          return false;
+        }
+        return true;
+      });
+      if (refined.length > 0) {
+        const best = pickBest(refined);
+        if (best) return best;
+      }
+    }
+  }
+
+  if (kind === 'openai') {
+    const previousOpenAIKeys = new Set(
+      previousRow?.kind === 'openai'
+        ? (previousRow.raw.apiKeyEntries ?? [])
+            .map((entry) => normalizeIdentityText(entry.apiKey))
+            .filter(Boolean)
+        : []
+    );
+    if (targetApiKey) {
+      previousOpenAIKeys.add(targetApiKey);
+    }
+    const hasMatchingOpenAIKeyEntry = (row: ProviderRow): boolean => {
+      if (row.kind !== 'openai' || previousOpenAIKeys.size === 0) return false;
+      return (row.raw.apiKeyEntries ?? []).some((entry) =>
+        previousOpenAIKeys.has(normalizeIdentityText(entry.apiKey))
+      );
+    };
+
+    if (targetName && targetBaseUrl) {
+      const nameAndUrlMatches = kindRows.filter(
+        (row) =>
+          normalizeIdentityText(row.raw.name) === targetName &&
+          normalizeIdentityText(row.baseUrl) === targetBaseUrl
+      );
+      const best = pickBest(nameAndUrlMatches);
+      if (best) return best;
+    }
+    if (savedIdentity.originalIndex !== undefined) {
+      const indexRow = kindRows.find((row) => row.originalIndex === savedIdentity.originalIndex);
+      if (
+        indexRow &&
+        ((targetName && normalizeIdentityText(indexRow.raw.name) === targetName) ||
+          (targetBaseUrl && normalizeIdentityText(indexRow.baseUrl) === targetBaseUrl) ||
+          hasMatchingOpenAIKeyEntry(indexRow))
+      ) {
+        return indexRow;
+      }
+    }
+    if (targetName && previousOpenAIKeys.size > 0) {
+      const nameAndKeyMatches = kindRows.filter(
+        (row) =>
+          normalizeIdentityText(row.raw.name) === targetName && hasMatchingOpenAIKeyEntry(row)
+      );
+      const best = pickBest(nameAndKeyMatches);
+      if (best) return best;
+    }
+    if (targetName) {
+      const nameMatches = kindRows.filter(
+        (row) => normalizeIdentityText(row.raw.name) === targetName
+      );
+      const best = pickBest(nameMatches);
+      if (best) return best;
+    }
+    if (targetBaseUrl && previousOpenAIKeys.size > 0) {
+      const urlAndKeyMatches = kindRows.filter(
+        (row) =>
+          normalizeIdentityText(row.baseUrl) === targetBaseUrl && hasMatchingOpenAIKeyEntry(row)
+      );
+      const best = pickBest(urlAndKeyMatches);
+      if (best) return best;
+    }
+    if (targetBaseUrl) {
+      const urlMatches = kindRows.filter(
+        (row) => normalizeIdentityText(row.baseUrl) === targetBaseUrl
+      );
+      const best = pickBest(urlMatches);
+      if (best) return best;
+    }
+    if (previousOpenAIKeys.size > 0) {
+      const keyMatches = kindRows.filter((row) => hasMatchingOpenAIKeyEntry(row));
+      const best = pickBest(keyMatches);
+      if (best) return best;
+    }
+    if (savedIdentity.originalIndex !== undefined) {
+      const byIndex = kindRows.find((row) => row.originalIndex === savedIdentity.originalIndex);
+      if (byIndex) return byIndex;
+    }
+    return null;
+  }
+
+  if (targetApiKey && targetBaseUrl) {
+    const keyAndUrlMatches = kindRows.filter(
+      (row) =>
+        row.kind !== 'openai' &&
+        normalizeIdentityText(row.raw.apiKey) === targetApiKey &&
+        normalizeIdentityText(row.baseUrl) === targetBaseUrl
+    );
+    if (keyAndUrlMatches.length > 0) {
+      const nameRefined = targetName
+        ? keyAndUrlMatches.filter((row) => normalizeIdentityText(row.raw.name) === targetName)
+        : keyAndUrlMatches;
+      const best = pickBest(nameRefined.length > 0 ? nameRefined : keyAndUrlMatches);
+      if (best) return best;
+    }
+  }
+
+  if (targetName) {
+    const nameMatches = kindRows.filter((row) => {
+      if (row.kind === 'openai') return false;
+      if (normalizeIdentityText(row.raw.name) !== targetName) return false;
+      if (savedIdentity.apiKey !== undefined && normalizeIdentityText(row.raw.apiKey) !== targetApiKey) {
+        return false;
+      }
+      if (savedIdentity.baseUrl !== undefined && normalizeIdentityText(row.baseUrl) !== targetBaseUrl) {
+        return false;
+      }
+      return true;
+    });
+    const best = pickBest(nameMatches);
+    if (best) return best;
+  }
+
+  if (targetApiKey) {
+    const keyMatches = kindRows.filter(
+      (row) =>
+        row.kind !== 'openai' && normalizeIdentityText(row.raw.apiKey) === targetApiKey
+    );
+    const best = pickBest(keyMatches);
+    if (best) return best;
+  }
+
+  if (targetBaseUrl) {
+    const urlMatches = kindRows.filter(
+      (row) =>
+        row.kind !== 'openai' &&
+        normalizeIdentityText(row.baseUrl) === targetBaseUrl &&
+        normalizeIdentityText(row.raw.apiKey) === targetApiKey
+    );
+    const best = pickBest(urlMatches);
+    if (best) return best;
+  }
+
+  if (targetName) {
+    const looseNameMatches = kindRows.filter(
+      (row) => row.kind !== 'openai' && normalizeIdentityText(row.raw.name) === targetName
+    );
+    const best = pickBest(looseNameMatches);
+    if (best) return best;
+  }
+
+  if (targetProxyUrl || targetPrefix) {
+    const fallbackMatches = kindRows.filter(
+      (row) =>
+        row.kind !== 'openai' &&
+        (!targetProxyUrl || normalizeIdentityText(row.raw.proxyUrl) === targetProxyUrl) &&
+        (!targetPrefix || normalizeIdentityText(row.prefix) === targetPrefix)
+    );
+    const best = pickBest(fallbackMatches);
+    if (best) return best;
+  }
+
+  if (v8Matches.length > 0) {
+    const best = pickBest(v8Matches);
+    if (best) return best;
+  }
+
+  if (savedIdentity.originalIndex !== undefined) {
+    const byIndex = kindRows.find((row) => row.originalIndex === savedIdentity.originalIndex);
+    if (byIndex) return byIndex;
+  }
+
+  return null;
+};
+
+const areProviderListsJsonEqual = (left: unknown[], right: unknown[]): boolean => {
+  if (left === right) return true;
+  if (left.length !== right.length) return false;
+  return JSON.stringify(left) === JSON.stringify(right);
+};
+
+const matchesDistinguishingRowIdentity = (snapshot: ProviderRow, candidate: ProviderRow): boolean => {
+  if (snapshot.kind !== candidate.kind) return false;
+  if (snapshot.kind === 'openai' && candidate.kind === 'openai') {
+    const prevKeySig = (snapshot.raw.apiKeyEntries ?? [])
+      .map((entry) => `${normalizeIdentityText(entry.apiKey)}::${normalizeIdentityText(entry.proxyUrl)}`)
+      .join('|');
+    const nextKeySig = (candidate.raw.apiKeyEntries ?? [])
+      .map((entry) => `${normalizeIdentityText(entry.apiKey)}::${normalizeIdentityText(entry.proxyUrl)}`)
+      .join('|');
+    return (
+      normalizeIdentityText(snapshot.raw.name) === normalizeIdentityText(candidate.raw.name) &&
+      normalizeIdentityText(snapshot.baseUrl) === normalizeIdentityText(candidate.baseUrl) &&
+      normalizeIdentityText(snapshot.prefix) === normalizeIdentityText(candidate.prefix) &&
+      prevKeySig === nextKeySig
+    );
+  }
+  return (
+    candidate.kind !== 'openai' &&
+    snapshot.kind !== 'openai' &&
+    normalizeIdentityText(snapshot.raw.apiKey) === normalizeIdentityText(candidate.raw.apiKey) &&
+    normalizeIdentityText(snapshot.baseUrl) === normalizeIdentityText(candidate.baseUrl) &&
+    normalizeIdentityText(snapshot.raw.proxyUrl) === normalizeIdentityText(candidate.raw.proxyUrl) &&
+    normalizeIdentityText(snapshot.raw.name) === normalizeIdentityText(candidate.raw.name)
+  );
+};
+
+const findShiftedDrawerRow = (
+  nextRows: ProviderRow[],
+  snapshot: ProviderRow | null
+): ProviderRow | null => {
+  if (!snapshot) return null;
+  const kindRows = nextRows.filter((row) => row.kind === snapshot.kind);
+  if (kindRows.length === 0) return null;
+
+  const targetAuthIndex = normalizeIdentityText(snapshot.raw.authIndex);
+  if (targetAuthIndex) {
+    const authMatches = kindRows.filter(
+      (row) => normalizeIdentityText(row.raw.authIndex) === targetAuthIndex
+    );
+    return authMatches.length === 1 ? authMatches[0] : null;
+  }
+
+  const matches = kindRows.filter((row) => matchesDistinguishingRowIdentity(snapshot, row));
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) {
+    const targetModelsSig = snapshot.modelNames
+      .map((name) => name.trim())
+      .filter(Boolean)
+      .sort()
+      .join('|');
+    const modelMatches = matches.filter(
+      (row) =>
+        row.modelNames
+          .map((name) => name.trim())
+          .filter(Boolean)
+          .sort()
+          .join('|') === targetModelsSig
+    );
+    if (modelMatches.length === 1) return modelMatches[0];
+  }
+  return null;
+};
+
+const getPerItemDeleteMethod = (kind: ProviderKind) => {
+  switch (kind) {
+    case 'gemini':
+      return 'deleteGeminiKey' in providersApi &&
+        typeof providersApi.deleteGeminiKey === 'function'
+        ? providersApi.deleteGeminiKey
+        : undefined;
+    case 'interactions':
+      return 'deleteInteractionsKey' in providersApi &&
+        typeof providersApi.deleteInteractionsKey === 'function'
+        ? providersApi.deleteInteractionsKey
+        : undefined;
+    case 'codex':
+      return 'deleteCodexConfig' in providersApi &&
+        typeof providersApi.deleteCodexConfig === 'function'
+        ? providersApi.deleteCodexConfig
+        : undefined;
+    case 'xai':
+      return 'deleteXAIConfig' in providersApi &&
+        typeof providersApi.deleteXAIConfig === 'function'
+        ? providersApi.deleteXAIConfig
+        : undefined;
+    case 'claude':
+      return 'deleteClaudeConfig' in providersApi &&
+        typeof providersApi.deleteClaudeConfig === 'function'
+        ? providersApi.deleteClaudeConfig
+        : undefined;
+    case 'vertex':
+      return 'deleteVertexConfig' in providersApi &&
+        typeof providersApi.deleteVertexConfig === 'function'
+        ? providersApi.deleteVertexConfig
+        : undefined;
+    case 'openai':
+      return 'deleteOpenAIProvider' in providersApi &&
+        typeof providersApi.deleteOpenAIProvider === 'function'
+        ? providersApi.deleteOpenAIProvider
+        : undefined;
+  }
 };
 
 export function AiProvidersPage() {
@@ -60,6 +577,7 @@ export function AiProvidersPage() {
   const { showNotification, showConfirmation } = useNotificationStore();
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
+  const isCompactViewport = useMediaQuery('(max-width: 768px)');
 
   const config = useConfigStore((state) => state.config);
   const fetchConfig = useConfigStore((state) => state.fetchConfig);
@@ -67,9 +585,26 @@ export function AiProvidersPage() {
   const clearCache = useConfigStore((state) => state.clearCache);
   const isCacheValid = useConfigStore((state) => state.isCacheValid);
 
+  const initialUiState = useMemo(() => readAiProvidersWorkspaceUiState(), []);
+
   const hasMounted = useRef(false);
   const [loading, setLoading] = useState(() => !isCacheValid());
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
+  const [v8AliasSupported, setV8AliasSupported] = useState<boolean>(() => {
+    if (typeof config?.v8Supported === 'boolean') {
+      return config.v8Supported;
+    }
+    return hasAnyV8SourceTag({
+      gemini: config?.geminiApiKeys || [],
+      interactions: config?.interactionsApiKeys || [],
+      codex: config?.codexApiKeys || [],
+      xai: config?.xaiApiKeys || [],
+      claude: config?.claudeApiKeys || [],
+      vertex: config?.vertexApiKeys || [],
+      openai: config?.openaiCompatibility || [],
+    });
+  });
 
   const [geminiKeys, setGeminiKeys] = useState<GeminiKeyConfig[]>(
     () => config?.geminiApiKeys || []
@@ -103,101 +638,419 @@ export function AiProvidersPage() {
     setConfigSwitchingKey(null);
   }, []);
 
-  // 表格筛选 / 排序 / 详情状态
+  const runWithMutationLock = useCallback(
+    async <T,>(
+      switchingKey: string,
+      task: () => Promise<T>
+    ): Promise<{ executed: true; value: T } | { executed: false }> => {
+      if (!beginConfigMutation(switchingKey)) {
+        return { executed: false };
+      }
+      try {
+        const value = await task();
+        return { executed: true, value };
+      } finally {
+        finishConfigMutation();
+      }
+    },
+    [beginConfigMutation, finishConfigMutation]
+  );
+
+  // 筛选、排序、视图与分页状态
   const [kindFilter, setKindFilter] = useState<ProviderKindFilter>('all');
+  const [statusFilter, setStatusFilter] = useState<ProviderStatusFilter>('all');
+  const [healthFilter, setHealthFilter] = useState<ProviderHealthFilter>('all');
   const [searchText, setSearchText] = useState('');
   const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set());
-  const [sortOption, setSortOption] = useState<ProviderSortOption>('priority');
-  const [sortDirection, setSortDirection] = useState<ProviderSortDirection>('desc');
-  const [detailRowKey, setDetailRowKey] = useState<string | null>(null);
+  const [storedLayoutMode, setStoredLayoutMode] = useState<ProviderLayoutMode>(
+    initialUiState.layoutMode
+  );
+  const [sortOption, setSortOption] = useState<ProviderSortOption>(initialUiState.sortOption);
+  const [sortDirection, setSortDirection] = useState<ProviderSortDirection>(
+    initialUiState.sortDirection
+  );
+  const [storedPageSize, setStoredPageSize] = useState(initialUiState.pageSize);
+
+  // 批量弹窗状态
+  const [batchPriorityModalOpen, setBatchPriorityModalOpen] = useState(false);
+  const [batchPriorityText, setBatchPriorityText] = useState('');
+  // 统一工作区抽屉与健康检查抽屉状态
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [drawerMode, setDrawerMode] = useState<'view-edit' | 'create'>('view-edit');
+  const [drawerRowKey, setDrawerRowKey] = useState<string | null>(null);
+  const [drawerInitialTab, setDrawerInitialTab] = useState<ProviderDrawerTab>('overview');
+  const [drawerCreateKind, setDrawerCreateKind] = useState<ProviderKind>('openai');
   const [healthCheckOpen, setHealthCheckOpen] = useState(false);
-  const [editDrawerKind, setEditDrawerKind] = useState<ProviderKind | null>(null);
-  const [editDrawerIndex, setEditDrawerIndex] = useState<number | null>(null);
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(PROVIDER_TABLE_DEFAULT_PAGE_SIZE);
+  const [healthCheckScope, setHealthCheckScope] = useState<'filtered' | 'selected' | 'single'>(
+    'filtered'
+  );
+  const [singleHealthCheckRow, setSingleHealthCheckRow] = useState<ProviderRow | null>(null);
+  const drawerControllerRef = useRef<ProviderWorkspaceDrawerHandle | null>(null);
+  const [drawerSessionId, setDrawerSessionId] = useState(0);
+  const [drawerRowSnapshot, setDrawerRowSnapshot] = useState<ProviderRow | null>(null);
+  const [drawerOrphanedRow, setDrawerOrphanedRow] = useState<ProviderRow | null>(null);
+  const [drawerReanchoring, setDrawerReanchoring] = useState(false);
+  const pendingSavedIdentityRef = useRef<{
+    kind: ProviderKind;
+    previousKey: string;
+    previousRow: ProviderRow | null;
+    savedIdentity: ProviderSavedIdentityHint;
+  } | null>(null);
+  const orphanNotifiedKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    writeAiProvidersWorkspaceUiState({
+      layoutMode: storedLayoutMode,
+      pageSize: storedPageSize,
+      sortOption,
+      sortDirection,
+    });
+  }, [sortDirection, sortOption, storedLayoutMode, storedPageSize]);
 
   const disableControls = connectionStatus !== 'connected';
   const isSwitching = Boolean(configSwitchingKey);
   const actionsDisabled = disableControls || loading || isSwitching;
-
+  const {
+    effectiveMode: effectiveLayoutMode,
+    setMode: setLayoutMode,
+    switcherHidden: viewSwitcherHidden,
+  } = usePersistedViewMode<ProviderLayoutMode>({
+    defaultMode: 'table',
+    validModes: ['table', 'grid'],
+    compactFallbackMode: 'grid',
+    isCompact: isCompactViewport,
+    value: storedLayoutMode,
+    onChange: setStoredLayoutMode,
+  });
   const pageTransitionLayer = usePageTransitionLayer();
   const isCurrentLayer = pageTransitionLayer ? pageTransitionLayer.status === 'current' : true;
 
   const { usageByProvider, loadRecentRequests, refreshRecentRequests } = useProviderRecentRequests({
     enabled: isCurrentLayer,
   });
+  const { historyByRowKey, refreshAccountHistory } = useProviderAccountHistory({
+    enabled: isCurrentLayer,
+    gemini: geminiKeys,
+    interactions: interactionsKeys,
+    codex: codexConfigs,
+    xai: xaiConfigs,
+    claude: claudeConfigs,
+    vertex: vertexConfigs,
+    openai: openaiProviders,
+  });
 
-  const getErrorMessage = useCallback((err: unknown) => {
-    const code = getUsageServiceErrorCode(err);
-    if (code) {
-      return t(`usage_service_errors.${code}`, {
-        defaultValue: t('usage_service_errors.request_failed'),
+  const v8AliasSupportedRef = useRef(v8AliasSupported);
+  v8AliasSupportedRef.current = v8AliasSupported;
+  const geminiKeysRef = useRef(geminiKeys);
+  geminiKeysRef.current = geminiKeys;
+  const interactionsKeysRef = useRef(interactionsKeys);
+  interactionsKeysRef.current = interactionsKeys;
+  const codexConfigsRef = useRef(codexConfigs);
+  codexConfigsRef.current = codexConfigs;
+  const xaiConfigsRef = useRef(xaiConfigs);
+  xaiConfigsRef.current = xaiConfigs;
+  const claudeConfigsRef = useRef(claudeConfigs);
+  claudeConfigsRef.current = claudeConfigs;
+  const vertexConfigsRef = useRef(vertexConfigs);
+  vertexConfigsRef.current = vertexConfigs;
+  const openaiProvidersRef = useRef(openaiProviders);
+  openaiProvidersRef.current = openaiProviders;
+  const drawerOpenRef = useRef(drawerOpen);
+  drawerOpenRef.current = drawerOpen;
+  const drawerModeRef = useRef(drawerMode);
+  drawerModeRef.current = drawerMode;
+  const drawerRowKeyRef = useRef(drawerRowKey);
+  drawerRowKeyRef.current = drawerRowKey;
+  const usageByProviderRef = useRef(usageByProvider);
+  usageByProviderRef.current = usageByProvider;
+  const historyByRowKeyRef = useRef(historyByRowKey);
+  historyByRowKeyRef.current = historyByRowKey;
+  const supersededConfigRef = useRef<typeof config>(null);
+
+  const getCurrentProviderLists = useCallback(
+    (): ProviderListsSnapshot => ({
+      gemini: [...geminiKeysRef.current],
+      interactions: [...interactionsKeysRef.current],
+      codex: [...codexConfigsRef.current],
+      xai: [...xaiConfigsRef.current],
+      claude: [...claudeConfigsRef.current],
+      vertex: [...vertexConfigsRef.current],
+      openai: [...openaiProvidersRef.current],
+    }),
+    []
+  );
+
+  const applyProviderListsState = useCallback((lists: ProviderListsSnapshot) => {
+    geminiKeysRef.current = lists.gemini;
+    interactionsKeysRef.current = lists.interactions;
+    codexConfigsRef.current = lists.codex;
+    xaiConfigsRef.current = lists.xai;
+    claudeConfigsRef.current = lists.claude;
+    vertexConfigsRef.current = lists.vertex;
+    openaiProvidersRef.current = lists.openai;
+    setGeminiKeys(lists.gemini);
+    setInteractionsKeys(lists.interactions);
+    setCodexConfigs(lists.codex);
+    setXAIConfigs(lists.xai);
+    setClaudeConfigs(lists.claude);
+    setVertexConfigs(lists.vertex);
+    setOpenaiProviders(lists.openai);
+  }, []);
+
+  const applySingleFamilyState = useCallback(
+    (kind: ProviderKind, nextList: ProviderListsSnapshot[ProviderKind]) => {
+      switch (kind) {
+        case 'gemini': {
+          const typed = nextList as GeminiKeyConfig[];
+          geminiKeysRef.current = typed;
+          setGeminiKeys(typed);
+          updateConfigValue('gemini-api-key', typed);
+          clearCache('gemini-api-key');
+          break;
+        }
+        case 'interactions': {
+          const typed = nextList as GeminiKeyConfig[];
+          interactionsKeysRef.current = typed;
+          setInteractionsKeys(typed);
+          updateConfigValue('interactions-api-key', typed);
+          clearCache('interactions-api-key');
+          break;
+        }
+        case 'codex': {
+          const typed = nextList as ProviderKeyConfig[];
+          codexConfigsRef.current = typed;
+          setCodexConfigs(typed);
+          updateConfigValue('codex-api-key', typed);
+          clearCache('codex-api-key');
+          break;
+        }
+        case 'xai': {
+          const typed = nextList as ProviderKeyConfig[];
+          xaiConfigsRef.current = typed;
+          setXAIConfigs(typed);
+          updateConfigValue('xai-api-key', typed);
+          clearCache('xai-api-key');
+          break;
+        }
+        case 'claude': {
+          const typed = nextList as ProviderKeyConfig[];
+          claudeConfigsRef.current = typed;
+          setClaudeConfigs(typed);
+          updateConfigValue('claude-api-key', typed);
+          clearCache('claude-api-key');
+          break;
+        }
+        case 'vertex': {
+          const typed = nextList as ProviderKeyConfig[];
+          vertexConfigsRef.current = typed;
+          setVertexConfigs(typed);
+          updateConfigValue('vertex-api-key', typed);
+          clearCache('vertex-api-key');
+          break;
+        }
+        case 'openai': {
+          const typed = nextList as OpenAIProviderConfig[];
+          openaiProvidersRef.current = typed;
+          setOpenaiProviders(typed);
+          updateConfigValue('openai-compatibility', typed);
+          clearCache('openai-compatibility');
+          break;
+        }
+      }
+    },
+    [clearCache, updateConfigValue]
+  );
+
+  const syncAllListsEtag = useCallback(
+    (etag?: string, options?: { excludeKind?: ProviderKind }) => {
+      const normalized = typeof etag === 'string' ? etag.trim() : '';
+      if (!normalized) return;
+      const current = getCurrentProviderLists();
+      const kinds: ProviderKind[] = [
+        'gemini',
+        'interactions',
+        'codex',
+        'xai',
+        'claude',
+        'vertex',
+        'openai',
+      ];
+      kinds.forEach((kind) => {
+        if (options?.excludeKind === kind) return;
+        const list = current[kind];
+        let changed = false;
+        const patched = list.map((item) => {
+          if (!item?.v8Source || item.v8Source.etag === normalized) return item;
+          changed = true;
+          return {
+            ...item,
+            v8Source: {
+              ...item.v8Source,
+              etag: normalized,
+            },
+          };
+        });
+        if (changed) {
+          applySingleFamilyState(kind, patched as ProviderListsSnapshot[ProviderKind]);
+        }
       });
-    }
-    if (err instanceof Error) return err.message;
-    if (typeof err === 'string') return err;
-    return '';
-  }, [t]);
+    },
+    [applySingleFamilyState, getCurrentProviderLists]
+  );
 
-  const loadConfigs = useCallback(async () => {
-    const hasValidCache = isCacheValid();
-    if (!hasValidCache) {
-      setLoading(true);
-    }
-    setError('');
-    try {
-      const [configResult, vertexResult, openaiResult] = await Promise.allSettled([
-        fetchConfig(),
-        providersApi.getVertexConfigs(),
-        providersApi.getOpenAIProviders(),
-      ]);
-
-      if (configResult.status !== 'fulfilled') {
-        throw configResult.reason;
+  const getErrorMessage = useCallback(
+    (err: unknown) => {
+      const code = getUsageServiceErrorCode(err);
+      if (code) {
+        return t(`usage_service_errors.${code}`, {
+          defaultValue: t('usage_service_errors.request_failed'),
+        });
       }
+      if (err instanceof Error) return err.message;
+      if (typeof err === 'string') return err;
+      return '';
+    },
+    [t]
+  );
 
-      const data = configResult.value;
-      setGeminiKeys(data?.geminiApiKeys || []);
-      setInteractionsKeys(data?.interactionsApiKeys || []);
-      setCodexConfigs(data?.codexApiKeys || []);
-      setXAIConfigs(data?.xaiApiKeys || []);
-      setClaudeConfigs(data?.claudeApiKeys || []);
-      setVertexConfigs(data?.vertexApiKeys || []);
-      setOpenaiProviders(data?.openaiCompatibility || []);
-
-      if (vertexResult.status === 'fulfilled') {
-        setVertexConfigs(vertexResult.value || []);
-        updateConfigValue('vertex-api-key', vertexResult.value || []);
-        clearCache('vertex-api-key');
+  const loadConfigs = useCallback(
+    async (options?: {
+      force?: boolean;
+      onRowsBuilt?: (nextRows: ProviderRow[]) => void;
+      preserveErrorOnFailure?: boolean;
+    }): Promise<ProviderRow[] | null> => {
+      const force = Boolean(options?.force);
+      const hasValidCache = !force && isCacheValid();
+      if (!hasValidCache && !force) {
+        setLoading(true);
       }
-
-      if (openaiResult.status === 'fulfilled') {
-        setOpenaiProviders(openaiResult.value || []);
-        updateConfigValue('openai-compatibility', openaiResult.value || []);
-        clearCache('openai-compatibility');
+      if (!options?.preserveErrorOnFailure) {
+        setError('');
       }
-    } catch (err: unknown) {
-      const message = getErrorMessage(err) || t('notification.refresh_failed');
-      setError(message);
-    } finally {
-      setLoading(false);
-    }
-  }, [clearCache, fetchConfig, getErrorMessage, isCacheValid, t, updateConfigValue]);
+      try {
+        const snapshotLoader =
+          'loadAllProvidersV8Snapshot' in providersApi &&
+          typeof providersApi.loadAllProvidersV8Snapshot === 'function'
+            ? providersApi.loadAllProvidersV8Snapshot
+            : undefined;
+
+        const [configResult, snapshotResult, vertexResult, openaiResult] = await Promise.allSettled([
+          fetchConfig(undefined, force),
+          force && snapshotLoader ? snapshotLoader() : Promise.resolve(null),
+          providersApi.getVertexConfigs(),
+          providersApi.getOpenAIProviders(),
+        ]);
+
+        if (configResult.status !== 'fulfilled') {
+          throw configResult.reason;
+        }
+
+        const data = configResult.value;
+        let nextGemini = data?.geminiApiKeys || [];
+        let nextInteractions = data?.interactionsApiKeys || [];
+        let nextCodex = data?.codexApiKeys || [];
+        let nextXAI = data?.xaiApiKeys || [];
+        let nextClaude = data?.claudeApiKeys || [];
+        let nextVertex = data?.vertexApiKeys || [];
+        let nextOpenAI = data?.openaiCompatibility || [];
+
+        const hasSnapshot =
+          snapshotResult.status === 'fulfilled' && Boolean(snapshotResult.value);
+
+        if (hasSnapshot && snapshotResult.value) {
+          supersededConfigRef.current = data ?? null;
+          v8AliasSupportedRef.current = snapshotResult.value.v8Supported;
+          setV8AliasSupported(snapshotResult.value.v8Supported);
+          nextGemini = snapshotResult.value.gemini;
+          nextInteractions = snapshotResult.value.interactions;
+          nextCodex = snapshotResult.value.codex;
+          nextXAI = snapshotResult.value.xai;
+          nextClaude = snapshotResult.value.claude;
+          nextVertex = snapshotResult.value.vertex;
+          nextOpenAI = snapshotResult.value.openai;
+        } else {
+          supersededConfigRef.current = null;
+          if (data?.v8Supported !== true) {
+            if (vertexResult.status === 'fulfilled') {
+              nextVertex = vertexResult.value || [];
+              if (!areProviderListsJsonEqual(nextVertex, data?.vertexApiKeys || [])) {
+                updateConfigValue('vertex-api-key', nextVertex);
+              }
+            }
+
+            if (openaiResult.status === 'fulfilled') {
+              nextOpenAI = openaiResult.value || [];
+              if (!areProviderListsJsonEqual(nextOpenAI, data?.openaiCompatibility || [])) {
+                updateConfigValue('openai-compatibility', nextOpenAI);
+              }
+            }
+          }
+          if (typeof data?.v8Supported === 'boolean') {
+            v8AliasSupportedRef.current = data.v8Supported;
+            setV8AliasSupported(data.v8Supported);
+          } else {
+            const anyV8Tag = hasAnyV8SourceTag({
+              gemini: nextGemini,
+              interactions: nextInteractions,
+              codex: nextCodex,
+              xai: nextXAI,
+              claude: nextClaude,
+              vertex: nextVertex,
+              openai: nextOpenAI,
+            });
+            v8AliasSupportedRef.current = anyV8Tag;
+            setV8AliasSupported(anyV8Tag);
+          }
+        }
+
+        const nextLists: ProviderListsSnapshot = {
+          gemini: nextGemini,
+          interactions: nextInteractions,
+          codex: nextCodex,
+          xai: nextXAI,
+          claude: nextClaude,
+          vertex: nextVertex,
+          openai: nextOpenAI,
+        };
+        applyProviderListsState(nextLists);
+
+        const nextRows = buildProviderRows({
+          ...nextLists,
+          usageByProvider: usageByProviderRef.current,
+          historyByRowKey: historyByRowKeyRef.current,
+        });
+        options?.onRowsBuilt?.(nextRows);
+        return nextRows;
+      } catch (err: unknown) {
+        if (!options?.preserveErrorOnFailure) {
+          const message = getErrorMessage(err) || t('notification.refresh_failed');
+          setError(message);
+        }
+        return null;
+      } finally {
+        setLoading(false);
+      }
+    },
+    [
+      applyProviderListsState,
+      fetchConfig,
+      getErrorMessage,
+      isCacheValid,
+      t,
+      updateConfigValue,
+    ]
+  );
 
   useEffect(() => {
     if (hasMounted.current) return;
     hasMounted.current = true;
-    loadConfigs();
+    void loadConfigs();
   }, [loadConfigs]);
 
   const leftCurrentLayerRef = useRef(false);
 
   useEffect(() => {
     if (!isCurrentLayer) {
-      // Editors invalidate the provider config cache before navigating back
-      // (clearCache also drops the full-config cache). When this list becomes
-      // the current layer again, reload so a committed save is never hidden
-      // behind stale data — even when its read-back failed.
       leftCurrentLayerRef.current = true;
       return;
     }
@@ -211,13 +1064,34 @@ export function AiProvidersPage() {
   }, [isCurrentLayer, isCacheValid, loadConfigs, loadRecentRequests]);
 
   useEffect(() => {
-    if (config?.geminiApiKeys) setGeminiKeys(config.geminiApiKeys);
-    if (config?.interactionsApiKeys) setInteractionsKeys(config.interactionsApiKeys);
-    if (config?.codexApiKeys) setCodexConfigs(config.codexApiKeys);
-    if (config?.xaiApiKeys) setXAIConfigs(config.xaiApiKeys);
-    if (config?.claudeApiKeys) setClaudeConfigs(config.claudeApiKeys);
-    if (config?.vertexApiKeys) setVertexConfigs(config.vertexApiKeys);
-    if (config?.openaiCompatibility) setOpenaiProviders(config.openaiCompatibility);
+    const superseded = supersededConfigRef.current;
+    if (config?.geminiApiKeys && config.geminiApiKeys !== superseded?.geminiApiKeys) {
+      setGeminiKeys(config.geminiApiKeys);
+    }
+    if (
+      config?.interactionsApiKeys &&
+      config.interactionsApiKeys !== superseded?.interactionsApiKeys
+    ) {
+      setInteractionsKeys(config.interactionsApiKeys);
+    }
+    if (config?.codexApiKeys && config.codexApiKeys !== superseded?.codexApiKeys) {
+      setCodexConfigs(config.codexApiKeys);
+    }
+    if (config?.xaiApiKeys && config.xaiApiKeys !== superseded?.xaiApiKeys) {
+      setXAIConfigs(config.xaiApiKeys);
+    }
+    if (config?.claudeApiKeys && config.claudeApiKeys !== superseded?.claudeApiKeys) {
+      setClaudeConfigs(config.claudeApiKeys);
+    }
+    if (config?.vertexApiKeys && config.vertexApiKeys !== superseded?.vertexApiKeys) {
+      setVertexConfigs(config.vertexApiKeys);
+    }
+    if (
+      config?.openaiCompatibility &&
+      config.openaiCompatibility !== superseded?.openaiCompatibility
+    ) {
+      setOpenaiProviders(config.openaiCompatibility);
+    }
   }, [
     config?.geminiApiKeys,
     config?.interactionsApiKeys,
@@ -228,28 +1102,21 @@ export function AiProvidersPage() {
     config?.openaiCompatibility,
   ]);
 
-  const handleRecentRequestsRefresh = useCallback(async () => {
-    await refreshRecentRequests();
-  }, [refreshRecentRequests]);
+  const handleWorkspaceRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await Promise.all([
+        loadConfigs({ force: true }),
+        refreshRecentRequests(),
+        refreshAccountHistory(),
+      ]);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [loadConfigs, refreshAccountHistory, refreshRecentRequests]);
 
-  useHeaderRefresh(handleRecentRequestsRefresh, isCurrentLayer);
+  useHeaderRefresh(handleWorkspaceRefresh, isCurrentLayer);
 
-  const openEditorDrawer = useCallback((kind: ProviderKind, editIndex: number | null) => {
-    setDetailRowKey(null);
-    setEditDrawerKind(kind);
-    setEditDrawerIndex(editIndex);
-  }, []);
-
-  const closeEditorDrawer = useCallback(() => {
-    setEditDrawerKind(null);
-    setEditDrawerIndex(null);
-  }, []);
-
-  const handleDrawerSaved = useCallback(() => {
-    void loadConfigs();
-  }, [loadConfigs]);
-
-  // 统一行集合与派生数据
   const rows = useMemo(
     () =>
       buildProviderRows({
@@ -261,11 +1128,13 @@ export function AiProvidersPage() {
         vertex: vertexConfigs,
         openai: openaiProviders,
         usageByProvider,
+        historyByRowKey,
       }),
     [
       claudeConfigs,
       codexConfigs,
       geminiKeys,
+      historyByRowKey,
       interactionsKeys,
       openaiProviders,
       usageByProvider,
@@ -277,16 +1146,14 @@ export function AiProvidersPage() {
   const allModelNames = useMemo(() => {
     const names = new Set<string>();
     rows.forEach((row) => {
-      row.modelNames.forEach((name) => names.add(name));
+      (row.modelFilterKeys ?? row.modelNames).forEach((name) => names.add(name));
     });
     return Array.from(names).sort();
   }, [rows]);
 
   useEffect(() => {
-    // 配置变更后清理已不存在的模型筛选项，避免筛选结果一直为空。
     setSelectedModels((prev) => {
       if (prev.size === 0) return prev;
-
       const availableModels = new Set(allModelNames);
       const next = new Set(Array.from(prev).filter((name) => availableModels.has(name)));
       return next.size === prev.size ? prev : next;
@@ -297,30 +1164,72 @@ export function AiProvidersPage() {
     () =>
       filterAndSortProviderRows(rows, {
         kind: kindFilter,
+        statusFilter,
+        healthFilter,
         searchText,
         selectedModels,
         sortOption,
         sortDirection,
       }),
-    [kindFilter, rows, searchText, selectedModels, sortDirection, sortOption]
+    [
+      healthFilter,
+      kindFilter,
+      rows,
+      searchText,
+      selectedModels,
+      sortDirection,
+      sortOption,
+      statusFilter,
+    ]
   );
 
-  const totalPages = Math.max(1, Math.ceil(visibleRows.length / pageSize));
-  const currentPage = Math.min(page, totalPages);
-  const pageStart = (currentPage - 1) * pageSize;
-  const pagedRows = visibleRows.slice(pageStart, pageStart + pageSize);
-  const pageStartItem = visibleRows.length === 0 ? 0 : pageStart + 1;
-  const pageEndItem = Math.min(visibleRows.length, pageStart + pageSize);
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
 
-  useEffect(() => {
-    setPage(1);
-  }, [kindFilter, searchText, selectedModels, sortDirection, sortOption]);
+  const {
+    page: currentPage,
+    setPage,
+    pageSize,
+    setPageSize,
+    totalPages,
+    startItem: pageStartItem,
+    endItem: pageEndItem,
+    pageItems: pagedRows,
+  } = useClientPagination(visibleRows, {
+    pageSize: storedPageSize,
+    onPageSizeChange: setStoredPageSize,
+    resetDeps: [
+      healthFilter,
+      kindFilter,
+      searchText,
+      selectedModels,
+      sortDirection,
+      sortOption,
+      statusFilter,
+    ],
+  });
 
-  useEffect(() => {
-    if (page === currentPage) return;
-    setPage(currentPage);
-  }, [currentPage, page]);
-
+  const {
+    selectionMode,
+    setSelectionMode,
+    toggleSelectionMode: handleToggleSelectionMode,
+    selectedKeys,
+    selectedItems: selectedRows,
+    toggleItem: handleToggleSelectRow,
+    togglePage: handleToggleSelectAllPage,
+    selectAll: handleSelectAllFiltered,
+    invertSelection,
+    clearSelection,
+    removeKeys: removeSelectedKeys,
+  } = useListSelection({
+    items: visibleRows,
+    pageItems: pagedRows,
+    getKey: (row) => row.key,
+  });
+  const selectedRowsRef = useRef(selectedRows);
+  selectedRowsRef.current = selectedRows;
+  const selectedKeysRef = useRef(selectedKeys);
+  selectedKeysRef.current = selectedKeys;
   const kindCounts = useMemo(() => {
     const counts: Record<ProviderKindFilter, number> = {
       all: rows.length,
@@ -338,1143 +1247,899 @@ export function AiProvidersPage() {
     return counts;
   }, [rows]);
 
-  const detailRow = useMemo(
-    () => (detailRowKey ? (rows.find((row) => row.key === detailRowKey) ?? null) : null),
-    [detailRowKey, rows]
+  const activeDrawerRow = useMemo(() => {
+    if (!drawerRowKey) return null;
+    const exactMatch = rows.find((row) => row.key === drawerRowKey) ?? null;
+    if (!exactMatch) return null;
+    if (
+      !drawerReanchoring &&
+      !isSwitching &&
+      drawerRowSnapshot &&
+      drawerRowSnapshot.key === drawerRowKey &&
+      !normalizeIdentityText(exactMatch.raw.authIndex) &&
+      !matchesDistinguishingRowIdentity(drawerRowSnapshot, exactMatch)
+    ) {
+      return null;
+    }
+    return exactMatch;
+  }, [drawerReanchoring, drawerRowKey, drawerRowSnapshot, isSwitching, rows]);
+
+  const resolvedDrawerRow =
+    drawerOpen && drawerMode === 'view-edit'
+      ? (activeDrawerRow ?? drawerOrphanedRow ?? drawerRowSnapshot)
+      : null;
+  const isDrawerRowDeletedExternally = Boolean(
+    drawerOpen && drawerMode === 'view-edit' && drawerOrphanedRow && !activeDrawerRow
   );
 
-  const filtersActive = kindFilter !== 'all' || searchText.trim() !== '' || selectedModels.size > 0;
+  const closeDrawer = useCallback(() => {
+    drawerOpenRef.current = false;
+    drawerRowKeyRef.current = null;
+    pendingSavedIdentityRef.current = null;
+    orphanNotifiedKeyRef.current = null;
+    setDrawerOrphanedRow(null);
+    setDrawerRowSnapshot(null);
+    setDrawerOpen(false);
+    setDrawerRowKey(null);
+  }, []);
 
-  const clearFilters = () => {
+  useEffect(() => {
+    if (!drawerOpen || drawerMode !== 'view-edit') {
+      pendingSavedIdentityRef.current = null;
+      orphanNotifiedKeyRef.current = null;
+      if (drawerRowSnapshot !== null) {
+        setDrawerRowSnapshot(null);
+      }
+      if (drawerOrphanedRow !== null) {
+        setDrawerOrphanedRow(null);
+      }
+      return;
+    }
+    if (activeDrawerRow) {
+      const snapshotMatches =
+        drawerRowSnapshot !== null &&
+        drawerRowSnapshot.key === activeDrawerRow.key &&
+        drawerRowSnapshot.raw === activeDrawerRow.raw &&
+        drawerRowSnapshot.enabled === activeDrawerRow.enabled &&
+        drawerRowSnapshot.originalIndex === activeDrawerRow.originalIndex;
+      if (!snapshotMatches) {
+        setDrawerRowSnapshot(activeDrawerRow);
+      }
+      if (drawerOrphanedRow !== null) {
+        setDrawerOrphanedRow(null);
+      }
+      orphanNotifiedKeyRef.current = null;
+      const pendingSave = pendingSavedIdentityRef.current;
+      if (!drawerReanchoring && !isSwitching && pendingSave) {
+        const isStalePreSaveRow =
+          pendingSave.previousRow !== null &&
+          activeDrawerRow.key === pendingSave.previousKey &&
+          activeDrawerRow.raw === pendingSave.previousRow.raw;
+        const targetName = normalizeIdentityText(pendingSave.savedIdentity.name);
+        const targetApiKey = normalizeIdentityText(pendingSave.savedIdentity.apiKey);
+        const targetBaseUrl = normalizeIdentityText(pendingSave.savedIdentity.baseUrl);
+        const targetProxyUrl = normalizeIdentityText(pendingSave.savedIdentity.proxyUrl);
+        const targetPrefix = normalizeIdentityText(pendingSave.savedIdentity.prefix);
+        const matchesSavedFields =
+          (!targetName || normalizeIdentityText(activeDrawerRow.raw.name) === targetName) &&
+          (activeDrawerRow.kind === 'openai' ||
+            !targetApiKey ||
+            normalizeIdentityText(activeDrawerRow.raw.apiKey) === targetApiKey) &&
+          (!targetBaseUrl || normalizeIdentityText(activeDrawerRow.baseUrl) === targetBaseUrl) &&
+          (activeDrawerRow.kind === 'openai' ||
+            !targetProxyUrl ||
+            normalizeIdentityText(activeDrawerRow.raw.proxyUrl) === targetProxyUrl) &&
+          (!targetPrefix || normalizeIdentityText(activeDrawerRow.prefix) === targetPrefix);
+        const matchesSavedAnchor =
+          pendingSave.kind === activeDrawerRow.kind &&
+          rowMatchesSavedAnchor(activeDrawerRow, pendingSave.savedIdentity) &&
+          matchesSavedFields;
+        const satisfiedNonKeySave =
+          pendingSave.kind === activeDrawerRow.kind &&
+          pendingSave.previousRow !== null &&
+          activeDrawerRow.key === pendingSave.previousKey &&
+          activeDrawerRow.raw !== pendingSave.previousRow.raw &&
+          matchesSavedFields;
+        if (!isStalePreSaveRow && (matchesSavedAnchor || satisfiedNonKeySave)) {
+          pendingSavedIdentityRef.current = null;
+        }
+      }
+      return;
+    }
+    if (!drawerRowKey || loading || drawerReanchoring || isSwitching) {
+      return;
+    }
+
+    const pendingSave = pendingSavedIdentityRef.current;
+    const reanchoredFromPendingSave = pendingSave
+      ? findReanchoredDrawerRow(
+          rows,
+          pendingSave.kind,
+          pendingSave.previousRow,
+          pendingSave.savedIdentity
+        )
+      : null;
+    const reanchored = reanchoredFromPendingSave ?? findShiftedDrawerRow(rows, drawerRowSnapshot);
+    if (reanchored) {
+      pendingSavedIdentityRef.current = null;
+      orphanNotifiedKeyRef.current = null;
+      drawerRowKeyRef.current = reanchored.key;
+      setDrawerRowKey(reanchored.key);
+      setDrawerRowSnapshot(reanchored);
+      setDrawerOrphanedRow(null);
+      return;
+    }
+
+    const hasUnsavedDraft = Boolean(drawerControllerRef.current?.isDirty?.());
+    if (hasUnsavedDraft) {
+      const frozenSnapshot = drawerRowSnapshot ?? drawerOrphanedRow;
+      if (frozenSnapshot && drawerOrphanedRow !== frozenSnapshot) {
+        setDrawerOrphanedRow(frozenSnapshot);
+      }
+      if (orphanNotifiedKeyRef.current !== drawerRowKey) {
+        orphanNotifiedKeyRef.current = drawerRowKey;
+        showNotification(t('notification.provider_conflict_refresh'), 'warning');
+      }
+      return;
+    }
+
+    closeDrawer();
+  }, [
+    activeDrawerRow,
+    closeDrawer,
+    drawerMode,
+    drawerOpen,
+    drawerOrphanedRow,
+    drawerReanchoring,
+    drawerRowKey,
+    drawerRowSnapshot,
+    isSwitching,
+    loading,
+    rows,
+    showNotification,
+    t,
+  ]);
+
+  const filtersActive =
+    kindFilter !== 'all' ||
+    statusFilter !== 'all' ||
+    healthFilter !== 'all' ||
+    searchText.trim() !== '' ||
+    selectedModels.size > 0;
+
+  const clearFilters = useCallback(() => {
     setKindFilter('all');
+    setStatusFilter('all');
+    setHealthFilter('all');
     setSearchText('');
     setSelectedModels(new Set());
-  };
+  }, []);
 
-  const applyProviderEnabledActions = async (
-    actions: Map<string, ProviderHealthCheckApplyAction>
-  ) => {
-    if (actions.size === 0) return;
-    if (configMutationLockRef.current.isLocked()) return;
-
-    const rowByKey = new Map(rows.map((row) => [row.key, row]));
-    const previous = {
-      gemini: geminiKeys,
-      interactions: interactionsKeys,
-      codex: codexConfigs,
-      xai: xaiConfigs,
-      claude: claudeConfigs,
-      vertex: vertexConfigs,
-      openai: openaiProviders,
-    };
-    let nextGemini = geminiKeys;
-    let nextInteractions = interactionsKeys;
-    let nextCodex = codexConfigs;
-    let nextXAI = xaiConfigs;
-    let nextClaude = claudeConfigs;
-    let nextVertex = vertexConfigs;
-    let nextOpenai = openaiProviders;
-    const changed = {
-      gemini: false,
-      interactions: false,
-      codex: false,
-      xai: false,
-      claude: false,
-      vertex: false,
-      openai: false,
-    };
-
-    actions.forEach((action, providerKey) => {
-      const row = rowByKey.get(providerKey);
-      if (!row) return;
-      const enabled = action === 'enable';
-      if (row.enabled === enabled) return;
-
-      if (row.kind === 'gemini') {
-        const current = nextGemini[row.originalIndex];
-        if (!current) return;
-        const excludedModels = enabled
-          ? withoutDisableAllModelsRule(current.excludedModels)
-          : withDisableAllModelsRule(current.excludedModels);
-        nextGemini = nextGemini.map((item, index) =>
-          index === row.originalIndex ? { ...item, excludedModels } : item
-        );
-        changed.gemini = true;
-      } else if (row.kind === 'interactions') {
-        const current = nextInteractions[row.originalIndex];
-        if (!current) return;
-        const excludedModels = enabled
-          ? withoutDisableAllModelsRule(current.excludedModels)
-          : withDisableAllModelsRule(current.excludedModels);
-        nextInteractions = nextInteractions.map((item, index) =>
-          index === row.originalIndex ? { ...item, excludedModels } : item
-        );
-        changed.interactions = true;
-      } else if (row.kind === 'codex') {
-        const current = nextCodex[row.originalIndex];
-        if (!current) return;
-        const excludedModels = enabled
-          ? withoutDisableAllModelsRule(current.excludedModels)
-          : withDisableAllModelsRule(current.excludedModels);
-        nextCodex = nextCodex.map((item, index) =>
-          index === row.originalIndex ? { ...item, excludedModels } : item
-        );
-        changed.codex = true;
-      } else if (row.kind === 'xai') {
-        const current = nextXAI[row.originalIndex];
-        if (!current) return;
-        const excludedModels = enabled
-          ? withoutDisableAllModelsRule(current.excludedModels)
-          : withDisableAllModelsRule(current.excludedModels);
-        nextXAI = nextXAI.map((item, index) =>
-          index === row.originalIndex ? { ...item, excludedModels } : item
-        );
-        changed.xai = true;
-      } else if (row.kind === 'claude') {
-        const current = nextClaude[row.originalIndex];
-        if (!current) return;
-        const excludedModels = enabled
-          ? withoutDisableAllModelsRule(current.excludedModels)
-          : withDisableAllModelsRule(current.excludedModels);
-        nextClaude = nextClaude.map((item, index) =>
-          index === row.originalIndex ? { ...item, excludedModels } : item
-        );
-        changed.claude = true;
-      } else if (row.kind === 'vertex') {
-        const current = nextVertex[row.originalIndex];
-        if (!current) return;
-        const excludedModels = enabled
-          ? withoutDisableAllModelsRule(current.excludedModels)
-          : withDisableAllModelsRule(current.excludedModels);
-        nextVertex = nextVertex.map((item, index) =>
-          index === row.originalIndex ? { ...item, excludedModels } : item
-        );
-        changed.vertex = true;
-      } else {
-        const current = nextOpenai[row.originalIndex];
-        if (!current) return;
-        nextOpenai = nextOpenai.map((item, index) =>
-          index === row.originalIndex ? { ...item, disabled: !enabled } : item
-        );
-        changed.openai = true;
+  const openProviderDrawer = useCallback(
+    async (row: ProviderRow, tab: ProviderDrawerTab = 'overview'): Promise<boolean> => {
+      const sameRow =
+        drawerOpenRef.current &&
+        drawerModeRef.current === 'view-edit' &&
+        drawerRowKeyRef.current === row.key;
+      if (drawerOpenRef.current && !sameRow && drawerControllerRef.current) {
+        const allowed = await drawerControllerRef.current.requestCloseOrSwitch();
+        if (!allowed) return false;
       }
-    });
+      if (!sameRow) {
+        setDrawerSessionId((n) => n + 1);
+      }
+      pendingSavedIdentityRef.current = null;
+      orphanNotifiedKeyRef.current = null;
+      drawerOpenRef.current = true;
+      drawerModeRef.current = 'view-edit';
+      drawerRowKeyRef.current = row.key;
+      setDrawerOrphanedRow(null);
+      setDrawerRowSnapshot(row);
+      setDrawerMode('view-edit');
+      setDrawerRowKey(row.key);
+      setDrawerInitialTab(tab);
+      setDrawerOpen(true);
+      return true;
+    },
+    []
+  );
 
-    if (!Object.values(changed).some(Boolean)) {
-      showNotification(t('ai_providers.health_check_no_changes'), 'success');
-      return;
-    }
+  const openCreateDrawer = useCallback(
+    async (preferredKind?: ProviderKind): Promise<boolean> => {
+      if (drawerOpenRef.current && drawerControllerRef.current) {
+        const allowed = await drawerControllerRef.current.requestCloseOrSwitch();
+        if (!allowed) return false;
+      }
+      const resolvedKind = preferredKind ?? (kindFilter !== 'all' ? kindFilter : 'openai');
+      setDrawerSessionId((n) => n + 1);
+      pendingSavedIdentityRef.current = null;
+      orphanNotifiedKeyRef.current = null;
+      drawerOpenRef.current = true;
+      drawerModeRef.current = 'create';
+      drawerRowKeyRef.current = null;
+      setDrawerOrphanedRow(null);
+      setDrawerRowSnapshot(null);
+      setDrawerMode('create');
+      setDrawerCreateKind(resolvedKind);
+      setDrawerRowKey(null);
+      setDrawerInitialTab('config');
+      setDrawerOpen(true);
+      return true;
+    },
+    [kindFilter]
+  );
 
-    if (!beginConfigMutation('health-check')) return;
+  const handleDrawerSaved = useCallback(
+    async (
+      savedKind: ProviderKind,
+      savedIdentity?: ProviderSavedIdentityHint
+    ): Promise<boolean> => {
+      const previousKey = drawerRowKeyRef.current;
+      const previousRow = previousKey
+        ? (rowsRef.current.find((candidate) => candidate.key === previousKey) ?? null)
+        : null;
+      const previousEtag = previousRow?.raw.v8Source?.etag;
+      const shouldReanchor =
+        drawerOpenRef.current &&
+        drawerModeRef.current === 'view-edit' &&
+        Boolean(previousKey) &&
+        Boolean(savedIdentity);
 
-    const applyLocalState = (
-      gemini: GeminiKeyConfig[],
-      interactions: GeminiKeyConfig[],
-      codex: ProviderKeyConfig[],
-      xai: ProviderKeyConfig[],
-      claude: ProviderKeyConfig[],
-      vertex: ProviderKeyConfig[],
-      openai: OpenAIProviderConfig[]
+      setDrawerReanchoring(true);
+      pendingSavedIdentityRef.current =
+        shouldReanchor && previousKey && savedIdentity
+          ? {
+              kind: savedKind,
+              previousKey,
+              previousRow,
+              savedIdentity,
+            }
+          : null;
+
+      try {
+        clearCache();
+        const refreshedRows = await loadConfigs({
+          force: true,
+          onRowsBuilt: (nextRows) => {
+            if (!shouldReanchor || !previousKey || !savedIdentity) return;
+            const existingAtPreviousKey = nextRows.find(
+              (candidate) => candidate.key === previousKey
+            );
+            if (existingAtPreviousKey) {
+              const targetName = normalizeIdentityText(savedIdentity.name);
+              const targetApiKey = normalizeIdentityText(savedIdentity.apiKey);
+              const targetBaseUrl = normalizeIdentityText(savedIdentity.baseUrl);
+              const nameMismatch =
+                Boolean(targetName) &&
+                normalizeIdentityText(existingAtPreviousKey.raw.name) !== targetName;
+              const apiKeyMismatch =
+                existingAtPreviousKey.kind !== 'openai' &&
+                Boolean(targetApiKey) &&
+                normalizeIdentityText(existingAtPreviousKey.raw.apiKey) !== targetApiKey;
+              const baseUrlMismatch =
+                Boolean(targetBaseUrl) &&
+                normalizeIdentityText(existingAtPreviousKey.baseUrl) !== targetBaseUrl;
+              if (!nameMismatch && !apiKeyMismatch && !baseUrlMismatch) {
+                pendingSavedIdentityRef.current = null;
+                setDrawerRowSnapshot(existingAtPreviousKey);
+                setDrawerOrphanedRow(null);
+                return;
+              }
+            }
+            const matched = findReanchoredDrawerRow(
+              nextRows,
+              savedKind,
+              previousRow,
+              savedIdentity
+            );
+            if (matched) {
+              pendingSavedIdentityRef.current = null;
+              drawerRowKeyRef.current = matched.key;
+              setDrawerRowKey(matched.key);
+              setDrawerRowSnapshot(matched);
+              setDrawerOrphanedRow(null);
+            }
+          },
+        });
+
+        if (refreshedRows !== null) {
+          pendingSavedIdentityRef.current = null;
+        }
+
+        const postSavedLists = getCurrentProviderLists();
+        const kindEtag = findFirstV8EtagInList(postSavedLists[savedKind]);
+        const latestReadEtag = readLatestV8ConfigEtag();
+        const effectiveEtag =
+          (latestReadEtag && latestReadEtag !== previousEtag ? latestReadEtag : undefined) ??
+          (refreshedRows !== null ? kindEtag : undefined) ??
+          savedIdentity?.v8Source?.etag ??
+          kindEtag ??
+          latestReadEtag;
+        if (effectiveEtag) {
+          syncAllListsEtag(
+            effectiveEtag,
+            refreshedRows === null ? { excludeKind: savedKind } : undefined
+          );
+        }
+
+        return refreshedRows !== null;
+      } finally {
+        setDrawerReanchoring(false);
+      }
+    },
+    [clearCache, getCurrentProviderLists, loadConfigs, syncAllListsEtag]
+  );
+
+  const commitChangedProviderLists = useCallback(
+    async (
+      previous: ProviderListsSnapshot,
+      nextLists: ProviderListsSnapshot,
+      changed: Record<ProviderKind, boolean>
     ) => {
-      if (changed.gemini) {
-        setGeminiKeys(gemini);
-        updateConfigValue('gemini-api-key', gemini);
-        clearCache('gemini-api-key');
-      }
-      if (changed.interactions) {
-        setInteractionsKeys(interactions);
-        updateConfigValue('interactions-api-key', interactions);
-        clearCache('interactions-api-key');
-      }
-      if (changed.codex) {
-        setCodexConfigs(codex);
-        updateConfigValue('codex-api-key', codex);
-        clearCache('codex-api-key');
-      }
-      if (changed.xai) {
-        setXAIConfigs(xai);
-        updateConfigValue('xai-api-key', xai);
-        clearCache('xai-api-key');
-      }
-      if (changed.claude) {
-        setClaudeConfigs(claude);
-        updateConfigValue('claude-api-key', claude);
-        clearCache('claude-api-key');
-      }
-      if (changed.vertex) {
-        setVertexConfigs(vertex);
-        updateConfigValue('vertex-api-key', vertex);
-        clearCache('vertex-api-key');
-      }
-      if (changed.openai) {
-        setOpenaiProviders(openai);
-        updateConfigValue('openai-compatibility', openai);
-        clearCache('openai-compatibility');
-      }
-    };
+      const hadV8SourceBefore = hasAnyV8SourceTag(previous);
+      const seedEtag =
+        findFirstV8EtagInLists(previous) ??
+        findFirstV8EtagInLists(nextLists) ??
+        readLatestV8ConfigEtag();
+      let expectedEtag = seedEtag;
+      let newestWriteEtag: string | undefined;
+      let completedWrites = 0;
 
-    applyLocalState(
-      nextGemini,
-      nextInteractions,
-      nextCodex,
-      nextXAI,
-      nextClaude,
-      nextVertex,
-      nextOpenai
-    );
-
-    try {
-      const mutations: Array<() => Promise<unknown>> = [];
-      if (changed.gemini) {
-        nextGemini.forEach((item, index) => {
-          if (item !== previous.gemini[index]) {
-            mutations.push(() => providersApi.updateGeminiKey(previous.gemini[index], item));
-          }
-        });
-      }
-      if (changed.interactions) {
-        nextInteractions.forEach((item, index) => {
-          if (item !== previous.interactions[index]) {
-            mutations.push(() =>
-              providersApi.updateInteractionsKey(previous.interactions[index], item)
-            );
-          }
-        });
-      }
-      if (changed.codex) {
-        nextCodex.forEach((item, index) => {
-          if (item !== previous.codex[index]) {
-            mutations.push(() => providersApi.updateCodexConfig(previous.codex[index], item));
-          }
-        });
-      }
-      if (changed.xai) {
-        nextXAI.forEach((item, index) => {
-          if (item !== previous.xai[index]) {
-            mutations.push(() => providersApi.updateXAIConfig(previous.xai[index], item));
-          }
-        });
-      }
-      if (changed.claude) {
-        nextClaude.forEach((item, index) => {
-          if (item !== previous.claude[index]) {
-            mutations.push(() => providersApi.updateClaudeConfig(previous.claude[index], item));
-          }
-        });
-      }
-      if (changed.vertex) {
-        nextVertex.forEach((item, index) => {
-          if (item !== previous.vertex[index]) {
-            mutations.push(() => providersApi.updateVertexConfig(previous.vertex[index], item));
-          }
-        });
-      }
-      if (changed.openai) {
-        nextOpenai.forEach((item, index) => {
-          if (item !== previous.openai[index]) {
-            mutations.push(() =>
-              providersApi.updateOpenAIProvider(previous.openai[index].name, index, item)
-            );
-          }
-        });
-      }
-      for (const mutate of mutations) {
-        await mutate();
-      }
-      await loadConfigs();
-      showNotification(t('ai_providers.health_check_apply_success'), 'success');
-    } catch (err: unknown) {
-      const message = getErrorMessage(err);
-      await loadConfigs();
-      showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
-      throw err;
-    } finally {
-      finishConfigMutation();
-    }
-  };
-
-  const setHealthCheckProviderEnabled = async (providerKey: string, enabled: boolean) => {
-    await applyProviderEnabledActions(new Map([[providerKey, enabled ? 'enable' : 'disable']]));
-  };
-
-  // 启停（key-based providers 走 excludedModels 规则）
-  const setConfigEnabled = async (
-    provider: Exclude<ProviderKind, 'openai'>,
-    index: number,
-    enabled: boolean
-  ) => {
-    if (provider === 'gemini' || provider === 'interactions') {
-      const source = provider === 'gemini' ? geminiKeys : interactionsKeys;
-      const current = source[index];
-      if (!current) return;
-
-      const switchingKey = `${provider}:${current.apiKey}`;
-      if (!beginConfigMutation(switchingKey)) return;
-
-      const previousList = source;
-      const nextExcluded = enabled
-        ? withoutDisableAllModelsRule(current.excludedModels)
-        : withDisableAllModelsRule(current.excludedModels);
-      const nextItem: GeminiKeyConfig = { ...current, excludedModels: nextExcluded };
-      const nextList = previousList.map((item, idx) => (idx === index ? nextItem : item));
-
-      if (provider === 'gemini') {
-        setGeminiKeys(nextList);
-        updateConfigValue('gemini-api-key', nextList);
-        clearCache('gemini-api-key');
-      } else {
-        setInteractionsKeys(nextList);
-        updateConfigValue('interactions-api-key', nextList);
-        clearCache('interactions-api-key');
-      }
+      const runFamilyWrite = async <T,>(
+        kind: ProviderKind,
+        nextList: T[],
+        saveFn: (list: T[], options?: { expectedEtag?: string }) => Promise<unknown>
+      ) => {
+        if (!changed[kind]) return;
+        const result = expectedEtag
+          ? await saveFn(nextList, { expectedEtag })
+          : await saveFn(nextList);
+        completedWrites += 1;
+        const nextEtag = extractWriteResultEtag(result) ?? readLatestV8ConfigEtag();
+        if (nextEtag) {
+          expectedEtag = nextEtag;
+          newestWriteEtag = nextEtag;
+        }
+        applySingleFamilyState(kind, nextList as ProviderListsSnapshot[ProviderKind]);
+      };
 
       try {
-        if (provider === 'gemini') {
-          await providersApi.updateGeminiKey(current, nextItem);
-        } else {
-          await providersApi.updateInteractionsKey(current, nextItem);
-        }
-        await loadConfigs();
-        showNotification(
-          enabled ? t('notification.config_enabled') : t('notification.config_disabled'),
-          'success'
-        );
+        await runFamilyWrite('gemini', nextLists.gemini, providersApi.saveGeminiKeys);
+        await runFamilyWrite('interactions', nextLists.interactions, providersApi.saveInteractionsKeys);
+        await runFamilyWrite('codex', nextLists.codex, providersApi.saveCodexConfigs);
+        await runFamilyWrite('xai', nextLists.xai, providersApi.saveXAIConfigs);
+        await runFamilyWrite('claude', nextLists.claude, providersApi.saveClaudeConfigs);
+        await runFamilyWrite('vertex', nextLists.vertex, providersApi.saveVertexConfigs);
+        await runFamilyWrite('openai', nextLists.openai, providersApi.saveOpenAIProviders);
       } catch (err: unknown) {
-        const message = getErrorMessage(err);
-        if (provider === 'gemini') {
-          setGeminiKeys(previousList);
-          updateConfigValue('gemini-api-key', previousList);
-          clearCache('gemini-api-key');
-        } else {
-          setInteractionsKeys(previousList);
-          updateConfigValue('interactions-api-key', previousList);
-          clearCache('interactions-api-key');
+        if (err && typeof err === 'object') {
+          Object.assign(err, { partialCommitted: completedWrites > 0 });
+          throw err;
         }
-        showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
-      } finally {
-        finishConfigMutation();
-      }
-      return;
-    }
-
-    const source =
-      provider === 'codex'
-        ? codexConfigs
-        : provider === 'xai'
-          ? xaiConfigs
-          : provider === 'claude'
-            ? claudeConfigs
-            : vertexConfigs;
-    const current = source[index];
-    if (!current) return;
-
-    const switchingKey = `${provider}:${current.apiKey}`;
-    if (!beginConfigMutation(switchingKey)) return;
-
-    const previousList = source;
-    const nextExcluded = enabled
-      ? withoutDisableAllModelsRule(current.excludedModels)
-      : withDisableAllModelsRule(current.excludedModels);
-    const nextItem: ProviderKeyConfig = { ...current, excludedModels: nextExcluded };
-    const nextList = previousList.map((item, idx) => (idx === index ? nextItem : item));
-
-    if (provider === 'codex') {
-      setCodexConfigs(nextList);
-      updateConfigValue('codex-api-key', nextList);
-      clearCache('codex-api-key');
-    } else if (provider === 'xai') {
-      setXAIConfigs(nextList);
-      updateConfigValue('xai-api-key', nextList);
-      clearCache('xai-api-key');
-    } else if (provider === 'claude') {
-      setClaudeConfigs(nextList);
-      updateConfigValue('claude-api-key', nextList);
-      clearCache('claude-api-key');
-    } else {
-      setVertexConfigs(nextList);
-      updateConfigValue('vertex-api-key', nextList);
-      clearCache('vertex-api-key');
-    }
-
-    try {
-      if (provider === 'codex') {
-        await providersApi.updateCodexConfig(current, nextItem);
-      } else if (provider === 'xai') {
-        await providersApi.updateXAIConfig(current, nextItem);
-      } else if (provider === 'claude') {
-        await providersApi.updateClaudeConfig(current, nextItem);
-      } else {
-        await providersApi.updateVertexConfig(current, nextItem);
-      }
-      await loadConfigs();
-      showNotification(
-        enabled ? t('notification.config_enabled') : t('notification.config_disabled'),
-        'success'
-      );
-    } catch (err: unknown) {
-      const message = getErrorMessage(err);
-      if (provider === 'codex') {
-        setCodexConfigs(previousList);
-        updateConfigValue('codex-api-key', previousList);
-        clearCache('codex-api-key');
-      } else if (provider === 'xai') {
-        setXAIConfigs(previousList);
-        updateConfigValue('xai-api-key', previousList);
-        clearCache('xai-api-key');
-      } else if (provider === 'claude') {
-        setClaudeConfigs(previousList);
-        updateConfigValue('claude-api-key', previousList);
-        clearCache('claude-api-key');
-      } else {
-        setVertexConfigs(previousList);
-        updateConfigValue('vertex-api-key', previousList);
-        clearCache('vertex-api-key');
-      }
-      showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
-    } finally {
-      finishConfigMutation();
-    }
-  };
-
-  const setOpenAIProviderEnabled = async (index: number, enabled: boolean) => {
-    const current = openaiProviders[index];
-    if (!current) return;
-
-    const switchingKey = `openai:${current.name}:${index}`;
-    if (!beginConfigMutation(switchingKey)) return;
-
-    const previousList = openaiProviders;
-    const nextItem: OpenAIProviderConfig = { ...current, disabled: !enabled };
-    const nextList = previousList.map((item, idx) => (idx === index ? nextItem : item));
-
-    setOpenaiProviders(nextList);
-    updateConfigValue('openai-compatibility', nextList);
-    clearCache('openai-compatibility');
-
-    try {
-      await providersApi.updateOpenAIProvider(current.name, index, nextItem);
-      await loadConfigs();
-      showNotification(
-        enabled ? t('notification.config_enabled') : t('notification.config_disabled'),
-        'success'
-      );
-    } catch (err: unknown) {
-      const message = getErrorMessage(err);
-      setOpenaiProviders(previousList);
-      updateConfigValue('openai-compatibility', previousList);
-      clearCache('openai-compatibility');
-      showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
-    } finally {
-      finishConfigMutation();
-    }
-  };
-
-  const setProviderWebsocketsEnabled = async (
-    provider: 'codex' | 'xai' | 'claude',
-    index: number,
-    enabled: boolean
-  ) => {
-    const source =
-      provider === 'codex' ? codexConfigs : provider === 'xai' ? xaiConfigs : claudeConfigs;
-    const current = source[index];
-    if (!current) return;
-
-    const switchingKey = `${provider}:${current.apiKey}:websockets`;
-    if (!beginConfigMutation(switchingKey)) return;
-
-    const previousList = source;
-    const nextItem: ProviderKeyConfig = { ...current, websockets: enabled };
-    const nextList = previousList.map((item, idx) => (idx === index ? nextItem : item));
-
-    if (provider === 'codex') {
-      setCodexConfigs(nextList);
-      updateConfigValue('codex-api-key', nextList);
-      clearCache('codex-api-key');
-    } else if (provider === 'xai') {
-      setXAIConfigs(nextList);
-      updateConfigValue('xai-api-key', nextList);
-      clearCache('xai-api-key');
-    } else {
-      setClaudeConfigs(nextList);
-      updateConfigValue('claude-api-key', nextList);
-      clearCache('claude-api-key');
-    }
-
-    try {
-      if (provider === 'codex') {
-        await providersApi.updateCodexConfig(current, nextItem);
-        await loadConfigs();
-        showNotification(t('notification.codex_config_updated'), 'success');
-      } else if (provider === 'xai') {
-        await providersApi.updateXAIConfig(current, nextItem);
-        await loadConfigs();
-        showNotification(t('notification.xai_config_updated'), 'success');
-      } else {
-        await providersApi.updateClaudeConfig(current, nextItem);
-        await loadConfigs();
-        showNotification(t('notification.claude_config_updated'), 'success');
-      }
-    } catch (err: unknown) {
-      const message = getErrorMessage(err);
-      if (provider === 'codex') {
-        setCodexConfigs(previousList);
-        updateConfigValue('codex-api-key', previousList);
-        clearCache('codex-api-key');
-      } else if (provider === 'xai') {
-        setXAIConfigs(previousList);
-        updateConfigValue('xai-api-key', previousList);
-        clearCache('xai-api-key');
-      } else {
-        setClaudeConfigs(previousList);
-        updateConfigValue('claude-api-key', previousList);
-        clearCache('claude-api-key');
-      }
-      showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
-    } finally {
-      finishConfigMutation();
-    }
-  };
-
-  const setProviderCloakEnabled = async (
-    provider: 'codex' | 'claude',
-    index: number,
-    enabled: boolean
-  ) => {
-    const source = provider === 'codex' ? codexConfigs : claudeConfigs;
-    const current = source[index];
-    if (!current) return;
-
-    const switchingKey = `${provider}:${current.apiKey}:cloak`;
-    if (!beginConfigMutation(switchingKey)) return;
-
-    const previousList = source;
-    const nextItem: ProviderKeyConfig = enabled
-      ? { ...current, cloak: current.cloak ?? { ...DEFAULT_CLOAK_CONFIG, sensitiveWords: [] } }
-      : { ...current };
-    if (!enabled) {
-      delete nextItem.cloak;
-    }
-    const nextList = previousList.map((item, idx) => (idx === index ? nextItem : item));
-
-    if (provider === 'codex') {
-      setCodexConfigs(nextList);
-      updateConfigValue('codex-api-key', nextList);
-      clearCache('codex-api-key');
-    } else {
-      setClaudeConfigs(nextList);
-      updateConfigValue('claude-api-key', nextList);
-      clearCache('claude-api-key');
-    }
-
-    try {
-      if (provider === 'codex') {
-        await providersApi.updateCodexConfig(current, nextItem);
-        await loadConfigs();
-        showNotification(t('notification.codex_config_updated'), 'success');
-      } else {
-        await providersApi.updateClaudeConfig(current, nextItem);
-        await loadConfigs();
-        showNotification(t('notification.claude_config_updated'), 'success');
-      }
-    } catch (err: unknown) {
-      const message = getErrorMessage(err);
-      if (provider === 'codex') {
-        setCodexConfigs(previousList);
-        updateConfigValue('codex-api-key', previousList);
-        clearCache('codex-api-key');
-      } else {
-        setClaudeConfigs(previousList);
-        updateConfigValue('claude-api-key', previousList);
-        clearCache('claude-api-key');
-      }
-      showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
-    } finally {
-      finishConfigMutation();
-    }
-  };
-
-  const setProviderCoolingPolicy = async (
-    provider: 'gemini' | 'interactions' | 'codex' | 'xai' | 'claude' | 'vertex' | 'openai',
-    index: number,
-    policy: CoolingPolicy
-  ) => {
-    const disableCooling = coolingPolicyToOverride(policy);
-    if (provider === 'gemini' || provider === 'interactions') {
-      const source = provider === 'gemini' ? geminiKeys : interactionsKeys;
-      const current = source[index];
-      if (!current) return;
-
-      const switchingKey = `${provider}:${current.apiKey}:disable-cooling`;
-      if (!beginConfigMutation(switchingKey)) return;
-
-      const previousList = source;
-      const nextItem: GeminiKeyConfig = { ...current, disableCooling };
-      const nextList = previousList.map((item, idx) => (idx === index ? nextItem : item));
-
-      if (provider === 'gemini') {
-        setGeminiKeys(nextList);
-        updateConfigValue('gemini-api-key', nextList);
-        clearCache('gemini-api-key');
-      } else {
-        setInteractionsKeys(nextList);
-        updateConfigValue('interactions-api-key', nextList);
-        clearCache('interactions-api-key');
-      }
-
-      try {
-        if (provider === 'gemini') {
-          await providersApi.updateGeminiKey(current, nextItem);
-        } else {
-          await providersApi.updateInteractionsKey(current, nextItem);
-        }
-        await loadConfigs();
-        showNotification(
-          t(
-            provider === 'gemini'
-              ? 'notification.gemini_key_updated'
-              : 'notification.interactions_key_updated'
-          ),
-          'success'
-        );
-      } catch (err: unknown) {
-        const message = getErrorMessage(err);
-        if (provider === 'gemini') {
-          setGeminiKeys(previousList);
-          updateConfigValue('gemini-api-key', previousList);
-          clearCache('gemini-api-key');
-        } else {
-          setInteractionsKeys(previousList);
-          updateConfigValue('interactions-api-key', previousList);
-          clearCache('interactions-api-key');
-        }
-        showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
-      } finally {
-        finishConfigMutation();
-      }
-      return;
-    }
-
-    if (provider === 'openai') {
-      const current = openaiProviders[index];
-      if (!current) return;
-
-      const switchingKey = `${provider}:${current.name}:${index}:disable-cooling`;
-      if (!beginConfigMutation(switchingKey)) return;
-
-      const previousList = openaiProviders;
-      const nextItem: OpenAIProviderConfig = { ...current, disableCooling };
-      const nextList = previousList.map((item, idx) => (idx === index ? nextItem : item));
-
-      setOpenaiProviders(nextList);
-      updateConfigValue('openai-compatibility', nextList);
-      clearCache('openai-compatibility');
-
-      try {
-        await providersApi.updateOpenAIProvider(current.name, index, nextItem);
-        await loadConfigs();
-        showNotification(t('notification.openai_provider_updated'), 'success');
-      } catch (err: unknown) {
-        const message = getErrorMessage(err);
-        setOpenaiProviders(previousList);
-        updateConfigValue('openai-compatibility', previousList);
-        clearCache('openai-compatibility');
-        showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
-      } finally {
-        finishConfigMutation();
-      }
-      return;
-    }
-
-    const source =
-      provider === 'codex'
-        ? codexConfigs
-        : provider === 'xai'
-          ? xaiConfigs
-          : provider === 'vertex'
-            ? vertexConfigs
-            : claudeConfigs;
-    const current = source[index];
-    if (!current) return;
-
-    const switchingKey = `${provider}:${current.apiKey}:disable-cooling`;
-    if (!beginConfigMutation(switchingKey)) return;
-
-    const previousList = source;
-    const nextItem: ProviderKeyConfig = { ...current, disableCooling };
-    const nextList = previousList.map((item, idx) => (idx === index ? nextItem : item));
-
-    if (provider === 'codex') {
-      setCodexConfigs(nextList);
-      updateConfigValue('codex-api-key', nextList);
-      clearCache('codex-api-key');
-    } else if (provider === 'xai') {
-      setXAIConfigs(nextList);
-      updateConfigValue('xai-api-key', nextList);
-      clearCache('xai-api-key');
-    } else if (provider === 'vertex') {
-      setVertexConfigs(nextList);
-      updateConfigValue('vertex-api-key', nextList);
-      clearCache('vertex-api-key');
-    } else {
-      setClaudeConfigs(nextList);
-      updateConfigValue('claude-api-key', nextList);
-      clearCache('claude-api-key');
-    }
-
-    try {
-      if (provider === 'codex') {
-        await providersApi.updateCodexConfig(current, nextItem);
-        await loadConfigs();
-        showNotification(t('notification.codex_config_updated'), 'success');
-      } else if (provider === 'xai') {
-        await providersApi.updateXAIConfig(current, nextItem);
-        await loadConfigs();
-        showNotification(t('notification.xai_config_updated'), 'success');
-      } else if (provider === 'vertex') {
-        await providersApi.updateVertexConfig(current, nextItem);
-        await loadConfigs();
-        showNotification(t('notification.vertex_config_updated'), 'success');
-      } else {
-        await providersApi.updateClaudeConfig(current, nextItem);
-        await loadConfigs();
-        showNotification(t('notification.claude_config_updated'), 'success');
-      }
-    } catch (err: unknown) {
-      const message = getErrorMessage(err);
-      if (provider === 'codex') {
-        setCodexConfigs(previousList);
-        updateConfigValue('codex-api-key', previousList);
-        clearCache('codex-api-key');
-      } else if (provider === 'xai') {
-        setXAIConfigs(previousList);
-        updateConfigValue('xai-api-key', previousList);
-        clearCache('xai-api-key');
-      } else if (provider === 'vertex') {
-        setVertexConfigs(previousList);
-        updateConfigValue('vertex-api-key', previousList);
-        clearCache('vertex-api-key');
-      } else {
-        setClaudeConfigs(previousList);
-        updateConfigValue('claude-api-key', previousList);
-        clearCache('claude-api-key');
-      }
-      showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
-    } finally {
-      finishConfigMutation();
-    }
-  };
-
-  const setProviderPriority = async (row: ProviderRow, priority: number) => {
-    const nextPriority = Math.trunc(priority);
-    const switchingKey = `${row.key}:priority`;
-
-    // 复用页面级切换锁，避免外层快捷优先级与抽屉保存、开关切换并发写入。
-    if (row.kind === 'gemini' || row.kind === 'interactions') {
-      const source = row.kind === 'gemini' ? geminiKeys : interactionsKeys;
-      const current = source[row.originalIndex];
-      if (!current || current.priority === nextPriority) return;
-
-      if (!beginConfigMutation(switchingKey)) return;
-      const previousList = source;
-      const nextList = previousList.map((item, idx) =>
-        idx === row.originalIndex ? { ...item, priority: nextPriority } : item
-      );
-
-      if (row.kind === 'gemini') {
-        setGeminiKeys(nextList);
-        updateConfigValue('gemini-api-key', nextList);
-        clearCache('gemini-api-key');
-      } else {
-        setInteractionsKeys(nextList);
-        updateConfigValue('interactions-api-key', nextList);
-        clearCache('interactions-api-key');
-      }
-
-      try {
-        if (row.kind === 'gemini') {
-          await providersApi.updateGeminiKey(current, { ...current, priority: nextPriority });
-        } else {
-          await providersApi.updateInteractionsKey(current, { ...current, priority: nextPriority });
-        }
-        await loadConfigs();
-        showNotification(
-          t(
-            row.kind === 'gemini'
-              ? 'notification.gemini_key_updated'
-              : 'notification.interactions_key_updated'
-          ),
-          'success'
-        );
-      } catch (err: unknown) {
-        const message = getErrorMessage(err);
-        if (row.kind === 'gemini') {
-          setGeminiKeys(previousList);
-          updateConfigValue('gemini-api-key', previousList);
-          clearCache('gemini-api-key');
-        } else {
-          setInteractionsKeys(previousList);
-          updateConfigValue('interactions-api-key', previousList);
-          clearCache('interactions-api-key');
-        }
-        showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
-      } finally {
-        finishConfigMutation();
-      }
-      return;
-    }
-
-    if (row.kind === 'openai') {
-      const current = openaiProviders[row.originalIndex];
-      if (!current || current.priority === nextPriority) return;
-
-      if (!beginConfigMutation(switchingKey)) return;
-      const previousList = openaiProviders;
-      const nextList = previousList.map((item, idx) =>
-        idx === row.originalIndex ? { ...item, priority: nextPriority } : item
-      );
-
-      setOpenaiProviders(nextList);
-      updateConfigValue('openai-compatibility', nextList);
-      clearCache('openai-compatibility');
-
-      try {
-        await providersApi.updateOpenAIProvider(current.name, row.originalIndex, {
-          ...current,
-          priority: nextPriority,
+        throw Object.assign(new Error(String(err)), {
+          partialCommitted: completedWrites > 0,
         });
-        await loadConfigs();
-        showNotification(t('notification.openai_provider_updated'), 'success');
-      } catch (err: unknown) {
-        const message = getErrorMessage(err);
-        setOpenaiProviders(previousList);
-        updateConfigValue('openai-compatibility', previousList);
-        clearCache('openai-compatibility');
-        showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
-      } finally {
-        finishConfigMutation();
       }
-      return;
-    }
 
-    const source =
-      row.kind === 'codex'
-        ? codexConfigs
-        : row.kind === 'xai'
-          ? xaiConfigs
-          : row.kind === 'claude'
-            ? claudeConfigs
-            : vertexConfigs;
-    const current = source[row.originalIndex];
-    if (!current || current.priority === nextPriority) return;
-
-    if (!beginConfigMutation(switchingKey)) return;
-    const previousList = source;
-    const nextList = previousList.map((item, idx) =>
-      idx === row.originalIndex ? { ...item, priority: nextPriority } : item
-    );
-
-    if (row.kind === 'codex') {
-      setCodexConfigs(nextList);
-      updateConfigValue('codex-api-key', nextList);
-      clearCache('codex-api-key');
-    } else if (row.kind === 'xai') {
-      setXAIConfigs(nextList);
-      updateConfigValue('xai-api-key', nextList);
-      clearCache('xai-api-key');
-    } else if (row.kind === 'claude') {
-      setClaudeConfigs(nextList);
-      updateConfigValue('claude-api-key', nextList);
-      clearCache('claude-api-key');
-    } else {
-      setVertexConfigs(nextList);
-      updateConfigValue('vertex-api-key', nextList);
-      clearCache('vertex-api-key');
-    }
-
-    try {
-      if (row.kind === 'codex') {
-        await providersApi.updateCodexConfig(current, { ...current, priority: nextPriority });
-        await loadConfigs();
-        showNotification(t('notification.codex_config_updated'), 'success');
-      } else if (row.kind === 'xai') {
-        await providersApi.updateXAIConfig(current, { ...current, priority: nextPriority });
-        await loadConfigs();
-        showNotification(t('notification.xai_config_updated'), 'success');
-      } else if (row.kind === 'claude') {
-        await providersApi.updateClaudeConfig(current, { ...current, priority: nextPriority });
-        await loadConfigs();
-        showNotification(t('notification.claude_config_updated'), 'success');
-      } else {
-        await providersApi.updateVertexConfig(current, { ...current, priority: nextPriority });
-        await loadConfigs();
-        showNotification(t('notification.vertex_config_updated'), 'success');
+      if (v8AliasSupportedRef.current && (hadV8SourceBefore || hasAnyV8SourceTag(nextLists))) {
+        await loadConfigs({ force: true, preserveErrorOnFailure: true });
       }
-    } catch (err: unknown) {
-      const message = getErrorMessage(err);
-      if (row.kind === 'codex') {
-        setCodexConfigs(previousList);
-        updateConfigValue('codex-api-key', previousList);
-        clearCache('codex-api-key');
-      } else if (row.kind === 'xai') {
-        setXAIConfigs(previousList);
-        updateConfigValue('xai-api-key', previousList);
-        clearCache('xai-api-key');
-      } else if (row.kind === 'claude') {
-        setClaudeConfigs(previousList);
-        updateConfigValue('claude-api-key', previousList);
-        clearCache('claude-api-key');
-      } else {
-        setVertexConfigs(previousList);
-        updateConfigValue('vertex-api-key', previousList);
-        clearCache('vertex-api-key');
+
+      const afterRefreshLatest = readLatestV8ConfigEtag();
+      const postRefreshLists = getCurrentProviderLists();
+      const changedRefreshedEtag = findFirstV8EtagInChangedLists(postRefreshLists, changed);
+      const effectiveEtag =
+        (afterRefreshLatest && afterRefreshLatest !== seedEtag ? afterRefreshLatest : undefined) ??
+        (changedRefreshedEtag && changedRefreshedEtag !== seedEtag
+          ? changedRefreshedEtag
+          : undefined) ??
+        newestWriteEtag ??
+        afterRefreshLatest;
+      if (effectiveEtag) {
+        syncAllListsEtag(effectiveEtag);
       }
-      showNotification(`${t('notification.update_failed')}: ${message}`, 'error');
-    } finally {
-      finishConfigMutation();
-    }
-  };
+    },
+    [applySingleFamilyState, getCurrentProviderLists, loadConfigs, syncAllListsEtag]
+  );
 
-  // 删除（按 provider 分派，沿用既有 API 契约）
-  const deleteGemini = (index: number, target: string) => {
-    const entry = geminiKeys[index];
-    if (!entry) return;
-    showConfirmation({
-      title: t('ai_providers.gemini_delete_title', { defaultValue: 'Delete Gemini Key' }),
-      message: t('ai_providers.gemini_delete_confirm'),
-      variant: 'danger',
-      confirmText: t('common.next'),
-      secondConfirmation: buildProviderDeleteSecondConfirmation(
-        t,
-        PROVIDER_KIND_LABELS.gemini,
-        target
-      ),
-      onConfirm: async () => {
-        try {
-          await providersApi.deleteGeminiKey(entry.apiKey, entry.baseUrl);
-          const next = geminiKeys.filter((_, idx) => idx !== index);
-          setGeminiKeys(next);
-          updateConfigValue('gemini-api-key', next);
-          clearCache('gemini-api-key');
-          showNotification(t('notification.gemini_key_deleted'), 'success');
-        } catch (err: unknown) {
-          const message = getErrorMessage(err);
-          showNotification(`${t('notification.delete_failed')}: ${message}`, 'error');
-        }
-      },
-    });
-  };
+  const applyProviderEnabledActions = useCallback(
+    async (actions: Map<string, ProviderHealthCheckApplyAction>) => {
+      if (actions.size === 0) return;
+      if (!beginConfigMutation('batch:enabled')) return;
 
-  const deleteInteractions = (index: number, target: string) => {
-    const entry = interactionsKeys[index];
-    if (!entry) return;
-    showConfirmation({
-      title: t('ai_providers.interactions_delete_title'),
-      message: t('ai_providers.interactions_delete_confirm'),
-      variant: 'danger',
-      confirmText: t('common.next'),
-      secondConfirmation: buildProviderDeleteSecondConfirmation(
-        t,
-        PROVIDER_KIND_LABELS.interactions,
-        target
-      ),
-      onConfirm: async () => {
-        try {
-          await providersApi.deleteInteractionsKey(entry.apiKey, entry.baseUrl);
-          const next = interactionsKeys.filter((_, idx) => idx !== index);
-          setInteractionsKeys(next);
-          updateConfigValue('interactions-api-key', next);
-          clearCache('interactions-api-key');
-          showNotification(t('notification.interactions_key_deleted'), 'success');
-        } catch (err: unknown) {
-          const message = getErrorMessage(err);
-          showNotification(`${t('notification.delete_failed')}: ${message}`, 'error');
-        }
-      },
-    });
-  };
+      const rowByKey = new Map(rowsRef.current.map((row) => [row.key, row]));
+      const previous = getCurrentProviderLists();
+      const nextLists = cloneProviderLists(previous);
+      const changed = createChangedMap();
 
-  const deleteProviderEntry = (type: 'codex' | 'xai' | 'claude', index: number, target: string) => {
-    const source = type === 'codex' ? codexConfigs : type === 'xai' ? xaiConfigs : claudeConfigs;
-    const entry = source[index];
-    if (!entry) return;
-    showConfirmation({
-      title: t(`ai_providers.${type}_delete_title`, {
-        defaultValue: `Delete ${type === 'codex' ? 'Codex' : type === 'xai' ? 'xAI' : 'Claude'} Config`,
-      }),
-      message: t(`ai_providers.${type}_delete_confirm`),
-      variant: 'danger',
-      confirmText: t('common.next'),
-      secondConfirmation: buildProviderDeleteSecondConfirmation(
-        t,
-        PROVIDER_KIND_LABELS[type],
-        target
-      ),
-      onConfirm: async () => {
-        try {
-          if (type === 'codex') {
-            await providersApi.deleteCodexConfig(entry.apiKey, entry.baseUrl);
-            const next = codexConfigs.filter((_, idx) => idx !== index);
-            setCodexConfigs(next);
-            updateConfigValue('codex-api-key', next);
-            clearCache('codex-api-key');
-            showNotification(t('notification.codex_config_deleted'), 'success');
-          } else if (type === 'xai') {
-            await providersApi.deleteXAIConfig(entry.apiKey, entry.baseUrl);
-            const next = xaiConfigs.filter((_, idx) => idx !== index);
-            setXAIConfigs(next);
-            updateConfigValue('xai-api-key', next);
-            clearCache('xai-api-key');
-            showNotification(t('notification.xai_config_deleted'), 'success');
+      let appliedCount = 0;
+      actions.forEach((action, providerKey) => {
+        const row = rowByKey.get(providerKey);
+        if (!row) return;
+        const enabled = action === 'enable';
+        if (row.enabled === enabled) return;
+
+        if (row.kind === 'openai') {
+          const current = nextLists.openai[row.originalIndex];
+          if (!current) return;
+          const nextEntry: OpenAIProviderConfig = { ...current };
+          if (enabled) {
+            delete nextEntry.disabled;
           } else {
-            await providersApi.deleteClaudeConfig(entry.apiKey, entry.baseUrl);
-            const next = claudeConfigs.filter((_, idx) => idx !== index);
-            setClaudeConfigs(next);
-            updateConfigValue('claude-api-key', next);
-            clearCache('claude-api-key');
-            showNotification(t('notification.claude_config_deleted'), 'success');
+            nextEntry.disabled = true;
           }
-        } catch (err: unknown) {
-          const message = getErrorMessage(err);
-          showNotification(`${t('notification.delete_failed')}: ${message}`, 'error');
+          nextLists.openai[row.originalIndex] = nextEntry;
+          changed.openai = true;
+          appliedCount += 1;
+          return;
         }
-      },
-    });
-  };
 
-  const deleteVertex = (index: number, target: string) => {
-    const entry = vertexConfigs[index];
-    if (!entry) return;
+        const targetList = nextLists[row.kind];
+        const current = targetList[row.originalIndex];
+        if (!current) return;
+        const excludedModels = enabled
+          ? withoutDisableAllModelsRule(current.excludedModels)
+          : withDisableAllModelsRule(current.excludedModels);
+        targetList[row.originalIndex] = { ...current, excludedModels };
+        changed[row.kind] = true;
+        appliedCount += 1;
+      });
+
+      if (appliedCount === 0) {
+        finishConfigMutation();
+        return;
+      }
+
+      applyProviderListsState(nextLists);
+
+      try {
+        await commitChangedProviderLists(previous, nextLists, changed);
+        showNotification(t('notification.config_updated'), 'success');
+      } catch (err: unknown) {
+        if (!isPartialOrConflictError(err)) {
+          applyProviderListsState(previous);
+        }
+        await loadConfigs({ force: true });
+        showNotification(`${t('notification.update_failed')}: ${getErrorMessage(err)}`, 'error');
+      } finally {
+        finishConfigMutation();
+      }
+    },
+    [
+      applyProviderListsState,
+      beginConfigMutation,
+      commitChangedProviderLists,
+      finishConfigMutation,
+      getCurrentProviderLists,
+      getErrorMessage,
+      loadConfigs,
+      showNotification,
+      t,
+    ]
+  );
+
+  const handleRowToggle = useCallback(
+    (row: ProviderRow, enabled: boolean) => {
+      const actionMap = new Map<string, ProviderHealthCheckApplyAction>([
+        [row.key, enabled ? 'enable' : 'disable'],
+      ]);
+      void applyProviderEnabledActions(actionMap);
+    },
+    [applyProviderEnabledActions]
+  );
+
+  const handleRowPriorityChange = useCallback(
+    async (row: ProviderRow, nextPriority?: number) => {
+      const normalizedPriority =
+        nextPriority !== undefined && Number.isFinite(nextPriority)
+          ? Math.trunc(nextPriority)
+          : undefined;
+      if (row.priority === normalizedPriority) return;
+      if (!beginConfigMutation(`${row.kind}:${row.originalIndex}:priority`)) return;
+
+      const previous = getCurrentProviderLists();
+      const nextLists = cloneProviderLists(previous);
+      const changed = createChangedMap();
+
+      const targetList = nextLists[row.kind] as Array<
+        GeminiKeyConfig | ProviderKeyConfig | OpenAIProviderConfig
+      >;
+      const current = targetList[row.originalIndex];
+      if (!current) {
+        finishConfigMutation();
+        return;
+      }
+      const nextItem = { ...current };
+      if (normalizedPriority === undefined) {
+        delete nextItem.priority;
+      } else {
+        nextItem.priority = normalizedPriority;
+      }
+      targetList[row.originalIndex] = nextItem;
+      changed[row.kind] = true;
+
+      try {
+        await commitChangedProviderLists(previous, nextLists, changed);
+        showNotification(t('notification.config_updated'), 'success');
+      } catch (err: unknown) {
+        if (isPartialOrConflictError(err)) {
+          await loadConfigs({ force: true });
+        } else {
+          applyProviderListsState(previous);
+        }
+        showNotification(`${t('notification.update_failed')}: ${getErrorMessage(err)}`, 'error');
+      } finally {
+        finishConfigMutation();
+      }
+    },
+    [
+      applyProviderListsState,
+      beginConfigMutation,
+      commitChangedProviderLists,
+      finishConfigMutation,
+      getCurrentProviderLists,
+      getErrorMessage,
+      loadConfigs,
+      showNotification,
+      t,
+    ]
+  );
+
+  const handleApplyBatchPriority = useCallback(async () => {
+    const currentSelectedRows = selectedRowsRef.current;
+    if (currentSelectedRows.length === 0) return;
+    const trimmed = batchPriorityText.trim();
+    let parsedPriority: number | undefined;
+    if (trimmed !== '') {
+      const numeric = Number(trimmed);
+      if (!Number.isFinite(numeric)) {
+        showNotification(
+          t('ai_providers.priority_invalid', { defaultValue: '请输入有效的整数优先级' }),
+          'error'
+        );
+        return;
+      }
+      parsedPriority = Math.trunc(numeric);
+    }
+
+    if (!beginConfigMutation('batch:priority')) return;
+    const previous = getCurrentProviderLists();
+    const nextLists = cloneProviderLists(previous);
+    const changed = createChangedMap();
+
+    currentSelectedRows.forEach((row) => {
+      const targetList = nextLists[row.kind] as Array<
+        GeminiKeyConfig | ProviderKeyConfig | OpenAIProviderConfig
+      >;
+      const current = targetList[row.originalIndex];
+      if (!current) return;
+      const nextEntry = { ...current };
+      if (parsedPriority === undefined) {
+        delete nextEntry.priority;
+      } else {
+        nextEntry.priority = parsedPriority;
+      }
+      targetList[row.originalIndex] = nextEntry;
+      changed[row.kind] = true;
+    });
+
+    try {
+      await commitChangedProviderLists(previous, nextLists, changed);
+      setBatchPriorityModalOpen(false);
+      setBatchPriorityText('');
+      showNotification(t('notification.config_updated'), 'success');
+    } catch (err: unknown) {
+      if (!isPartialOrConflictError(err)) {
+        applyProviderListsState(previous);
+      }
+      await loadConfigs({ force: true });
+      showNotification(`${t('notification.update_failed')}: ${getErrorMessage(err)}`, 'error');
+    } finally {
+      finishConfigMutation();
+    }
+  }, [
+    applyProviderListsState,
+    batchPriorityText,
+    beginConfigMutation,
+    commitChangedProviderLists,
+    finishConfigMutation,
+    getCurrentProviderLists,
+    getErrorMessage,
+    loadConfigs,
+    showNotification,
+    t,
+  ]);
+
+  const handleRowDelete = useCallback(
+    (row: ProviderRow) => {
+      const target = row.label || row.sortName || row.baseUrl;
+      const titleKey =
+        row.kind === 'openai'
+          ? 'ai_providers.openai_delete_title'
+          : `ai_providers.${row.kind}_delete_title`;
+      const confirmKey =
+        row.kind === 'openai'
+          ? 'ai_providers.openai_delete_confirm'
+          : `ai_providers.${row.kind}_delete_confirm`;
+
+      showConfirmation({
+        title: t(titleKey, {
+          defaultValue: `Delete ${PROVIDER_KIND_LABELS[row.kind]}`,
+        }),
+        message: t(confirmKey),
+        variant: 'danger',
+        confirmText: t('common.next'),
+        secondConfirmation: buildProviderDeleteSecondConfirmation(
+          t,
+          PROVIDER_KIND_LABELS[row.kind],
+          target
+        ),
+        onConfirm: async () => {
+          const latestRow = findMatchingFreshRow(rowsRef.current, row);
+          const effectiveRow = latestRow ?? row;
+          if (!beginConfigMutation(`${effectiveRow.kind}:${effectiveRow.originalIndex}:delete`)) {
+            return;
+          }
+          const previous = getCurrentProviderLists();
+          try {
+            if (!latestRow) {
+              await loadConfigs({ force: true });
+              return;
+            }
+
+            const currentList = previous[latestRow.kind];
+            const freshIndex =
+              latestRow.originalIndex >= 0 && latestRow.originalIndex < currentList.length
+                ? latestRow.originalIndex
+                : -1;
+            const freshRaw = freshIndex >= 0 ? currentList[freshIndex] : latestRow.raw;
+            const deleteMethod = getPerItemDeleteMethod(latestRow.kind);
+
+            if (deleteMethod) {
+              const seedEtag =
+                findFirstV8EtagInLists(previous) ?? readLatestV8ConfigEtag();
+              let deleteResult: unknown;
+              if (latestRow.kind === 'openai') {
+                const openaiItem = freshRaw as OpenAIProviderConfig;
+                deleteResult = await (
+                  deleteMethod as (
+                    name: string,
+                    v8Source?: OpenAIProviderConfig['v8Source']
+                  ) => Promise<unknown>
+                )(openaiItem.name, openaiItem.v8Source);
+              } else {
+                const keyItem = freshRaw as GeminiKeyConfig | ProviderKeyConfig;
+                deleteResult = await (
+                  deleteMethod as (
+                    apiKey: string,
+                    baseUrl?: string,
+                    v8Source?: GeminiKeyConfig['v8Source']
+                  ) => Promise<unknown>
+                )(keyItem.apiKey, keyItem.baseUrl, keyItem.v8Source);
+              }
+              const deleteEtag =
+                extractWriteResultEtag(deleteResult) ?? readLatestV8ConfigEtag();
+              if (freshIndex >= 0) {
+                applySingleFamilyState(
+                  latestRow.kind,
+                  currentList.filter((_, idx) => idx !== freshIndex) as ProviderListsSnapshot[ProviderKind]
+                );
+              }
+              await loadConfigs({ force: true, preserveErrorOnFailure: true });
+              const refreshedKindEtag = findFirstV8EtagInList(
+                getCurrentProviderLists()[latestRow.kind]
+              );
+              const afterDeleteLatest = readLatestV8ConfigEtag();
+              const effectiveEtag =
+                (afterDeleteLatest && afterDeleteLatest !== seedEtag
+                  ? afterDeleteLatest
+                  : undefined) ??
+                (refreshedKindEtag && refreshedKindEtag !== seedEtag
+                  ? refreshedKindEtag
+                  : undefined) ??
+                deleteEtag ??
+                afterDeleteLatest ??
+                refreshedKindEtag;
+              if (effectiveEtag) {
+                syncAllListsEtag(effectiveEtag);
+              }
+            } else {
+              const nextLists = cloneProviderLists(previous);
+              if (freshIndex >= 0) {
+                const remaining = currentList.filter((_, idx) => idx !== freshIndex);
+                switch (latestRow.kind) {
+                  case 'gemini':
+                    nextLists.gemini = remaining as GeminiKeyConfig[];
+                    break;
+                  case 'interactions':
+                    nextLists.interactions = remaining as GeminiKeyConfig[];
+                    break;
+                  case 'codex':
+                    nextLists.codex = remaining as ProviderKeyConfig[];
+                    break;
+                  case 'xai':
+                    nextLists.xai = remaining as ProviderKeyConfig[];
+                    break;
+                  case 'claude':
+                    nextLists.claude = remaining as ProviderKeyConfig[];
+                    break;
+                  case 'vertex':
+                    nextLists.vertex = remaining as ProviderKeyConfig[];
+                    break;
+                  case 'openai':
+                    nextLists.openai = remaining as OpenAIProviderConfig[];
+                    break;
+                }
+              }
+              await commitChangedProviderLists(previous, nextLists, createChangedMap(latestRow.kind));
+            }
+
+            if (
+              drawerOpenRef.current &&
+              (drawerRowKeyRef.current === row.key || drawerRowKeyRef.current === latestRow.key)
+            ) {
+              closeDrawer();
+            }
+
+            removeSelectedKeys([row.key, latestRow.key]);
+            showNotification(t('notification.config_updated'), 'success');
+          } catch (err: unknown) {
+            if (!isPartialOrConflictError(err)) {
+              applyProviderListsState(previous);
+            }
+            await loadConfigs({ force: true });
+            showNotification(`${t('notification.delete_failed')}: ${getErrorMessage(err)}`, 'error');
+          } finally {
+            finishConfigMutation();
+          }
+        },
+      });
+    },
+    [
+      applyProviderListsState,
+      applySingleFamilyState,
+      closeDrawer,
+      beginConfigMutation,
+      commitChangedProviderLists,
+      finishConfigMutation,
+      getCurrentProviderLists,
+      getErrorMessage,
+      loadConfigs,
+      removeSelectedKeys,
+      showConfirmation,
+      showNotification,
+      syncAllListsEtag,
+      t,
+    ]
+  );
+
+  const handleBatchDelete = useCallback(() => {
+    const targetSnapshot = [...selectedRowsRef.current];
+    if (targetSnapshot.length === 0) return;
+    const summaryLabel = targetSnapshot
+      .slice(0, 3)
+      .map((row) => row.label)
+      .join(', ');
+    const targetText =
+      targetSnapshot.length > 3 ? `${summaryLabel} (+${targetSnapshot.length - 3})` : summaryLabel;
+
     showConfirmation({
-      title: t('ai_providers.vertex_delete_title', { defaultValue: 'Delete Vertex Config' }),
-      message: t('ai_providers.vertex_delete_confirm'),
+      title: t('ai_providers.batch_delete_title', {
+        count: targetSnapshot.length,
+        defaultValue: `批量删除 ${targetSnapshot.length} 条提供商配置`,
+      }),
+      message: t('ai_providers.batch_delete_confirm', {
+        count: targetSnapshot.length,
+        targets: targetText,
+        defaultValue: `确定删除已选中的 ${targetSnapshot.length} 条上游提供商配置（${targetText}）吗？此操作不可撤销。`,
+      }),
       variant: 'danger',
       confirmText: t('common.next'),
       secondConfirmation: buildProviderDeleteSecondConfirmation(
         t,
-        PROVIDER_KIND_LABELS.vertex,
-        target
+        t('ai_providers.batch_delete_scope', { defaultValue: '批量提供商配置' }),
+        targetText
       ),
       onConfirm: async () => {
+        if (!beginConfigMutation('batch:delete')) return;
+        const previous = getCurrentProviderLists();
+        const freshRows = rowsRef.current;
+        const removeIndexesByKind: Record<ProviderKind, Set<number>> = {
+          gemini: new Set(),
+          interactions: new Set(),
+          codex: new Set(),
+          xai: new Set(),
+          claude: new Set(),
+          vertex: new Set(),
+          openai: new Set(),
+        };
+        const deletedKeys = new Set<string>();
+
+        targetSnapshot.forEach((snapshotRow) => {
+          const matchedRow = findMatchingFreshRow(freshRows, snapshotRow);
+          if (!matchedRow) return;
+          removeIndexesByKind[matchedRow.kind].add(matchedRow.originalIndex);
+          deletedKeys.add(snapshotRow.key);
+          deletedKeys.add(matchedRow.key);
+        });
+
+        const nextLists: ProviderListsSnapshot = {
+          gemini: previous.gemini.filter((_, idx) => !removeIndexesByKind.gemini.has(idx)),
+          interactions: previous.interactions.filter(
+            (_, idx) => !removeIndexesByKind.interactions.has(idx)
+          ),
+          codex: previous.codex.filter((_, idx) => !removeIndexesByKind.codex.has(idx)),
+          xai: previous.xai.filter((_, idx) => !removeIndexesByKind.xai.has(idx)),
+          claude: previous.claude.filter((_, idx) => !removeIndexesByKind.claude.has(idx)),
+          vertex: previous.vertex.filter((_, idx) => !removeIndexesByKind.vertex.has(idx)),
+          openai: previous.openai.filter((_, idx) => !removeIndexesByKind.openai.has(idx)),
+        };
+        const changed: Record<ProviderKind, boolean> = {
+          gemini: removeIndexesByKind.gemini.size > 0,
+          interactions: removeIndexesByKind.interactions.size > 0,
+          codex: removeIndexesByKind.codex.size > 0,
+          xai: removeIndexesByKind.xai.size > 0,
+          claude: removeIndexesByKind.claude.size > 0,
+          vertex: removeIndexesByKind.vertex.size > 0,
+          openai: removeIndexesByKind.openai.size > 0,
+        };
+
         try {
-          await providersApi.deleteVertexConfig(entry.apiKey, entry.baseUrl);
-          const next = vertexConfigs.filter((_, idx) => idx !== index);
-          setVertexConfigs(next);
-          updateConfigValue('vertex-api-key', next);
-          clearCache('vertex-api-key');
-          showNotification(t('notification.vertex_config_deleted'), 'success');
+          await commitChangedProviderLists(previous, nextLists, changed);
+          if (
+            drawerOpenRef.current &&
+            drawerRowKeyRef.current &&
+            deletedKeys.has(drawerRowKeyRef.current)
+          ) {
+            closeDrawer();
+          }
+          clearSelection();
+          setSelectionMode(false);
+          showNotification(t('notification.config_updated'), 'success');
         } catch (err: unknown) {
-          const message = getErrorMessage(err);
-          showNotification(`${t('notification.delete_failed')}: ${message}`, 'error');
+          if (!isPartialOrConflictError(err)) {
+            applyProviderListsState(previous);
+          }
+          await loadConfigs({ force: true });
+          showNotification(`${t('notification.delete_failed')}: ${getErrorMessage(err)}`, 'error');
+        } finally {
+          finishConfigMutation();
         }
       },
     });
-  };
+  }, [
+    applyProviderListsState,
+    clearSelection,
+    closeDrawer,
+    beginConfigMutation,
+    commitChangedProviderLists,
+    finishConfigMutation,
+    getCurrentProviderLists,
+    getErrorMessage,
+    loadConfigs,
+    setSelectionMode,
+    showConfirmation,
+    showNotification,
+    t,
+  ]);
 
-  const deleteOpenai = (index: number, target: string) => {
-    const entry = openaiProviders[index];
-    if (!entry) return;
-    showConfirmation({
-      title: t('ai_providers.openai_delete_title', { defaultValue: 'Delete OpenAI Provider' }),
-      message: t('ai_providers.openai_delete_confirm'),
-      variant: 'danger',
-      confirmText: t('common.next'),
-      secondConfirmation: buildProviderDeleteSecondConfirmation(
-        t,
-        PROVIDER_KIND_LABELS.openai,
-        target
-      ),
-      onConfirm: async () => {
-        try {
-          await providersApi.deleteOpenAIProvider(entry.name);
-          const next = openaiProviders.filter((_, idx) => idx !== index);
-          setOpenaiProviders(next);
-          updateConfigValue('openai-compatibility', next);
-          clearCache('openai-compatibility');
-          showNotification(t('notification.openai_provider_deleted'), 'success');
-        } catch (err: unknown) {
-          const message = getErrorMessage(err);
-          showNotification(`${t('notification.delete_failed')}: ${message}`, 'error');
-        }
-      },
-    });
-  };
-
-  // 行级回调分派
-  const handleRowToggle = (row: ProviderRow, enabled: boolean) => {
-    if (row.kind === 'openai') {
-      void setOpenAIProviderEnabled(row.originalIndex, enabled);
-    } else {
-      void setConfigEnabled(row.kind, row.originalIndex, enabled);
-    }
-  };
-
-  const handleRowWebsocketsToggle = (row: ProviderRow, enabled: boolean) => {
-    if (row.kind !== 'codex' && row.kind !== 'xai' && row.kind !== 'claude') return;
-    void setProviderWebsocketsEnabled(row.kind, row.originalIndex, enabled);
-  };
-
-  const handleRowCloakToggle = (row: ProviderRow, enabled: boolean) => {
-    if (row.kind !== 'codex' && row.kind !== 'claude') return;
-    void setProviderCloakEnabled(row.kind, row.originalIndex, enabled);
-  };
-
-  const handleRowCoolingPolicyChange = (row: ProviderRow, policy: CoolingPolicy) => {
-    if (
-      row.kind !== 'gemini' &&
-      row.kind !== 'interactions' &&
-      row.kind !== 'codex' &&
-      row.kind !== 'xai' &&
-      row.kind !== 'claude' &&
-      row.kind !== 'vertex' &&
-      row.kind !== 'openai'
-    ) {
-      return;
-    }
-    void setProviderCoolingPolicy(row.kind, row.originalIndex, policy);
-  };
-
-  const handleRowPriorityChange = (row: ProviderRow, priority: number) => {
-    void setProviderPriority(row, priority);
-  };
-
-  const handleRowEdit = (row: ProviderRow) => {
-    setDetailRowKey(null);
-    openEditorDrawer(row.kind, row.originalIndex);
-  };
-
-  const handleRowDelete = (row: ProviderRow) => {
-    setDetailRowKey(null);
-    const target = row.label || row.sortName || row.baseUrl;
-    if (row.kind === 'gemini') {
-      deleteGemini(row.originalIndex, target);
-    } else if (row.kind === 'interactions') {
-      deleteInteractions(row.originalIndex, target);
-    } else if (row.kind === 'codex' || row.kind === 'xai' || row.kind === 'claude') {
-      deleteProviderEntry(row.kind, row.originalIndex, target);
-    } else if (row.kind === 'vertex') {
-      deleteVertex(row.originalIndex, target);
-    } else {
-      deleteOpenai(row.originalIndex, target);
-    }
-  };
-
-  const handleAdd = (kind: ProviderKind) => {
-    openEditorDrawer(kind, null);
-  };
-
+  const handleInvertVisibleSelection = useCallback(() => {
+    invertSelection('all');
+  }, [invertSelection]);
   const emptyState =
     rows.length > 0 && kindFilter !== 'all' && kindCounts[kindFilter] === 0 ? (
-      // 当前类型尚无配置：直接给“添加该类型配置”入口，避免“清除筛选”死胡同
       <EmptyState
+        variant="canvas"
         title={t('ai_providers.kind_empty_title', { name: PROVIDER_KIND_LABELS[kindFilter] })}
         action={
-          <Button size="sm" onClick={() => handleAdd(kindFilter)} disabled={actionsDisabled}>
+          <Button size="sm" onClick={() => void openCreateDrawer(kindFilter)} disabled={actionsDisabled}>
             {t('ai_providers.add_kind_button', { name: PROVIDER_KIND_LABELS[kindFilter] })}
           </Button>
         }
       />
     ) : rows.length > 0 && filtersActive ? (
       <EmptyState
+        variant="canvas"
         title={t('ai_providers.table_filtered_empty_title')}
         description={t('ai_providers.table_filtered_empty_desc')}
         action={
@@ -1485,19 +2150,63 @@ export function AiProvidersPage() {
       />
     ) : (
       <EmptyState
+        variant="canvas"
         title={t('ai_providers.table_empty_title')}
         description={t('ai_providers.table_empty_desc')}
+        action={
+          <Button size="sm" onClick={() => void openCreateDrawer()} disabled={actionsDisabled}>
+            {t('ai_providers.add_button')}
+          </Button>
+        }
       />
     );
 
+  const healthCheckTargetRows = useMemo(() => {
+    if (healthCheckScope === 'single') {
+      if (!singleHealthCheckRow) return [];
+      const matched = rows.find((item) => item.key === singleHealthCheckRow.key);
+      return [matched ?? singleHealthCheckRow];
+    }
+    return healthCheckScope === 'selected' ? selectedRows : visibleRows;
+  }, [healthCheckScope, rows, selectedRows, singleHealthCheckRow, visibleRows]);
+
+  const sharedListProps = {
+    rows: pagedRows,
+    loading,
+    actionsDisabled,
+    toggleDisabled: actionsDisabled,
+    resolvedTheme,
+    emptyState,
+    selectionMode,
+    selectedKeys,
+    onToggleSelectRow: handleToggleSelectRow,
+    onToggleSelectAllPage: handleToggleSelectAllPage,
+    selectedDrawerKey: drawerOpen && drawerMode === 'view-edit' ? drawerRowKey : null,
+    onInspect: (row: ProviderRow) => void openProviderDrawer(row, 'overview'),
+    onOpenModels: (row: ProviderRow) => void openProviderDrawer(row, 'models'),
+    onOpenConnectivity: (row: ProviderRow) => void openProviderDrawer(row, 'connectivity'),
+    onHealthCheckRow: (row: ProviderRow) => {
+      setSingleHealthCheckRow(row);
+      setHealthCheckScope('single');
+      setHealthCheckOpen(true);
+    },
+    onEdit: (row: ProviderRow) => void openProviderDrawer(row, 'config'),
+    onDelete: handleRowDelete,
+    onToggleEnabled: handleRowToggle,
+    onChangePriority: handleRowPriorityChange,
+    routingStrategy: config ? config.routingStrategy || 'round-robin' : undefined,
+    globalDisableCooling: config?.disableCooling,
+  };
   return (
     <div className={styles.container}>
-      {error && <div className="error-box">{error}</div>}
-
       <ProviderToolbar
         kind={kindFilter}
         kindCounts={kindCounts}
         onKindChange={setKindFilter}
+        statusFilter={statusFilter}
+        onStatusFilterChange={setStatusFilter}
+        healthFilter={healthFilter}
+        onHealthFilterChange={setHealthFilter}
         searchText={searchText}
         onSearchTextChange={setSearchText}
         allModelNames={allModelNames}
@@ -1507,135 +2216,301 @@ export function AiProvidersPage() {
         onSortOptionChange={setSortOption}
         sortDirection={sortDirection}
         onSortDirectionChange={setSortDirection}
+        onResetFilters={clearFilters}
+        totalCount={rows.length}
+        filteredCount={visibleRows.length}
         disabled={actionsDisabled}
         resolvedTheme={resolvedTheme}
-        onAdd={handleAdd}
-        onHealthCheck={() => setHealthCheckOpen(true)}
+        onRefresh={() => void handleWorkspaceRefresh()}
+        refreshing={refreshing || loading}
+        onAdd={(kind) => void openCreateDrawer(kind)}
+        onHealthCheck={() => {
+          setHealthCheckScope('filtered');
+          setHealthCheckOpen(true);
+        }}
         healthCheckDisabled={visibleRows.length === 0}
       />
 
-      <Card>
-        <ProviderTable
-          rows={pagedRows}
-          loading={loading}
-          actionsDisabled={actionsDisabled}
-          toggleDisabled={actionsDisabled}
-          resolvedTheme={resolvedTheme}
-          emptyState={emptyState}
-          onShowDetail={(row) => setDetailRowKey(row.key)}
-          onEdit={handleRowEdit}
-          onDelete={handleRowDelete}
-          onToggle={handleRowToggle}
-          onPriorityChange={handleRowPriorityChange}
-        />
-        {visibleRows.length > 0 &&
-          (visibleRows.length > PROVIDER_TABLE_DEFAULT_PAGE_SIZE ||
-            pageSize !== PROVIDER_TABLE_DEFAULT_PAGE_SIZE) && (
-            <PaginationFooter
-              variant="inset"
-              currentPage={currentPage}
-              totalPages={totalPages}
-              infoText={t('monitoring.pagination_info', {
-                current: currentPage,
-                total: totalPages,
-                start: pageStartItem,
-                end: pageEndItem,
-                count: visibleRows.length,
-              })}
-              prevLabel={t('monitoring.pagination_prev')}
-              nextLabel={t('monitoring.pagination_next')}
-              onPageChange={setPage}
-              pageSize={pageSize}
-              pageSizeOptions={PROVIDER_TABLE_PAGE_SIZE_OPTIONS}
-              pageSizeLabel={t('monitoring.page_size_label')}
-              pageSizeAriaLabel={t('monitoring.page_size_label')}
-              formatPageSizeOption={(size) => t('monitoring.page_size_option', { count: size })}
-              onPageSizeChange={(nextPageSize) => {
-                setPageSize(nextPageSize);
-                setPage(1);
-              }}
-              showPageJump={totalPages > 1}
-              jumpPrefixLabel={t('monitoring.pagination_jump_prefix')}
-              jumpSuffixLabel={t('monitoring.pagination_jump_suffix')}
-              jumpInputAriaLabel={t('monitoring.pagination_jump_label')}
-              disabled={loading}
-            />
-          )}
-      </Card>
+      {error && <div className="error-box">{error}</div>}
 
-      <ProviderDetailDrawer
-        row={detailRow}
-        open={detailRowKey !== null}
+      <WorkspaceListPanel<ProviderLayoutMode>
+        showHeader={rows.length > 0}
+        selectionActive={selectionMode || selectedRows.length > 0}
+        summary={
+          filtersActive
+            ? t('ai_providers.workspace_filtered_summary', {
+                visible: visibleRows.length,
+                total: rows.length,
+                defaultValue: `匹配 ${visibleRows.length} / 共 ${rows.length} 条渠道`,
+              })
+            : t('ai_providers.workspace_total_summary', {
+                count: rows.length,
+                defaultValue: `共 ${rows.length} 条上游渠道`,
+              })
+        }
+        hint={
+          selectionMode
+            ? t('ai_providers.workspace_selection_hint', {
+                defaultValue: '勾选上游渠道后可批量测活、启用、停用、调整优先级或删除。',
+              })
+            : t('ai_providers.workspace_batch_hint', {
+                defaultValue: '选择上游渠道后可批量测活、启用、停用、调整优先级或删除。',
+              })
+        }
+        selectionBadge={
+          selectionMode
+            ? t('ai_providers.selected_count_badge', {
+                count: selectedRows.length,
+                defaultValue: `已选 ${selectedRows.length} 项`,
+              })
+            : undefined
+        }
+        selectionTools={
+          selectionMode ? (
+            <>
+              <Button
+                variant="ghost"
+                size="xs"
+                onClick={handleSelectAllFiltered}
+                disabled={visibleRows.length === 0 || actionsDisabled}
+              >
+                {t('ai_providers.select_all_filtered', {
+                  count: visibleRows.length,
+                  defaultValue: `全选当前结果 (${visibleRows.length})`,
+                })}
+              </Button>
+              <Button
+                variant="ghost"
+                size="xs"
+                onClick={handleInvertVisibleSelection}
+                disabled={visibleRows.length === 0 || actionsDisabled}
+              >
+                {t('ai_providers.invert_selection', { defaultValue: '反选' })}
+              </Button>
+              {selectedRows.length > 0 && (
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  onClick={clearSelection}
+                  disabled={actionsDisabled}
+                >
+                  {t('ai_providers.clear_selected', { defaultValue: '清空已选' })}
+                </Button>
+              )}
+            </>
+          ) : undefined
+        }
+        headerActions={
+          <Button
+            variant={selectionMode ? 'primary' : 'secondary'}
+            size="sm"
+            onClick={handleToggleSelectionMode}
+            disabled={visibleRows.length === 0 && !selectionMode}
+          >
+            {selectionMode
+              ? t('ai_providers.exit_selection_mode', { defaultValue: '退出选择' })
+              : t('ai_providers.enter_selection_mode', { defaultValue: '批量选择' })}
+          </Button>
+        }
+        viewMode={{
+          idBase: 'ai-providers-view-mode',
+          value: effectiveLayoutMode,
+          onChange: setLayoutMode,
+          tableId: 'table',
+          cardsId: 'grid',
+          tableLabel: t('ai_providers.view_mode_table', { defaultValue: '表格' }),
+          cardsLabel: t('ai_providers.view_mode_grid', { defaultValue: '卡片' }),
+          ariaLabel: t('ai_providers.view_mode_switcher', { defaultValue: '列表视图模式' }),
+          hidden: viewSwitcherHidden,
+        }}
+        footer={
+          <LocalizedPaginationFooter
+            currentPage={currentPage}
+            totalPages={totalPages}
+            totalCount={visibleRows.length}
+            startItem={pageStartItem}
+            endItem={pageEndItem}
+            pageSize={pageSize}
+            pageSizeOptions={PROVIDER_WORKSPACE_PAGE_SIZE_OPTIONS}
+            onPageChange={setPage}
+            onPageSizeChange={setPageSize}
+            disabled={loading}
+          />
+        }
+      >
+        {effectiveLayoutMode === 'grid' ? (
+          <ProviderCardGrid {...sharedListProps} />
+        ) : (
+          <ProviderTable {...sharedListProps} />
+        )}
+      </WorkspaceListPanel>
+
+      <FloatingActionDock
+        open={selectionMode && selectedRows.length > 0}
+        role="toolbar"
+        ariaLabel={t('ai_providers.batch_dock_aria', { defaultValue: '提供商批量操作栏' })}
+        leading={
+          <span className={styles.dockLeading}>
+            {t('ai_providers.selected_count_badge', {
+              count: selectedRows.length,
+              defaultValue: `已选 ${selectedRows.length} 项`,
+            })}
+          </span>
+        }
+      >
+        <div className={styles.dockActions}>
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={actionsDisabled}
+            onClick={() => {
+              setHealthCheckScope('selected');
+              setHealthCheckOpen(true);
+            }}
+          >
+            {t('ai_providers.batch_health_check', { defaultValue: '测活所选' })}
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={actionsDisabled}
+            onClick={() => {
+              const actionMap = new Map<string, ProviderHealthCheckApplyAction>();
+              selectedRows.forEach((row) => actionMap.set(row.key, 'enable'));
+              void applyProviderEnabledActions(actionMap);
+            }}
+          >
+            {t('ai_providers.batch_enable', { defaultValue: '批量启用' })}
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            className={styles.dockDangerButton}
+            disabled={actionsDisabled}
+            onClick={() => {
+              const actionMap = new Map<string, ProviderHealthCheckApplyAction>();
+              selectedRows.forEach((row) => actionMap.set(row.key, 'disable'));
+              void applyProviderEnabledActions(actionMap);
+            }}
+          >
+            {t('ai_providers.batch_disable', { defaultValue: '批量停用' })}
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={actionsDisabled}
+            onClick={() => {
+              setBatchPriorityText('');
+              setBatchPriorityModalOpen(true);
+            }}
+          >
+            {t('ai_providers.batch_set_priority', { defaultValue: '设优先级' })}
+          </Button>
+          <DropdownMenu
+            ariaLabel={t('ai_providers.batch_more_actions', { defaultValue: '更多批量操作' })}
+            triggerIcon={<IconMoreVertical size={16} />}
+            disabled={actionsDisabled}
+            items={[
+              {
+                key: 'batch-delete',
+                label: t('ai_providers.batch_delete_action', {
+                  count: selectedRows.length,
+                  defaultValue: `删除已选 (${selectedRows.length})`,
+                }),
+                icon: <IconTrash2 size={15} />,
+                tone: 'danger',
+                onClick: handleBatchDelete,
+              },
+            ]}
+          />
+        </div>
+      </FloatingActionDock>
+
+      <Modal
+        open={batchPriorityModalOpen}
+        onClose={() => setBatchPriorityModalOpen(false)}
+        title={t('ai_providers.batch_priority_modal_title', {
+          count: selectedRows.length,
+          defaultValue: `批量设置优先级（已选 ${selectedRows.length} 项）`,
+        })}
+        width={440}
+        footer={
+          <>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setBatchPriorityModalOpen(false)}
+              disabled={isSwitching}
+            >
+              {t('common.cancel')}
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              loading={isSwitching}
+              onClick={() => void handleApplyBatchPriority()}
+            >
+              {t('common.save')}
+            </Button>
+          </>
+        }
+      >
+        <div className={styles.priorityModalBody}>
+          <p className={styles.priorityModalHint}>
+            {t('ai_providers.batch_priority_modal_hint', {
+              defaultValue: '数值越大优先级越高；留空并保存将清除所选渠道的显式优先级设置。',
+            })}
+          </p>
+          <Input
+            label={t('ai_providers.priority_label')}
+            type="number"
+            step={1}
+            value={batchPriorityText}
+            onChange={(event) => setBatchPriorityText(event.target.value)}
+            placeholder={t('ai_providers.priority_placeholder', { defaultValue: '例如 10（留空清除）' })}
+          />
+        </div>
+      </Modal>
+
+      <ProviderWorkspaceDrawer
+        ref={drawerControllerRef}
+        open={drawerOpen}
+        mode={drawerMode}
+        row={resolvedDrawerRow}
+        createKind={drawerCreateKind}
+        onCreateKindChange={setDrawerCreateKind}
+        initialTab={drawerInitialTab}
+        v8AliasSupported={v8AliasSupported}
         usageByProvider={usageByProvider}
         resolvedTheme={resolvedTheme}
-        actionsDisabled={actionsDisabled}
-        toggleDisabled={actionsDisabled}
-        onClose={() => setDetailRowKey(null)}
-        onEdit={handleRowEdit}
+        rowDeletedExternally={isDrawerRowDeletedExternally}
+        sessionId={drawerSessionId}
+        onClose={closeDrawer}
+        onSaved={handleDrawerSaved}
+        onToggleEnabled={handleRowToggle}
         onDelete={handleRowDelete}
-        onToggle={handleRowToggle}
-        onToggleWebsockets={handleRowWebsocketsToggle}
-        onToggleCloak={handleRowCloakToggle}
-        onToggleDisableCooling={handleRowCoolingPolicyChange}
+        toggleDisabled={actionsDisabled}
+        deleteDisabled={actionsDisabled}
+        runWithMutationLock={runWithMutationLock}
       />
+
       <ProviderHealthCheckDrawer
         open={healthCheckOpen}
-        rows={visibleRows}
+        rows={healthCheckTargetRows}
+        allRows={rows}
+        scopeMode={healthCheckScope}
         actionsDisabled={actionsDisabled}
-        onClose={() => setHealthCheckOpen(false)}
         onApplyResultActions={applyProviderEnabledActions}
-        onSetProviderEnabled={setHealthCheckProviderEnabled}
-      />
-      <GeminiEditDrawer
-        open={editDrawerKind === 'gemini'}
-        editIndex={editDrawerIndex}
-        disabled={actionsDisabled}
-        onClose={closeEditorDrawer}
-        onSaved={handleDrawerSaved}
-      />
-      <GeminiEditDrawer
-        open={editDrawerKind === 'interactions'}
-        editIndex={editDrawerIndex}
-        disabled={actionsDisabled}
-        onClose={closeEditorDrawer}
-        onSaved={handleDrawerSaved}
-        providerKind="interactions"
-      />
-      <CodexEditDrawer
-        open={editDrawerKind === 'codex'}
-        editIndex={editDrawerIndex}
-        disabled={actionsDisabled}
-        onClose={closeEditorDrawer}
-        onSaved={handleDrawerSaved}
-      />
-      <CodexEditDrawer
-        open={editDrawerKind === 'xai'}
-        editIndex={editDrawerIndex}
-        disabled={actionsDisabled}
-        onClose={closeEditorDrawer}
-        onSaved={handleDrawerSaved}
-        providerKind="xai"
-      />
-      <VertexEditDrawer
-        open={editDrawerKind === 'vertex'}
-        editIndex={editDrawerIndex}
-        disabled={actionsDisabled}
-        onClose={closeEditorDrawer}
-        onSaved={handleDrawerSaved}
-      />
-      <ClaudeEditDrawer
-        open={editDrawerKind === 'claude'}
-        editIndex={editDrawerIndex}
-        disabled={actionsDisabled}
-        onClose={closeEditorDrawer}
-        onSaved={handleDrawerSaved}
-      />
-      <OpenAIEditDrawer
-        open={editDrawerKind === 'openai'}
-        editIndex={editDrawerIndex}
-        disabled={actionsDisabled}
-        onClose={closeEditorDrawer}
-        onSaved={handleDrawerSaved}
+        onSetProviderEnabled={async (providerKey, enabled) => {
+          await applyProviderEnabledActions(new Map([[providerKey, enabled ? 'enable' : 'disable']]));
+        }}
+        onOpenProviderConfig={async (targetRow) => {
+          const switched = await openProviderDrawer(targetRow, 'config');
+          if (switched) {
+            setHealthCheckOpen(false);
+          }
+        }}
+        onClose={() => setHealthCheckOpen(false)}
       />
     </div>
   );
