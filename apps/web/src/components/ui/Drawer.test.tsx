@@ -36,6 +36,7 @@ vi.mock('./icons', () => ({
 }));
 
 import { Drawer } from './Drawer';
+import { registerOpenModal } from './overlayEscapeStack';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -62,7 +63,21 @@ const installMinimalDom = () => {
   const htmlStyle = { overflow: '' };
   const listeners = new Map<string, Set<EventListenerOrEventListenerObject>>();
 
-  class HTMLElementMock {}
+  class HTMLElementMock {
+    focus = vi.fn();
+    hasAttribute() {
+      return false;
+    }
+    get tabIndex() {
+      return 0;
+    }
+    querySelectorAll(): unknown[] {
+      return [];
+    }
+    contains(_node?: unknown): boolean {
+      return false;
+    }
+  }
 
   const documentMock = {
     body: { style: bodyStyle },
@@ -98,36 +113,80 @@ const installMinimalDom = () => {
     });
   }
 
-  return () => {
-    if (previousHTMLElement) {
-      Object.defineProperty(globalThis, 'HTMLElement', previousHTMLElement);
-    } else {
-      Reflect.deleteProperty(globalThis, 'HTMLElement');
-    }
+  const dispatchKey = (key: string, options: { shiftKey?: boolean } = {}) => {
+    let immediateStopped = false;
+    const event = {
+      key,
+      shiftKey: Boolean(options.shiftKey),
+      defaultPrevented: false,
+      preventDefault: vi.fn(),
+      stopImmediatePropagation: () => {
+        immediateStopped = true;
+      },
+    } as unknown as KeyboardEvent;
 
-    if (previousDocument) {
-      Object.defineProperty(globalThis, 'document', previousDocument);
-    } else {
-      Reflect.deleteProperty(globalThis, 'document');
-    }
-
-    if (installedWindow) {
-      if (previousWindow) {
-        Object.defineProperty(globalThis, 'window', previousWindow);
+    for (const listener of Array.from(listeners.get('keydown') ?? [])) {
+      if (immediateStopped) break;
+      if (typeof listener === 'function') {
+        listener(event);
       } else {
-        Reflect.deleteProperty(globalThis, 'window');
+        listener.handleEvent(event);
       }
     }
+    return event;
+  };
+
+  const createMockElement = (focusable?: HTMLElementMock[]) => {
+    const el = new HTMLElementMock();
+    el.focus = vi.fn(() => {
+      documentMock.activeElement = el;
+    });
+    if (focusable) {
+      el.querySelectorAll = () => focusable;
+      el.contains = (node: unknown) => node === el || focusable.includes(node as HTMLElementMock);
+    }
+    return el;
+  };
+
+  return {
+    bodyStyle,
+    htmlStyle,
+    dispatchKey,
+    createMockElement,
+    setActiveElement: (el: unknown) => {
+      documentMock.activeElement = el;
+    },
+    restore: () => {
+      if (previousHTMLElement) {
+        Object.defineProperty(globalThis, 'HTMLElement', previousHTMLElement);
+      } else {
+        Reflect.deleteProperty(globalThis, 'HTMLElement');
+      }
+
+      if (previousDocument) {
+        Object.defineProperty(globalThis, 'document', previousDocument);
+      } else {
+        Reflect.deleteProperty(globalThis, 'document');
+      }
+
+      if (installedWindow) {
+        if (previousWindow) {
+          Object.defineProperty(globalThis, 'window', previousWindow);
+        } else {
+          Reflect.deleteProperty(globalThis, 'window');
+        }
+      }
+    },
   };
 };
 
 describe('Drawer overlay close guard', () => {
   let renderer: ReactTestRenderer | undefined;
-  let restoreDom: (() => void) | undefined;
+  let domEnv: ReturnType<typeof installMinimalDom> | undefined;
 
   beforeEach(() => {
     vi.useFakeTimers();
-    restoreDom = installMinimalDom();
+    domEnv = installMinimalDom();
   });
 
   afterEach(() => {
@@ -135,8 +194,8 @@ describe('Drawer overlay close guard', () => {
       renderer?.unmount();
     });
     renderer = undefined;
-    restoreDom?.();
-    restoreDom = undefined;
+    domEnv?.restore();
+    domEnv = undefined;
     vi.useRealTimers();
   });
 
@@ -421,5 +480,107 @@ describe('Drawer overlay close guard', () => {
 
     // Once open becomes false, drawer unmounts immediately without re-running close animation.
     expect(mounted.root.findAllByProps({ role: 'dialog' })).toHaveLength(0);
+  });
+
+  it('traps Tab and Shift+Tab inside the topmost Drawer panel and yields when a Modal is open', async () => {
+    const firstEl = domEnv!.createMockElement();
+    const lastEl = domEnv!.createMockElement();
+    const panelEl = domEnv!.createMockElement([firstEl, lastEl]);
+
+    await act(async () => {
+      renderer = create(
+        <Drawer open title="Trap drawer" onClose={vi.fn()}>
+          <input aria-label="field" />
+        </Drawer>,
+        {
+          createNodeMock: (element) =>
+            element.type === 'div' &&
+            typeof element.props === 'object' &&
+            element.props !== null &&
+            'role' in element.props &&
+            element.props.role === 'dialog'
+              ? panelEl
+              : null,
+        }
+      );
+      await Promise.resolve();
+    });
+
+    // Tab on last focusable element wraps to first
+    domEnv!.setActiveElement(lastEl);
+    let tabEvent = domEnv!.dispatchKey('Tab');
+    expect(tabEvent.preventDefault).toHaveBeenCalled();
+    expect(firstEl.focus).toHaveBeenCalledTimes(1);
+
+    // Shift+Tab on first focusable element wraps to last
+    domEnv!.setActiveElement(firstEl);
+    let shiftTabEvent = domEnv!.dispatchKey('Tab', { shiftKey: true });
+    expect(shiftTabEvent.preventDefault).toHaveBeenCalled();
+    expect(lastEl.focus).toHaveBeenCalledTimes(1);
+
+    // Shift+Tab on panel itself wraps to last
+    domEnv!.setActiveElement(panelEl);
+    shiftTabEvent = domEnv!.dispatchKey('Tab', { shiftKey: true });
+    expect(shiftTabEvent.preventDefault).toHaveBeenCalled();
+    expect(lastEl.focus).toHaveBeenCalledTimes(2);
+
+    // While a Modal is open on top, Drawer does not hijack Tab
+    const unregisterModal = registerOpenModal();
+    try {
+      domEnv!.setActiveElement(lastEl);
+      tabEvent = domEnv!.dispatchKey('Tab');
+      expect(tabEvent.preventDefault).not.toHaveBeenCalled();
+      expect(firstEl.focus).toHaveBeenCalledTimes(1);
+    } finally {
+      unregisterModal();
+    }
+  });
+
+  it('reaches closed phase and releases scroll lock and key traps across closing -> open=true -> open=false before microtask flush', async () => {
+    domEnv!.bodyStyle.overflow = 'auto';
+    domEnv!.htmlStyle.overflow = 'scroll';
+    const onClose = vi.fn();
+
+    const mounted = await mountDrawer(onClose);
+
+    // Start closing with an active close timer
+    await act(async () => {
+      mounted.update(
+        <Drawer open={false} title="Test drawer" onClose={onClose}>
+          <input aria-label="field" />
+        </Drawer>
+      );
+      await Promise.resolve();
+      vi.advanceTimersByTime(100);
+    });
+    expect(findOverlay(mounted).props.className).toContain('overlayClosing');
+
+    // Flip open true -> false before the queued entering microtask flushes
+    act(() => {
+      mounted.update(
+        <Drawer open title="Test drawer" onClose={onClose}>
+          <input aria-label="field" />
+        </Drawer>
+      );
+      mounted.update(
+        <Drawer open={false} title="Test drawer" onClose={onClose}>
+          <input aria-label="field" />
+        </Drawer>
+      );
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+      vi.advanceTimersByTime(CLOSE_ANIMATION_DURATION);
+    });
+
+    expect(mounted.root.findAllByProps({ role: 'dialog' })).toHaveLength(0);
+    expect(domEnv!.bodyStyle.overflow).toBe('auto');
+    expect(domEnv!.htmlStyle.overflow).toBe('scroll');
+
+    const escapeEvent = domEnv!.dispatchKey('Escape');
+    const tabEvent = domEnv!.dispatchKey('Tab');
+    expect(escapeEvent.preventDefault).not.toHaveBeenCalled();
+    expect(tabEvent.preventDefault).not.toHaveBeenCalled();
   });
 });

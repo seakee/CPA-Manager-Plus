@@ -59,6 +59,13 @@
   }
 }
 
+.triggerSm {
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
+  padding: 0 10px;
+  font-size: 12.5px;
+}
+
 .triggerText {
   flex: 1 1 auto;
   min-width: 0;
@@ -115,6 +122,7 @@
   text-align: left;
   font-size: 13px;
   font-weight: 500;
+  white-space: nowrap;
   transition:
     background-color 0.15s ease,
     border-color 0.15s ease;

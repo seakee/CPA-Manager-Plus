@@ -1,0 +1,109 @@
+@use '../../styles/mixins' as *;
+
+.root {
+  --list-panel-gutter-x: 16px;
+
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-lg);
+  background: var(--bg-primary);
+  box-shadow: var(--app-specular-highlight);
+
+  @include mobile {
+    --list-panel-gutter-x: 12px;
+    border-radius: 16px;
+  }
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 14px;
+  flex-wrap: wrap;
+  padding: 12px var(--list-panel-gutter-x);
+  border-bottom: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--surface-subtle) 34%, var(--bg-primary));
+
+  @include mobile {
+    align-items: stretch;
+    padding: 10px var(--list-panel-gutter-x);
+  }
+}
+
+.headerActive {
+  background: color-mix(in srgb, var(--primary-color) 6%, var(--bg-primary));
+}
+
+.headerLeft {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.headerMeta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.summary {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.hint {
+  font-size: 12px;
+  color: var(--text-tertiary, var(--text-secondary));
+  line-height: 1.4;
+}
+
+.selectionBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--app-radius-xs);
+  background: color-mix(in srgb, var(--primary-color) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--primary-color) 28%, transparent);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.selectionTools {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.headerRight {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-left: auto;
+
+  @include mobile {
+    margin-left: 0;
+  }
+}
+
+.body {
+  min-width: 0;
+}
+
+.bodyGutter {
+  padding: 14px var(--list-panel-gutter-x);
+}

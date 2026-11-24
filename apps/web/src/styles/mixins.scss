@@ -90,3 +90,28 @@
     outline-offset: 2px;
   }
 }
+
+// 卡片行表格公共表头与行表面
+@mixin card-row-table-header {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: nowrap;
+}
+
+@mixin card-row-table-surface {
+  border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+  border-radius: var(--app-radius-md);
+  background: var(--bg-primary);
+}
+
+@mixin card-row-table-cell-surface {
+  border-top: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+  background: var(--bg-primary);
+}

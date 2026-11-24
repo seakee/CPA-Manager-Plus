@@ -35,6 +35,7 @@ interface ModelInputListProps {
   aliasPlaceholder?: string;
   hideAddButton?: boolean;
   onAdd?: () => void;
+  onRemove?: (index: number) => void;
   className?: string;
   rowClassName?: string;
   inputClassName?: string;
@@ -77,6 +78,7 @@ export function ModelInputList({
   aliasPlaceholder = 'alias (optional)',
   hideAddButton = false,
   onAdd,
+  onRemove,
   className = '',
   rowClassName = '',
   inputClassName = '',
@@ -212,6 +214,10 @@ export function ModelInputList({
   };
 
   const removeEntry = (index: number) => {
+    if (onRemove) {
+      onRemove(index);
+      return;
+    }
     const next = currentEntries.filter((_, idx) => idx !== index);
     onChange(next.length ? next : [{ name: '', alias: '' }]);
   };
@@ -251,7 +257,7 @@ export function ModelInputList({
                 size="xs"
                 iconOnly
                 onClick={() => removeEntry(index)}
-                disabled={disabled || currentEntries.length <= 1}
+                disabled={disabled || (!onRemove && currentEntries.length <= 1)}
                 className={removeButtonClassName}
                 title={removeButtonTitle}
                 aria-label={removeButtonAriaLabel}
