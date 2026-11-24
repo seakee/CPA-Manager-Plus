@@ -1,6 +1,7 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { describe, expect, it, vi } from 'vitest';
 import { Input } from '@/components/ui/Input';
+import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import { CoolingPolicySelect } from '@/components/providers/CoolingPolicySelect';
 import type { AccountRow } from '@/features/accounts/model/accountRows';
 import type { UseAuthFileConfigurationEditorResult } from '@/features/authFiles/hooks/useAuthFileConfigurationEditor';
@@ -56,6 +57,7 @@ const makeDraft = (
   disableCooling: 'inherit',
   requestRetry: '',
   websockets: false,
+  useSiwc: false,
   xaiRoutingMode: 'grok-build',
   baseUrl: '',
   cloakMode: '',
@@ -202,6 +204,7 @@ describe('AccountConfigurationTab', () => {
     ).toBe(true);
     expect(text).toContain('auth_files.websockets_label');
     expect(text).not.toContain('ai_providers.claude_cloak_mode_label');
+    expect(text).not.toContain('auth_files.use_siwc_label');
   });
 
   it('shows Claude cloak controls without xAI or websocket fields', () => {
@@ -212,6 +215,221 @@ describe('AccountConfigurationTab', () => {
     expect(text).toContain('accounts.config_tool_prefix_disabled');
     expect(text).not.toContain('accounts.config_xai_route_mode');
     expect(text).not.toContain('auth_files.websockets_label');
+    expect(text).not.toContain('auth_files.use_siwc_label');
+  });
+
+  it('disables enabling use_siwc on unbound Codex credentials and shows binding guidance', () => {
+    const unboundRow = makeRow('codex', {
+      raw: {
+        name: 'credential.json',
+        type: 'codex',
+        provider: 'codex',
+        siwc_bind_supported: true,
+        siwc_bound: false,
+      },
+    });
+    const unboundEditor = makeEditor('codex', makeDraft({ useSiwc: false }));
+    const renderer = renderTab(unboundRow, unboundEditor);
+    const text = readText(renderer.toJSON());
+
+    expect(text).toContain('auth_files.use_siwc_label');
+    expect(text).toContain('auth_files.use_siwc_requires_bind');
+    expect(text).not.toContain('auth_files.use_siwc_hint');
+
+    const siwcSwitch = renderer.root
+      .findAllByType(ToggleSwitch)
+      .find((node) => node.props.ariaLabel === 'auth_files.use_siwc_label');
+    expect(siwcSwitch).toBeDefined();
+    expect(siwcSwitch?.props.checked).toBe(false);
+    expect(siwcSwitch?.props.disabled).toBe(true);
+    act(() => renderer.unmount());
+  });
+
+  it('allows turning off a misconfigured use_siwc=true on an unbound Codex credential', () => {
+    const unboundRow = makeRow('codex', {
+      raw: {
+        name: 'credential.json',
+        type: 'codex',
+        provider: 'codex',
+        siwc_bind_supported: true,
+        siwc_bound: false,
+      },
+    });
+    const codexEditor = makeEditor('codex', makeDraft({ useSiwc: true }));
+    const codexRenderer = renderTab(unboundRow, codexEditor);
+    const codexText = readText(codexRenderer.toJSON());
+
+    expect(codexText).toContain('auth_files.use_siwc_label');
+    expect(codexText).toContain('auth_files.use_siwc_hint');
+
+    const siwcSwitch = codexRenderer.root
+      .findAllByType(ToggleSwitch)
+      .find((node) => node.props.ariaLabel === 'auth_files.use_siwc_label');
+    expect(siwcSwitch).toBeDefined();
+    expect(siwcSwitch?.props.checked).toBe(true);
+    expect(siwcSwitch?.props.disabled).toBe(false);
+
+    act(() => siwcSwitch!.props.onChange(false));
+    expect(codexEditor.updateField).toHaveBeenCalledWith('useSiwc', false);
+
+    const afterOffEditor = makeEditor('codex', makeDraft({ useSiwc: false }));
+    act(() =>
+      codexRenderer.update(
+        <AccountConfigurationTab
+          row={unboundRow}
+          disableControls={false}
+          editor={afterOffEditor}
+          onCopyText={vi.fn()}
+        />
+      )
+    );
+    const afterOffSwitch = codexRenderer.root
+      .findAllByType(ToggleSwitch)
+      .find((node) => node.props.ariaLabel === 'auth_files.use_siwc_label');
+    expect(afterOffSwitch?.props.disabled).toBe(true);
+    expect(readText(codexRenderer.toJSON())).toContain('auth_files.use_siwc_requires_bind');
+    act(() => codexRenderer.unmount());
+  });
+
+  it('allows bound Codex credentials to toggle use_siwc freely and hides unsupported credentials', () => {
+    const boundRow = makeRow('codex', {
+      raw: {
+        name: 'credential.json',
+        type: 'codex',
+        provider: 'codex',
+        siwc_bind_supported: true,
+        siwc_bound: true,
+      },
+    });
+    const boundEditor = makeEditor('codex', makeDraft({ useSiwc: false }));
+    const boundRenderer = renderTab(boundRow, boundEditor);
+    const boundText = readText(boundRenderer.toJSON());
+
+    expect(boundText).toContain('auth_files.use_siwc_label');
+    expect(boundText).toContain('auth_files.use_siwc_hint');
+    expect(boundText).not.toContain('auth_files.use_siwc_requires_bind');
+
+    const siwcSwitch = boundRenderer.root
+      .findAllByType(ToggleSwitch)
+      .find((node) => node.props.ariaLabel === 'auth_files.use_siwc_label');
+    expect(siwcSwitch?.props.disabled).toBe(false);
+
+    act(() => siwcSwitch!.props.onChange(true));
+    expect(boundEditor.updateField).toHaveBeenCalledWith('useSiwc', true);
+    act(() => boundRenderer.unmount());
+
+    const unsupportedCodexRow = makeRow('codex', {
+      raw: {
+        name: 'codex-apikey.json',
+        type: 'codex',
+        provider: 'codex',
+        siwc_bind_supported: false,
+      },
+    });
+    const unsupportedCodexRenderer = renderTab(unsupportedCodexRow, makeEditor('codex'));
+    const unsupportedText = readText(unsupportedCodexRenderer.toJSON());
+    expect(unsupportedText).toContain('auth_files.websockets_label');
+    expect(unsupportedText).not.toContain('auth_files.use_siwc_label');
+    act(() => unsupportedCodexRenderer.unmount());
+
+    const geminiRenderer = renderTab(makeRow('gemini'), makeEditor('gemini'));
+    expect(readText(geminiRenderer.toJSON())).not.toContain('auth_files.use_siwc_label');
+    act(() => geminiRenderer.unmount());
+  });
+
+  it('prefers fresh state.authFile metadata over stale row.raw and handles invalid and pre-v8 SIWC states', () => {
+    // Fresh state.authFile overrides stale row.raw (e.g., list refresh failed after save).
+    const staleRow = makeRow('codex', {
+      raw: {
+        name: 'credential.json',
+        type: 'codex',
+        provider: 'codex',
+        siwc_bind_supported: true,
+        siwc_bound: false,
+      },
+    });
+    const freshEditor = makeEditor('codex', makeDraft({ useSiwc: false }));
+    freshEditor.state = {
+      ...freshEditor.state!,
+      authFile: {
+        name: 'credential.json',
+        type: 'codex',
+        siwc_bind_supported: true,
+        siwc_bound: true,
+      },
+    };
+    const freshRenderer = renderTab(staleRow, freshEditor);
+    const freshSwitch = freshRenderer.root
+      .findAllByType(ToggleSwitch)
+      .find((node) => node.props.ariaLabel === 'auth_files.use_siwc_label');
+    expect(freshSwitch?.props.disabled).toBe(false);
+    act(() => freshRenderer.unmount());
+
+    // Invalid SIWC credential: use_siwc=true stays toggleable OFF; bound use_siwc=false stays toggleable ON.
+    const invalidActiveRow = makeRow('codex', {
+      raw: {
+        name: 'codex-invalid.json',
+        type: 'codex',
+        provider: 'codex',
+        siwc_bind_supported: true,
+        siwc_bound: false,
+        siwc_status: 'invalid',
+        use_siwc: true,
+      },
+    });
+    const invalidActiveEditor = makeEditor('codex', makeDraft({ useSiwc: true }));
+    const invalidActiveRenderer = renderTab(invalidActiveRow, invalidActiveEditor);
+    const invalidActiveSwitch = invalidActiveRenderer.root
+      .findAllByType(ToggleSwitch)
+      .find((node) => node.props.ariaLabel === 'auth_files.use_siwc_label');
+    expect(invalidActiveSwitch?.props.checked).toBe(true);
+    expect(invalidActiveSwitch?.props.disabled).toBe(false);
+    act(() => invalidActiveSwitch!.props.onChange(false));
+    expect(invalidActiveEditor.updateField).toHaveBeenCalledWith('useSiwc', false);
+    act(() => invalidActiveRenderer.unmount());
+
+    const invalidBoundOffRow = makeRow('codex', {
+      raw: {
+        name: 'codex-invalid-bound.json',
+        type: 'codex',
+        provider: 'codex',
+        siwc_bind_supported: true,
+        siwc_bound: true,
+        siwc_status: 'invalid',
+        use_siwc: false,
+      },
+    });
+    const invalidBoundOffEditor = makeEditor('codex', makeDraft({ useSiwc: false }));
+    const invalidBoundOffRenderer = renderTab(invalidBoundOffRow, invalidBoundOffEditor);
+    const invalidBoundOffSwitch = invalidBoundOffRenderer.root
+      .findAllByType(ToggleSwitch)
+      .find((node) => node.props.ariaLabel === 'auth_files.use_siwc_label');
+    expect(invalidBoundOffSwitch?.props.checked).toBe(false);
+    expect(invalidBoundOffSwitch?.props.disabled).toBe(false);
+    act(() => invalidBoundOffRenderer.unmount());
+
+    // Pre-v8 CPA omits siwc_bind_supported: hide switch when off, keep disable recovery when on.
+    const preV8Row = makeRow('codex', {
+      raw: {
+        name: 'codex-prev8.json',
+        type: 'codex',
+        provider: 'codex',
+      },
+    });
+    const preV8OffRenderer = renderTab(preV8Row, makeEditor('codex', makeDraft({ useSiwc: false })));
+    expect(readText(preV8OffRenderer.toJSON())).not.toContain('auth_files.use_siwc_label');
+    act(() => preV8OffRenderer.unmount());
+
+    const preV8OnEditor = makeEditor('codex', makeDraft({ useSiwc: true }));
+    const preV8OnRenderer = renderTab(preV8Row, preV8OnEditor);
+    const preV8OnSwitch = preV8OnRenderer.root
+      .findAllByType(ToggleSwitch)
+      .find((node) => node.props.ariaLabel === 'auth_files.use_siwc_label');
+    expect(preV8OnSwitch?.props.checked).toBe(true);
+    expect(preV8OnSwitch?.props.disabled).toBe(false);
+    act(() => preV8OnSwitch!.props.onChange(false));
+    expect(preV8OnEditor.updateField).toHaveBeenCalledWith('useSiwc', false);
+    act(() => preV8OnRenderer.unmount());
   });
 
   it('keeps primary save and reset actions at the top of the hierarchy', () => {

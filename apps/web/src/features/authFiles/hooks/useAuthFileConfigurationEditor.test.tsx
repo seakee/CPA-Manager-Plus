@@ -900,4 +900,132 @@ describe('useAuthFileConfigurationEditor', () => {
     expect(latest?.draft?.note).toBe('connection-b');
     expect(latest?.dirty).toBe(false);
   });
+
+  it('enforces Codex SIWC binding guard and saves use_siwc transitions through the hook', async () => {
+    const unboundCodexFile = {
+      name: 'codex-unbound.json',
+      id: 'runtime-codex-unbound',
+      type: 'codex',
+      provider: 'codex',
+      authIndex: 'codex-1',
+      account: 'bob@example.com',
+      account_id: 'acc-bob',
+      siwc_bind_supported: true,
+      siwc_bound: false,
+    } as AuthFileItem;
+
+    mocks.list.mockResolvedValue({ files: [unboundCodexFile] });
+    setDownloadedRecord({
+      type: 'codex',
+      auth_index: 'codex-1',
+      account_id: 'acc-bob',
+      use_siwc: false,
+    });
+
+    await act(async () => {
+      renderer = create(<Harness activeFile={unboundCodexFile} />);
+      await Promise.resolve();
+    });
+    await flush();
+
+    // Unbound Codex credential cannot produce a use_siwc=true patch.
+    act(() => latest?.updateField('useSiwc', true));
+    expect(latest?.dirty).toBe(false);
+    expect(latest?.canSave).toBe(false);
+    await act(async () => {
+      await latest?.save();
+    });
+    expect(mocks.patchFieldsWithPluginSourceFallback).not.toHaveBeenCalled();
+
+    // Misconfigured unbound Codex credential with use_siwc=true CAN save use_siwc=false recovery.
+    const misconfiguredCodexFile = {
+      ...unboundCodexFile,
+      name: 'codex-misconfigured.json',
+      authIndex: 'codex-2',
+      account_id: 'acc-dave',
+      use_siwc: true,
+    } as AuthFileItem;
+    mocks.list.mockResolvedValue({ files: [misconfiguredCodexFile] });
+    setDownloadedRecord({
+      type: 'codex',
+      auth_index: 'codex-2',
+      account_id: 'acc-dave',
+      use_siwc: true,
+    });
+    await act(async () => {
+      renderer?.update(<Harness activeFile={misconfiguredCodexFile} />);
+      await Promise.resolve();
+    });
+    await flush();
+
+    act(() => latest?.updateField('useSiwc', false));
+    expect(latest?.dirty).toBe(true);
+    expect(latest?.canSave).toBe(true);
+    setDownloadedRecord({
+      type: 'codex',
+      auth_index: 'codex-2',
+      account_id: 'acc-dave',
+      use_siwc: false,
+    });
+    await act(async () => {
+      await latest?.save();
+    });
+    expect(mocks.patchFieldsWithPluginSourceFallback).toHaveBeenLastCalledWith(
+      expect.objectContaining({ name: 'codex-misconfigured.json' }),
+      { use_siwc: false },
+      expect.anything()
+    );
+
+    // Bound Codex credential can save use_siwc=true and keep draft clean after reload.
+    const boundCodexFile = {
+      ...unboundCodexFile,
+      name: 'codex-bound.json',
+      authIndex: 'codex-3',
+      account_id: 'acc-carol',
+      siwc_bound: true,
+      use_siwc: false,
+    } as AuthFileItem;
+    mocks.list.mockResolvedValue({ files: [boundCodexFile] });
+    setDownloadedRecord({
+      type: 'codex',
+      auth_index: 'codex-3',
+      account_id: 'acc-carol',
+      use_siwc: false,
+      siwc: {
+        access_token: 'siwc-at',
+        refresh_token: 'siwc-rt',
+        client_id: 'siwc-cid',
+      },
+    });
+    await act(async () => {
+      renderer?.update(<Harness activeFile={boundCodexFile} />);
+      await Promise.resolve();
+    });
+    await flush();
+
+    act(() => latest?.updateField('useSiwc', true));
+    expect(latest?.dirty).toBe(true);
+    expect(latest?.canSave).toBe(true);
+    setDownloadedRecord({
+      type: 'codex',
+      auth_index: 'codex-3',
+      account_id: 'acc-carol',
+      use_siwc: true,
+      siwc: {
+        access_token: 'siwc-at',
+        refresh_token: 'siwc-rt',
+        client_id: 'siwc-cid',
+      },
+    });
+    await act(async () => {
+      await latest?.save();
+    });
+    expect(mocks.patchFieldsWithPluginSourceFallback).toHaveBeenLastCalledWith(
+      expect.objectContaining({ name: 'codex-bound.json' }),
+      { use_siwc: true },
+      expect.anything()
+    );
+    expect(latest?.draft?.useSiwc).toBe(true);
+    expect(latest?.dirty).toBe(false);
+  });
 });

@@ -104,6 +104,14 @@ const cpaManagementPrefix = "/v0/management"
 // the management secret field.
 const cpaV8APIKeysConfigPath = "/v8/management/config/api-keys"
 const cpaV8ModelsRefreshPath = "/v8/management/models/refresh"
+const cpaV8CredentialsPath = "/v8/management/credentials"
+const (
+	cpaV8OAuthPrefix       = "/v8/management/oauth"
+	cpaV8OAuthSIWCBindPath = "/v8/management/oauth/siwc/bind"
+	cpaV8OAuthCallbackPath = "/v8/management/oauth/callback"
+	cpaV8OAuthStatusPath   = "/v8/management/oauth/status"
+	cpaV8OAuthSessionPath  = "/v8/management/oauth/session"
+)
 const codexInviteOriginHeader = "X-Codex-Invite-Origin"
 const managementOriginJSONField = "management_origin"
 const authFilePhysicalNameHeader = "X-CPAMP-Auth-File-Physical-Name"
@@ -114,28 +122,69 @@ const authFileWriteContentSHA256Header = "X-CPAMP-Auth-File-Write-Content-SHA256
 
 const maxAuthFileMutationRequestBytes int64 = 10*1024*1024 + 64*1024
 const maxAuthFileMutationResponseBytes int64 = 1024 * 1024
+const maxPluginManagementOriginBodyBytes int64 = 10 * 1024 * 1024
 const authFileOwnershipPersistenceTimeout = 5 * time.Second
 
 var errAuthFileMutationBodyTooLarge = errors.New("auth file mutation body is too large")
+var errPluginManagementBodyTooLarge = errors.New("plugin management request body is too large")
 
 var cpaBuiltinManagementPathHeads = map[string]struct{}{
-	"account-action-candidates": {},
-	"accounts":                  {},
-	"api-call":                  {},
-	"api-keys":                  {},
-	"api-key-aliases":           {},
-	"api-key-usage":             {},
-	"auth-files":                {},
-	"codex-inspection":          {},
-	"config":                    {},
-	"dashboard":                 {},
-	"model-prices":              {},
-	"monitoring":                {},
-	"plugin-store":              {},
-	"plugins":                   {},
-	"reload":                    {},
-	"usage":                     {},
-	"usage-statistics-enabled":  {},
+	"account-action-candidates":  {},
+	"accounts":                   {},
+	"api-call":                   {},
+	"api-key-aliases":            {},
+	"api-key-usage":              {},
+	"api-keys":                   {},
+	"auth-files":                 {},
+	"claude-api-key":             {},
+	"codex-api-key":              {},
+	"codex-inspection":           {},
+	"config":                     {},
+	"config.yaml":                {},
+	"cpa-connection":             {},
+	"dashboard":                  {},
+	"debug":                      {},
+	"error-logs-max-files":       {},
+	"force-model-prefix":         {},
+	"gemini-api-key":             {},
+	"get-auth-status":            {},
+	"interactions-api-key":       {},
+	"latest-version":             {},
+	"logging-to-file":            {},
+	"logs":                       {},
+	"logs-max-total-size-mb":     {},
+	"max-retry-credentials":      {},
+	"max-retry-interval":         {},
+	"meta-api-key":               {},
+	"model-definitions":          {},
+	"model-prices":               {},
+	"monitoring":                 {},
+	"oauth-callback":             {},
+	"oauth-excluded-models":      {},
+	"oauth-model-alias":          {},
+	"oauth-request-scoped-errors": {},
+	"oauth-session":              {},
+	"openai-compatibility":       {},
+	"plugin-store":               {},
+	"plugins":                    {},
+	"proxy-url":                  {},
+	"quota":                      {},
+	"quota-exceeded":             {},
+	"quota-snapshots":            {},
+	"reload":                     {},
+	"request-error-logs":         {},
+	"request-log":                {},
+	"request-log-by-id":          {},
+	"request-retry":              {},
+	"reset-quota":                {},
+	"routing":                    {},
+	"usage":                      {},
+	"usage-queue":                {},
+	"usage-statistics-enabled":   {},
+	"vertex":                     {},
+	"vertex-api-key":             {},
+	"ws-auth":                    {},
+	"xai-api-key":                {},
 }
 
 func New(managerConfigService *managerconfig.Service, stores ...*store.Store) *Service {
@@ -337,6 +386,39 @@ func (s *Service) ProxyV8ModelsRefresh(w http.ResponseWriter, r *http.Request, w
 	}
 	s.proxyToSavedSetup(w, r, writeError, true, false)
 }
+
+// ProxyV8Credentials forwards CPA v8 credential inventory reads
+// (`GET /v8/management/credentials`) for verified admins only, substituting the
+// saved CPA management key upstream without exposing sibling v8 credential
+// mutation routes.
+func (s *Service) ProxyV8Credentials(w http.ResponseWriter, r *http.Request, writeError func(http.ResponseWriter, int, error), methodNotAllowed func(http.ResponseWriter)) {
+	if r == nil || r.URL == nil || !IsCPAV8CredentialsPath(r.URL.Path) || !isCanonicalRequestPath(r.URL) {
+		writeError(w, http.StatusNotFound, errors.New("proxy path must be "+cpaV8CredentialsPath))
+		return
+	}
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	s.proxyToSavedSetup(w, r, writeError, true, false)
+}
+
+// ProxyV8OAuth forwards the four exact CPA v8 OAuth SIWC management endpoints
+// (`POST /v8/management/oauth/siwc/bind`, `POST /v8/management/oauth/callback`,
+// `GET /v8/management/oauth/status`, `DELETE /v8/management/oauth/session`) for
+// verified admins only, substituting the saved CPA management key upstream.
+func (s *Service) ProxyV8OAuth(w http.ResponseWriter, r *http.Request, writeError func(http.ResponseWriter, int, error), methodNotAllowed func(http.ResponseWriter)) {
+	if r == nil || r.URL == nil || !IsCPAV8OAuthPath(r.URL.Path) || !isCanonicalRequestPath(r.URL) {
+		writeError(w, http.StatusNotFound, errors.New("proxy path must be a whitelisted CPA v8 OAuth path"))
+		return
+	}
+	allowedMethod := CPAV8OAuthAllowedMethod(r.URL.Path)
+	if allowedMethod == "" || r.Method != allowedMethod {
+		methodNotAllowed(w)
+		return
+	}
+	s.proxyToSavedSetup(w, r, writeError, true, false)
+}
 func (s *Service) proxyToSavedSetup(w http.ResponseWriter, r *http.Request, writeError func(http.ResponseWriter, int, error), useSavedManagementKey bool, rewritePluginOrigin bool) {
 	s.proxyWithResponseHook(w, r, writeError, useSavedManagementKey, rewritePluginOrigin, nil)
 }
@@ -361,7 +443,11 @@ func (s *Service) proxyWithResponseHook(w http.ResponseWriter, r *http.Request, 
 	}
 	if rewritePluginOrigin {
 		if err := rewritePluginManagementOriginBody(r, target); err != nil {
-			writeError(w, http.StatusBadRequest, err)
+			status := http.StatusBadRequest
+			if errors.Is(err, errPluginManagementBodyTooLarge) {
+				status = http.StatusRequestEntityTooLarge
+			}
+			writeError(w, status, err)
 			return
 		}
 	}
@@ -1654,12 +1740,15 @@ func rewritePluginManagementOriginBody(r *http.Request, target *url.URL) error {
 	if r == nil || r.Body == nil || target == nil || !isJSONContentType(r.Header.Get("Content-Type")) {
 		return nil
 	}
-	raw, err := io.ReadAll(r.Body)
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxPluginManagementOriginBodyBytes+1))
 	if err != nil {
 		return err
 	}
 	if errClose := r.Body.Close(); errClose != nil {
 		return errClose
+	}
+	if int64(len(raw)) > maxPluginManagementOriginBodyBytes {
+		return errPluginManagementBodyTooLarge
 	}
 	if len(bytes.TrimSpace(raw)) == 0 {
 		restoreRequestBody(r, raw)
@@ -1763,8 +1852,13 @@ func IsCPAPluginManagementPath(path string) bool {
 	if head == "" {
 		return false
 	}
-	_, reserved := cpaBuiltinManagementPathHeads[head]
-	return !reserved
+	if _, reserved := cpaBuiltinManagementPathHeads[head]; reserved {
+		return false
+	}
+	if !strings.Contains(rest, "/") && strings.HasSuffix(head, "-auth-url") && len(head) > len("-auth-url") {
+		return false
+	}
+	return true
 }
 
 func IsCPAPluginResourcePath(path string) bool {
@@ -1782,6 +1876,44 @@ func IsCPAV8APIKeysConfigPath(path string) bool {
 // endpoint so no sibling or nested path under /v8/management/models is exposed.
 func IsCPAV8ModelsRefreshPath(path string) bool {
 	return path == cpaV8ModelsRefreshPath
+}
+
+// IsCPAV8CredentialsPath matches only the exact CPA v8 credentials list
+// endpoint (`GET /v8/management/credentials`) so no sibling or nested path
+// under /v8/management/credentials is exposed.
+func IsCPAV8CredentialsPath(path string) bool {
+	return path == cpaV8CredentialsPath
+}
+
+func isCPAV8CredentialsSubtree(requestPath string) bool {
+	return requestPath == cpaV8CredentialsPath || strings.HasPrefix(requestPath, cpaV8CredentialsPath+"/")
+}
+
+// CPAV8OAuthAllowedMethod returns the single HTTP method permitted on an exact
+// CPA v8 OAuth SIWC management path, or an empty string for any other path.
+func CPAV8OAuthAllowedMethod(path string) string {
+	switch path {
+	case cpaV8OAuthSIWCBindPath:
+		return http.MethodPost
+	case cpaV8OAuthCallbackPath:
+		return http.MethodPost
+	case cpaV8OAuthStatusPath:
+		return http.MethodGet
+	case cpaV8OAuthSessionPath:
+		return http.MethodDelete
+	default:
+		return ""
+	}
+}
+
+// IsCPAV8OAuthPath matches only the four exact CPA v8 OAuth SIWC management
+// endpoints, with no prefix wildcard.
+func IsCPAV8OAuthPath(path string) bool {
+	return CPAV8OAuthAllowedMethod(path) != ""
+}
+
+func isCPAV8OAuthSubtree(requestPath string) bool {
+	return requestPath == cpaV8OAuthPrefix || strings.HasPrefix(requestPath, cpaV8OAuthPrefix+"/")
 }
 // isCanonicalRequestPath rejects percent-encoded, dot-segment and duplicate-slash
 // paths. ServeMux does not clean escaped dot segments and redirects the rest, so
@@ -1854,6 +1986,58 @@ func IsNonCanonicalV8ModelsRefreshRequest(r *http.Request) bool {
 	}
 	cleaned := cleanRequestPath(r.URL.Path)
 	return IsCPAV8ModelsRefreshPath(cleaned) || IsCPAV8ModelsRefreshPath(strings.TrimSuffix(cleaned, "/"))
+}
+
+// IsCanonicalV8CredentialsRequest reports whether r targets the exact CPA v8
+// credentials list route in canonical URL form.
+func IsCanonicalV8CredentialsRequest(r *http.Request) bool {
+	return r != nil && r.URL != nil && IsCPAV8CredentialsPath(r.URL.Path) && isCanonicalRequestPath(r.URL)
+}
+
+// IsNonCanonicalV8CredentialsRequest reports whether r is a dirty path
+// targeting or traversing /v8/management/credentials that must be refused with
+// 404 before ServeMux can 301-redirect it.
+func IsNonCanonicalV8CredentialsRequest(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	if strings.HasSuffix(r.URL.Path, "/") && IsCPAV8CredentialsPath(strings.TrimSuffix(r.URL.Path, "/")) {
+		return true
+	}
+	if isCanonicalRequestPath(r.URL) {
+		return false
+	}
+	if isCPAV8CredentialsSubtree(r.URL.Path) {
+		return true
+	}
+	cleaned := cleanRequestPath(r.URL.Path)
+	return isCPAV8CredentialsSubtree(cleaned) || isCPAV8CredentialsSubtree(strings.TrimSuffix(cleaned, "/"))
+}
+
+// IsCanonicalV8OAuthRequest reports whether r targets one of the four exact CPA
+// v8 OAuth SIWC management paths in canonical URL form.
+func IsCanonicalV8OAuthRequest(r *http.Request) bool {
+	return r != nil && r.URL != nil && IsCPAV8OAuthPath(r.URL.Path) && isCanonicalRequestPath(r.URL)
+}
+
+// IsNonCanonicalV8OAuthRequest reports whether r is a dirty path targeting or
+// traversing the CPA v8 OAuth management subtree that must be refused with 404
+// before ServeMux can 301-redirect it.
+func IsNonCanonicalV8OAuthRequest(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	if strings.HasSuffix(r.URL.Path, "/") && IsCPAV8OAuthPath(strings.TrimSuffix(r.URL.Path, "/")) {
+		return true
+	}
+	if isCanonicalRequestPath(r.URL) {
+		return false
+	}
+	if isCPAV8OAuthSubtree(r.URL.Path) {
+		return true
+	}
+	cleaned := cleanRequestPath(r.URL.Path)
+	return isCPAV8OAuthSubtree(cleaned) || isCPAV8OAuthSubtree(strings.TrimSuffix(cleaned, "/"))
 }
 // cleanRequestPath mirrors the cleaning http.ServeMux performs before dispatch:
 // duplicate slashes collapse, dot segments resolve, and a trailing slash survives.

@@ -8,6 +8,7 @@ import type {
   PluginMetadata,
   PluginMenu,
   PluginStoreEntry,
+  PluginOAuthProviderEntry,
   PluginStoreInstallResult,
   PluginStorePlatform,
   PluginStoreResponse,
@@ -29,6 +30,39 @@ const hasOwn = (source: Record<string, unknown>, key: string): boolean =>
 const normalizePluginOAuthProvider = (value: unknown): string | undefined => {
   const provider = asString(value).trim();
   return provider || undefined;
+};
+
+const normalizePluginOAuthProviders = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const providers: string[] = [];
+  value.forEach((item) => {
+    const provider = normalizePluginOAuthProvider(item);
+    if (!provider || seen.has(provider)) return;
+    seen.add(provider);
+    providers.push(provider);
+  });
+  return providers;
+};
+
+const normalizePluginOAuthProviderEntries = (value: unknown): PluginOAuthProviderEntry[] => {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const entries: PluginOAuthProviderEntry[] = [];
+  value.forEach((item) => {
+    if (!isRecord(item)) return;
+    const identifier = asString(item.identifier ?? item.provider ?? item.id).trim();
+    if (!identifier || seen.has(identifier)) return;
+    seen.add(identifier);
+    const name = asString(item.name ?? item.title).trim();
+    const logo = asString(item.logo).trim();
+    entries.push({
+      identifier,
+      ...(name ? { name } : {}),
+      ...(logo ? { logo } : {}),
+    });
+  });
+  return entries;
 };
 
 const normalizeConfigField = (value: unknown): PluginConfigField | null => {
@@ -106,14 +140,25 @@ const normalizePluginEntry = (value: unknown): PluginListEntry | null => {
   const configFields = normalizeConfigFields(value.config_fields ?? value.configFields);
   const supportsOAuth = asBoolean(value.supports_oauth ?? value.supportsOAuth);
   const oauthProvider = normalizePluginOAuthProvider(value.oauth_provider ?? value.oauthProvider);
+  const oauthProviders = normalizePluginOAuthProviders(
+    value.oauth_providers ?? value.oauthProviders
+  );
+  const oauthProviderEntries = normalizePluginOAuthProviderEntries(
+    value.oauth_provider_entries ?? value.oauthProviderEntries
+  );
+  const hasExplicitOAuthProvider =
+    hasOwn(value, 'oauth_provider') ||
+    hasOwn(value, 'oauthProvider') ||
+    hasOwn(value, 'oauth_providers') ||
+    hasOwn(value, 'oauthProviders');
   const legacyOAuthProvider =
-    supportsOAuth && !hasOwn(value, 'oauth_provider') && !hasOwn(value, 'oauthProvider')
-      ? normalizePluginOAuthProvider(id)
-      : undefined;
+    supportsOAuth && !hasExplicitOAuthProvider ? normalizePluginOAuthProvider(id) : undefined;
 
   return {
     id,
-    oauthProvider: oauthProvider ?? legacyOAuthProvider,
+    oauthProvider: oauthProvider ?? oauthProviders[0] ?? legacyOAuthProvider,
+    ...(oauthProviders.length > 0 ? { oauthProviders } : {}),
+    ...(oauthProviderEntries.length > 0 ? { oauthProviderEntries } : {}),
     path: asString(value.path).trim(),
     configured: asBoolean(value.configured),
     registered: asBoolean(value.registered),

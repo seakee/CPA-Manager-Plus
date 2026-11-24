@@ -11,6 +11,11 @@ import iconKimiLight from '@/assets/icons/kimi-light.svg';
 import iconQwen from '@/assets/icons/qwen.svg';
 import iconVertex from '@/assets/icons/vertex.svg';
 import type { AuthFileItem } from '@/types';
+import {
+  hasSiwcCredentialTokens,
+  isSiwcBound,
+  supportsSiwcBinding,
+} from '@/entities/accounts/siwcBinding';
 import { parseTimestamp } from '@/utils/timestamp';
 
 export type ResolvedTheme = 'light' | 'dark';
@@ -195,6 +200,113 @@ export const applyAuthFileWebsockets = (
 
 export const readCodexAuthFileWebsockets = readAuthFileWebsockets;
 export const applyCodexAuthFileWebsockets = applyAuthFileWebsockets;
+
+export type AuthFileSiwcCapabilityOptions = {
+  file?: AuthFileItem | null;
+  record?: Record<string, unknown> | null;
+};
+
+const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+const readNonEmptyRecordString = (
+  record: Record<string, unknown> | null | undefined,
+  ...keys: string[]
+): string => {
+  if (!record) return '';
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (trimmed) return trimmed;
+    }
+  }
+  return '';
+};
+
+const readNestedAuthProperty = (
+  record: Record<string, unknown> | null | undefined,
+  ...keys: string[]
+): string => {
+  if (!record) return '';
+  const direct = readNonEmptyRecordString(record, ...keys);
+  if (direct) return direct;
+  for (const containerKey of ['attributes', 'metadata']) {
+    const nested = record[containerKey];
+    if (isPlainRecord(nested)) {
+      const nestedValue = readNonEmptyRecordString(nested, ...keys);
+      if (nestedValue) return nestedValue;
+    }
+  }
+  return '';
+};
+
+const hasAuthRecordOAuthTokens = (record: Record<string, unknown> | null | undefined): boolean => {
+  if (!record) return false;
+  if (
+    readNonEmptyRecordString(
+      record,
+      'access_token',
+      'accessToken',
+      'refresh_token',
+      'refreshToken'
+    )
+  ) {
+    return true;
+  }
+  for (const containerKey of ['tokens', 'credentials', 'metadata']) {
+    const nested = record[containerKey];
+    if (
+      isPlainRecord(nested) &&
+      readNonEmptyRecordString(
+        nested,
+        'access_token',
+        'accessToken',
+        'refresh_token',
+        'refreshToken'
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+};
+
+
+export const supportsAuthFileSiwc = (
+  providerKey: string,
+  options?: AuthFileSiwcCapabilityOptions
+): boolean => {
+  if (normalizeProviderKey(providerKey) !== 'codex') return false;
+  if (!options) return true;
+
+  const { file, record } = options;
+  if (file) {
+    return supportsSiwcBinding(file);
+  }
+  if (record && parseDisableCoolingValue(record.runtime_only ?? record.runtimeOnly) === true) {
+    return false;
+  }
+
+  const source = readNestedAuthProperty(record, 'source').toLowerCase();
+  if (source && source !== 'file') return false;
+
+  const authKind = readNestedAuthProperty(record, 'auth_kind', 'authKind').toLowerCase();
+  if (authKind && authKind !== 'oauth') return false;
+
+  const hasOAuth = hasAuthRecordOAuthTokens(record) || hasSiwcCredentialTokens(record);
+  if (readNestedAuthProperty(record, 'api_key', 'apiKey').length > 0 && !hasOAuth) {
+    return false;
+  }
+
+  return true;
+};
+
+export const isAuthFileSiwcBound = (options?: AuthFileSiwcCapabilityOptions): boolean =>
+  Boolean((options?.file && isSiwcBound(options.file)) || hasSiwcCredentialTokens(options?.record));
+
+export const readAuthFileUseSiwc = (value: Record<string, unknown>): boolean =>
+  parseDisableCoolingValue(value.use_siwc ?? value.useSiwc) ?? false;
 
 export function isRuntimeOnlyAuthFile(file: AuthFileItem): boolean {
   const raw = file['runtime_only'] ?? file.runtimeOnly;

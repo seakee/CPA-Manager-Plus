@@ -1,1153 +1,533 @@
-import {
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ChangeEvent,
-} from 'react';
-import { useTranslation } from 'react-i18next';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Card } from '@/components/ui/Card';
+import { useTranslation } from 'react-i18next';
+import { PageControlBar } from '@/components/common/PageControlBar';
 import { Button } from '@/components/ui/Button';
-import { Input } from '@/components/ui/Input';
+import { IconChevronLeft, IconExternalLink, IconInfo, IconRefreshCw } from '@/components/ui/icons';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
-import {
-  publishAccountCredentialMutationRevision,
-  useAuthStore,
-  useNotificationStore,
-  useThemeStore,
-} from '@/stores';
-import {
-  oauthApi,
-  authFilesApi,
-  pluginsApi,
-  type BuiltInOAuthProvider,
-  type OAuthProvider,
-} from '@/services/api';
-import { vertexApi, type VertexImportResponse } from '@/services/api/vertex';
-import { copyToClipboard } from '@/utils/clipboard';
-import type { PluginListEntry } from '@/types';
-import { getPluginTitle, resolvePluginAssetURL } from '@/features/plugins/pluginResources';
-import { createCodexInspectionConnectionFingerprint } from '@/features/monitoring/codexInspection';
-import {
-  createAccountCredentialMutationBaseline,
-  recordAccountCredentialMutationMarker,
-  type AccountCredentialMutationBaseline,
-} from '@/features/accounts/model/accountCredentialMutationMarker';
-import type { ApiClientRequestScope } from '@/services/api/client';
-import {
-  completeAccountOAuthReauthSessionFromSearch,
-  readAccountOAuthReauthSessionId,
-} from '@/features/accounts/model/accountReauthSession';
-import {
-  isOAuthProviderAttemptCurrent,
-  isOAuthPollingScopeCurrent,
-  resolvePluginOAuthProviderId,
-  shouldShowPluginOAuthProvider,
-  type OAuthProviderAttempt,
-  type OAuthPollingScope,
-} from './oauthProviderHelpers';
-import styles from './OAuthPage.module.scss';
-import iconCodex from '@/assets/icons/codex.svg';
-import iconClaude from '@/assets/icons/claude.svg';
-import iconAntigravity from '@/assets/icons/antigravity.svg';
-import iconKimiLight from '@/assets/icons/kimi-light.svg';
-import iconKimiDark from '@/assets/icons/kimi-dark.svg';
+import { useThemeStore } from '@/stores';
 import iconVertex from '@/assets/icons/vertex.svg';
-import iconGrok from '@/assets/icons/grok.svg';
-import iconGrokDark from '@/assets/icons/grok-dark.svg';
+import iconCodex from '@/assets/icons/codex.svg';
+import { OAuthFlowDialog } from './components/OAuthFlowDialog';
+import { ProviderTile, type ProviderTileStatus } from './components/ProviderTile';
+import { SiwcBindDialog } from './components/SiwcBindDialog';
+import { VertexImportDialog } from './components/VertexImportDialog';
+import { resolveFlowView } from './flowView';
+import { useOAuthFlows } from './hooks/useOAuthFlows';
+import { useVertexImport } from './hooks/useVertexImport';
+import { resolveThemedIcon, type OAuthProviderCard } from './providers';
+import styles from './OAuthPage.module.scss';
 
-interface ProviderState {
-  url?: string;
-  state?: string;
-  status?: 'idle' | 'waiting' | 'success' | 'error';
-  error?: string;
-  polling?: boolean;
-  callbackUrl?: string;
-  callbackSubmitting?: boolean;
-  callbackStatus?: 'success' | 'error';
-  callbackError?: string;
-}
+const OAUTH_PROVIDER_HASH_PREFIX = '#oauth-provider-';
 
-interface ScopedOAuthProviderAttempt extends OAuthProviderAttempt {
-  requestScope: ApiClientRequestScope;
-  credentialBaseline?: AccountCredentialMutationBaseline;
-}
-
-interface VertexImportResult {
-  projectId?: string;
-  email?: string;
-  location?: string;
-  authFile?: string;
-}
-
-interface VertexImportState {
-  file?: File;
-  fileName: string;
-  location: string;
-  loading: boolean;
-  error?: string;
-  result?: VertexImportResult;
-}
-
-interface BuiltInProviderDefinition {
-  id: BuiltInOAuthProvider;
-  titleKey: string;
-  hintKey: string;
-  urlLabelKey: string;
-  icon: string | { light: string; dark: string };
-}
-
-interface OAuthProviderDefinition {
-  id: OAuthProvider;
-  title: string;
-  hint: string;
-  urlLabel: string;
-  icon?: string | { light: string; dark: string };
-  supportsCallback: boolean;
-  isPlugin: boolean;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object';
-}
-
-function getErrorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (isRecord(error) && typeof error.message === 'string') return error.message;
-  return typeof error === 'string' ? error : '';
-}
-
-function getErrorStatus(error: unknown): number | undefined {
-  if (!isRecord(error)) return undefined;
-  return typeof error.status === 'number' ? error.status : undefined;
-}
-
-const BUILT_IN_PROVIDERS: BuiltInProviderDefinition[] = [
-  {
-    id: 'codex',
-    titleKey: 'auth_login.codex_oauth_title',
-    hintKey: 'auth_login.codex_oauth_hint',
-    urlLabelKey: 'auth_login.codex_oauth_url_label',
-    icon: iconCodex,
-  },
-  {
-    id: 'anthropic',
-    titleKey: 'auth_login.anthropic_oauth_title',
-    hintKey: 'auth_login.anthropic_oauth_hint',
-    urlLabelKey: 'auth_login.anthropic_oauth_url_label',
-    icon: iconClaude,
-  },
-  {
-    id: 'antigravity',
-    titleKey: 'auth_login.antigravity_oauth_title',
-    hintKey: 'auth_login.antigravity_oauth_hint',
-    urlLabelKey: 'auth_login.antigravity_oauth_url_label',
-    icon: iconAntigravity,
-  },
-  {
-    id: 'kimi',
-    titleKey: 'auth_login.kimi_oauth_title',
-    hintKey: 'auth_login.kimi_oauth_hint',
-    urlLabelKey: 'auth_login.kimi_oauth_url_label',
-    icon: { light: iconKimiLight, dark: iconKimiDark },
-  },
-  {
-    id: 'xai',
-    titleKey: 'auth_login.xai_oauth_title',
-    hintKey: 'auth_login.xai_oauth_hint',
-    urlLabelKey: 'auth_login.xai_oauth_url_label',
-    icon: { light: iconGrok, dark: iconGrokDark },
-  },
-];
-
-const BUILT_IN_PROVIDER_IDS = new Set<string>(BUILT_IN_PROVIDERS.map((provider) => provider.id));
-
-const CALLBACK_SUPPORTED = new Set<string>(['codex', 'anthropic', 'antigravity', 'xai']);
-const XAI_CALLBACK_URL = 'http://127.0.0.1:56121/callback';
-const SUCCESS_RESET_DELAY_MS = 5000;
-const getProviderI18nPrefix = (provider: BuiltInOAuthProvider) => provider.replace('-', '_');
-const getAuthKey = (provider: BuiltInOAuthProvider, suffix: string) =>
-  `auth_login.${getProviderI18nPrefix(provider)}_${suffix}`;
-
-const getIcon = (icon: string | { light: string; dark: string }, theme: 'light' | 'dark') => {
-  return typeof icon === 'string' ? icon : icon[theme];
-};
-
-const isAbsoluteUrl = (value: string): boolean => {
+const parseTargetProviderFromHash = (hash: string): string | null => {
+  if (!hash.startsWith(OAUTH_PROVIDER_HASH_PREFIX)) return null;
   try {
-    new URL(value);
-    return true;
+    const raw = decodeURIComponent(hash.slice(OAUTH_PROVIDER_HASH_PREFIX.length)).trim();
+    return raw || null;
   } catch {
-    return false;
+    return null;
   }
-};
-
-const readQueryLikeCallbackInput = (value: string) => {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const queryStart = trimmed.indexOf('?');
-  const hashStart = trimmed.indexOf('#');
-  const rawParams =
-    queryStart >= 0
-      ? trimmed.slice(queryStart + 1)
-      : hashStart >= 0
-        ? trimmed.slice(hashStart + 1)
-        : trimmed;
-
-  if (!/(^|[&#?])(code|state|error)=/i.test(rawParams)) return null;
-  return new URLSearchParams(rawParams.replace(/^[?#]/, ''));
-};
-
-const extractDisplayedXaiCode = (value: string): string => {
-  const trimmed = value.trim();
-  const codeMatch = trimmed.match(/\bcode\s*[:=]\s*([^\s&]+)/i);
-  return (codeMatch?.[1] ?? trimmed).trim();
-};
-
-const buildXaiCallbackUrl = (input: string, state?: string): string | null => {
-  const trimmed = input.trim();
-  if (!trimmed) return null;
-  if (isAbsoluteUrl(trimmed)) return trimmed;
-
-  const params = readQueryLikeCallbackInput(trimmed);
-  if (params) {
-    const code = params.get('code')?.trim();
-    const error = params.get('error')?.trim();
-    const errorDescription = params.get('error_description')?.trim();
-    const callbackState = params.get('state')?.trim() || state?.trim();
-    if (!callbackState) return null;
-
-    const callbackUrl = new URL(XAI_CALLBACK_URL);
-    callbackUrl.searchParams.set('state', callbackState);
-    if (code) callbackUrl.searchParams.set('code', code);
-    if (error) callbackUrl.searchParams.set('error', error);
-    if (errorDescription) callbackUrl.searchParams.set('error_description', errorDescription);
-    return callbackUrl.toString();
-  }
-
-  const code = extractDisplayedXaiCode(trimmed);
-  const callbackState = state?.trim();
-  if (!code || !callbackState) return null;
-
-  const callbackUrl = new URL(XAI_CALLBACK_URL);
-  callbackUrl.searchParams.set('code', code);
-  callbackUrl.searchParams.set('state', callbackState);
-  return callbackUrl.toString();
-};
-
-const resolveCallbackUrl = (
-  provider: OAuthProvider,
-  input: string,
-  state?: string
-): string | null => {
-  if (provider !== 'xai') return input.trim();
-  return buildXaiCallbackUrl(input, state);
 };
 
 export function OAuthPage() {
   const { t } = useTranslation();
-  const navigate = useNavigate();
   const location = useLocation();
-  const { showNotification } = useNotificationStore();
+  const navigate = useNavigate();
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
-  const connectionStatus = useAuthStore((state) => state.connectionStatus);
-  const apiBase = useAuthStore((state) => state.apiBase);
-  const managementKey = useAuthStore((state) => state.managementKey);
-  const supportsPlugin = useAuthStore((state) => state.supportsPlugin);
-  const requestScope = useMemo(() => ({ apiBase, managementKey }), [apiBase, managementKey]);
-  const pluginOAuthAvailable = connectionStatus === 'connected' && supportsPlugin;
-  const connectionFingerprint = useMemo(
-    () => createCodexInspectionConnectionFingerprint(apiBase, managementKey),
-    [apiBase, managementKey]
-  );
-  const oauthPollingScope = useMemo<OAuthPollingScope>(
-    () => ({
-      connectionFingerprint,
-      accountReauthSessionId: readAccountOAuthReauthSessionId(location.search),
-      search: location.search,
-    }),
-    [connectionFingerprint, location.search]
-  );
-  const [states, setStates] = useState<Record<string, ProviderState>>({});
-  const [pluginOAuthPlugins, setPluginOAuthPlugins] = useState<PluginListEntry[]>([]);
-  const [vertexState, setVertexState] = useState<VertexImportState>({
-    fileName: '',
-    location: '',
-    loading: false,
-  });
-  const pollingTimers = useRef<Partial<Record<string, number>>>({});
-  const successResetTimers = useRef<Partial<Record<string, number>>>({});
-  const providerAttemptVersions = useRef<Partial<Record<string, number>>>({});
-  const providerCredentialBaselines = useRef<
-    Partial<Record<string, { version: number; baseline: AccountCredentialMutationBaseline }>>
-  >({});
-  const callbackAttemptVersions = useRef<Partial<Record<string, number>>>({});
-  const oauthPollingScopeRef = useRef(oauthPollingScope);
-  const connectionFingerprintRef = useRef(connectionFingerprint);
-  const vertexImportGenerationRef = useRef(0);
-  const vertexFileInputRef = useRef<HTMLInputElement | null>(null);
-  connectionFingerprintRef.current = connectionFingerprint;
+  const theme = resolvedTheme === 'dark' ? 'dark' : 'light';
 
-  const clearTimers = useCallback(() => {
-    Object.values(pollingTimers.current).forEach((timer) => {
-      if (timer !== undefined) window.clearInterval(timer);
-    });
-    Object.values(successResetTimers.current).forEach((timer) => {
-      if (timer !== undefined) window.clearTimeout(timer);
-    });
-    pollingTimers.current = {};
-    successResetTimers.current = {};
-  }, []);
+  const [focusedModal, setFocusedModal] = useState<{
+    fingerprint: string | null;
+    providerId: string;
+  } | null>(null);
+  const [vertexModalFingerprint, setVertexModalFingerprint] = useState<string | null | undefined>(
+    undefined
+  );
+  const [siwcModalFingerprint, setSiwcModalFingerprint] = useState<string | null | undefined>(
+    undefined
+  );
+
+  const focusedProviderRef = useRef<string | null>(null);
+  const focusedModalTokenRef = useRef(0);
+  const autoOpenedNavKeyRef = useRef<string | null>(null);
+  const activeCycleIndexRef = useRef(-1);
+
+  const isFocused = useCallback((provider: string) => focusedProviderRef.current === provider, []);
+
+  const flows = useOAuthFlows({
+    search: location.search,
+    isFocused,
+  });
+
+  const focusedProviderId =
+    focusedModal && focusedModal.fingerprint === flows.connectionFingerprint
+      ? focusedModal.providerId
+      : null;
+  const vertexDialogOpen =
+    vertexModalFingerprint !== undefined && vertexModalFingerprint === flows.connectionFingerprint;
+  const siwcDialogOpen =
+    siwcModalFingerprint !== undefined && siwcModalFingerprint === flows.connectionFingerprint;
 
   useLayoutEffect(() => {
-    const previousScope = oauthPollingScopeRef.current;
-    oauthPollingScopeRef.current = oauthPollingScope;
-    if (isOAuthPollingScopeCurrent(previousScope, oauthPollingScope)) return;
-    providerAttemptVersions.current = {};
-    providerCredentialBaselines.current = {};
-    callbackAttemptVersions.current = {};
-    vertexImportGenerationRef.current += 1;
-    clearTimers();
-    setStates((prev) => (Object.keys(prev).length === 0 ? prev : {}));
-    setPluginOAuthPlugins([]);
-    setVertexState({ fileName: '', location: '', loading: false });
-  }, [clearTimers, oauthPollingScope]);
+    focusedProviderRef.current = focusedProviderId;
+    focusedModalTokenRef.current += 1;
+  }, [flows.connectionFingerprint, focusedProviderId]);
 
-  const providers = useMemo<OAuthProviderDefinition[]>(() => {
-    const builtIn = BUILT_IN_PROVIDERS.map((provider) => ({
-      id: provider.id,
-      title: t(provider.titleKey),
-      hint: t(provider.hintKey),
-      urlLabel: t(provider.urlLabelKey),
-      icon: provider.icon,
-      supportsCallback: CALLBACK_SUPPORTED.has(provider.id),
-      isPlugin: false,
-    }));
-    const pluginProviders = pluginOAuthAvailable
-      ? pluginOAuthPlugins
-          .filter((plugin) => shouldShowPluginOAuthProvider(plugin, BUILT_IN_PROVIDER_IDS))
-          .map((plugin) => {
-            const title = getPluginTitle(plugin);
-            const logo = resolvePluginAssetURL(plugin.logo || plugin.metadata?.logo || '', apiBase);
-            return {
-              id: resolvePluginOAuthProviderId(plugin),
-              title,
-              hint: t('auth_login.plugin_oauth_hint', { plugin: title }),
-              urlLabel: t('auth_login.plugin_oauth_url_label'),
-              icon: logo || undefined,
-              supportsCallback: false,
-              isPlugin: true,
-            };
-          })
-      : [];
-    return [...builtIn, ...pluginProviders];
-  }, [apiBase, pluginOAuthAvailable, pluginOAuthPlugins, t]);
+  const vertex = useVertexImport({
+    connectionFingerprint: flows.connectionFingerprint,
+    requestScope: flows.requestScope,
+    onCredentialAdded: flows.recordCredentialAdded,
+  });
 
-  useEffect(() => {
-    const targetId = location.hash.replace(/^#/, '');
-    if (!targetId) return;
-    const frame = window.requestAnimationFrame(() => {
-      document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [location.hash, providers.length]);
-
-  useEffect(() => {
-    return () => {
-      providerAttemptVersions.current = {};
-      providerCredentialBaselines.current = {};
-      callbackAttemptVersions.current = {};
-      vertexImportGenerationRef.current += 1;
-      clearTimers();
-    };
-  }, [clearTimers]);
-
-  const loadPluginProviders = useCallback(async () => {
-    if (!pluginOAuthAvailable) return;
-    const loadConnectionFingerprint = connectionFingerprint;
-    try {
-      const response = await pluginsApi.list(requestScope);
-      if (connectionFingerprintRef.current !== loadConnectionFingerprint) return;
-      setPluginOAuthPlugins(response.plugins.filter((plugin) => plugin.supportsOAuth));
-    } catch {
-      if (connectionFingerprintRef.current !== loadConnectionFingerprint) return;
-      setPluginOAuthPlugins([]);
-    }
-  }, [connectionFingerprint, pluginOAuthAvailable, requestScope]);
-
-  useEffect(() => {
-    void loadPluginProviders();
-  }, [loadPluginProviders]);
-
-  useHeaderRefresh(loadPluginProviders, pluginOAuthAvailable);
-
-  const getProviderDefinition = useCallback(
-    (provider: OAuthProvider) => providers.find((item) => item.id === provider),
-    [providers]
+  const connected = flows.connectionStatus === 'connected';
+  const targetProviderId = useMemo(
+    () => parseTargetProviderFromHash(location.hash),
+    [location.hash]
   );
 
-  const getProviderActionText = useCallback(
-    (provider: OAuthProvider, suffix: string) => {
-      const definition = getProviderDefinition(provider);
-      if (!definition?.isPlugin && BUILT_IN_PROVIDER_IDS.has(provider)) {
-        return t(getAuthKey(provider as BuiltInOAuthProvider, suffix));
+  useHeaderRefresh(flows.loadPluginProviders, flows.pluginOAuthAvailable);
+
+  const { states: flowStates, startAuth, dismissSuccess, connectionFingerprint } = flows;
+
+  const openProviderFlow = useCallback(
+    (providerId: string) => {
+      focusedModalTokenRef.current += 1;
+      setFocusedModal({ fingerprint: connectionFingerprint, providerId });
+      const currentState = flowStates[providerId] ?? {};
+      const view = resolveFlowView(currentState);
+      if (connected && (view === 'idle' || view === 'failed')) {
+        void startAuth(providerId);
       }
-      return t(`auth_login.plugin_${suffix}`, {
-        plugin: definition?.title || provider,
-      });
     },
-    [getProviderDefinition, t]
+    [connected, connectionFingerprint, flowStates, startAuth]
   );
 
-  const updateProviderState = (provider: OAuthProvider, next: Partial<ProviderState>) => {
-    setStates((prev) => ({
-      ...prev,
-      [provider]: { ...(prev[provider] ?? {}), ...next },
-    }));
-  };
-
-  const beginProviderAttempt = (provider: OAuthProvider): ScopedOAuthProviderAttempt => {
-    const version = (providerAttemptVersions.current[provider] ?? 0) + 1;
-    providerAttemptVersions.current[provider] = version;
-    return { scope: oauthPollingScopeRef.current, version, requestScope };
-  };
-
-  const isProviderAttemptCurrent = (
-    provider: OAuthProvider,
-    attempt: OAuthProviderAttempt
-  ): boolean => {
-    const currentAuth = useAuthStore.getState();
-    const currentConnectionFingerprint = createCodexInspectionConnectionFingerprint(
-      currentAuth.apiBase,
-      currentAuth.managementKey
-    );
-    return (
-      Boolean(attempt.scope.connectionFingerprint) &&
-      currentConnectionFingerprint === attempt.scope.connectionFingerprint &&
-      connectionFingerprintRef.current === attempt.scope.connectionFingerprint &&
-      isOAuthProviderAttemptCurrent(
-        attempt,
-        oauthPollingScopeRef.current,
-        providerAttemptVersions.current[provider]
-      )
-    );
-  };
-
-  const finishProviderAttempt = (provider: OAuthProvider, attempt: OAuthProviderAttempt) => {
-    if (providerAttemptVersions.current[provider] === attempt.version) {
-      delete providerAttemptVersions.current[provider];
-      delete providerCredentialBaselines.current[provider];
+  const closeProviderFlow = useCallback(() => {
+    focusedModalTokenRef.current += 1;
+    if (focusedProviderId) {
+      dismissSuccess(focusedProviderId);
     }
-  };
+    setFocusedModal(null);
+  }, [dismissSuccess, focusedProviderId]);
 
-  const beginCallbackAttempt = (provider: OAuthProvider): ScopedOAuthProviderAttempt => {
-    const version = (callbackAttemptVersions.current[provider] ?? 0) + 1;
-    callbackAttemptVersions.current[provider] = version;
-    return { scope: oauthPollingScopeRef.current, version, requestScope };
-  };
+  // Deep-link handling for `/oauth?accountReauth=...#oauth-provider-<id>`
+  useEffect(() => {
+    if (!targetProviderId) return;
+    const targetElement = document.getElementById(`oauth-provider-${targetProviderId}`);
+    targetElement?.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
-  const isCallbackAttemptCurrent = (
-    provider: OAuthProvider,
-    attempt: OAuthProviderAttempt
-  ): boolean => {
-    const currentAuth = useAuthStore.getState();
-    const currentConnectionFingerprint = createCodexInspectionConnectionFingerprint(
-      currentAuth.apiBase,
-      currentAuth.managementKey
-    );
-    return (
-      Boolean(attempt.scope.connectionFingerprint) &&
-      currentConnectionFingerprint === attempt.scope.connectionFingerprint &&
-      connectionFingerprintRef.current === attempt.scope.connectionFingerprint &&
-      isOAuthProviderAttemptCurrent(
-        attempt,
-        oauthPollingScopeRef.current,
-        callbackAttemptVersions.current[provider]
-      )
-    );
-  };
+    if (!connected) return;
+    const navKey = `${location.key}:${location.search}:${location.hash}`;
+    if (!flows.accountReauthSessionId || autoOpenedNavKeyRef.current === navKey) return;
 
-  const finishCallbackAttempt = (provider: OAuthProvider, attempt: OAuthProviderAttempt) => {
-    if (callbackAttemptVersions.current[provider] === attempt.version) {
-      delete callbackAttemptVersions.current[provider];
+    const matchedProvider = flows.providerCards.find((card) => card.id === targetProviderId);
+    if (!matchedProvider) return;
+    const rafId = window.requestAnimationFrame(() => {
+      if (autoOpenedNavKeyRef.current === navKey) return;
+      autoOpenedNavKeyRef.current = navKey;
+      openProviderFlow(matchedProvider.id);
+    });
+    return () => window.cancelAnimationFrame(rafId);
+  }, [
+    connected,
+    flows.accountReauthSessionId,
+    flows.providerCards,
+    location.hash,
+    location.key,
+    location.search,
+    openProviderFlow,
+    targetProviderId,
+  ]);
+
+  const focusedCard = useMemo(
+    () => flows.providerCards.find((item) => item.id === focusedProviderId) ?? null,
+    [flows.providerCards, focusedProviderId]
+  );
+
+  const targetProviderCard = useMemo(
+    () => (targetProviderId ? flows.providerCards.find((item) => item.id === targetProviderId) ?? null : null),
+    [flows.providerCards, targetProviderId]
+  );
+
+  const activeProviderCards = useMemo(
+    () =>
+      flows.providerCards.filter((card) => {
+        const st = flows.states[card.id];
+        return Boolean(st && resolveFlowView(st) === 'flow');
+      }),
+    [flows.providerCards, flows.states]
+  );
+
+  const openNextActiveFlow = useCallback(() => {
+    if (activeProviderCards.length === 0) return;
+    const nextIndex = (activeCycleIndexRef.current + 1) % activeProviderCards.length;
+    activeCycleIndexRef.current = nextIndex;
+    openProviderFlow(activeProviderCards[nextIndex].id);
+  }, [activeProviderCards, openProviderFlow]);
+
+  const { vertex: vertexState, resetForAnother: resetVertexForAnother } = vertex;
+  const closeVertexDialog = useCallback(() => {
+    if (vertexState.result) {
+      resetVertexForAnother();
     }
-  };
+    setVertexModalFingerprint(undefined);
+  }, [resetVertexForAnother, vertexState.result]);
+  const openSiwcDialog = useCallback(() => {
+    setSiwcModalFingerprint(connectionFingerprint);
+  }, [connectionFingerprint]);
+  const closeSiwcDialog = useCallback(() => {
+    setSiwcModalFingerprint(undefined);
+  }, []);
+  const totalChannels = flows.providerCards.length + 2; // Built-ins + Plugins + Vertex JSON + SIWC Bind
 
-  const clearPollingTimer = (provider: OAuthProvider) => {
-    const timer = pollingTimers.current[provider];
-    if (timer !== undefined) {
-      window.clearInterval(timer);
-      delete pollingTimers.current[provider];
+  const getTilePresentation = (
+    card: OAuthProviderCard
+  ): {
+    title: string;
+    subtitle: string;
+    icon: string;
+    status: ProviderTileStatus;
+    statusText?: string;
+  } => {
+    const state = flows.states[card.id] ?? {};
+    const view = resolveFlowView(state);
+    const title =
+      card.kind === 'builtin'
+        ? typeof card.label === 'string'
+          ? card.label
+          : t(card.label.key)
+        : card.title;
+    const icon = card.kind === 'builtin' ? resolveThemedIcon(card.icon, theme) : card.icon;
+
+    let subtitle: string;
+    if (card.kind === 'plugin') {
+      subtitle = t('auth_login.tile_subtitle_plugin');
+    } else if (card.flow === 'device') {
+      subtitle = card.domain
+        ? `${t('auth_login.tile_subtitle_device')} · ${card.domain}`
+        : t('auth_login.tile_subtitle_device');
+    } else if (card.id === 'xai') {
+      subtitle = t('auth_login.tile_subtitle_xai');
+    } else {
+      subtitle = t('auth_login.tile_subtitle_browser');
     }
-  };
 
-  const clearSuccessResetTimer = (provider: OAuthProvider) => {
-    const timer = successResetTimers.current[provider];
-    if (timer !== undefined) {
-      window.clearTimeout(timer);
-      delete successResetTimers.current[provider];
-    }
-  };
-
-  const clearProviderTimers = (provider: OAuthProvider) => {
-    clearPollingTimer(provider);
-    clearSuccessResetTimer(provider);
-  };
-
-  const resetProviderAttempt = (provider: OAuthProvider) => {
-    delete providerAttemptVersions.current[provider];
-    delete providerCredentialBaselines.current[provider];
-    delete callbackAttemptVersions.current[provider];
-    clearProviderTimers(provider);
-    setStates((prev) => {
+    if (view === 'flow') {
       return {
-        ...prev,
-        [provider]: {},
-      };
-    });
-  };
-
-  const completeProviderAuth = (
-    provider: OAuthProvider,
-    attempt: ScopedOAuthProviderAttempt
-  ): boolean => {
-    if (!isProviderAttemptCurrent(provider, attempt)) return false;
-    const currentScope = oauthPollingScopeRef.current;
-    const completionConnectionFingerprint = attempt.scope.connectionFingerprint;
-    if (
-      !completionConnectionFingerprint ||
-      !isOAuthPollingScopeCurrent(attempt.scope, currentScope)
-    ) {
-      return false;
-    }
-    completeAccountOAuthReauthSessionFromSearch(
-      currentScope.search,
-      provider,
-      completionConnectionFingerprint
-    );
-    recordAccountCredentialMutationMarker({
-      connectionFingerprint: completionConnectionFingerprint,
-      provider,
-      baseline: attempt.credentialBaseline,
-      requireObservedMutation: true,
-    });
-    publishAccountCredentialMutationRevision({
-      connectionFingerprint: completionConnectionFingerprint,
-      provider,
-      kind: 'oauth',
-    });
-    clearPollingTimer(provider);
-    clearSuccessResetTimer(provider);
-    finishProviderAttempt(provider, attempt);
-    delete callbackAttemptVersions.current[provider];
-    updateProviderState(provider, {
-      url: undefined,
-      state: undefined,
-      status: 'success',
-      error: undefined,
-      polling: false,
-      callbackUrl: '',
-      callbackSubmitting: false,
-      callbackStatus: undefined,
-      callbackError: undefined,
-    });
-    const timer = window.setTimeout(() => {
-      if (successResetTimers.current[provider] !== timer) return;
-      resetProviderAttempt(provider);
-    }, SUCCESS_RESET_DELAY_MS);
-    successResetTimers.current[provider] = timer;
-    return true;
-  };
-
-  const handleProviderAuthStatus = (
-    provider: OAuthProvider,
-    response: Awaited<ReturnType<typeof oauthApi.getAuthStatus>>,
-    attempt: ScopedOAuthProviderAttempt,
-    successMessage: string
-  ): 'completed' | 'waiting' | 'error' | 'stale' => {
-    if (!isProviderAttemptCurrent(provider, attempt)) return 'stale';
-    if (response.status === 'ok') {
-      if (!completeProviderAuth(provider, attempt)) return 'stale';
-      showNotification(successMessage, 'success');
-      return 'completed';
-    }
-    if (response.status === 'error') {
-      finishProviderAttempt(provider, attempt);
-      delete callbackAttemptVersions.current[provider];
-      clearPollingTimer(provider);
-      updateProviderState(provider, {
-        status: 'error',
-        error: response.error,
-        polling: false,
-        callbackSubmitting: false,
-        callbackStatus: 'error',
-        callbackError: response.error,
-      });
-      showNotification(
-        `${getProviderActionText(provider, 'oauth_status_error')} ${response.error || ''}`,
-        'error'
-      );
-      return 'error';
-    }
-    return 'waiting';
-  };
-
-  const startPolling = (
-    provider: OAuthProvider,
-    state: string,
-    attempt: ScopedOAuthProviderAttempt
-  ) => {
-    clearPollingTimer(provider);
-    let requestInFlight = false;
-    const timer = window.setInterval(async () => {
-      const isCurrentAttempt = () =>
-        pollingTimers.current[provider] === timer && isProviderAttemptCurrent(provider, attempt);
-      const stopAttempt = () => {
-        window.clearInterval(timer);
-        if (pollingTimers.current[provider] === timer) {
-          delete pollingTimers.current[provider];
-        }
-      };
-      if (!isCurrentAttempt()) {
-        stopAttempt();
-        return;
-      }
-      if (requestInFlight) return;
-      requestInFlight = true;
-      try {
-        const res = await oauthApi.getAuthStatus(state, attempt.requestScope);
-        if (!isCurrentAttempt()) {
-          stopAttempt();
-          return;
-        }
-        const result = handleProviderAuthStatus(
-          provider,
-          res,
-          attempt,
-          getProviderActionText(provider, 'oauth_status_success')
-        );
-        if (result === 'error' || result === 'completed') {
-          stopAttempt();
-        }
-      } catch (err: unknown) {
-        if (!isCurrentAttempt()) {
-          stopAttempt();
-          return;
-        }
-        finishProviderAttempt(provider, attempt);
-        updateProviderState(provider, {
-          status: 'error',
-          error: getErrorMessage(err),
-          polling: false,
-        });
-        stopAttempt();
-      } finally {
-        requestInFlight = false;
-      }
-    }, 3000);
-    pollingTimers.current[provider] = timer;
-  };
-
-  const startAuth = async (provider: OAuthProvider) => {
-    clearProviderTimers(provider);
-    delete callbackAttemptVersions.current[provider];
-    delete providerCredentialBaselines.current[provider];
-    const attempt = beginProviderAttempt(provider);
-    updateProviderState(provider, {
-      url: undefined,
-      state: undefined,
-      status: 'waiting',
-      polling: true,
-      error: undefined,
-      callbackSubmitting: false,
-      callbackStatus: undefined,
-      callbackError: undefined,
-      callbackUrl: '',
-    });
-    try {
-      try {
-        const response = await authFilesApi.list(attempt.requestScope);
-        if (!isProviderAttemptCurrent(provider, attempt)) return;
-        attempt.credentialBaseline =
-          createAccountCredentialMutationBaseline(response.files, provider) ?? undefined;
-        if (attempt.credentialBaseline) {
-          providerCredentialBaselines.current[provider] = {
-            version: attempt.version,
-            baseline: attempt.credentialBaseline,
-          };
-        }
-      } catch {
-        if (!isProviderAttemptCurrent(provider, attempt)) return;
-        // OAuth remains available, but completion will fail closed without a mutation marker.
-      }
-      const res = await oauthApi.startAuth(provider, attempt.requestScope);
-      if (!isProviderAttemptCurrent(provider, attempt)) return;
-      if (!res.state) {
-        const message = t('auth_login.missing_state');
-        finishProviderAttempt(provider, attempt);
-        updateProviderState(provider, {
-          url: res.url,
-          state: undefined,
-          status: 'error',
-          error: message,
-          polling: false,
-        });
-        showNotification(message, 'error');
-        return;
-      }
-      updateProviderState(provider, {
-        url: res.url,
-        state: res.state,
+        title,
+        subtitle,
+        icon,
         status: 'waiting',
-        polling: true,
-      });
-      startPolling(provider, res.state, attempt);
-    } catch (err: unknown) {
-      if (!isProviderAttemptCurrent(provider, attempt)) return;
-      const message = getErrorMessage(err);
-      finishProviderAttempt(provider, attempt);
-      updateProviderState(provider, { status: 'error', error: message, polling: false });
-      showNotification(
-        `${getProviderActionText(provider, 'oauth_start_error')}${message ? ` ${message}` : ''}`,
-        'error'
-      );
-    }
-  };
-
-  const copyLink = async (url?: string) => {
-    if (!url) return;
-    const copied = await copyToClipboard(url);
-    showNotification(
-      t(copied ? 'notification.link_copied' : 'notification.copy_failed'),
-      copied ? 'success' : 'error'
-    );
-  };
-
-  const submitCallback = async (provider: OAuthProvider) => {
-    const providerState = states[provider];
-    const callbackInput = (providerState?.callbackUrl || '').trim();
-    if (!callbackInput) {
-      showNotification(
-        t(
-          provider === 'xai'
-            ? 'auth_login.xai_callback_required'
-            : 'auth_login.oauth_callback_required'
-        ),
-        'warning'
-      );
-      return;
-    }
-    const state = providerState?.state;
-    const providerVersion = providerAttemptVersions.current[provider];
-    const redirectUrl = resolveCallbackUrl(provider, callbackInput, state);
-    if (!redirectUrl) {
-      showNotification(
-        t(
-          provider === 'xai' ? 'auth_login.xai_callback_state_missing' : 'auth_login.missing_state'
-        ),
-        'warning'
-      );
-      return;
-    }
-    if (!state || providerVersion === undefined) {
-      showNotification(t('auth_login.missing_state'), 'warning');
-      return;
-    }
-    const providerAttempt: ScopedOAuthProviderAttempt = {
-      scope: oauthPollingScopeRef.current,
-      version: providerVersion,
-      requestScope,
-      credentialBaseline:
-        providerCredentialBaselines.current[provider]?.version === providerVersion
-          ? providerCredentialBaselines.current[provider]?.baseline
-          : undefined,
-    };
-    if (!isProviderAttemptCurrent(provider, providerAttempt)) return;
-    const callbackAttempt = beginCallbackAttempt(provider);
-    updateProviderState(provider, {
-      callbackSubmitting: true,
-      callbackStatus: undefined,
-      callbackError: undefined,
-    });
-    const probeStatus = async () => {
-      const response = await oauthApi.getAuthStatus(state, providerAttempt.requestScope);
-      if (
-        !isCallbackAttemptCurrent(provider, callbackAttempt) ||
-        !isProviderAttemptCurrent(provider, providerAttempt)
-      ) {
-        return;
-      }
-      finishCallbackAttempt(provider, callbackAttempt);
-      handleProviderAuthStatus(
-        provider,
-        response,
-        providerAttempt,
-        getProviderActionText(provider, 'oauth_status_success')
-      );
-    };
-    try {
-      await oauthApi.submitCallback(provider, redirectUrl, callbackAttempt.requestScope);
-      if (!isCallbackAttemptCurrent(provider, callbackAttempt)) return;
-      if (!isProviderAttemptCurrent(provider, providerAttempt)) return;
-      updateProviderState(provider, {
-        callbackSubmitting: false,
-        callbackStatus: 'success',
-        callbackError: undefined,
-      });
-      showNotification(t('auth_login.oauth_callback_success'), 'success');
-      try {
-        await probeStatus();
-      } catch {
-        if (isCallbackAttemptCurrent(provider, callbackAttempt)) {
-          finishCallbackAttempt(provider, callbackAttempt);
-        }
-      }
-    } catch (err: unknown) {
-      if (!isCallbackAttemptCurrent(provider, callbackAttempt)) return;
-      const status = getErrorStatus(err);
-      if (status === 409 && isProviderAttemptCurrent(provider, providerAttempt)) {
-        updateProviderState(provider, {
-          callbackSubmitting: false,
-          callbackStatus: 'success',
-          callbackError: undefined,
-        });
-        try {
-          await probeStatus();
-        } catch (probeError: unknown) {
-          if (!isCallbackAttemptCurrent(provider, callbackAttempt)) return;
-          finishCallbackAttempt(provider, callbackAttempt);
-          updateProviderState(provider, {
-            callbackSubmitting: false,
-            callbackStatus: 'error',
-            callbackError: getErrorMessage(probeError) || undefined,
-          });
-        }
-        return;
-      }
-      const message = getErrorMessage(err);
-      const errorMessage =
-        status === 404
-          ? t('auth_login.oauth_callback_upgrade_hint', {
-              defaultValue: 'Please update CLI Proxy API or check the connection.',
-            })
-          : message || undefined;
-      finishCallbackAttempt(provider, callbackAttempt);
-      updateProviderState(provider, {
-        callbackSubmitting: false,
-        callbackStatus: 'error',
-        callbackError: errorMessage,
-      });
-      const notificationMessage = errorMessage
-        ? `${t('auth_login.oauth_callback_error')} ${errorMessage}`
-        : t('auth_login.oauth_callback_error');
-      showNotification(notificationMessage, 'error');
-    }
-  };
-
-  const handleVertexFilePick = () => {
-    vertexFileInputRef.current?.click();
-  };
-
-  const handleVertexFileChange = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    if (!file.name.endsWith('.json')) {
-      showNotification(t('vertex_import.file_required'), 'warning');
-      event.target.value = '';
-      return;
-    }
-    setVertexState((prev) => ({
-      ...prev,
-      file,
-      fileName: file.name,
-      error: undefined,
-      result: undefined,
-    }));
-    event.target.value = '';
-  };
-
-  const handleVertexImport = async () => {
-    if (!vertexState.file) {
-      const message = t('vertex_import.file_required');
-      setVertexState((prev) => ({ ...prev, error: message }));
-      showNotification(message, 'warning');
-      return;
-    }
-    const location = vertexState.location.trim();
-    const importGeneration = vertexImportGenerationRef.current + 1;
-    vertexImportGenerationRef.current = importGeneration;
-    const importConnectionFingerprint = connectionFingerprint;
-    if (!importConnectionFingerprint) return;
-    const importRequestScope = requestScope;
-    const isCurrentImport = () =>
-      connectionFingerprintRef.current === importConnectionFingerprint &&
-      vertexImportGenerationRef.current === importGeneration;
-    setVertexState((prev) => ({ ...prev, loading: true, error: undefined, result: undefined }));
-    try {
-      const res: VertexImportResponse = await vertexApi.importCredential(
-        vertexState.file,
-        location || undefined,
-        importRequestScope
-      );
-      if (!isCurrentImport()) return;
-      const result: VertexImportResult = {
-        projectId: res.project_id,
-        email: res.email,
-        location: res.location,
-        authFile: res['auth-file'] ?? res.auth_file,
+        statusText: state.pollingError
+          ? t('auth_login.tile_status_paused')
+          : t('auth_login.tile_status_waiting'),
       };
-      recordAccountCredentialMutationMarker({
-        connectionFingerprint: importConnectionFingerprint,
-        provider: 'vertex',
-      });
-      publishAccountCredentialMutationRevision({
-        connectionFingerprint: importConnectionFingerprint,
-        provider: 'vertex',
-        kind: 'credential',
-      });
-      setVertexState((prev) => ({ ...prev, loading: false, result }));
-      showNotification(t('vertex_import.success'), 'success');
-    } catch (err: unknown) {
-      if (!isCurrentImport()) return;
-      const message = getErrorMessage(err);
-      setVertexState((prev) => ({
-        ...prev,
-        loading: false,
-        error: message || t('notification.upload_failed'),
-      }));
-      const notification = message
-        ? `${t('notification.upload_failed')}: ${message}`
-        : t('notification.upload_failed');
-      showNotification(notification, 'error');
     }
+    if (view === 'success') {
+      return {
+        title,
+        subtitle,
+        icon,
+        status: 'success',
+        statusText: t('auth_login.tile_status_added'),
+      };
+    }
+    if (view === 'failed') {
+      return {
+        title,
+        subtitle,
+        icon,
+        status: 'error',
+        statusText: t('auth_login.tile_status_error'),
+      };
+    }
+    return { title, subtitle, icon, status: 'idle' };
   };
+
+  const getCardLabel = (card: OAuthProviderCard): string =>
+    card.kind === 'builtin'
+      ? typeof card.label === 'string'
+        ? card.label
+        : t(card.label.key)
+      : card.title;
 
   return (
     <div className={styles.container}>
-      <div className={styles.content}>
-        {providers.map((provider) => {
-          const state = states[provider.id] || {};
-          const canSubmitCallback = provider.supportsCallback && Boolean(state.url);
-          const loginButtonLabel =
-            state.status === 'success'
-              ? t('auth_login.login_another_account')
-              : getProviderActionText(provider.id, 'oauth_button');
-          const statusBadgeClassName = [
-            'status-badge',
-            state.status === 'success' ? 'success' : '',
-            state.status === 'error' ? 'error' : '',
-          ]
-            .filter(Boolean)
-            .join(' ');
-          return (
-            <div key={provider.id} id={`oauth-provider-${provider.id}`}>
-              <Card
-                title={
-                  <span className={styles.cardTitle}>
-                    {provider.icon ? (
-                      <img
-                        src={getIcon(provider.icon, resolvedTheme)}
-                        alt=""
-                        className={styles.cardTitleIcon}
-                      />
-                    ) : (
-                      <span className={styles.pluginIconFallback} aria-hidden="true">
-                        {provider.title.slice(0, 1).toUpperCase()}
-                      </span>
-                    )}
-                    {provider.title}
-                  </span>
-                }
-                extra={
-                  <Button onClick={() => startAuth(provider.id)} loading={state.polling}>
-                    {loginButtonLabel}
-                  </Button>
-                }
-              >
-                <div className={styles.cardContent}>
-                  <div className={styles.cardHint}>{provider.hint}</div>
-                  {state.url && (
-                    <div className={styles.authUrlBox}>
-                      <div className={styles.authUrlLabel}>{provider.urlLabel}</div>
-                      <div className={styles.authUrlValue}>{state.url}</div>
-                      <div className={styles.authUrlActions}>
-                        <Button variant="secondary" size="sm" onClick={() => copyLink(state.url!)}>
-                          {getProviderActionText(provider.id, 'copy_link')}
-                        </Button>
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          onClick={() => window.open(state.url, '_blank', 'noopener,noreferrer')}
-                        >
-                          {getProviderActionText(provider.id, 'open_link')}
-                        </Button>
-                      </div>
-                    </div>
-                  )}
-                  {canSubmitCallback && (
-                    <div className={styles.callbackSection}>
-                      <Input
-                        label={t(
-                          provider.id === 'xai'
-                            ? 'auth_login.xai_callback_label'
-                            : 'auth_login.oauth_callback_label'
-                        )}
-                        hint={t(
-                          provider.id === 'xai'
-                            ? 'auth_login.xai_callback_hint'
-                            : 'auth_login.oauth_callback_hint'
-                        )}
-                        value={state.callbackUrl || ''}
-                        onChange={(e) =>
-                          updateProviderState(provider.id, {
-                            callbackUrl: e.target.value,
-                            callbackStatus: undefined,
-                            callbackError: undefined,
-                          })
-                        }
-                        placeholder={t(
-                          provider.id === 'xai'
-                            ? 'auth_login.xai_callback_placeholder'
-                            : 'auth_login.oauth_callback_placeholder'
-                        )}
-                      />
-                      <div className={styles.callbackActions}>
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          onClick={() => submitCallback(provider.id)}
-                          loading={state.callbackSubmitting}
-                        >
-                          {t('auth_login.oauth_callback_button')}
-                        </Button>
-                      </div>
-                      {state.callbackStatus === 'success' && state.status === 'waiting' && (
-                        <div className="status-badge success">
-                          {t('auth_login.oauth_callback_status_success')}
-                        </div>
-                      )}
-                      {state.callbackStatus === 'error' && (
-                        <div className="status-badge error">
-                          {t('auth_login.oauth_callback_status_error')} {state.callbackError || ''}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  {state.status && state.status !== 'idle' && (
-                    <div className={statusBadgeClassName}>
-                      {state.status === 'success'
-                        ? getProviderActionText(provider.id, 'oauth_status_success')
-                        : state.status === 'error'
-                          ? `${getProviderActionText(provider.id, 'oauth_status_error')} ${state.error || ''}`
-                          : getProviderActionText(provider.id, 'oauth_status_waiting')}
-                    </div>
-                  )}
-                  {state.status === 'success' && (
-                    <div className={styles.successActions}>
-                      <Button variant="secondary" size="sm" onClick={() => navigate('/accounts')}>
-                        {t('auth_login.view_credentials')}
-                      </Button>
-                    </div>
-                  )}
-                </div>
-              </Card>
-            </div>
-          );
-        })}
-
-        {/* Vertex JSON 登录 */}
-        <Card
-          title={
-            <span className={styles.cardTitle}>
-              <img src={iconVertex} alt="" className={styles.cardTitleIcon} />
-              {t('vertex_import.title')}
-            </span>
-          }
-          extra={
-            <Button onClick={handleVertexImport} loading={vertexState.loading}>
-              {t('vertex_import.import_button')}
-            </Button>
-          }
-        >
-          <div className={styles.cardContent}>
-            <div className={styles.cardHint}>{t('vertex_import.description')}</div>
-            <Input
-              label={t('vertex_import.location_label')}
-              hint={t('vertex_import.location_hint')}
-              value={vertexState.location}
-              onChange={(e) =>
-                setVertexState((prev) => ({
-                  ...prev,
-                  location: e.target.value,
-                }))
-              }
-              placeholder={t('vertex_import.location_placeholder')}
+      <PageControlBar
+        leading={
+          <div className={styles.controlSummary}>
+            <span
+              className={`${styles.connectionDot} ${connected ? styles.connectionDotLive : ''}`}
+              aria-hidden="true"
             />
-            <div className={styles.formItem}>
-              <label className={styles.formItemLabel}>{t('vertex_import.file_label')}</label>
-              <div className={styles.filePicker}>
-                <Button variant="secondary" size="sm" onClick={handleVertexFilePick}>
-                  {t('vertex_import.choose_file')}
-                </Button>
-                <div
-                  className={`${styles.fileName} ${
-                    vertexState.fileName ? '' : styles.fileNamePlaceholder
-                  }`.trim()}
-                >
-                  {vertexState.fileName || t('vertex_import.file_placeholder')}
-                </div>
-              </div>
-              <div className={styles.cardHintSecondary}>{t('vertex_import.file_hint')}</div>
-              <input
-                ref={vertexFileInputRef}
-                type="file"
-                accept=".json,application/json"
-                style={{ display: 'none' }}
-                onChange={handleVertexFileChange}
-              />
-            </div>
-            {vertexState.error && <div className="status-badge error">{vertexState.error}</div>}
-            {vertexState.result && (
-              <div className={styles.connectionBox}>
-                <div className={styles.connectionLabel}>{t('vertex_import.result_title')}</div>
-                <div className={styles.keyValueList}>
-                  {vertexState.result.projectId && (
-                    <div className={styles.keyValueItem}>
-                      <span className={styles.keyValueKey}>
-                        {t('vertex_import.result_project')}
-                      </span>
-                      <span className={styles.keyValueValue}>{vertexState.result.projectId}</span>
-                    </div>
-                  )}
-                  {vertexState.result.email && (
-                    <div className={styles.keyValueItem}>
-                      <span className={styles.keyValueKey}>{t('vertex_import.result_email')}</span>
-                      <span className={styles.keyValueValue}>{vertexState.result.email}</span>
-                    </div>
-                  )}
-                  {vertexState.result.location && (
-                    <div className={styles.keyValueItem}>
-                      <span className={styles.keyValueKey}>
-                        {t('vertex_import.result_location')}
-                      </span>
-                      <span className={styles.keyValueValue}>{vertexState.result.location}</span>
-                    </div>
-                  )}
-                  {vertexState.result.authFile && (
-                    <div className={styles.keyValueItem}>
-                      <span className={styles.keyValueKey}>{t('vertex_import.result_file')}</span>
-                      <span className={styles.keyValueValue}>{vertexState.result.authFile}</span>
-                    </div>
-                  )}
-                </div>
-              </div>
+            <span className={styles.channelCount}>
+              {t('auth_login.channels_count', { count: totalChannels })}
+            </span>
+            {activeProviderCards.length > 0 && (
+              <button
+                type="button"
+                className={styles.activePill}
+                title={activeProviderCards.map(getCardLabel).join(' / ')}
+                onClick={openNextActiveFlow}
+              >
+                <span className={styles.statusDotWaiting} aria-hidden="true" />
+                <span>
+                  {t('auth_login.in_progress_count', { count: activeProviderCards.length })}
+                </span>
+              </button>
+            )}
+            {flows.addedCount > 0 && (
+              <span className={styles.addedPill}>
+                +{flows.addedCount} {t('auth_login.added_this_session')}
+              </span>
             )}
           </div>
-        </Card>
-      </div>
+        }
+        actions={
+          <>
+            {flows.pluginOAuthAvailable && (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => void flows.loadPluginProviders()}
+                loading={flows.pluginsLoading}
+                disabled={flows.pluginsLoading}
+              >
+                <IconRefreshCw size={14} />
+                <span>{t('auth_login.refresh_plugins')}</span>
+              </Button>
+            )}
+            <Button variant="secondary" size="sm" onClick={() => navigate('/accounts')}>
+              <span>{t('auth_login.view_credentials')}</span>
+              <IconExternalLink size={14} />
+            </Button>
+          </>
+        }
+      />
+
+      {flows.accountReauthSessionId && targetProviderCard && (
+        <div className={styles.reauthBanner}>
+          <div className={styles.reauthBannerText}>
+            <span className={styles.statusDotWaiting} aria-hidden="true" />
+            <span>
+              {t('auth_login.reauth_banner_message', {
+                provider: getCardLabel(targetProviderCard),
+              })}
+            </span>
+          </div>
+          <div className={styles.reauthBannerActions}>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => openProviderFlow(targetProviderCard.id)}
+              disabled={!connected}
+            >
+              {t('auth_login.reauth_open_flow')}
+            </Button>
+            <Button variant="secondary" size="sm" onClick={() => navigate('/accounts')}>
+              <IconChevronLeft size={14} />
+              <span>{t('auth_login.return_to_accounts')}</span>
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Main OAuth / Device-code Providers */}
+      <section className={styles.sectionPanel} aria-labelledby="oauth-builtin-heading">
+        <header className={styles.panelHeader}>
+          <div className={styles.panelHeaderTitleGroup}>
+            <h2 id="oauth-builtin-heading" className={styles.panelTitle}>
+              {t('auth_login.oauth_section_title')}
+            </h2>
+            <span className={styles.panelCount}>{flows.builtInProviders.length}</span>
+          </div>
+          <span className={styles.panelMeta}>{t('auth_login.oauth_section_hint')}</span>
+        </header>
+
+        <div className={styles.panelBody}>
+          <div className={styles.tileGrid}>
+            {flows.builtInProviders.map((card) => {
+              const tile = getTilePresentation(card);
+              return (
+                <ProviderTile
+                  key={card.id}
+                  domId={`oauth-provider-${card.id}`}
+                  icon={tile.icon}
+                  title={tile.title}
+                  subtitle={tile.subtitle}
+                  status={tile.status}
+                  statusText={tile.statusText}
+                  highlighted={targetProviderId === card.id}
+                  disabled={!connected}
+                  onClick={() => openProviderFlow(card.id)}
+                />
+              );
+            })}
+          </div>
+        </div>
+      </section>
+
+      {/* Plugin OAuth Providers (rendered when enabled plugins exist or plugin fetch failed) */}
+      {flows.pluginOAuthAvailable &&
+        (flows.pluginProviders.length > 0 || Boolean(flows.pluginLoadError)) && (
+          <section className={styles.sectionPanel} aria-labelledby="oauth-plugin-heading">
+            <header className={styles.panelHeader}>
+              <div className={styles.panelHeaderTitleGroup}>
+                <h2 id="oauth-plugin-heading" className={styles.panelTitle}>
+                  {t('auth_login.plugin_section_title')}
+                </h2>
+                <span className={styles.panelCount}>{flows.pluginProviders.length}</span>
+              </div>
+              <span className={styles.panelMeta}>{t('auth_login.plugin_section_hint')}</span>
+            </header>
+
+            <div className={styles.panelBody}>
+              {flows.pluginLoadError ? (
+                <div role="alert" className={styles.pluginErrorRow}>
+                  <div className={styles.pluginErrorMessage}>
+                    <IconInfo size={15} />
+                    <span>{flows.pluginLoadError}</span>
+                  </div>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => void flows.loadPluginProviders()}
+                  >
+                    {t('common.retry')}
+                  </Button>
+                </div>
+              ) : (
+                <div className={styles.tileGrid}>
+                  {flows.pluginProviders.map((card) => {
+                    const tile = getTilePresentation(card);
+                    return (
+                      <ProviderTile
+                        key={card.id}
+                        domId={`oauth-provider-${card.id}`}
+                        icon={tile.icon}
+                        title={tile.title}
+                        subtitle={tile.subtitle}
+                        status={tile.status}
+                        statusText={tile.statusText}
+                        highlighted={targetProviderId === card.id}
+                        disabled={!connected}
+                        onClick={() => openProviderFlow(card.id)}
+                      />
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </section>
+        )}
+
+      {/* Other Credential Methods (Vertex AI Import & SIWC Binding) */}
+      <section className={styles.sectionPanel} aria-labelledby="oauth-other-methods-heading">
+        <header className={styles.panelHeader}>
+          <div className={styles.panelHeaderTitleGroup}>
+            <h2 id="oauth-other-methods-heading" className={styles.panelTitle}>
+              {t('auth_login.other_methods_section_title')}
+            </h2>
+            <span className={styles.panelCount}>2</span>
+          </div>
+          <span className={styles.panelMeta}>{t('auth_login.other_methods_section_hint')}</span>
+        </header>
+
+        <div className={styles.panelBody}>
+          <div className={styles.tileGrid}>
+            <ProviderTile
+              domId="oauth-provider-vertex"
+              icon={iconVertex}
+              title={t('vertex_import.tile_title')}
+              subtitle={t('auth_login.vertex_tile_subtitle')}
+              status={vertex.vertex.result ? 'success' : vertex.vertex.error ? 'error' : 'idle'}
+              statusText={
+                vertex.vertex.result
+                  ? t('auth_login.tile_status_added')
+                  : vertex.vertex.error
+                    ? t('auth_login.tile_status_error')
+                    : undefined
+              }
+              highlighted={targetProviderId === 'vertex'}
+              disabled={!connected}
+              onClick={() => setVertexModalFingerprint(flows.connectionFingerprint)}
+            />
+            <ProviderTile
+              domId="oauth-provider-siwc"
+              icon={iconCodex}
+              title={t('siwc.title')}
+              subtitle={t('siwc.tile_caption')}
+              status="idle"
+              highlighted={targetProviderId === 'siwc'}
+              disabled={!connected}
+              onClick={openSiwcDialog}
+            />
+          </div>
+        </div>
+      </section>
+
+      <OAuthFlowDialog
+        card={focusedCard}
+        state={focusedCard ? flows.states[focusedCard.id] ?? {} : {}}
+        theme={theme}
+        connected={connected}
+        isReauthTarget={Boolean(
+          focusedCard && flows.accountReauthSessionId && focusedCard.id === targetProviderId
+        )}
+        providerText={flows.providerText}
+        onStart={() => {
+          if (focusedCard) void flows.startAuth(focusedCard.id);
+        }}
+        onCancel={() => {
+          if (!focusedCard) return;
+          const providerId = focusedCard.id;
+          const token = focusedModalTokenRef.current;
+          void flows.cancelAuth(providerId).then((cancelled) => {
+            if (
+              cancelled &&
+              focusedModalTokenRef.current === token &&
+              focusedProviderRef.current === providerId
+            ) {
+              setFocusedModal(null);
+            }
+          });
+        }}
+        onResumePolling={() => {
+          if (focusedCard) flows.resumePolling(focusedCard.id);
+        }}
+        onCallbackChange={(value) => {
+          if (focusedCard) flows.setCallbackInput(focusedCard.id, value);
+        }}
+        onSubmitCallback={() => {
+          if (focusedCard) void flows.submitCallback(focusedCard.id);
+        }}
+        onNavigateAccounts={() => navigate('/accounts')}
+        onClose={closeProviderFlow}
+      />
+
+      <VertexImportDialog
+        open={vertexDialogOpen}
+        vertex={vertex.vertex}
+        connected={connected}
+        onPickFile={vertex.pickFile}
+        onClearFile={vertex.clearFile}
+        onLocationChange={vertex.setLocation}
+        onImport={() => void vertex.importCredential()}
+        onResetForAnother={vertex.resetForAnother}
+        onNavigateAccounts={() => navigate('/accounts')}
+        onClose={closeVertexDialog}
+      />
+
+      <SiwcBindDialog
+        open={siwcDialogOpen}
+        onClose={closeSiwcDialog}
+        onSuccess={flows.recordCredentialAdded}
+        onViewAccounts={() => {
+          closeSiwcDialog();
+          navigate('/accounts');
+        }}
+      />
     </div>
   );
 }

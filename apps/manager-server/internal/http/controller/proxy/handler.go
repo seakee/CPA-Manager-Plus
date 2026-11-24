@@ -67,6 +67,36 @@ func (h *Handler) V8ModelsRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	h.App.ProxyService.ProxyV8ModelsRefresh(w, r, response.Error, response.MethodNotAllowed)
 }
+
+// V8Credentials forwards CPA v8 credential inventory reads for verified admins
+// only, substituting the saved CPA management key upstream.
+func (h *Handler) V8Credentials(w http.ResponseWriter, r *http.Request) {
+	ok, err := h.App.AdminAuthService.VerifyHeader(r.Context(), r.Header.Get("Authorization"))
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, err)
+		return
+	}
+	if !ok {
+		response.Error(w, http.StatusUnauthorized, errors.New("invalid admin key"))
+		return
+	}
+	h.App.ProxyService.ProxyV8Credentials(w, r, response.Error, response.MethodNotAllowed)
+}
+
+// V8OAuth forwards the four whitelisted CPA v8 OAuth SIWC management routes for
+// verified admins only, substituting the saved CPA management key upstream.
+func (h *Handler) V8OAuth(w http.ResponseWriter, r *http.Request) {
+	ok, err := h.App.AdminAuthService.VerifyHeader(r.Context(), r.Header.Get("Authorization"))
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, err)
+		return
+	}
+	if !ok {
+		response.Error(w, http.StatusUnauthorized, errors.New("invalid admin key"))
+		return
+	}
+	h.App.ProxyService.ProxyV8OAuth(w, r, response.Error, response.MethodNotAllowed)
+}
 func (h *Handler) CPAResource(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet,

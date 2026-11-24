@@ -683,8 +683,8 @@
 .accountGridCardMetaBadges {
   display: flex;
   align-items: center;
-  flex-wrap: nowrap;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 6px 8px;
   min-width: 0;
 
   .accountPriorityButton,
@@ -1398,6 +1398,7 @@
 }
 
 .accountIdentityBadgeRow {
+  flex-wrap: wrap;
   gap: 6px;
 }
 

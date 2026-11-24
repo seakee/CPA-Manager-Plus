@@ -40,6 +40,15 @@ describe('Panel Lite CPA transport boundary', () => {
     expect(() =>
       assertPanelManagementTarget('https://manager.example/control/api/v2/v0/management', '/status')
     ).toThrow();
+    expect(() =>
+      assertPanelManagementTarget('//evil.example/v0/management', '/config')
+    ).toThrow();
+    expect(() =>
+      assertPanelManagementTarget('//evil.example/v8/management', '/credentials')
+    ).toThrow();
+    expect(() =>
+      assertPanelManagementTarget('  //evil.example/api/v2/cpamp/v8/management', '/oauth/siwc/bind')
+    ).toThrow();
   });
 
   it('allows only the authenticated Full Web legacy bridge target', () => {
@@ -51,6 +60,56 @@ describe('Panel Lite CPA transport boundary', () => {
     ).not.toThrow();
     expect(() =>
       assertPanelManagementTarget('https://manager.example/control/api/v2/v0/management', '/config')
+    ).toThrow();
+    expect(() =>
+      assertPanelManagementTarget(
+        'https://manager.example/control/api/v2/cpamp/v8/management',
+        '/oauth/siwc/bind'
+      )
+    ).not.toThrow();
+    expect(() =>
+      assertPanelManagementTarget('http://cpa:8317/v8/management', '/oauth/siwc/bind')
+    ).not.toThrow();
+    expect(() =>
+      assertPanelManagementTarget('https://manager.example/control/api/v2/v8/management', '/oauth/siwc/bind')
+    ).toThrow();
+  });
+
+  it.each([
+    '/credentials',
+    '/oauth/siwc/bind',
+    '/oauth/callback',
+    '/oauth/status',
+    '/oauth/session',
+  ])('permits allowlisted CPA v8 management path %s on standalone and Full Web bases', (resource) => {
+    expect(() =>
+      assertPanelManagementTarget('http://cpa:8317/v8/management', resource)
+    ).not.toThrow();
+    expect(() =>
+      assertPanelManagementTarget(
+        'https://manager.example/control/api/v2/cpamp/v8/management',
+        resource
+      )
+    ).not.toThrow();
+  });
+
+  it.each([
+    '/config',
+    '/config/access/api-keys',
+    '/oauth/status/',
+    '/credentials/download',
+    '/oauth/siwc/bind/extra',
+    '/api/v2',
+    '/api/v2/status',
+  ])('rejects non-allowlisted or escaping CPA v8 management path %s', (resource) => {
+    expect(() =>
+      assertPanelManagementTarget('http://cpa:8317/v8/management', resource)
+    ).toThrow();
+    expect(() =>
+      assertPanelManagementTarget(
+        'https://manager.example/control/api/v2/cpamp/v8/management',
+        resource
+      )
     ).toThrow();
   });
 

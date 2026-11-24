@@ -137,6 +137,18 @@ func externalLegacyLogConfigWrite(path, method string) bool {
 	}
 }
 
+var managerLocalManagementFamilySlugs = []string{
+	"usage",
+	"dashboard",
+	"model-prices",
+	"monitoring",
+	"api-key-aliases",
+	"account-action-candidates",
+	"codex-inspection",
+	"quota-snapshots",
+	"cpa-connection",
+}
+
 // legacyBridgePresentsSavedKey reports whether a legacy request ends up presenting
 // the saved management credential to the user's CPA once its caller is authorized.
 // Only those requests are gated: the Manager-local families answer from its own
@@ -157,6 +169,12 @@ func legacyBridgePresentsSavedKey(r *http.Request) bool {
 	if proxysvc.IsCPAV8ModelsRefreshPath(path) {
 		return r.Method == http.MethodPost && proxysvc.IsCanonicalV8ModelsRefreshRequest(r)
 	}
+	if proxysvc.IsCPAV8CredentialsPath(path) {
+		return r.Method == http.MethodGet && proxysvc.IsCanonicalV8CredentialsRequest(r)
+	}
+	if proxysvc.IsCPAV8OAuthPath(path) {
+		return r.Method == proxysvc.CPAV8OAuthAllowedMethod(path) && proxysvc.IsCanonicalV8OAuthRequest(r)
+	}
 	cleaned := strings.TrimRight(path, "/")
 	if cleaned == "/v0/resource/plugins" || strings.HasPrefix(cleaned, "/v0/resource/plugins/") {
 		return true
@@ -166,17 +184,8 @@ func legacyBridgePresentsSavedKey(r *http.Request) bool {
 	}
 	// Manager-local controllers are dispatched before the CPA proxy in the legacy
 	// router, so they never carry the saved key upstream.
-	for _, family := range []string{
-		"/v0/management/usage",
-		"/v0/management/dashboard",
-		"/v0/management/model-prices",
-		"/v0/management/monitoring",
-		"/v0/management/api-key-aliases",
-		"/v0/management/account-action-candidates",
-		"/v0/management/codex-inspection",
-		"/v0/management/quota-snapshots",
-		"/v0/management/cpa-connection",
-	} {
+	for _, slug := range managerLocalManagementFamilySlugs {
+		family := "/v0/management/" + slug
 		if cleaned == family || strings.HasPrefix(cleaned, family+"/") {
 			return false
 		}
@@ -598,12 +607,12 @@ func (a *freshApplication) externalCredentialHoldBudget(path string) time.Durati
 // non-streaming completion that takes a minute to send its headers is a healthy
 // answer, not a hung CPA, and cutting it turns it into a 502.
 //
-// `api-call` forwards an arbitrary provider request. `oauth-callback` exchanges an
-// authorization code for tokens at the provider, and that exchange is the
-// provider's latency too.
+// `api-call` forwards an arbitrary provider request. `oauth-callback` and CPA
+// v8 `/v8/management/oauth/callback` exchange an authorization code for tokens
+// at the provider, and that exchange is the provider's latency too.
 func externalLegacyWaitsOnProvider(path string) bool {
 	switch strings.TrimRight(path, "/") {
-	case "/v0/management/api-call", "/v0/management/oauth-callback":
+	case "/v0/management/api-call", "/v0/management/oauth-callback", "/v8/management/oauth/callback":
 		return true
 	default:
 		return false
@@ -1682,10 +1691,12 @@ func legacyBridgePathAllowed(resource, method string) bool {
 		return allowed(http.MethodGet, http.MethodDelete)
 	case "v0/management/request-error-logs":
 		return allowed(http.MethodGet)
-	case "v0/management/codex-auth-url", "v0/management/anthropic-auth-url", "v0/management/antigravity-auth-url", "v0/management/kimi-auth-url", "v0/management/xai-auth-url", "v0/management/get-auth-status":
+	case "v0/management/codex-auth-url", "v0/management/anthropic-auth-url", "v0/management/antigravity-auth-url", "v0/management/kimi-auth-url", "v0/management/kimi-ai-auth-url", "v0/management/xai-auth-url", "v0/management/devin-auth-url", "v0/management/meta-auth-url", "v0/management/get-auth-status":
 		return allowed(http.MethodGet)
 	case "v0/management/oauth-callback":
 		return allowed(http.MethodPost)
+	case "v0/management/oauth-session":
+		return allowed(http.MethodDelete)
 	case "v0/management/latest-version":
 		return allowed(http.MethodGet)
 	case "v0/management/config.yaml":
@@ -1750,6 +1761,16 @@ func legacyBridgePathAllowed(resource, method string) bool {
 		return allowed(http.MethodGet)
 	case "v8/management/models/refresh":
 		return allowed(http.MethodPost)
+	case "v8/management/credentials":
+		return allowed(http.MethodGet)
+	case "v8/management/oauth/siwc/bind":
+		return allowed(http.MethodPost)
+	case "v8/management/oauth/callback":
+		return allowed(http.MethodPost)
+	case "v8/management/oauth/status":
+		return allowed(http.MethodGet)
+	case "v8/management/oauth/session":
+		return allowed(http.MethodDelete)
 	case "status", "health", "v1/models", "models":
 		return allowed(http.MethodGet)
 	default:
@@ -1764,7 +1785,14 @@ func legacyBridgeDynamicPathAllowed(resource, method string, allowed func(...str
 	}
 	path := strings.TrimPrefix(resource, management)
 	parts := strings.Split(path, "/")
-	if len(parts) < 2 || !safeBridgePathSegment(parts[len(parts)-1]) {
+	if len(parts) == 1 {
+		if strings.HasSuffix(parts[0], "-auth-url") &&
+			validBridgeOAuthProviderSlug(strings.TrimSuffix(parts[0], "-auth-url")) {
+			return allowed(http.MethodGet)
+		}
+		return false
+	}
+	if !safeBridgePathSegment(parts[len(parts)-1]) {
 		return false
 	}
 	// Request logs and API-key aliases use opaque single path segments.
@@ -1859,6 +1887,37 @@ func safeBridgePathSegment(value string) bool {
 		return false
 	}
 	return value != "." && value != ".."
+}
+
+func validBridgeOAuthProviderSlug(slug string) bool {
+	if slug == "" || isManagerLocalManagementFamilySlug(slug) {
+		return false
+	}
+	prevHyphen := true
+	for _, b := range []byte(slug) {
+		if b == '-' {
+			if prevHyphen {
+				return false
+			}
+			prevHyphen = true
+			continue
+		}
+		if (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') {
+			prevHyphen = false
+			continue
+		}
+		return false
+	}
+	return !prevHyphen
+}
+
+func isManagerLocalManagementFamilySlug(slug string) bool {
+	for _, reserved := range managerLocalManagementFamilySlugs {
+		if slug == reserved || strings.HasPrefix(slug, reserved+"-") {
+			return true
+		}
+	}
+	return false
 }
 
 func safeBridgeNumericSegment(value string) bool {

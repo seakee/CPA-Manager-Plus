@@ -105,7 +105,10 @@ func New(appCtx *app.Context) http.Handler {
 // with an exact 404 before ServeMux can redirect them onto a canonical one.
 func refuseNonCanonicalV8APIKeysPath(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if proxysvc.IsNonCanonicalV8APIKeysConfigRequest(r) || proxysvc.IsNonCanonicalV8ModelsRefreshRequest(r) {
+		if proxysvc.IsNonCanonicalV8APIKeysConfigRequest(r) ||
+			proxysvc.IsNonCanonicalV8ModelsRefreshRequest(r) ||
+			proxysvc.IsNonCanonicalV8CredentialsRequest(r) ||
+			proxysvc.IsNonCanonicalV8OAuthRequest(r) {
 			http.NotFound(w, r)
 			return
 		}
@@ -127,12 +130,25 @@ func rootHandler(
 	proxyHandler *proxycontroller.Handler,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// The v8 API-key subtree accepts GET only. Its OPTIONS is answered here
-		// rather than by the generic preflight branch below, which would advertise
-		// a 204 for a method the route does not have. This still runs inside
-		// RejectCrossSiteAdmin, so a sandboxed document cannot even ask.
-		if (proxysvc.IsCPAV8APIKeysConfigPath(r.URL.Path) || proxysvc.IsCPAV8ModelsRefreshPath(r.URL.Path)) && r.Method == http.MethodOptions {
+		// Whitelisted CPA v8 routes enforce exact per-path method sets (GET on
+		// /config/api-keys* and /credentials, POST on /models/refresh, and one exact
+		// method per /oauth/* route). Answer bare OPTIONS probes, untrusted origins,
+		// and disallowed preflights with 405 rather than falling through to the
+		// generic 204 preflight branch, while admitting valid CORS preflights when
+		// middleware.WriteCORS trusts the Origin and Access-Control-Request-Method
+		// names a method allowed on that path. This still runs inside
+		// RejectCrossSiteAdmin, so a sandboxed document cannot reach it.
+		if (proxysvc.IsCPAV8APIKeysConfigPath(r.URL.Path) ||
+			proxysvc.IsCPAV8ModelsRefreshPath(r.URL.Path) ||
+			proxysvc.IsCPAV8CredentialsPath(r.URL.Path) ||
+			proxysvc.IsCPAV8OAuthPath(r.URL.Path)) && r.Method == http.MethodOptions {
 			middleware.WriteCORS(appCtx.Config, w, r)
+			if strings.TrimSpace(r.Header.Get("Origin")) != "" &&
+				w.Header().Get("Access-Control-Allow-Origin") != "" &&
+				isAllowedCPAV8PreflightMethod(r.URL.Path, strings.TrimSpace(r.Header.Get("Access-Control-Request-Method"))) {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
 			response.MethodNotAllowed(w)
 			return
 		}
@@ -141,19 +157,19 @@ func rootHandler(
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/v0/management/model-prices") {
+		if hasManagementFamilyPrefix(r.URL.Path, "/v0/management/model-prices") {
 			middleware.WithCORS(appCtx.Config, modelPriceHandler.Handle)(w, r)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/v0/management/api-key-aliases") {
+		if hasManagementFamilyPrefix(r.URL.Path, "/v0/management/api-key-aliases") {
 			middleware.WithCORS(appCtx.Config, apiKeyAliasHandler.Handle)(w, r)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/v0/management/account-action-candidates") {
+		if hasManagementFamilyPrefix(r.URL.Path, "/v0/management/account-action-candidates") {
 			middleware.WithCORS(appCtx.Config, accountActionHandler.Handle)(w, r)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/v0/management/codex-inspection") {
+		if hasManagementFamilyPrefix(r.URL.Path, "/v0/management/codex-inspection") {
 			middleware.WithCORS(appCtx.Config, codexInspectionHandler.Handle)(w, r)
 			return
 		}
@@ -211,10 +227,38 @@ func rootHandler(
 			middleware.WithCORS(appCtx.Config, proxyHandler.V8ModelsRefresh)(w, r)
 			return
 		}
+		if proxysvc.IsCPAV8CredentialsPath(r.URL.Path) {
+			middleware.WithCORS(appCtx.Config, proxyHandler.V8Credentials)(w, r)
+			return
+		}
+		if proxysvc.IsCPAV8OAuthPath(r.URL.Path) {
+			middleware.WithCORS(appCtx.Config, proxyHandler.V8OAuth)(w, r)
+			return
+		}
 		if r.URL.Path == "/" {
 			http.Redirect(w, r, "/management.html", http.StatusTemporaryRedirect)
 			return
 		}
 		http.NotFound(w, r)
+	}
+}
+
+func hasManagementFamilyPrefix(requestPath, family string) bool {
+	return requestPath == family || strings.HasPrefix(requestPath, family+"/")
+}
+
+func isAllowedCPAV8PreflightMethod(path, method string) bool {
+	switch {
+	case proxysvc.IsCPAV8APIKeysConfigPath(path):
+		return method == http.MethodGet
+	case proxysvc.IsCPAV8ModelsRefreshPath(path):
+		return method == http.MethodPost
+	case proxysvc.IsCPAV8CredentialsPath(path):
+		return method == http.MethodGet
+	case proxysvc.IsCPAV8OAuthPath(path):
+		allowed := proxysvc.CPAV8OAuthAllowedMethod(path)
+		return allowed != "" && method == allowed
+	default:
+		return false
 	}
 }

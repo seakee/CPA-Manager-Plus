@@ -2,6 +2,7 @@ import { authFilesApi, type AuthFilesApiRequestScope } from '@/services/api/auth
 import { createScopedApiRequestConfig } from '@/services/api/client';
 import type { TFunction } from 'i18next';
 import { getApiCallErrorMessage } from '@/services/api/apiCall';
+import { createConnectionFingerprint } from '@/utils/connectionFingerprint';
 import type { AuthFileItem, Config, QuotaModelScope } from '@/types';
 import {
   CODEX_INSPECTION_AUTO_ACTION_MODES,
@@ -308,26 +309,7 @@ export class CodexInspectionStoppedError extends Error {
   }
 }
 
-export const createCodexInspectionConnectionFingerprint = (
-  apiBase: string,
-  managementKey: string
-) => {
-  const normalizedApiBase = readString(apiBase).replace(/\/+$/, '');
-  const normalizedManagementKey = readString(managementKey);
-  if (!normalizedApiBase || !normalizedManagementKey) return null;
-
-  const input = `${normalizedApiBase}\u0000${normalizedManagementKey}`;
-  let hashA = 0x811c9dc5;
-  let hashB = 0x9e3779b9;
-
-  for (let index = 0; index < input.length; index += 1) {
-    const code = input.charCodeAt(index);
-    hashA = Math.imul(hashA ^ code, 0x01000193);
-    hashB = Math.imul(hashB ^ code, 0x85ebca6b);
-  }
-
-  return `v1:${(hashA >>> 0).toString(36)}${(hashB >>> 0).toString(36)}`;
-};
+export const createCodexInspectionConnectionFingerprint = createConnectionFingerprint;
 
 const createDeferred = (): CodexInspectionSessionPromiseState => {
   let resolve: ((value: CodexInspectionRunResult) => void) | null = null;

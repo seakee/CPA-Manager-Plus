@@ -42,6 +42,16 @@ export interface AuthFileItem {
   geminiVirtualProject?: string;
   recent_requests?: RecentRequestBucket[];
   recentRequests?: RecentRequestBucket[];
+  siwc_bind_supported?: boolean;
+  siwcBindSupported?: boolean;
+  use_siwc?: boolean;
+  useSiwc?: boolean;
+  siwc_bound?: boolean;
+  siwcBound?: boolean;
+  siwc_expires_at?: string;
+  siwcExpiresAt?: string;
+  siwc_status?: string;
+  siwcStatus?: string;
   [key: string]: unknown;
 }
 

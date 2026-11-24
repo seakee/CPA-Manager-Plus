@@ -230,9 +230,10 @@ export function useAuthFileConfigurationEditor(
       state.record,
       state.providerKey,
       state.originalDraft,
-      state.draft
+      state.draft,
+      file ?? state.authFile
     );
-  }, [state]);
+  }, [file, state]);
 
   const hasPatch = Object.keys(patchResult.patch).length > 0;
   const hasErrors = Object.keys(patchResult.errors).length > 0;

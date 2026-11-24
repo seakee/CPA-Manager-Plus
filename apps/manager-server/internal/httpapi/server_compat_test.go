@@ -1588,6 +1588,457 @@ func TestServerCompatV8ModelsRefreshProxy(t *testing.T) {
 	}
 }
 
+func TestServerCompatV0OAuthManagementRoutesRequireAdminAuth(t *testing.T) {
+	cpa := testutil.NewCPAMock(t)
+	setup := &store.Setup{CPAUpstreamURL: cpa.URL(), ManagementKey: "management-key", Queue: "usage", PopSide: "right"}
+	handler, _ := newCompatHandler(t, testutil.NewConfig(t), setup)
+
+	oauthRoutes := []struct {
+		method string
+		target string
+		path   string
+		query  string
+		body   string
+	}{
+		{
+			method: http.MethodPost,
+			target: "/v0/management/oauth-callback",
+			path:   "/v0/management/oauth-callback",
+			body:   `{"provider":"codex","redirect_url":"http://127.0.0.1:1455/auth/callback?state=st_1&code=cd_1"}`,
+		},
+		{
+			method: http.MethodDelete,
+			target: "/v0/management/oauth-session?state=st_1",
+			path:   "/v0/management/oauth-session",
+			query:  "state=st_1",
+		},
+		{
+			method: http.MethodGet,
+			target: "/v0/management/get-auth-status?state=st_1",
+			path:   "/v0/management/get-auth-status",
+			query:  "state=st_1",
+		},
+		{
+			method: http.MethodGet,
+			target: "/v0/management/kimi-ai-auth-url?is_webui=true",
+			path:   "/v0/management/kimi-ai-auth-url",
+			query:  "is_webui=true",
+		},
+		{
+			method: http.MethodGet,
+			target: "/v0/management/model-prices-auth-url?is_webui=true",
+			path:   "/v0/management/model-prices-auth-url",
+			query:  "is_webui=true",
+		},
+	}
+
+	for _, route := range oauthRoutes {
+		for _, cred := range []struct {
+			name string
+			key  string
+		}{
+			{name: "missing admin key", key: ""},
+			{name: "wrong admin key", key: "wrong-key"},
+			{name: "raw CPA management key", key: "management-key"},
+		} {
+			t.Run(route.method+" "+route.path+" "+cred.name, func(t *testing.T) {
+				before := len(cpa.Requests())
+				res := testutil.Request(t, handler, route.method, route.target, route.body, cred.key)
+				testutil.RequireStatus(t, res, http.StatusUnauthorized)
+				if len(cpa.Requests()) != before {
+					t.Fatalf("%s %s (%s) unexpectedly reached CPA", route.method, route.target, cred.name)
+				}
+			})
+		}
+
+		okRes := testutil.Request(t, handler, route.method, route.target, route.body, testutil.AdminKey)
+		testutil.RequireStatus(t, okRes, http.StatusOK)
+		got, ok := cpa.LastRequest(route.path)
+		if !ok {
+			t.Fatalf("CPA mock did not receive %s", route.path)
+		}
+		if got.Method != route.method || got.Authorization != "Bearer management-key" || got.Query != route.query || got.Body != route.body {
+			t.Fatalf("%s %s proxy request = %#v", route.method, route.target, got)
+		}
+	}
+}
+
+func TestServerCompatV8CredentialsProxy(t *testing.T) {
+	cpa := testutil.NewCPAMock(t)
+	setup := &store.Setup{CPAUpstreamURL: cpa.URL(), ManagementKey: "management-key", Queue: "usage", PopSide: "right"}
+	handler, _ := newCompatHandler(t, testutil.NewConfig(t), setup)
+
+	for _, tc := range []struct {
+		target string
+		query  string
+	}{
+		{target: "/v8/management/credentials"},
+		{target: "/v8/management/credentials?name=codex-main.json", query: "name=codex-main.json"},
+	} {
+		rr := testutil.Request(t, handler, http.MethodGet, tc.target, "", testutil.AdminKey)
+		testutil.RequireStatus(t, rr, http.StatusOK)
+		got, ok := cpa.LastRequest("/v8/management/credentials")
+		if !ok {
+			t.Fatal("CPA mock did not receive /v8/management/credentials")
+		}
+		if got.Method != http.MethodGet || got.Authorization != "Bearer management-key" || got.Query != tc.query {
+			t.Fatalf("GET %s proxy request = %#v", tc.target, got)
+		}
+	}
+
+	for _, tc := range []struct {
+		name       string
+		method     string
+		target     string
+		key        string
+		want       int
+		noRedirect bool
+	}{
+		{name: "missing admin key", method: http.MethodGet, target: "/v8/management/credentials", want: http.StatusUnauthorized},
+		{name: "wrong admin key", method: http.MethodGet, target: "/v8/management/credentials", key: "wrong-key", want: http.StatusUnauthorized},
+		{name: "CPA management key rejected", method: http.MethodGet, target: "/v8/management/credentials", key: "management-key", want: http.StatusUnauthorized},
+		{name: "post not allowed", method: http.MethodPost, target: "/v8/management/credentials", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "put not allowed", method: http.MethodPut, target: "/v8/management/credentials", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "patch not allowed", method: http.MethodPatch, target: "/v8/management/credentials", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "delete not allowed", method: http.MethodDelete, target: "/v8/management/credentials", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "options with key not allowed", method: http.MethodOptions, target: "/v8/management/credentials", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "options without key not allowed", method: http.MethodOptions, target: "/v8/management/credentials", want: http.StatusMethodNotAllowed},
+		{name: "trailing slash denied", method: http.MethodGet, target: "/v8/management/credentials/", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "verify subpath denied", method: http.MethodPost, target: "/v8/management/credentials/verify", key: testutil.AdminKey, want: http.StatusNotFound},
+		{name: "status subpath denied", method: http.MethodPatch, target: "/v8/management/credentials/status", key: testutil.AdminKey, want: http.StatusNotFound},
+		{name: "fields subpath denied", method: http.MethodPatch, target: "/v8/management/credentials/fields", key: testutil.AdminKey, want: http.StatusNotFound},
+		{name: "duplicate slash denied", method: http.MethodGet, target: "/v8//management/credentials", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "leading double slash denied", method: http.MethodGet, target: "//v8/management/credentials", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "dot segment denied", method: http.MethodGet, target: "/v8/management/./credentials", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "encoded dot segment denied", method: http.MethodGet, target: "/v8/management/credentials/%2e%2e/config", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "encoded unreserved denied", method: http.MethodGet, target: "/v8/management/%63redentials", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := len(cpa.Requests())
+			res := testutil.Request(t, handler, tc.method, tc.target, "", tc.key)
+			testutil.RequireStatus(t, res, tc.want)
+			if tc.noRedirect && res.Header().Get("Location") != "" {
+				t.Fatalf("%s %s redirected to %q", tc.method, tc.target, res.Header().Get("Location"))
+			}
+			if len(cpa.Requests()) != before {
+				t.Fatalf("%s %s unexpectedly reached CPA", tc.method, tc.target)
+			}
+		})
+	}
+
+	for _, target := range []string{"/v8/management/credentials", "/v8/management/%63redentials"} {
+		before := len(cpa.Requests())
+		crossSite := httptest.NewRequest(http.MethodGet, target, nil)
+		crossSite.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+		crossSite.Header.Set("Sec-Fetch-Site", "cross-site")
+		crossSite.Header.Set("Sec-Fetch-Dest", "empty")
+		crossSiteRR := httptest.NewRecorder()
+		handler.ServeHTTP(crossSiteRR, crossSite)
+		testutil.RequireStatus(t, crossSiteRR, http.StatusForbidden)
+		if len(cpa.Requests()) != before {
+			t.Fatalf("cross-site GET %s reached CPA", target)
+		}
+	}
+
+	t.Run("CORS preflight trusts configured origin and exact allowed methods on credentials and models refresh", func(t *testing.T) {
+		corsCfg := testutil.NewConfig(t)
+		corsCfg.CORSOrigins = []string{"http://localhost:5173"}
+		corsHandler, _ := newCompatHandler(t, corsCfg, setup)
+
+		for _, tc := range []struct {
+			name          string
+			target        string
+			origin        string
+			requestMethod string
+			want          int
+			wantACAO      string
+		}{
+			{
+				name:          "credentials trusted GET preflight allowed",
+				target:        "/v8/management/credentials",
+				origin:        "http://localhost:5173",
+				requestMethod: http.MethodGet,
+				want:          http.StatusNoContent,
+				wantACAO:      "http://localhost:5173",
+			},
+			{
+				name:          "credentials trusted POST preflight rejected",
+				target:        "/v8/management/credentials",
+				origin:        "http://localhost:5173",
+				requestMethod: http.MethodPost,
+				want:          http.StatusMethodNotAllowed,
+				wantACAO:      "http://localhost:5173",
+			},
+			{
+				name:          "credentials untrusted GET preflight rejected",
+				target:        "/v8/management/credentials",
+				origin:        "https://untrusted.example",
+				requestMethod: http.MethodGet,
+				want:          http.StatusMethodNotAllowed,
+				wantACAO:      "",
+			},
+			{
+				name:          "credentials bare OPTIONS rejected",
+				target:        "/v8/management/credentials",
+				origin:        "",
+				requestMethod: http.MethodGet,
+				want:          http.StatusMethodNotAllowed,
+				wantACAO:      "",
+			},
+			{
+				name:          "models refresh trusted POST preflight allowed",
+				target:        "/v8/management/models/refresh",
+				origin:        "http://localhost:5173",
+				requestMethod: http.MethodPost,
+				want:          http.StatusNoContent,
+				wantACAO:      "http://localhost:5173",
+			},
+			{
+				name:          "models refresh trusted GET preflight rejected",
+				target:        "/v8/management/models/refresh",
+				origin:        "http://localhost:5173",
+				requestMethod: http.MethodGet,
+				want:          http.StatusMethodNotAllowed,
+				wantACAO:      "http://localhost:5173",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				before := len(cpa.Requests())
+				req := httptest.NewRequest(http.MethodOptions, tc.target, nil)
+				if tc.origin != "" {
+					req.Header.Set("Origin", tc.origin)
+				}
+				if tc.requestMethod != "" {
+					req.Header.Set("Access-Control-Request-Method", tc.requestMethod)
+				}
+				req.Header.Set("Access-Control-Request-Headers", "Authorization, Content-Type")
+				rr := httptest.NewRecorder()
+				corsHandler.ServeHTTP(rr, req)
+				testutil.RequireStatus(t, rr, tc.want)
+				if got := rr.Header().Get("Access-Control-Allow-Origin"); got != tc.wantACAO {
+					t.Fatalf("Access-Control-Allow-Origin = %q, want %q", got, tc.wantACAO)
+				}
+				if len(cpa.Requests()) != before {
+					t.Fatalf("OPTIONS %s unexpectedly reached CPA", tc.target)
+				}
+			})
+		}
+	})
+}
+
+func TestServerCompatV8OAuthProxy(t *testing.T) {
+	cpa := testutil.NewCPAMock(t)
+	setup := &store.Setup{CPAUpstreamURL: cpa.URL(), ManagementKey: "management-key", Queue: "usage", PopSide: "right"}
+	handler, _ := newCompatHandler(t, testutil.NewConfig(t), setup)
+
+	for _, tc := range []struct {
+		method string
+		target string
+		path   string
+		query  string
+		body   string
+	}{
+		{
+			method: http.MethodPost,
+			target: "/v8/management/oauth/siwc/bind",
+			path:   "/v8/management/oauth/siwc/bind",
+			body:   `{"name":"codex-main.json"}`,
+		},
+		{
+			method: http.MethodPost,
+			target: "/v8/management/oauth/callback",
+			path:   "/v8/management/oauth/callback",
+			body:   `{"provider":"codex","redirect_url":"http://127.0.0.1:1455/auth/callback?state=st_abc&code=code_xyz"}`,
+		},
+		{
+			method: http.MethodGet,
+			target: "/v8/management/oauth/status?state=st_abc",
+			path:   "/v8/management/oauth/status",
+			query:  "state=st_abc",
+		},
+		{
+			method: http.MethodDelete,
+			target: "/v8/management/oauth/session?state=st_abc",
+			path:   "/v8/management/oauth/session",
+			query:  "state=st_abc",
+		},
+	} {
+		rr := testutil.Request(t, handler, tc.method, tc.target, tc.body, testutil.AdminKey)
+		testutil.RequireStatus(t, rr, http.StatusOK)
+		got, ok := cpa.LastRequest(tc.path)
+		if !ok {
+			t.Fatalf("CPA mock did not receive %s", tc.path)
+		}
+		if got.Method != tc.method || got.Authorization != "Bearer management-key" || got.Query != tc.query || got.Body != tc.body {
+			t.Fatalf("%s %s proxy request = %#v", tc.method, tc.target, got)
+		}
+	}
+
+	for _, tc := range []struct {
+		name       string
+		method     string
+		target     string
+		key        string
+		want       int
+		noRedirect bool
+	}{
+		{name: "missing admin key on bind", method: http.MethodPost, target: "/v8/management/oauth/siwc/bind", want: http.StatusUnauthorized},
+		{name: "wrong admin key on callback", method: http.MethodPost, target: "/v8/management/oauth/callback", key: "wrong-key", want: http.StatusUnauthorized},
+		{name: "CPA management key rejected on status", method: http.MethodGet, target: "/v8/management/oauth/status?state=st_abc", key: "management-key", want: http.StatusUnauthorized},
+		{name: "missing admin key on session", method: http.MethodDelete, target: "/v8/management/oauth/session?state=st_abc", want: http.StatusUnauthorized},
+		{name: "bind get not allowed", method: http.MethodGet, target: "/v8/management/oauth/siwc/bind", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "callback get not allowed", method: http.MethodGet, target: "/v8/management/oauth/callback", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "status post not allowed", method: http.MethodPost, target: "/v8/management/oauth/status?state=st_abc", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "session get not allowed", method: http.MethodGet, target: "/v8/management/oauth/session?state=st_abc", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "options bind not allowed", method: http.MethodOptions, target: "/v8/management/oauth/siwc/bind", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "options callback without key not allowed", method: http.MethodOptions, target: "/v8/management/oauth/callback", want: http.StatusMethodNotAllowed},
+		{name: "options status not allowed", method: http.MethodOptions, target: "/v8/management/oauth/status", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "options session not allowed", method: http.MethodOptions, target: "/v8/management/oauth/session", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "oauth root denied", method: http.MethodGet, target: "/v8/management/oauth", key: testutil.AdminKey, want: http.StatusNotFound},
+		{name: "siwc parent denied", method: http.MethodPost, target: "/v8/management/oauth/siwc", key: testutil.AdminKey, want: http.StatusNotFound},
+		{name: "nested bind path denied", method: http.MethodPost, target: "/v8/management/oauth/siwc/bind/extra", key: testutil.AdminKey, want: http.StatusNotFound},
+		{name: "trailing slash bind denied", method: http.MethodPost, target: "/v8/management/oauth/siwc/bind/", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "trailing slash status denied", method: http.MethodGet, target: "/v8/management/oauth/status/", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "duplicate slash in prefix denied", method: http.MethodPost, target: "/v8//management/oauth/siwc/bind", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "leading double slash denied", method: http.MethodPost, target: "//v8/management/oauth/callback", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "duplicate slash in subtree denied", method: http.MethodGet, target: "/v8/management/oauth//status", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "dot segment denied", method: http.MethodDelete, target: "/v8/management/oauth/./session", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "parent traversal denied", method: http.MethodPost, target: "/v8/management/oauth/siwc/bind/../../../credentials/download", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "encoded dot segment denied", method: http.MethodGet, target: "/v8/management/oauth/%2e%2e/models/refresh", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "encoded slash denied", method: http.MethodPost, target: "/v8/management/oauth/siwc%2Fbind", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "encoded uppercase dot segment denied", method: http.MethodGet, target: "/v8/management/oauth/%2E%2E/config", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "encoded lowercase slash denied", method: http.MethodPost, target: "/v8/management/oauth/siwc%2fbind", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "encoded unreserved status denied", method: http.MethodGet, target: "/v8/management/oauth/%73tatus", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "encoded unreserved bind denied", method: http.MethodPost, target: "/v8/management/oauth/siwc/%62ind", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := len(cpa.Requests())
+			res := testutil.Request(t, handler, tc.method, tc.target, "", tc.key)
+			testutil.RequireStatus(t, res, tc.want)
+			if tc.noRedirect && res.Header().Get("Location") != "" {
+				t.Fatalf("%s %s redirected to %q", tc.method, tc.target, res.Header().Get("Location"))
+			}
+			if len(cpa.Requests()) != before {
+				t.Fatalf("%s %s unexpectedly reached CPA", tc.method, tc.target)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		method string
+		target string
+	}{
+		{method: http.MethodPost, target: "/v8/management/oauth/siwc/bind"},
+		{method: http.MethodPost, target: "/v8/management/oauth/callback"},
+		{method: http.MethodGet, target: "/v8/management/oauth/status?state=st_abc"},
+		{method: http.MethodDelete, target: "/v8/management/oauth/session?state=st_abc"},
+		{method: http.MethodGet, target: "/v8/management/oauth//status"},
+	} {
+		before := len(cpa.Requests())
+		crossSite := httptest.NewRequest(tc.method, tc.target, nil)
+		crossSite.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+		crossSite.Header.Set("Origin", "https://untrusted.example")
+		crossSite.Header.Set("Sec-Fetch-Site", "cross-site")
+		crossSite.Header.Set("Sec-Fetch-Dest", "empty")
+		crossSiteRR := httptest.NewRecorder()
+		handler.ServeHTTP(crossSiteRR, crossSite)
+		testutil.RequireStatus(t, crossSiteRR, http.StatusForbidden)
+		if len(cpa.Requests()) != before {
+			t.Fatalf("cross-site %s %s reached CPA", tc.method, tc.target)
+		}
+	}
+
+	t.Run("untrusted origin CORS and cross-site isolation on callback and session", func(t *testing.T) {
+		corsCfg := testutil.NewConfig(t)
+		corsCfg.CORSOrigins = []string{"http://localhost:5173"}
+		corsHandler, _ := newCompatHandler(t, corsCfg, setup)
+
+		for _, tc := range []struct {
+			method string
+			target string
+			body   string
+		}{
+			{
+				method: http.MethodPost,
+				target: "/v8/management/oauth/callback",
+				body:   `{"provider":"codex","redirect_url":"http://127.0.0.1:1455/auth/callback?state=st_abc&code=code_xyz"}`,
+			},
+			{
+				method: http.MethodDelete,
+				target: "/v8/management/oauth/session?state=st_abc",
+			},
+		} {
+			before := len(cpa.Requests())
+			preflight := httptest.NewRequest(http.MethodOptions, tc.target, nil)
+			preflight.Header.Set("Origin", "https://untrusted.example")
+			preflight.Header.Set("Access-Control-Request-Method", tc.method)
+			preflight.Header.Set("Access-Control-Request-Headers", "Authorization, Content-Type")
+			preflightRR := httptest.NewRecorder()
+			corsHandler.ServeHTTP(preflightRR, preflight)
+			testutil.RequireStatus(t, preflightRR, http.StatusMethodNotAllowed)
+			if got := preflightRR.Header().Get("Access-Control-Allow-Origin"); got != "" {
+				t.Fatalf("untrusted preflight %s %s Access-Control-Allow-Origin = %q, want empty", tc.method, tc.target, got)
+			}
+
+			crossOriginFetch := httptest.NewRequest(tc.method, tc.target, strings.NewReader(tc.body))
+			crossOriginFetch.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+			crossOriginFetch.Header.Set("Origin", "https://untrusted.example")
+			crossOriginFetch.Header.Set("Sec-Fetch-Site", "cross-site")
+			crossOriginFetch.Header.Set("Sec-Fetch-Dest", "empty")
+			crossOriginRR := httptest.NewRecorder()
+			corsHandler.ServeHTTP(crossOriginRR, crossOriginFetch)
+			testutil.RequireStatus(t, crossOriginRR, http.StatusForbidden)
+			if got := crossOriginRR.Header().Get("Access-Control-Allow-Origin"); got != "" {
+				t.Fatalf("cross-site %s %s Access-Control-Allow-Origin = %q, want empty", tc.method, tc.target, got)
+			}
+			if len(cpa.Requests()) != before {
+				t.Fatalf("untrusted cross-site %s %s reached CPA", tc.method, tc.target)
+			}
+
+			untrustedDirect := httptest.NewRequest(tc.method, tc.target, strings.NewReader(tc.body))
+			untrustedDirect.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+			untrustedDirect.Header.Set("Origin", "https://untrusted.example")
+			untrustedDirectRR := httptest.NewRecorder()
+			corsHandler.ServeHTTP(untrustedDirectRR, untrustedDirect)
+			if got := untrustedDirectRR.Header().Get("Access-Control-Allow-Origin"); got != "" {
+				t.Fatalf("untrusted Origin %s %s Access-Control-Allow-Origin = %q, want empty", tc.method, tc.target, got)
+			}
+
+			trustedDirect := httptest.NewRequest(tc.method, tc.target, strings.NewReader(tc.body))
+			trustedDirect.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+			trustedDirect.Header.Set("Origin", "http://localhost:5173")
+			trustedDirectRR := httptest.NewRecorder()
+			corsHandler.ServeHTTP(trustedDirectRR, trustedDirect)
+			testutil.RequireStatus(t, trustedDirectRR, http.StatusOK)
+			if got := trustedDirectRR.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:5173" {
+				t.Fatalf("trusted Origin %s %s Access-Control-Allow-Origin = %q, want http://localhost:5173", tc.method, tc.target, got)
+			}
+
+			trustedPreflight := httptest.NewRequest(http.MethodOptions, tc.target, nil)
+			trustedPreflight.Header.Set("Origin", "http://localhost:5173")
+			trustedPreflight.Header.Set("Access-Control-Request-Method", tc.method)
+			trustedPreflight.Header.Set("Access-Control-Request-Headers", "Authorization, Content-Type")
+			trustedPreflightRR := httptest.NewRecorder()
+			corsHandler.ServeHTTP(trustedPreflightRR, trustedPreflight)
+			testutil.RequireStatus(t, trustedPreflightRR, http.StatusNoContent)
+			if got := trustedPreflightRR.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:5173" {
+				t.Fatalf("trusted preflight %s %s Access-Control-Allow-Origin = %q, want http://localhost:5173", tc.method, tc.target, got)
+			}
+
+			disallowedMethod := http.MethodGet
+			if tc.method == http.MethodGet {
+				disallowedMethod = http.MethodPost
+			}
+			badMethodPreflight := httptest.NewRequest(http.MethodOptions, tc.target, nil)
+			badMethodPreflight.Header.Set("Origin", "http://localhost:5173")
+			badMethodPreflight.Header.Set("Access-Control-Request-Method", disallowedMethod)
+			badMethodPreflightRR := httptest.NewRecorder()
+			corsHandler.ServeHTTP(badMethodPreflightRR, badMethodPreflight)
+			testutil.RequireStatus(t, badMethodPreflightRR, http.StatusMethodNotAllowed)
+		}
+	})
+}
+
 func TestServerCompatPluginProxyRoutes(t *testing.T) {
 	type observedRequest struct {
 		method            string

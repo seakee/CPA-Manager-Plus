@@ -7,15 +7,18 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/httpapi"
@@ -24,6 +27,8 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagearchive"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/fresh"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshrouting"
 	freshstrategy "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
@@ -219,6 +224,31 @@ func TestLegacyBridgePathAllowlistCoversExistingReadAndAuthFlows(t *testing.T) {
 		{resource: "v0/management/codex-auth-url", method: http.MethodGet, allowed: true},
 		{resource: "v0/management/get-auth-status", method: http.MethodGet, allowed: true},
 		{resource: "v0/management/oauth-callback", method: http.MethodPost, allowed: true},
+		{resource: "v0/management/kimi-ai-auth-url", method: http.MethodGet, allowed: true},
+		{resource: "v0/management/devin-auth-url", method: http.MethodGet, allowed: true},
+		{resource: "v0/management/meta-auth-url", method: http.MethodGet, allowed: true},
+		{resource: "v0/management/acme-cloud-auth-url", method: http.MethodGet, allowed: true},
+		{resource: "v0/management/acme-cloud-auth-url", method: http.MethodPost, allowed: false},
+		{resource: "v0/management/-auth-url", method: http.MethodGet, allowed: false},
+		{resource: "v0/management/..-auth-url", method: http.MethodGet, allowed: false},
+		{resource: "v0/management/.foo-auth-url", method: http.MethodGet, allowed: false},
+		{resource: "v0/management/foo.bar-auth-url", method: http.MethodGet, allowed: false},
+		{resource: "v0/management/foo_bar-auth-url", method: http.MethodGet, allowed: false},
+		{resource: "v0/management/--auth-url", method: http.MethodGet, allowed: false},
+		{resource: "v0/management/UPPER-auth-url", method: http.MethodGet, allowed: false},
+		{resource: "v0/management/-foo-auth-url", method: http.MethodGet, allowed: false},
+		{resource: "v0/management/foo--bar-auth-url", method: http.MethodGet, allowed: false},
+		{resource: "v0/management/model-prices-auth-url", method: http.MethodGet, allowed: false},
+		{resource: "v0/management/api-key-aliases-auth-url", method: http.MethodGet, allowed: false},
+		{resource: "v0/management/account-action-candidates-auth-url", method: http.MethodGet, allowed: false},
+		{resource: "v0/management/codex-inspection-auth-url", method: http.MethodGet, allowed: false},
+		{resource: "v0/management/usage-auth-url", method: http.MethodGet, allowed: false},
+		{resource: "v0/management/dashboard-auth-url", method: http.MethodGet, allowed: false},
+		{resource: "v0/management/monitoring-auth-url", method: http.MethodGet, allowed: false},
+		{resource: "v0/management/quota-snapshots-auth-url", method: http.MethodGet, allowed: false},
+		{resource: "v0/management/cpa-connection-auth-url", method: http.MethodGet, allowed: false},
+		{resource: "v0/management/oauth-session", method: http.MethodDelete, allowed: true},
+		{resource: "v0/management/oauth-session", method: http.MethodGet, allowed: false},
 		{resource: "usage-service/account-processing-policy", method: http.MethodGet, allowed: true},
 		{resource: "usage-service/account-processing-policy", method: http.MethodPatch, allowed: true},
 		{resource: "usage-service/quota-cooldowns", method: http.MethodGet, allowed: true},
@@ -288,6 +318,33 @@ func TestLegacyBridgePathAllowlistCoversExistingReadAndAuthFlows(t *testing.T) {
 		{resource: "v0/management/request-error-logs/%2e%2e", method: http.MethodGet, allowed: false},
 		{resource: "v0/management/usage/import-sessions/a%2Fb/chunk", method: http.MethodPut, allowed: false},
 		{resource: "v0/management/oauth-callback", method: http.MethodGet, allowed: false},
+		{resource: "v8/management/credentials", method: http.MethodGet, allowed: true},
+		{resource: "v8/management/credentials", method: http.MethodPost, allowed: false},
+		{resource: "v8/management/credentials", method: http.MethodPut, allowed: false},
+		{resource: "v8/management/credentials", method: http.MethodPatch, allowed: false},
+		{resource: "v8/management/credentials", method: http.MethodDelete, allowed: false},
+		{resource: "v8/management/credentials/verify", method: http.MethodPost, allowed: false},
+		{resource: "v8/management/oauth/siwc/bind", method: http.MethodPost, allowed: true},
+		{resource: "v8/management/oauth/siwc/bind", method: http.MethodGet, allowed: false},
+		{resource: "v8/management/oauth/siwc/bind", method: http.MethodPut, allowed: false},
+		{resource: "v8/management/oauth/siwc/bind", method: http.MethodDelete, allowed: false},
+		{resource: "v8/management/oauth/callback", method: http.MethodPost, allowed: true},
+		{resource: "v8/management/oauth/callback", method: http.MethodGet, allowed: false},
+		{resource: "v8/management/oauth/callback", method: http.MethodPut, allowed: false},
+		{resource: "v8/management/oauth/callback", method: http.MethodDelete, allowed: false},
+		{resource: "v8/management/oauth/status", method: http.MethodGet, allowed: true},
+		{resource: "v8/management/oauth/status", method: http.MethodPost, allowed: false},
+		{resource: "v8/management/oauth/status", method: http.MethodPut, allowed: false},
+		{resource: "v8/management/oauth/status", method: http.MethodDelete, allowed: false},
+		{resource: "v8/management/oauth/session", method: http.MethodDelete, allowed: true},
+		{resource: "v8/management/oauth/session", method: http.MethodGet, allowed: false},
+		{resource: "v8/management/oauth/session", method: http.MethodPost, allowed: false},
+		{resource: "v8/management/oauth/session", method: http.MethodPut, allowed: false},
+		{resource: "v8/management/oauth", method: http.MethodGet, allowed: false},
+		{resource: "v8/management/oauth/siwc", method: http.MethodPost, allowed: false},
+		{resource: "v8/management/oauth/siwc/bind/extra", method: http.MethodPost, allowed: false},
+		{resource: "v8/management/oauth/status/extra", method: http.MethodGet, allowed: false},
+		{resource: "v8/management/oauth/unknown", method: http.MethodGet, allowed: false},
 	} {
 		t.Run(test.method+" "+test.resource, func(t *testing.T) {
 			if got := legacyBridgePathAllowed(test.resource, test.method); got != test.allowed {
@@ -696,5 +753,680 @@ func TestFreshUsageRuntimeConfigSparsePatchAndMixedCaseBodyKeysPreserveTLSSkipVe
 	app.serveLegacyResource(&muxRec, req, clone, opRec.Operation, "usage-service/config")
 	if muxRec.Code != http.StatusBadRequest {
 		t.Fatalf("expected controller to reject mixed-case body cleanly, got %d %s", muxRec.Code, muxRec.Body.String())
+	}
+}
+
+func TestV8OAuthLegacyBridgeGateAndProviderWaitHelpers(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{path: "/v8/management/oauth/callback", want: true},
+		{path: "/v8/management/oauth/callback/", want: true},
+		{path: "/v0/management/oauth-callback", want: true},
+		{path: "/v0/management/api-call", want: true},
+		{path: "/v8/management/oauth/siwc/bind", want: false},
+		{path: "/v8/management/oauth/status", want: false},
+		{path: "/v8/management/oauth/session", want: false},
+		{path: "/v8/management/models/refresh", want: false},
+		{path: "/v8/management/credentials", want: false},
+	} {
+		if got := externalLegacyWaitsOnProvider(tc.path); got != tc.want {
+			t.Fatalf("externalLegacyWaitsOnProvider(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+
+	var app freshApplication
+	if got := app.externalCredentialHoldBudget("/v8/management/oauth/callback"); got != 0 {
+		t.Fatalf("externalCredentialHoldBudget(v8 oauth callback) = %v, want 0", got)
+	}
+	if got := app.externalCredentialHoldBudget("/v8/management/oauth/status"); got <= 0 {
+		t.Fatalf("externalCredentialHoldBudget(v8 oauth status) = %v, want > 0", got)
+	}
+	if got := app.externalCredentialHoldBudget("/v8/management/credentials"); got <= 0 {
+		t.Fatalf("externalCredentialHoldBudget(v8 credentials) = %v, want > 0", got)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		method string
+		target string
+		want   bool
+	}{
+		{name: "canonical credentials", method: http.MethodGet, target: "/v8/management/credentials", want: true},
+		{name: "canonical credentials with query", method: http.MethodGet, target: "/v8/management/credentials?name=codex.json", want: true},
+		{name: "credentials wrong method", method: http.MethodPost, target: "/v8/management/credentials", want: false},
+		{name: "credentials trailing slash", method: http.MethodGet, target: "/v8/management/credentials/", want: false},
+		{name: "credentials encoded unreserved", method: http.MethodGet, target: "/v8/management/%63redentials", want: false},
+		{name: "canonical siwc bind", method: http.MethodPost, target: "/v8/management/oauth/siwc/bind", want: true},
+		{name: "canonical callback", method: http.MethodPost, target: "/v8/management/oauth/callback", want: true},
+		{name: "canonical status with state", method: http.MethodGet, target: "/v8/management/oauth/status?state=st_1", want: true},
+		{name: "canonical session with state", method: http.MethodDelete, target: "/v8/management/oauth/session?state=st_1", want: true},
+		{name: "bind wrong method", method: http.MethodGet, target: "/v8/management/oauth/siwc/bind", want: false},
+		{name: "callback wrong method", method: http.MethodGet, target: "/v8/management/oauth/callback", want: false},
+		{name: "status wrong method", method: http.MethodPost, target: "/v8/management/oauth/status?state=st_1", want: false},
+		{name: "session wrong method", method: http.MethodGet, target: "/v8/management/oauth/session?state=st_1", want: false},
+		{name: "options on status", method: http.MethodOptions, target: "/v8/management/oauth/status", want: false},
+		{name: "trailing slash", method: http.MethodGet, target: "/v8/management/oauth/status/", want: false},
+		{name: "duplicate slash", method: http.MethodGet, target: "/v8//management/oauth/status", want: false},
+		{name: "encoded slash", method: http.MethodPost, target: "/v8/management/oauth/siwc%2Fbind", want: false},
+		{name: "extra segment", method: http.MethodPost, target: "/v8/management/oauth/siwc/bind/extra", want: false},
+		{name: "oauth root", method: http.MethodGet, target: "/v8/management/oauth", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.target, nil)
+			if got := legacyBridgePresentsSavedKey(req); got != tc.want {
+				t.Fatalf("legacyBridgePresentsSavedKey(%s %s) = %v, want %v", tc.method, tc.target, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFreshManagedBridgedV8OAuthEndToEnd(t *testing.T) {
+	hostCtx, stopHost := context.WithCancel(t.Context())
+	defer stopHost()
+
+	mgmtKey := strings.Repeat("c", 64)
+	type upstreamHit struct {
+		method string
+		path   string
+		query  string
+		body   string
+	}
+	var hits []upstreamHit
+	cpaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+mgmtKey {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		raw, _ := io.ReadAll(r.Body)
+		hits = append(hits, upstreamHit{
+			method: r.Method,
+			path:   r.URL.Path,
+			query:  r.URL.RawQuery,
+			body:   string(raw),
+		})
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer cpaServer.Close()
+
+	opened, app := newUsageCompletionApplication(t, hostCtx, config.Config{
+		CPAUpstreamURL: cpaServer.URL,
+		CollectorMode:  "http",
+		PollInterval:   50 * time.Millisecond,
+	})
+	current, err := app.store.Load(hostCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protectedKey, err := opened.Protector.ProtectString(mgmtKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeObs := validInstallationRuntime()
+	if _, err := app.store.Update(hostCtx, current.Operation.Identity, current.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+			Strategy:                      bootstrap.NewManaged,
+			Stage:                         "committed",
+			TargetIdentity:                string(runtimeObs.Identity),
+			TargetGeneration:              uint64(runtimeObs.Generation),
+			TargetArtifactID:              string(runtimeObs.ActiveGatewayArtifact.ArtifactID),
+			DestinationConnectionIdentity: freshstrategy.ManagedDestinationIdentity(cpaServer.URL),
+		}
+		r.Operation.ProductComplete = true
+		r.Connection = &model.ManagerCPAConnectionConfig{
+			CPABaseURL:    cpaServer.URL,
+			ManagementKey: protectedKey,
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app.routing = freshrouting.New(app.store, activeAdoptRoutingDriver{store: app.store})
+
+	const apiBase = currentInstallManagementAPIV2Prefix
+	serveRequest := func(method, target, body, auth string, headers map[string]string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(method, target, strings.NewReader(body))
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+		return rec
+	}
+
+	for idx, tc := range []struct {
+		method    string
+		resource  string
+		body      string
+		wantPath  string
+		wantQuery string
+	}{
+		{
+			method:    http.MethodGet,
+			resource:  "cpamp/v8/management/credentials?name=codex-acct.json",
+			wantPath:  "/v8/management/credentials",
+			wantQuery: "name=codex-acct.json",
+		},
+		{
+			method:   http.MethodPost,
+			resource: "cpamp/v8/management/oauth/siwc/bind",
+			body:     `{"name":"codex-acct.json"}`,
+			wantPath: "/v8/management/oauth/siwc/bind",
+		},
+		{
+			method:   http.MethodPost,
+			resource: "cpamp/v8/management/oauth/callback",
+			body:     `{"provider":"codex","redirect_url":"http://127.0.0.1:1455/auth/callback?state=st_1&code=cd_1"}`,
+			wantPath: "/v8/management/oauth/callback",
+		},
+		{
+			method:    http.MethodGet,
+			resource:  "cpamp/v8/management/oauth/status?state=st_1",
+			wantPath:  "/v8/management/oauth/status",
+			wantQuery: "state=st_1",
+		},
+		{
+			method:    http.MethodDelete,
+			resource:  "cpamp/v8/management/oauth/session?state=st_1",
+			wantPath:  "/v8/management/oauth/session",
+			wantQuery: "state=st_1",
+		},
+	} {
+		res := serveRequest(tc.method, apiBase+tc.resource, tc.body, "Bearer "+strategyTestAdmin, nil)
+		if res.Code != http.StatusOK {
+			t.Fatalf("%s %s = %d %s, want 200", tc.method, tc.resource, res.Code, res.Body.String())
+		}
+		if len(hits) != idx+1 {
+			t.Fatalf("hits len = %d, want %d", len(hits), idx+1)
+		}
+		got := hits[idx]
+		if got.method != tc.method || got.path != tc.wantPath || got.query != tc.wantQuery || got.body != tc.body {
+			t.Fatalf("hit %d = %#v, want method=%q path=%q query=%q body=%q", idx, got, tc.method, tc.wantPath, tc.wantQuery, tc.body)
+		}
+	}
+
+	// Cross-site requests through app.ServeHTTP fail closed with 403 before reaching CPA.
+	for _, crossSite := range []struct {
+		method string
+		target string
+	}{
+		{http.MethodGet, apiBase + "cpamp/v8/management/credentials"},
+		{http.MethodPost, apiBase + "cpamp/v8/management/oauth/siwc/bind"},
+		{http.MethodPost, apiBase + "cpamp/v8/management/oauth/callback"},
+		{http.MethodGet, apiBase + "cpamp/v8/management/oauth/status?state=st_1"},
+		{http.MethodDelete, apiBase + "cpamp/v8/management/oauth/session?state=st_1"},
+	} {
+		before := len(hits)
+		res := serveRequest(crossSite.method, crossSite.target, "", "Bearer "+strategyTestAdmin, map[string]string{
+			"Sec-Fetch-Site": "cross-site",
+			"Sec-Fetch-Dest": "empty",
+		})
+		if res.Code != http.StatusForbidden {
+			t.Fatalf("cross-site %s %s = %d %s, want 403", crossSite.method, crossSite.target, res.Code, res.Body.String())
+		}
+		if len(hits) != before {
+			t.Fatalf("cross-site %s %s reached upstream unexpectedly", crossSite.method, crossSite.target)
+		}
+	}
+
+	// Missing/wrong/raw-CPA credentials fail closed with 401 before reaching CPA.
+	for _, unauth := range []struct {
+		name   string
+		method string
+		target string
+		auth   string
+	}{
+		{name: "missing auth on credentials", method: http.MethodGet, target: apiBase + "cpamp/v8/management/credentials", auth: ""},
+		{name: "wrong auth on callback", method: http.MethodPost, target: apiBase + "cpamp/v8/management/oauth/callback", auth: "Bearer wrong-admin-key"},
+		{name: "raw CPA key on bind", method: http.MethodPost, target: apiBase + "cpamp/v8/management/oauth/siwc/bind", auth: "Bearer " + mgmtKey},
+		{name: "missing auth on session", method: http.MethodDelete, target: apiBase + "cpamp/v8/management/oauth/session?state=st_1", auth: ""},
+	} {
+		t.Run(unauth.name, func(t *testing.T) {
+			before := len(hits)
+			res := serveRequest(unauth.method, unauth.target, "", unauth.auth, nil)
+			if res.Code != http.StatusUnauthorized {
+				t.Fatalf("%s = %d %s, want 401", unauth.name, res.Code, res.Body.String())
+			}
+			if len(hits) != before {
+				t.Fatalf("%s reached upstream unexpectedly", unauth.name)
+			}
+		})
+	}
+
+	// Non-canonical and disallowed paths/methods fail closed with 404 before reaching CPA.
+	for _, blocked := range []struct {
+		method string
+		target string
+	}{
+		{http.MethodPost, apiBase + "cpamp/v8/management/credentials"},
+		{http.MethodGet, apiBase + "cpamp/v8/management/credentials/"},
+		{http.MethodPost, apiBase + "cpamp/v8/management/credentials/verify"},
+		{http.MethodGet, apiBase + "cpamp/v8/management/%63redentials"},
+		{http.MethodGet, apiBase + "cpamp/v8/management/oauth/siwc/bind"},
+		{http.MethodGet, apiBase + "cpamp/v8/management/oauth/callback"},
+		{http.MethodPost, apiBase + "cpamp/v8/management/oauth/status?state=st_1"},
+		{http.MethodGet, apiBase + "cpamp/v8/management/oauth/session?state=st_1"},
+		{http.MethodPost, apiBase + "cpamp/v8/management/oauth/siwc/bind/extra"},
+		{http.MethodGet, apiBase + "cpamp/v8/management/oauth"},
+		{http.MethodGet, apiBase + "cpamp/v8/management/oauth//status"},
+		{http.MethodGet, apiBase + "cpamp/v8/management/oauth/%73tatus"},
+		{http.MethodPost, apiBase + "cpamp/v8/management/oauth/siwc/%62ind"},
+		{http.MethodGet, apiBase + "cpamp/v8/management/oauth/%2E%2E/config"},
+		{http.MethodPost, apiBase + "cpamp/v8/management/oauth/siwc%2fbind"},
+	} {
+		before := len(hits)
+		res := serveRequest(blocked.method, blocked.target, "", "Bearer "+strategyTestAdmin, nil)
+		if res.Code != http.StatusNotFound {
+			t.Fatalf("%s %s = %d %s, want 404", blocked.method, blocked.target, res.Code, res.Body.String())
+		}
+		if res.Header().Get("Location") != "" {
+			t.Fatalf("%s %s redirected to %q", blocked.method, blocked.target, res.Header().Get("Location"))
+		}
+		if len(hits) != before {
+			t.Fatalf("%s %s reached upstream unexpectedly", blocked.method, blocked.target)
+		}
+	}
+}
+
+func TestFreshExternalBridgedV8OAuthAndCredentialsGate(t *testing.T) {
+	newRoutedExternalApp := func(t *testing.T, handler http.HandlerFunc) *freshApplication {
+		t.Helper()
+		srv := httptest.NewServer(handler)
+		t.Cleanup(srv.Close)
+		app := newExternalApp(t, srv.URL, externalAuthorityManagement)
+		app.routing = freshrouting.New(app.store, activeAdoptRoutingDriver{store: app.store})
+		return app
+	}
+
+	doExternal := func(t *testing.T, app *freshApplication, method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		rr := httptest.NewRecorder()
+		app.ServeHTTP(rr, req)
+		return rr
+	}
+
+	t.Run("business 400 404 409 pass through unchanged without fencing callback or credentials", func(t *testing.T) {
+		var nextBindStatus atomic.Int32
+		nextBindStatus.Store(http.StatusOK)
+		var nextBindBody atomic.Value
+		nextBindBody.Store(`{"status":"ok"}`)
+		var forwardedCalls atomic.Int64
+		app := newRoutedExternalApp(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "Bearer "+externalAuthorityManagement {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("X-CPA-Version", "v8.0.55")
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/v8/management/config.yaml":
+				_, _ = w.Write([]byte(`{"config-version":8}`))
+			case "/v8/management/config/access/api-keys":
+				_, _ = w.Write([]byte("[]"))
+			case "/v8/management/oauth/siwc/bind":
+				forwardedCalls.Add(1)
+				w.WriteHeader(int(nextBindStatus.Load()))
+				_, _ = w.Write([]byte(nextBindBody.Load().(string)))
+			case "/v8/management/oauth/callback":
+				forwardedCalls.Add(1)
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"status":"ok","bound":true}`))
+			case "/v8/management/credentials":
+				forwardedCalls.Add(1)
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"files":[{"name":"codex.json","siwc_bind_supported":true}]}`))
+			default:
+				http.NotFound(w, r)
+			}
+		})
+
+		for _, biz := range []struct {
+			status int
+			body   string
+		}{
+			{status: http.StatusBadRequest, body: `{"error":"invalid_credential_name"}`},
+			{status: http.StatusNotFound, body: `{"error":"credential_not_found"}`},
+			{status: http.StatusConflict, body: `{"error":"siwc_not_supported"}`},
+		} {
+			nextBindStatus.Store(int32(biz.status))
+			nextBindBody.Store(biz.body)
+			res := doExternal(t, app, http.MethodPost, currentInstallManagementAPIV2Prefix+"cpamp/v8/management/oauth/siwc/bind", `{"name":"codex.json"}`)
+			if res.Code != biz.status || strings.TrimSpace(res.Body.String()) != biz.body {
+				t.Fatalf("business %d bind = %d %q, want %d %q", biz.status, res.Code, res.Body.String(), biz.status, biz.body)
+			}
+		}
+
+		before := forwardedCalls.Load()
+		cbRes := doExternal(t, app, http.MethodPost, currentInstallManagementAPIV2Prefix+"cpamp/v8/management/oauth/callback", `{"provider":"codex","redirect_url":"http://127.0.0.1:1455/auth/callback?state=st_1&code=cd_1"}`)
+		if cbRes.Code != http.StatusOK {
+			t.Fatalf("callback after business errors = %d %s, want 200", cbRes.Code, cbRes.Body.String())
+		}
+		credRes := doExternal(t, app, http.MethodGet, currentInstallManagementAPIV2Prefix+"cpamp/v8/management/credentials", "")
+		if credRes.Code != http.StatusOK {
+			t.Fatalf("credentials after business errors = %d %s, want 200", credRes.Code, credRes.Body.String())
+		}
+		if got := forwardedCalls.Load() - before; got != 2 {
+			t.Fatalf("forwarded calls = %d, want 2", got)
+		}
+	})
+
+	t.Run("pre-v8 CPA 404 on v8 credentials falls back to v0 auth-files without fencing", func(t *testing.T) {
+		var authFilesCalls atomic.Int64
+		app := newRoutedExternalApp(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "Bearer "+externalAuthorityManagement {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("X-CPA-Version", "v7.9.0")
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/v8/management/config.yaml":
+				_, _ = w.Write([]byte(`{"config-version":8}`))
+			case "/v8/management/config/access/api-keys":
+				_, _ = w.Write([]byte("[]"))
+			case "/v8/management/credentials":
+				http.NotFound(w, r)
+			case "/v0/management/auth-files":
+				authFilesCalls.Add(1)
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"files":[{"name":"codex-legacy.json","type":"codex"}]}`))
+			default:
+				http.NotFound(w, r)
+			}
+		})
+
+		v8Res := doExternal(t, app, http.MethodGet, currentInstallManagementAPIV2Prefix+"cpamp/v8/management/credentials", "")
+		if v8Res.Code != http.StatusNotFound {
+			t.Fatalf("pre-v8 GET /v8/management/credentials = %d %s, want 404", v8Res.Code, v8Res.Body.String())
+		}
+
+		v0Res := doExternal(t, app, http.MethodGet, currentInstallManagementAPIV2Prefix+"cpamp/v0/management/auth-files", "")
+		if v0Res.Code != http.StatusOK || !strings.Contains(v0Res.Body.String(), "codex-legacy.json") {
+			t.Fatalf("fallback GET /v0/management/auth-files = %d %s, want 200 with codex-legacy.json", v0Res.Code, v0Res.Body.String())
+		}
+		if got := authFilesCalls.Load(); got != 1 {
+			t.Fatalf("v0 auth-files calls = %d, want 1", got)
+		}
+	})
+
+	for _, refusal := range []struct {
+		name       string
+		cpaStatus  int
+		wantDetail string
+	}{
+		{name: "cpa 401 rejected", cpaStatus: http.StatusUnauthorized, wantDetail: ""},
+		{name: "cpa 403 forbidden", cpaStatus: http.StatusForbidden, wantDetail: externalRebindForbiddenDetail},
+	} {
+		t.Run(refusal.name, func(t *testing.T) {
+			var totalCalls atomic.Int64
+			app := newRoutedExternalApp(t, func(w http.ResponseWriter, r *http.Request) {
+				totalCalls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(refusal.cpaStatus)
+				_, _ = w.Write([]byte(`{"error":"denied"}`))
+			})
+
+			bindRes := doExternal(t, app, http.MethodPost, currentInstallManagementAPIV2Prefix+"cpamp/v8/management/oauth/siwc/bind", `{"name":"codex.json"}`)
+			if bindRes.Code != http.StatusConflict {
+				t.Fatalf("bind status = %d %s, want 409", bindRes.Code, bindRes.Body.String())
+			}
+			var payload struct {
+				Code   string `json:"code"`
+				Detail string `json:"detail"`
+			}
+			if err := json.Unmarshal(bindRes.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("unmarshal refusal %q: %v", bindRes.Body.String(), err)
+			}
+			if payload.Code != freshconfig.ReasonManagementRejected || payload.Detail != refusal.wantDetail {
+				t.Fatalf("refusal payload = %+v, want code=%q detail=%q", payload, freshconfig.ReasonManagementRejected, refusal.wantDetail)
+			}
+			if got := totalCalls.Load(); got != 1 {
+				t.Fatalf("bind upstream calls = %d, want 1", got)
+			}
+
+			before := totalCalls.Load()
+			cbRes := doExternal(t, app, http.MethodPost, currentInstallManagementAPIV2Prefix+"cpamp/v8/management/oauth/callback", `{"provider":"codex","redirect_url":"http://127.0.0.1:1455/auth/callback?state=st_1&code=cd_1"}`)
+			if cbRes.Code != http.StatusConflict || errorCode(t, cbRes) != freshconfig.ReasonManagementRejected {
+				t.Fatalf("fenced callback = %d %s, want 409 %s", cbRes.Code, cbRes.Body.String(), freshconfig.ReasonManagementRejected)
+			}
+			credRes := doExternal(t, app, http.MethodGet, currentInstallManagementAPIV2Prefix+"cpamp/v8/management/credentials", "")
+			if credRes.Code != http.StatusConflict || errorCode(t, credRes) != freshconfig.ReasonManagementRejected {
+				t.Fatalf("fenced credentials = %d %s, want 409 %s", credRes.Code, credRes.Body.String(), freshconfig.ReasonManagementRejected)
+			}
+			if got := totalCalls.Load() - before; got != 0 {
+				t.Fatalf("fenced requests reached CPA %d times, want 0", got)
+			}
+		})
+	}
+}
+
+func TestCompletedUpgradeBridgeV8CredentialsAndOAuth(t *testing.T) {
+	t.Setenv("CPAMP_INGRESS_CONTROL_URL", "")
+	const mgmtKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	const clientKey = "sk-upg-oauth-client-key-0001"
+
+	type observedHit struct {
+		method string
+		path   string
+		query  string
+		body   string
+	}
+	var hits []observedHit
+	cpaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+mgmtKey {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("X-CPA-Version", "v8.0.55")
+		w.Header().Set("Content-Type", "application/json")
+		raw, _ := io.ReadAll(r.Body)
+		hits = append(hits, observedHit{
+			method: r.Method,
+			path:   r.URL.Path,
+			query:  r.URL.RawQuery,
+			body:   string(raw),
+		})
+		switch r.URL.Path {
+		case "/v8/management/config/access/api-keys":
+			_, _ = w.Write([]byte(`["` + clientKey + `"]`))
+		case "/v8/management/credentials":
+			_, _ = w.Write([]byte(`{"files":[{"name":"codex-upg.json","siwc_bind_supported":true,"use_siwc":true}]}`))
+		default:
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		}
+	}))
+	defer cpaServer.Close()
+
+	st, cfg, adminKey := seedCompletedManagedUpgradeStore(t, "/upg-console", "/upg-gw")
+	keyBytes, _, err := security.LoadOrCreateDataKey("", cfg.DataKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protector, err := security.NewProtector(keyBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealedDestKey, err := protector.ProtectString(mgmtKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	qualifiedArtifact, err := freshstrategy.QualifiedUpgradeAdoptionArtifactID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceIdentity := "external:sha256:" + strings.Repeat("d", 64)
+	pluginsInit := false
+	destPayload, _ := json.Marshal(upgradeDestinationRecord{
+		BaseURL:           cpaServer.URL,
+		URLProved:         true,
+		ManagementKey:     sealedDestKey,
+		ServerFingerprint: "external:sha256:" + strings.Repeat("e", 64),
+		Attempt:           1,
+		OperationID:       upgradeManagedDestinationOperationID(sourceIdentity, 1),
+		Intent: upgradeDestinationIntent{
+			ExpectedRuntimeIdentity:   "rt-managed-upg",
+			ExpectedRuntimeGeneration: 7,
+			ExpectedActiveArtifactID:  qualifiedArtifact,
+			SourceIdentity:            sourceIdentity,
+			SourceClass:               upgradeManagedDestinationClass,
+			APIKeys:                   []string{clientKey},
+			PluginsEnabled:            &pluginsInit,
+		},
+	})
+	if _, err := st.SQLDB().Exec(`insert into settings(key, value, updated_at_ms) values(?, ?, ?)`, upgradeImportDestinationSettingKey, string(destPayload), time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SetEmbeddedRuntimeDesiredLifecycle(t.Context(), model.EmbeddedRuntimeDesiredRunning); err != nil {
+		t.Fatal(err)
+	}
+
+	rt := &upgradeCanonicalTestRuntime{
+		status: model.RuntimeObservedStatus{
+			Identity:           "rt-managed-upg",
+			Generation:         19,
+			ProtocolVersion:    "v1",
+			State:              model.RuntimeStateReady,
+			CPAObservedVersion: "v8.0.55",
+			Capabilities:       model.RuntimeCapabilities{model.RuntimeCapabilityStart, model.RuntimeCapabilityStop, model.RuntimeCapabilityRestart},
+			ActiveGatewayArtifact: &model.ActiveGatewayArtifact{
+				Engine:     "cpa",
+				ArtifactID: qualifiedArtifact,
+				Version:    "v8.0.55",
+			},
+		},
+	}
+
+	manager := collector.NewManager(cfg, st)
+	t.Cleanup(func() { manager.Stop() })
+	serverApp := httpapi.New(cfg, st, manager)
+	var canonical *upgradeCanonicalServer
+	if err := attachCompletedUpgradeRouting(t.Context(), cfg, st, serverApp, func(context.Context) bool { return true }, upgradeCanonicalDependencies{
+		Protector:    protector,
+		Runtime:      rt,
+		CanonicalOut: &canonical,
+	}); err != nil {
+		t.Fatalf("attachCompletedUpgradeRouting: %v", err)
+	}
+	if canonical == nil {
+		t.Fatal("expected upgradeCanonicalServer instance")
+	}
+	hits = nil
+
+	doCanonical := func(method, target, body, auth string, headers map[string]string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(method, target, strings.NewReader(body))
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		rec := httptest.NewRecorder()
+		canonical.ServeHTTP(rec, req)
+		return rec
+	}
+
+	const upgBase = "/upg-console/api/v2/"
+	for idx, tc := range []struct {
+		method    string
+		resource  string
+		body      string
+		wantPath  string
+		wantQuery string
+	}{
+		{
+			method:   http.MethodGet,
+			resource: "cpamp/v8/management/credentials",
+			wantPath: "/v8/management/credentials",
+		},
+		{
+			method:   http.MethodPost,
+			resource: "cpamp/v8/management/oauth/siwc/bind",
+			body:     `{"name":"codex-upg.json"}`,
+			wantPath: "/v8/management/oauth/siwc/bind",
+		},
+		{
+			method:   http.MethodPost,
+			resource: "cpamp/v8/management/oauth/callback",
+			body:     `{"provider":"codex","redirect_url":"http://127.0.0.1:1455/auth/callback?state=st_upg&code=cd_upg"}`,
+			wantPath: "/v8/management/oauth/callback",
+		},
+		{
+			method:    http.MethodGet,
+			resource:  "cpamp/v8/management/oauth/status?state=st_upg",
+			wantPath:  "/v8/management/oauth/status",
+			wantQuery: "state=st_upg",
+		},
+		{
+			method:    http.MethodDelete,
+			resource:  "cpamp/v8/management/oauth/session?state=st_upg",
+			wantPath:  "/v8/management/oauth/session",
+			wantQuery: "state=st_upg",
+		},
+		{
+			method:    http.MethodDelete,
+			resource:  "cpamp/v0/management/oauth-session?state=st_v0",
+			wantPath:  "/v0/management/oauth-session",
+			wantQuery: "state=st_v0",
+		},
+	} {
+		res := doCanonical(tc.method, upgBase+tc.resource, tc.body, "Bearer "+adminKey, nil)
+		if res.Code != http.StatusOK {
+			t.Fatalf("%s %s = %d %s, want 200", tc.method, tc.resource, res.Code, res.Body.String())
+		}
+		if len(hits) != idx+1 {
+			t.Fatalf("hits len = %d, want %d", len(hits), idx+1)
+		}
+		got := hits[idx]
+		if got.method != tc.method || got.path != tc.wantPath || got.query != tc.wantQuery || got.body != tc.body {
+			t.Fatalf("hit %d = %#v, want method=%q path=%q query=%q body=%q", idx, got, tc.method, tc.wantPath, tc.wantQuery, tc.body)
+		}
+	}
+
+	before := len(hits)
+	crossSite := doCanonical(http.MethodPost, upgBase+"cpamp/v8/management/oauth/callback", `{}`, "Bearer "+adminKey, map[string]string{
+		"Sec-Fetch-Site": "cross-site",
+		"Sec-Fetch-Dest": "empty",
+	})
+	if crossSite.Code != http.StatusForbidden {
+		t.Fatalf("cross-site upgrade callback = %d, want 403", crossSite.Code)
+	}
+	unauth := doCanonical(http.MethodGet, upgBase+"cpamp/v8/management/credentials", "", "", nil)
+	if unauth.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated upgrade credentials = %d, want 401", unauth.Code)
+	}
+	for _, blocked := range []struct {
+		method string
+		target string
+	}{
+		{http.MethodPost, upgBase + "cpamp/v8/management/credentials"},
+		{http.MethodGet, upgBase + "cpamp/v8/management/%63redentials"},
+		{http.MethodGet, upgBase + "cpamp/v8/management/oauth/%73tatus"},
+		{http.MethodGet, upgBase + "cpamp/v0/management/oauth-session?state=st_v0"},
+	} {
+		res := doCanonical(blocked.method, blocked.target, "", "Bearer "+adminKey, nil)
+		if res.Code != http.StatusNotFound {
+			t.Fatalf("%s %s = %d %s, want 404", blocked.method, blocked.target, res.Code, res.Body.String())
+		}
+	}
+	if len(hits) != before {
+		t.Fatalf("rejected upgrade requests reached CPA %d times, want 0", len(hits)-before)
 	}
 }

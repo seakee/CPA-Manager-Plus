@@ -11,6 +11,7 @@ const { mocks } = vi.hoisted(() => ({
     startAuth: vi.fn(),
     getAuthStatus: vi.fn(),
     submitCallback: vi.fn(),
+    cancelSession: vi.fn(),
     authFilesList: vi.fn(async () => ({ files: [] })),
     pluginList: vi.fn(async () => ({ plugins: [] })),
     vertexImport: vi.fn(),
@@ -18,7 +19,7 @@ const { mocks } = vi.hoisted(() => ({
     navigate: vi.fn(),
     recordMutationMarker: vi.fn(),
     publishMutationRevision: vi.fn(),
-    intervalCallbacks: [] as Array<() => void | Promise<void>>,
+    pollCallbacks: [] as Array<() => void | Promise<void>>,
   },
 }));
 
@@ -28,8 +29,29 @@ vi.mock('react-i18next', () => ({
 }));
 
 vi.mock('react-router-dom', () => ({
-  useLocation: () => ({ hash: '' }),
+  useLocation: () => ({ key: 'lifecycle', pathname: '/oauth', search: '', hash: '' }),
   useNavigate: () => mocks.navigate,
+}));
+
+vi.mock('@/components/ui/Modal', () => ({
+  Modal: ({
+    open,
+    title,
+    children,
+    footer,
+  }: {
+    open: boolean;
+    title?: React.ReactNode;
+    children?: React.ReactNode;
+    footer?: React.ReactNode;
+  }) =>
+    open ? (
+      <div data-testid="modal">
+        <div>{title}</div>
+        <div>{children}</div>
+        <div>{footer}</div>
+      </div>
+    ) : null,
 }));
 
 vi.mock('@/stores', () => {
@@ -61,6 +83,7 @@ vi.mock('@/services/api', () => ({
     startAuth: mocks.startAuth,
     getAuthStatus: mocks.getAuthStatus,
     submitCallback: mocks.submitCallback,
+    cancelSession: mocks.cancelSession,
   },
   authFilesApi: {
     list: mocks.authFilesList,
@@ -76,8 +99,8 @@ vi.mock('@/services/api/vertex', () => ({
   },
 }));
 
-vi.mock('@/features/monitoring/codexInspection', () => ({
-  createCodexInspectionConnectionFingerprint: (apiBase: string, managementKey: string) =>
+vi.mock('@/utils/connectionFingerprint', () => ({
+  createConnectionFingerprint: (apiBase: string, managementKey: string) =>
     apiBase && managementKey ? `${apiBase}:${managementKey}` : null,
 }));
 
@@ -93,7 +116,7 @@ vi.mock('@/utils/clipboard', () => ({
   copyToClipboard: vi.fn(async () => true),
 }));
 
-vi.mock('@/features/plugins/pluginResources', () => ({
+vi.mock('@/utils/pluginAssets', () => ({
   getPluginTitle: (plugin: { id: string }) => plugin.id,
   resolvePluginAssetURL: () => '',
 }));
@@ -116,6 +139,14 @@ const treeText = (renderer: ReactTestRenderer): string =>
     .map((child) => (typeof child === 'string' ? child : textContent(child)))
     .join('');
 
+const findTileButton = (renderer: ReactTestRenderer, label: string): ReactTestInstance => {
+  const button = renderer.root
+    .findAllByType('button')
+    .find((candidate) => candidate.props['aria-label'] === label);
+  if (!button) throw new Error(`Tile button not found: ${label}`);
+  return button;
+};
+
 const findButton = (renderer: ReactTestRenderer, text: string): ReactTestInstance => {
   const button = renderer.root
     .findAllByType('button')
@@ -123,6 +154,8 @@ const findButton = (renderer: ReactTestRenderer, text: string): ReactTestInstanc
   if (!button) throw new Error(`Button not found: ${text}`);
   return button;
 };
+
+const mountedRenderers = new Set<ReactTestRenderer>();
 
 const renderOAuthPage = async (): Promise<ReactTestRenderer> => {
   let renderer!: ReactTestRenderer;
@@ -134,16 +167,11 @@ const renderOAuthPage = async (): Promise<ReactTestRenderer> => {
   return renderer;
 };
 
-const mountedRenderers = new Set<ReactTestRenderer>();
-
-const startCodexAuth = (renderer: ReactTestRenderer): Promise<void> => {
-  let promise!: Promise<void>;
-  act(() => {
-    promise = Promise.resolve(
-      findButton(renderer, 'auth_login.codex_oauth_button').props.onClick()
-    );
+const startCodexAuth = async (renderer: ReactTestRenderer): Promise<void> => {
+  await act(async () => {
+    findTileButton(renderer, 'Codex').props.onClick();
+    await Promise.resolve();
   });
-  return promise;
 };
 
 describe('OAuthPage connection lifecycle', () => {
@@ -151,18 +179,20 @@ describe('OAuthPage connection lifecycle', () => {
     vi.clearAllMocks();
     mocks.apiBase = 'http://cpa-a.local:8317';
     mocks.managementKey = 'key-a';
-    mocks.intervalCallbacks = [];
+    mocks.pollCallbacks = [];
     mocks.authFilesList.mockReset();
     mocks.authFilesList.mockResolvedValue({ files: [] });
     vi.stubGlobal('window', {
       requestAnimationFrame: vi.fn(() => 1),
       cancelAnimationFrame: vi.fn(),
-      setInterval: vi.fn((callback: () => void | Promise<void>) => {
-        mocks.intervalCallbacks.push(callback);
-        return mocks.intervalCallbacks.length;
-      }),
+      setInterval: vi.fn(() => 1),
       clearInterval: vi.fn(),
-      setTimeout: vi.fn(() => 100),
+      setTimeout: vi.fn((callback: () => void | Promise<void>, delay?: number) => {
+        if (delay === 3000) {
+          mocks.pollCallbacks.push(callback);
+        }
+        return mocks.pollCallbacks.length + 100;
+      }),
       clearTimeout: vi.fn(),
       open: vi.fn(),
     });
@@ -176,123 +206,123 @@ describe('OAuthPage connection lifecycle', () => {
     vi.unstubAllGlobals();
   });
 
-  it('ignores a late auth-link response after the CPA connection changes', async () => {
-    const oldRequest = deferred<{ url: string; state: string }>();
-    const newRequest = deferred<{ url: string; state: string }>();
-    mocks.startAuth.mockImplementation((_provider: string, scope: { apiBase: string }) =>
-      scope.apiBase === 'http://cpa-a.local:8317' ? oldRequest.promise : newRequest.promise
-    );
+  it('ignores a late startAuth response after the CPA connection changes', async () => {
+    const startA = deferred<{ url: string; state: string }>();
+    mocks.startAuth.mockReturnValue(startA.promise);
     const renderer = await renderOAuthPage();
 
-    const oldAuthPromise = startCodexAuth(renderer);
-    await act(async () => {
-      await Promise.resolve();
-    });
-    expect(mocks.startAuth).toHaveBeenCalledWith('codex', {
-      apiBase: 'http://cpa-a.local:8317',
-      managementKey: 'key-a',
-    });
+    await startCodexAuth(renderer);
+    expect(mocks.startAuth).toHaveBeenCalledWith(
+      'codex',
+      { apiBase: 'http://cpa-a.local:8317', managementKey: 'key-a' },
+      expect.any(AbortSignal)
+    );
 
     mocks.apiBase = 'http://cpa-b.local:8317';
     mocks.managementKey = 'key-b';
     await act(async () => {
       renderer.update(<OAuthPage />);
-    });
-    const newAuthPromise = startCodexAuth(renderer);
-    await act(async () => {
       await Promise.resolve();
     });
 
     await act(async () => {
-      oldRequest.resolve({ url: 'https://auth.example/old', state: 'old-state' });
-      await oldAuthPromise;
+      startA.resolve({ url: 'https://auth.example/a', state: 'state-a' });
+      await Promise.resolve();
+      await Promise.resolve();
     });
-    expect(treeText(renderer)).not.toContain('https://auth.example/old');
-    expect(mocks.intervalCallbacks).toHaveLength(0);
 
-    await act(async () => {
-      newRequest.resolve({ url: 'https://auth.example/new', state: 'new-state' });
-      await newAuthPromise;
-    });
-    expect(treeText(renderer)).toContain('https://auth.example/new');
-    expect(mocks.intervalCallbacks).toHaveLength(1);
+    expect(treeText(renderer)).not.toContain('auth.example');
+    expect(mocks.pollCallbacks).toHaveLength(0);
   });
 
-  it('ignores a late polling success after the CPA connection changes', async () => {
-    const polling = deferred<{ status: 'ok' }>();
+  it('ignores a late polling completion after the CPA connection changes', async () => {
+    const pollA = deferred<{ status: 'ok' }>();
     mocks.startAuth.mockResolvedValue({ url: 'https://auth.example/codex', state: 'state-a' });
-    mocks.getAuthStatus.mockReturnValue(polling.promise);
+    mocks.getAuthStatus.mockReturnValue(pollA.promise);
     const renderer = await renderOAuthPage();
-    const authPromise = startCodexAuth(renderer);
-    await act(async () => {
-      await authPromise;
-    });
 
-    let pollingPromise!: Promise<void>;
+    await startCodexAuth(renderer);
     await act(async () => {
-      pollingPromise = Promise.resolve(mocks.intervalCallbacks[0]?.());
       await Promise.resolve();
     });
-    expect(mocks.getAuthStatus).toHaveBeenCalledWith('state-a', {
-      apiBase: 'http://cpa-a.local:8317',
-      managementKey: 'key-a',
+    expect(mocks.pollCallbacks).toHaveLength(1);
+
+    await act(async () => {
+      mocks.pollCallbacks[0]();
+      await Promise.resolve();
     });
+    expect(mocks.getAuthStatus).toHaveBeenCalledWith(
+      'state-a',
+      { apiBase: 'http://cpa-a.local:8317', managementKey: 'key-a' },
+      expect.any(AbortSignal)
+    );
 
     mocks.apiBase = 'http://cpa-b.local:8317';
     mocks.managementKey = 'key-b';
     await act(async () => {
       renderer.update(<OAuthPage />);
-      polling.resolve({ status: 'ok' });
-      await pollingPromise;
+      await Promise.resolve();
     });
 
-    expect(mocks.recordMutationMarker).not.toHaveBeenCalled();
+    await act(async () => {
+      pollA.resolve({ status: 'ok' });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
     expect(mocks.showNotification).not.toHaveBeenCalledWith(
       'auth_login.codex_oauth_status_success',
       'success'
     );
+    expect(mocks.recordMutationMarker).not.toHaveBeenCalled();
   });
 
-  it('ignores a late callback response after the CPA connection changes', async () => {
-    const callback = deferred<{ status: 'ok' }>();
-    mocks.startAuth.mockResolvedValue({ url: 'https://auth.example/codex', state: 'state-a' });
-    mocks.submitCallback.mockReturnValue(callback.promise);
+  it('ignores a late Vertex import completion after the CPA connection changes', async () => {
+    const importA = deferred<{ project_id: string }>();
+    mocks.vertexImport.mockReturnValue(importA.promise);
     const renderer = await renderOAuthPage();
-    const authPromise = startCodexAuth(renderer);
+
     await act(async () => {
-      await authPromise;
+      findTileButton(renderer, 'vertex_import.tile_title').props.onClick();
     });
 
-    const callbackInput = renderer.root
+    const fileInput = renderer.root
       .findAllByType('input')
-      .find((input) => input.props.placeholder === 'auth_login.oauth_callback_placeholder');
-    if (!callbackInput) throw new Error('Callback input not found');
-    act(() => callbackInput.props.onChange({ target: { value: 'http://callback?code=1' } }));
-    let callbackPromise!: Promise<void>;
+      .find((input) => input.props.type === 'file');
+    if (!fileInput) throw new Error('Vertex file input not found');
+    act(() =>
+      fileInput.props.onChange({
+        target: { files: [{ name: 'vertex-a.json', size: 512 }], value: 'vertex-a.json' },
+      })
+    );
+
     await act(async () => {
-      callbackPromise = Promise.resolve(
-        findButton(renderer, 'auth_login.oauth_callback_button').props.onClick()
-      );
+      findButton(renderer, 'vertex_import.import_button').props.onClick();
       await Promise.resolve();
     });
-    expect(mocks.submitCallback).toHaveBeenCalledWith('codex', 'http://callback?code=1', {
-      apiBase: 'http://cpa-a.local:8317',
-      managementKey: 'key-a',
-    });
+    expect(mocks.vertexImport).toHaveBeenCalledWith(
+      { name: 'vertex-a.json', size: 512 },
+      undefined,
+      { apiBase: 'http://cpa-a.local:8317', managementKey: 'key-a' },
+      expect.any(AbortSignal)
+    );
 
     mocks.apiBase = 'http://cpa-b.local:8317';
     mocks.managementKey = 'key-b';
     await act(async () => {
       renderer.update(<OAuthPage />);
-      callback.resolve({ status: 'ok' });
-      await callbackPromise;
+      await Promise.resolve();
     });
 
+    await act(async () => {
+      importA.resolve({ project_id: 'project-a' });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(treeText(renderer)).not.toContain('project-a');
+    expect(mocks.showNotification).not.toHaveBeenCalledWith('vertex_import.success', 'success');
     expect(mocks.recordMutationMarker).not.toHaveBeenCalled();
-    expect(mocks.showNotification).not.toHaveBeenCalledWith(
-      'auth_login.oauth_callback_success',
-      'success'
-    );
   });
 
   it('records one scoped mutation marker when callback success races with polling success', async () => {
@@ -305,26 +335,26 @@ describe('OAuthPage connection lifecycle', () => {
       .mockReturnValueOnce(callbackStatus.promise);
     mocks.submitCallback.mockReturnValue(callback.promise);
     const renderer = await renderOAuthPage();
-    const authPromise = startCodexAuth(renderer);
-    await act(async () => {
-      await authPromise;
-    });
 
-    let pollingPromise!: Promise<void>;
+    await startCodexAuth(renderer);
     await act(async () => {
-      pollingPromise = Promise.resolve(mocks.intervalCallbacks[0]?.());
       await Promise.resolve();
     });
+
+    await act(async () => {
+      mocks.pollCallbacks[0]();
+      await Promise.resolve();
+    });
+
     const callbackInput = renderer.root
       .findAllByType('input')
       .find((input) => input.props.placeholder === 'auth_login.oauth_callback_placeholder');
     if (!callbackInput) throw new Error('Callback input not found');
     act(() => callbackInput.props.onChange({ target: { value: 'http://callback?code=1' } }));
-    let callbackPromise!: Promise<void>;
+
+    const callbackForm = renderer.root.findByType('form');
     await act(async () => {
-      callbackPromise = Promise.resolve(
-        findButton(renderer, 'auth_login.oauth_callback_button').props.onClick()
-      );
+      callbackForm.props.onSubmit({ preventDefault: vi.fn() });
       await Promise.resolve();
     });
 
@@ -333,9 +363,11 @@ describe('OAuthPage connection lifecycle', () => {
       await Promise.resolve();
     });
     expect(mocks.recordMutationMarker).not.toHaveBeenCalled();
+
     await act(async () => {
       callbackStatus.resolve({ status: 'ok' });
-      await callbackPromise;
+      await Promise.resolve();
+      await Promise.resolve();
     });
     expect(mocks.recordMutationMarker).toHaveBeenCalledTimes(1);
     expect(mocks.recordMutationMarker).toHaveBeenCalledWith({
@@ -351,7 +383,8 @@ describe('OAuthPage connection lifecycle', () => {
 
     await act(async () => {
       polling.resolve({ status: 'ok' });
-      await pollingPromise;
+      await Promise.resolve();
+      await Promise.resolve();
     });
     expect(mocks.recordMutationMarker).toHaveBeenCalledTimes(1);
     expect(
@@ -367,9 +400,10 @@ describe('OAuthPage connection lifecycle', () => {
     mocks.submitCallback.mockResolvedValue({ status: 'ok' });
     mocks.getAuthStatus.mockResolvedValue({ status: 'wait' });
     const renderer = await renderOAuthPage();
-    const authPromise = startCodexAuth(renderer);
+
+    await startCodexAuth(renderer);
     await act(async () => {
-      await authPromise;
+      await Promise.resolve();
     });
 
     const callbackInput = renderer.root
@@ -377,14 +411,19 @@ describe('OAuthPage connection lifecycle', () => {
       .find((input) => input.props.placeholder === 'auth_login.oauth_callback_placeholder');
     if (!callbackInput) throw new Error('Callback input not found');
     act(() => callbackInput.props.onChange({ target: { value: 'http://callback?code=1' } }));
+
     await act(async () => {
-      await findButton(renderer, 'auth_login.oauth_callback_button').props.onClick();
+      renderer.root.findByType('form').props.onSubmit({ preventDefault: vi.fn() });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
     });
 
-    expect(mocks.getAuthStatus).toHaveBeenCalledWith('state-a', {
-      apiBase: 'http://cpa-a.local:8317',
-      managementKey: 'key-a',
-    });
+    expect(mocks.getAuthStatus).toHaveBeenCalledWith(
+      'state-a',
+      { apiBase: 'http://cpa-a.local:8317', managementKey: 'key-a' },
+      expect.any(AbortSignal)
+    );
     expect(mocks.recordMutationMarker).not.toHaveBeenCalled();
     expect(treeText(renderer)).toContain('auth_login.oauth_callback_status_success');
     expect(treeText(renderer)).toContain('auth_login.codex_oauth_status_waiting');
@@ -397,9 +436,10 @@ describe('OAuthPage connection lifecycle', () => {
     );
     mocks.getAuthStatus.mockResolvedValue({ status: 'ok' });
     const renderer = await renderOAuthPage();
-    const authPromise = startCodexAuth(renderer);
+
+    await startCodexAuth(renderer);
     await act(async () => {
-      await authPromise;
+      await Promise.resolve();
     });
 
     const callbackInput = renderer.root
@@ -407,14 +447,19 @@ describe('OAuthPage connection lifecycle', () => {
       .find((input) => input.props.placeholder === 'auth_login.oauth_callback_placeholder');
     if (!callbackInput) throw new Error('Callback input not found');
     act(() => callbackInput.props.onChange({ target: { value: 'http://callback?code=1' } }));
+
     await act(async () => {
-      await findButton(renderer, 'auth_login.oauth_callback_button').props.onClick();
+      renderer.root.findByType('form').props.onSubmit({ preventDefault: vi.fn() });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
     });
 
-    expect(mocks.getAuthStatus).toHaveBeenCalledWith('state-a', {
-      apiBase: 'http://cpa-a.local:8317',
-      managementKey: 'key-a',
-    });
+    expect(mocks.getAuthStatus).toHaveBeenCalledWith(
+      'state-a',
+      { apiBase: 'http://cpa-a.local:8317', managementKey: 'key-a' },
+      expect.any(AbortSignal)
+    );
     expect(mocks.recordMutationMarker).toHaveBeenCalledTimes(1);
   });
 });

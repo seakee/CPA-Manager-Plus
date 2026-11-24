@@ -6,6 +6,7 @@ import { Drawer } from '@/components/ui/Drawer';
 import { DropdownMenu } from '@/components/ui/DropdownMenu';
 import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
+import { SiwcStatusBadge } from '@/components/ui/SiwcStatusBadge';
 import { ProviderStatusBar } from '@/components/providers/ProviderStatusBar';
 import {
   ANTIGRAVITY_CONFIG,
@@ -776,6 +777,7 @@ vi.mock('@/features/authFiles/hooks/useAuthFileConfigurationEditor', () => ({
       disableCooling: 'inherit' as const,
       requestRetry: '',
       websockets: false,
+      useSiwc: false,
       xaiRoutingMode: 'grok-build' as const,
       baseUrl: '',
       cloakMode: '',
@@ -20439,6 +20441,88 @@ describe('AccountsPage replacement flows', () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it('renders SIWC status badges in grid, table, and detail overview while suppressing stale unbound expiry', async () => {
+      const activeFile: AuthFileItem = {
+        ...makeCodexFile('codex-active.json', 'auth-act', 'active@example.com'),
+        siwc_bind_supported: true,
+        siwc_bound: true,
+        use_siwc: true,
+        siwc_status: 'valid',
+        siwc_expires_at: '2035-01-01T00:00:00Z',
+      };
+      const boundFile: AuthFileItem = {
+        ...makeCodexFile('codex-bound.json', 'auth-bnd', 'bound@example.com'),
+        siwc_bind_supported: true,
+        siwc_bound: true,
+        use_siwc: false,
+        siwc_expires_at: '2035-01-01T00:00:00Z',
+      };
+      const invalidFile: AuthFileItem = {
+        ...makeCodexFile('codex-invalid.json', 'auth-inv', 'invalid@example.com'),
+        siwc_bind_supported: true,
+        siwc_bound: true,
+        use_siwc: true,
+        siwc_status: 'invalid',
+        siwc_expires_at: '2020-01-01T00:00:00Z',
+      };
+      const unboundFile: AuthFileItem = {
+        ...makeCodexFile('codex-unbound.json', 'auth-unb', 'unbound@example.com'),
+        siwc_bind_supported: true,
+        siwc_bound: false,
+        use_siwc: false,
+        siwc_expires_at: '2035-01-01T00:00:00Z',
+      };
+      mocks.files = [activeFile, boundFile, invalidFile, unboundFile];
+      mocks.location = {
+        pathname: '/accounts',
+        search: `?layout=grid&account=${encodeURIComponent(`${invalidFile.name}\u0000auth-inv`)}&tab=overview`,
+      };
+
+      const renderer = await renderAccountsPage();
+      await flushPromises();
+
+      const gridBadges = renderer.root.findAllByType(SiwcStatusBadge);
+      const activeGridBadge = gridBadges.find((node) => node.props.status === 'active');
+      const boundGridBadge = gridBadges.find((node) => node.props.status === 'bound');
+      const invalidGridBadge = gridBadges.find((node) => node.props.status === 'invalid');
+      const unboundGridBadge = gridBadges.find((node) => node.props.status === 'unbound');
+      expect(activeGridBadge?.props.title).toContain('siwc.expires');
+      expect(boundGridBadge?.props.title).toContain('siwc.expires');
+      expect(invalidGridBadge).toBeDefined();
+      expect(invalidGridBadge?.props.showPrefix).toBe(true);
+      expect(invalidGridBadge?.props.title).toContain('siwc.expires');
+      expect(invalidGridBadge?.findAllByType('span')[0]?.props.className).toContain('invalid');
+      expect(unboundGridBadge).toBeDefined();
+      expect(unboundGridBadge?.props.title).toBeUndefined();
+
+      const overviewTab = renderer.root.findByType(AccountOverviewTab);
+      expect(readText(overviewTab)).toContain('siwc.invalid');
+      expect(readText(overviewTab)).toContain('siwc.detail_expires_label');
+
+      mocks.location = {
+        pathname: '/accounts',
+        search: '?layout=table',
+      };
+      await act(async () => {
+        renderer.update(<AccountsPage />);
+        await Promise.resolve();
+      });
+      await flushPromises();
+
+      const tableBadges = renderer.root.findAllByType(SiwcStatusBadge);
+      const activeTableBadge = tableBadges.find((node) => node.props.status === 'active');
+      const boundTableBadge = tableBadges.find((node) => node.props.status === 'bound');
+      const invalidTableBadge = tableBadges.find((node) => node.props.status === 'invalid');
+      const unboundTableBadge = tableBadges.find((node) => node.props.status === 'unbound');
+      expect(activeTableBadge?.props.title).toContain('siwc.expires');
+      expect(boundTableBadge?.props.title).toContain('siwc.expires');
+      expect(invalidTableBadge).toBeDefined();
+      expect(invalidTableBadge?.props.title).toContain('siwc.expires');
+      expect(invalidTableBadge?.findAllByType('span')[0]?.props.className).toContain('invalid');
+      expect(unboundTableBadge).toBeDefined();
+      expect(unboundTableBadge?.props.title).toBeUndefined();
     });
   });
 });

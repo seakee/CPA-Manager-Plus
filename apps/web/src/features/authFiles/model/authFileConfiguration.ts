@@ -7,10 +7,15 @@ import {
 } from '@/types';
 import type { AuthFileFieldsPatch } from '@/services/api/authFiles';
 import {
+  isAuthFileSiwcBound,
   normalizeExcludedModels,
   normalizeProviderKey,
   parseDisableCoolingValue,
+  readAuthFileUseSiwc,
   readAuthFileWebsockets,
+  supportsAuthFileSiwc,
+  supportsAuthFileWebsockets,
+  type AuthFileSiwcCapabilityOptions,
 } from '@/features/authFiles/constants';
 import {
   readAuthFileStatusAccountId,
@@ -40,6 +45,7 @@ export type AuthFileConfigurationDraft = {
   disableCooling: CoolingPolicy;
   requestRetry: string;
   websockets: boolean;
+  useSiwc: boolean;
   xaiRoutingMode: XaiRoutingMode;
   baseUrl: string;
   cloakMode: string;
@@ -66,6 +72,8 @@ export type AuthFileConfigurationErrors = Partial<
 
 export type AuthFileConfigurationCapabilities = {
   websockets: boolean;
+  supportsSiwc: boolean;
+  canEnableSiwc: boolean;
   xaiRouting: boolean;
   claudeCloak: boolean;
 };
@@ -291,11 +299,16 @@ const recordMatchesFileIdentity = (
 };
 
 export const getAuthFileConfigurationCapabilities = (
-  provider: string
+  provider: string,
+  options?: AuthFileSiwcCapabilityOptions
 ): AuthFileConfigurationCapabilities => {
   const providerKey = normalizeProviderKey(provider);
+  const supportsSiwc = supportsAuthFileSiwc(providerKey, options);
+  const siwcBound = isAuthFileSiwcBound(options);
   return {
-    websockets: providerKey === 'codex' || providerKey === 'xai',
+    websockets: supportsAuthFileWebsockets(providerKey),
+    supportsSiwc,
+    canEnableSiwc: supportsSiwc && siwcBound,
     xaiRouting: providerKey === 'xai',
     claudeCloak: providerKey === 'claude',
   };
@@ -377,6 +390,7 @@ export const buildAuthFileConfigurationDraft = (
       record.request_retry ?? record['request-retry'] ?? record.requestRetry
     ),
     websockets: readAuthFileWebsockets(record),
+    useSiwc: supportsAuthFileSiwc(providerKey) ? readAuthFileUseSiwc(record) : false,
     xaiRoutingMode: usingApi ? 'official-api' : 'grok-build',
     baseUrl:
       providerKey === 'xai' && usingApi
@@ -443,12 +457,12 @@ export const buildAuthFileConfigurationPatch = (
   record: Record<string, unknown>,
   provider: string,
   originalDraft: AuthFileConfigurationDraft,
-  draft: AuthFileConfigurationDraft
+  draft: AuthFileConfigurationDraft,
+  file?: AuthFileItem | null
 ): AuthFileConfigurationPatchResult => {
   const patch: AuthFileFieldsPatch = {};
   const errors: AuthFileConfigurationErrors = {};
-  const capabilities = getAuthFileConfigurationCapabilities(provider);
-
+  const capabilities = getAuthFileConfigurationCapabilities(provider, { file, record });
   const originalPrefix = originalDraft.prefix.trim();
   const nextPrefix = draft.prefix.trim();
   if (nextPrefix !== originalPrefix) patch.prefix = nextPrefix;
@@ -533,6 +547,16 @@ export const buildAuthFileConfigurationPatch = (
 
   if (capabilities.websockets && draft.websockets !== originalDraft.websockets) {
     patch.websockets = draft.websockets;
+  }
+
+  if (supportsAuthFileSiwc(provider) && draft.useSiwc !== originalDraft.useSiwc) {
+    if (draft.useSiwc) {
+      if (capabilities.canEnableSiwc) {
+        patch.use_siwc = true;
+      }
+    } else {
+      patch.use_siwc = false;
+    }
   }
 
   if (capabilities.xaiRouting) {

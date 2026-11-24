@@ -77,12 +77,9 @@ const buildV1ModelsEndpoint = (baseUrl: string): string => {
 };
 
 const buildV8ModelsRefreshEndpoint = (baseUrl: string): string => {
-  const raw = (baseUrl || '').trim();
-  if (!raw) return '';
-  const normalized = raw.startsWith('/') ? raw : normalizeApiBase(raw);
+  const normalized = normalizeApiBase(baseUrl);
   if (!normalized) return '';
   let trimmed = normalized.replace(/\/+$/g, '');
-  trimmed = trimmed.replace(/\/v0\/management$/i, '');
   trimmed = trimmed.replace(/\/v1\/models$/i, '');
   trimmed = trimmed.replace(/\/v1$/i, '');
   if (!trimmed) return '';

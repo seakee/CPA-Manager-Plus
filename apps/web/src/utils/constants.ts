@@ -53,14 +53,6 @@ export const NOTIFICATION_DURATION_MS = 3000;
 export const NOTIFICATION_SHORT_DURATION_MS = 2400;
 export const NOTIFICATION_ALERT_DURATION_MS = 5000;
 
-// OAuth 卡片 ID 列表
-export const OAUTH_CARD_IDS = [
-  'codex-oauth-card',
-  'anthropic-oauth-card',
-  'antigravity-oauth-card',
-  'kimi-oauth-card',
-  'xai-oauth-card',
-];
 export const OAUTH_PROVIDERS = {
   CODEX: 'codex',
   ANTHROPIC: 'anthropic',

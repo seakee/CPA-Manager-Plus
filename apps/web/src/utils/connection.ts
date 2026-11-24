@@ -4,10 +4,11 @@ export const DEFAULT_DOCKER_CPA_BASE_URL = 'http://host.docker.internal:8317';
 
 export const normalizeApiBase = (input: string): string => {
   let base = (input || '').trim();
-  if (!base) return '';
-  base = base.replace(/\/?v0\/management\/?$/i, '');
+  if (!base || base.startsWith('//')) return '';
+  base = base.replace(/\/?v(?:0|8)\/management\/?$/i, '');
   base = base.replace(/\/+$/i, '');
-  if (!/^https?:\/\//i.test(base)) {
+  if (!base || base.startsWith('//')) return '';
+  if (!/^https?:\/\//i.test(base) && !base.startsWith('/')) {
     base = `http://${base}`;
   }
   return base;
@@ -17,6 +18,12 @@ export const computeApiUrl = (base: string): string => {
   const normalized = normalizeApiBase(base);
   if (!normalized) return '';
   return `${normalized}${MANAGEMENT_API_PREFIX}`;
+};
+
+export const computeV8ApiUrl = (base: string): string => {
+  const normalized = normalizeApiBase(base);
+  if (!normalized) return '';
+  return `${normalized}/v8/management`;
 };
 
 const readEnvDefaultCPAConnectionBase = (): string => {

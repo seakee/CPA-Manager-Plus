@@ -49,7 +49,10 @@ export function AccountConfigurationTab({
     sharedSourceReadOnly,
     sourceMemberCount,
   } = editor;
-  const capabilities = getAuthFileConfigurationCapabilities(state?.providerKey || row.provider);
+  const capabilities = getAuthFileConfigurationCapabilities(state?.providerKey || row.provider, {
+    file: state?.authFile ? { ...row.raw, ...state.authFile } : row.raw,
+    record: state?.record,
+  });
   const providerLabel = getProviderLabel(state?.providerKey || row.provider, t);
   const disabled =
     disableControls ||
@@ -252,7 +255,11 @@ export function AccountConfigurationTab({
         </div>
       </section>
 
-      {(capabilities.websockets || capabilities.xaiRouting || capabilities.claudeCloak) && (
+      {(capabilities.websockets ||
+        capabilities.supportsSiwc ||
+        draft.useSiwc ||
+        capabilities.xaiRouting ||
+        capabilities.claudeCloak) && (
         <section className={styles.configurationSection}>
           <h3 className={styles.configurationSectionTitle}>
             {t('accounts.config_section_provider', { provider: providerLabel })}
@@ -301,6 +308,25 @@ export function AccountConfigurationTab({
                 onChange={(value) => editor.updateField('websockets', value)}
                 disabled={disabled}
                 ariaLabel={t('auth_files.websockets_label')}
+              />
+            </div>
+          ) : null}
+
+          {capabilities.supportsSiwc || draft.useSiwc ? (
+            <div className={styles.configurationToggleRow}>
+              <div>
+                <strong>{t('auth_files.use_siwc_label')}</strong>
+                <p>
+                  {!capabilities.canEnableSiwc && !draft.useSiwc
+                    ? t('auth_files.use_siwc_requires_bind')
+                    : t('auth_files.use_siwc_hint')}
+                </p>
+              </div>
+              <ToggleSwitch
+                checked={draft.useSiwc}
+                onChange={(value) => editor.updateField('useSiwc', value)}
+                disabled={disabled || (!capabilities.canEnableSiwc && !draft.useSiwc)}
+                ariaLabel={t('auth_files.use_siwc_label')}
               />
             </div>
           ) : null}

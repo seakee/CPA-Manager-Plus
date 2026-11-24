@@ -97,6 +97,12 @@ import {
   createCodexReauthTargetFromAuthFile,
   type CodexReauthTarget,
 } from '@/features/oauth/codexReauthModel';
+import { SiwcStatusBadge } from '@/components/ui/SiwcStatusBadge';
+import {
+  getSiwcBindingStatus,
+  readSiwcExpiresAtForDisplay,
+  supportsSiwcBinding,
+} from '@/entities/accounts/siwcBinding';
 import { runCredentialVisibilityRetry } from '@/features/accounts/model/accountCredentialVisibilityRetry';
 import {
   ACCOUNT_CODEX_STATUS_FILTERS,
@@ -227,6 +233,7 @@ import {
 import { buildAccountSubscriptionPresentation } from '@/features/accounts/model/accountSubscriptionPresentation';
 import { resolveAccountQuotaWindowUsageAndForecast } from '@/features/accounts/model/accountQuotaWindowUsagePresentation';
 import { formatCompactNumber, formatCompactUsd, formatUsd } from '@/utils/usage';
+import { formatDateTime } from '@/utils/format';
 import { resolveCredentialIdentity } from '@/utils/authFileCredentialIdentity';
 import {
   getAuthFileCodexInspectionKeyForFile,
@@ -8731,6 +8738,18 @@ export function AccountsPage() {
       codexResetCreditsCount !== null &&
       codexResetCreditsCount > 0;
     const providerIcon = getAuthFileIcon(row.provider, resolvedTheme);
+    const siwcSupported = supportsSiwcBinding(row.raw);
+    const siwcStatus = siwcSupported ? getSiwcBindingStatus(row.raw) : null;
+    const siwcExpiresAt = siwcSupported ? readSiwcExpiresAtForDisplay(row.raw) : undefined;
+    const siwcExpiresFormatted = siwcExpiresAt
+      ? (() => {
+          const formatted = formatDateTime(siwcExpiresAt, i18n.language);
+          return formatted === 'Invalid Date' ? siwcExpiresAt : formatted;
+        })()
+      : undefined;
+    const siwcExpiresTitle = siwcExpiresFormatted
+      ? t('siwc.expires', { date: siwcExpiresFormatted })
+      : undefined;
     const quotaEmptyLabel =
       quotaWindows.length > 0
         ? t('accounts.quota_details_only')
@@ -8777,6 +8796,8 @@ export function AccountsPage() {
       codexResetCreditsCount,
       hasCodexResetCredits,
       providerIcon,
+      siwcStatus,
+      siwcExpiresTitle,
       quotaEmptyLabel,
       quotaWindowTitle,
       healthTitle,
@@ -9102,6 +9123,13 @@ export function AccountsPage() {
                             })}
                           </span>
                         </span>
+                      ) : null}
+                      {ctx.siwcStatus ? (
+                        <SiwcStatusBadge
+                          status={ctx.siwcStatus}
+                          showPrefix
+                          title={ctx.siwcExpiresTitle}
+                        />
                       ) : null}
                       {editingPriorityState?.rowKey === row.selectionKey ? (
                         <input
@@ -9493,6 +9521,15 @@ export function AccountsPage() {
                           </span>
                         ) : null}
                       </div>
+                      {ctx.siwcStatus ? (
+                        <div className={styles.accountIdentityBadgeRow}>
+                          <SiwcStatusBadge
+                            status={ctx.siwcStatus}
+                            showPrefix
+                            title={ctx.siwcExpiresTitle}
+                          />
+                        </div>
+                      ) : null}
                     </div>
                   </div>
 
