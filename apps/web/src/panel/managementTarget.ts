@@ -11,8 +11,9 @@ const ALLOWED_V8_MANAGEMENT_PATHS: Record<string, true> = {
 export function assertPanelManagementTarget(base: string, resource: string): void {
   const path = resource.split('?')[0];
   const normalizedBase = base.trim().replace(/\/+$/, '');
-  const isV0Base = /\/v0\/management$/i.test(normalizedBase);
-  const isV8Base = /\/v8\/management$/i.test(normalizedBase);
+  const lowerBase = normalizedBase.toLowerCase();
+  const isV0Base = lowerBase.endsWith('/v0/management');
+  const isV8Base = lowerBase.endsWith('/v8/management');
   const fullWebLegacyBridge = /\/api\/v2\/cpamp\/v0\/management$/i.test(normalizedBase);
   const fullWebV8Bridge = /\/api\/v2\/cpamp\/v8\/management$/i.test(normalizedBase);
   if (
