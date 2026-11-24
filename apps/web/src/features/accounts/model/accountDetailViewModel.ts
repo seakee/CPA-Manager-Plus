@@ -46,7 +46,15 @@ import {
 } from './quotaRecommendations';
 import type { UsageValueRow, UsageValueSource } from './usageValueRows';
 import { getPlanPresentation, resolveAuthFilePlanType, type PlanPresentation } from '@/utils/plans';
-import { buildAccountSubscriptionPresentation } from './accountSubscriptionPresentation';
+import {
+  buildAccountSubscriptionPresentation,
+  parseValidSubscriptionUntilMs,
+} from './accountSubscriptionPresentation';
+import {
+  getSiwcBindingStatus,
+  readSiwcExpiresAtForDisplay,
+  supportsSiwcBinding,
+} from '@/entities/accounts/siwcBinding';
 import {
   classifyAccountCredentialStatusEvidence,
   getAccountRequestCredentialEvidence,
@@ -1088,6 +1096,9 @@ const buildOverviewCredential = (
     codexQuota,
     t,
   });
+  const supportsSiwc = supportsSiwcBinding(row.raw);
+  const siwcExpiresAt = supportsSiwc ? readSiwcExpiresAtForDisplay(row.raw) : undefined;
+  const siwcExpiresAtMs = siwcExpiresAt ? parseValidSubscriptionUntilMs(siwcExpiresAt) : null;
 
   return {
     statusLabelKey: row.disabled
@@ -1098,9 +1109,31 @@ const buildOverviewCredential = (
       : 'accounts.detail_local_auth_file',
     fields: compactFields([
       field('provider', 'accounts.col_provider', row.provider),
-      field('planType', 'accounts.col_plan', subscription.planPresentation?.fullLabel ?? subscription.effectivePlanType),
+      field(
+        'planType',
+        'accounts.col_plan',
+        subscription.planPresentation?.fullLabel ?? subscription.effectivePlanType
+      ),
       field('updatedAtMs', 'accounts.detail_updated_at', row.updatedAtMs, 'timestamp'),
-      field('subscriptionUntilMs', subscription.subscriptionUntilLabelKey, subscription.subscriptionUntilMs, 'quota_reset'),
+      field(
+        'subscriptionUntilMs',
+        subscription.subscriptionUntilLabelKey,
+        subscription.subscriptionUntilMs,
+        'quota_reset'
+      ),
+      supportsSiwc
+        ? field(
+            'siwcStatus',
+            'siwc.detail_status_label',
+            `siwc.${getSiwcBindingStatus(row.raw)}`,
+            'i18n'
+          )
+        : null,
+      supportsSiwc && siwcExpiresAt
+        ? siwcExpiresAtMs !== null
+          ? field('siwcExpiresAt', 'siwc.detail_expires_label', siwcExpiresAtMs, 'timestamp')
+          : field('siwcExpiresAt', 'siwc.detail_expires_label', siwcExpiresAt)
+        : null,
       field('authIndex', 'accounts.detail_auth_index', presentOverviewText(row.authIndex)),
       field('priority', 'accounts.col_priority', row.priority ?? 0, 'number'),
     ]),

@@ -216,6 +216,15 @@ describe('plugin resource URL boundary', () => {
     expect(resolvePluginAssetURL('/v0/resource/plugins/demo/logo.png', '')).toBe(
       `${ORIGIN}/v0/resource/plugins/demo/logo.png`
     );
+    expect(
+      resolvePluginAssetURL('/v0/resource/plugins/demo/index.html', '/api/v2/cpamp')
+    ).toBe(`${ORIGIN}/v0/resource/plugins/demo/index.html`);
+    expect(
+      resolvePluginAssetURL('/v0/resource/plugins/demo/index.html', '/console/api/v2/cpamp')
+    ).toBe(`${ORIGIN}/v0/resource/plugins/demo/index.html`);
+    expect(
+      resolvePluginAssetURL('/v0/resource/plugins/demo/index.html', '/v0/management')
+    ).toBe(`${ORIGIN}/v0/resource/plugins/demo/index.html`);
   });
 
   it('reports unsupported targets instead of producing a loadable URL', () => {
@@ -240,6 +249,18 @@ describe('plugin resource URL boundary', () => {
       )
     ).toBe('');
     expect(resolvePluginAssetURL('/v0/resource/plugins/demo/index.html', 'not a url')).toBe('');
+    expect(
+      resolvePluginAssetURL(
+        '/v0/resource/plugins/demo/index.html',
+        '//manager.elsewhere.test/api/v2/cpamp'
+      )
+    ).toBe('');
+    expect(
+      resolvePluginAssetURL(
+        '/v0/resource/plugins/demo/index.html',
+        '//admin.example.test/api/v2/cpamp'
+      )
+    ).toBe('');
   });
 
   it('refuses to resolve anything without a browser origin', () => {

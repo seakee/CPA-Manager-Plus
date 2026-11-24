@@ -353,6 +353,19 @@ describe('modelsApi.refreshUpstreamModels', () => {
         undefined,
         { headers: { Authorization: 'Bearer mgmt-secret' } }
       );
+
+      await modelsApi.refreshUpstreamModels('/console/api/v2/cpamp/v8/management/', 'admin-key');
+      expect(postSpy).toHaveBeenNthCalledWith(
+        3,
+        '/console/api/v2/cpamp/v8/management/models/refresh',
+        undefined,
+        { headers: { Authorization: 'Bearer admin-key' } }
+      );
+
+      await expect(
+        modelsApi.refreshUpstreamModels('//evil.example/v8/management', 'admin-key')
+      ).rejects.toThrow('Invalid base url');
+      expect(postSpy).toHaveBeenCalledTimes(3);
     } finally {
       postSpy.mockRestore();
     }

@@ -19,6 +19,21 @@ describe('accountReauth', () => {
       oauthProvider: 'anthropic',
       path: '/oauth#oauth-provider-anthropic',
     });
+    expect(resolveAccountReauthAction({ name: 'devin.json', type: 'devin' })).toEqual({
+      kind: 'navigate',
+      oauthProvider: 'devin',
+      path: '/oauth#oauth-provider-devin',
+    });
+    expect(resolveAccountReauthAction({ name: 'kimi-ai.json', type: 'kimi-ai' })).toEqual({
+      kind: 'navigate',
+      oauthProvider: 'kimi-ai',
+      path: '/oauth#oauth-provider-kimi-ai',
+    });
+    expect(resolveAccountReauthAction({ name: 'meta.json', type: 'meta' })).toEqual({
+      kind: 'navigate',
+      oauthProvider: 'meta',
+      path: '/oauth#oauth-provider-meta',
+    });
   });
 
   it('returns an explicit unsupported action for providers without OAuth login', () => {

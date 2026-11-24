@@ -8,6 +8,7 @@ import {
   buildRedactedAuthFileConfigurationText,
   getAuthFileConfigurationCapabilities,
   parseAuthFileConfigurationSource,
+  redactAuthFileConfigurationValue,
   type AuthFileConfigurationDraft,
 } from './authFileConfiguration';
 
@@ -25,23 +26,117 @@ describe('authFileConfiguration provider capabilities', () => {
   it('keeps provider-only OAuth fields distinct', () => {
     expect(getAuthFileConfigurationCapabilities('codex')).toEqual({
       websockets: true,
+      supportsSiwc: true,
+      canEnableSiwc: false,
       xaiRouting: false,
       claudeCloak: false,
     });
     expect(getAuthFileConfigurationCapabilities('grok')).toEqual({
       websockets: true,
+      supportsSiwc: false,
+      canEnableSiwc: false,
       xaiRouting: true,
       claudeCloak: false,
     });
     expect(getAuthFileConfigurationCapabilities('claude')).toEqual({
       websockets: false,
+      supportsSiwc: false,
+      canEnableSiwc: false,
       xaiRouting: false,
       claudeCloak: true,
     });
     expect(getAuthFileConfigurationCapabilities('gemini')).toEqual({
       websockets: false,
+      supportsSiwc: false,
+      canEnableSiwc: false,
       xaiRouting: false,
       claudeCloak: false,
+    });
+  });
+
+  it('evaluates Codex SIWC support and binding eligibility from credential metadata and records', () => {
+    expect(
+      getAuthFileConfigurationCapabilities('codex', {
+        file: makeFile({ siwc_bind_supported: false, siwc_bound: true }),
+        record: {
+          type: 'codex',
+          siwc: { access_token: 'sa', refresh_token: 'sr', client_id: 'cid' },
+        },
+      })
+    ).toMatchObject({
+      supportsSiwc: false,
+      canEnableSiwc: false,
+    });
+
+    expect(
+      getAuthFileConfigurationCapabilities('codex', {
+        record: { type: 'codex', api_key: 'sk-codex-only' },
+      })
+    ).toMatchObject({
+      supportsSiwc: false,
+      canEnableSiwc: false,
+    });
+
+    expect(
+      getAuthFileConfigurationCapabilities('codex', {
+        record: { type: 'codex', auth_kind: 'apikey' },
+      })
+    ).toMatchObject({
+      supportsSiwc: false,
+      canEnableSiwc: false,
+    });
+
+    expect(
+      getAuthFileConfigurationCapabilities('codex', {
+        file: makeFile({ siwc_bind_supported: true, siwc_bound: false }),
+        record: {
+          type: 'codex',
+          access_token: 'oauth-at',
+          refresh_token: 'oauth-rt',
+          siwc: { access_token: 'partial-only' },
+        },
+      })
+    ).toMatchObject({
+      supportsSiwc: true,
+      canEnableSiwc: false,
+    });
+
+    expect(
+      getAuthFileConfigurationCapabilities('codex', {
+        file: makeFile({ siwc_bind_supported: true, siwc_bound: true }),
+        record: { type: 'codex' },
+      })
+    ).toMatchObject({
+      supportsSiwc: true,
+      canEnableSiwc: true,
+    });
+
+    expect(
+      getAuthFileConfigurationCapabilities('codex', {
+        record: {
+          type: 'codex',
+          access_token: 'oauth-at',
+          refresh_token: 'oauth-rt',
+          siwc: {
+            access_token: 'siwc-access',
+            refresh_token: 'siwc-refresh',
+            client_id: 'siwc-client',
+          },
+        },
+      })
+    ).toMatchObject({
+      supportsSiwc: true,
+      canEnableSiwc: true,
+    });
+
+    expect(
+      getAuthFileConfigurationCapabilities('codex', {
+        file: makeFile(),
+        record: { type: 'codex', access_token: 'oauth-at', refresh_token: 'oauth-rt' },
+      })
+    ).toMatchObject({
+      supportsSiwc: false,
+      canEnableSiwc: false,
     });
   });
 });
@@ -433,6 +528,135 @@ describe('buildAuthFileConfigurationPatch', () => {
       baseUrl: 'accounts.config_error_xai_base_url',
     });
   });
+
+  it('enforces Codex SIWC binding before emitting use_siwc=true while preserving disable recovery', () => {
+    const unboundRecord = { type: 'codex' };
+    const unboundOriginal = buildAuthFileConfigurationDraft(unboundRecord, 'codex');
+    expect(unboundOriginal.useSiwc).toBe(false);
+    expect(
+      buildAuthFileConfigurationPatch(
+        unboundRecord,
+        'codex',
+        unboundOriginal,
+        { ...unboundOriginal, useSiwc: true },
+        makeFile({ siwc_bind_supported: true, siwc_bound: false })
+      )
+    ).toEqual({
+      errors: {},
+      patch: {},
+    });
+
+    const misconfiguredUnboundRecord = { type: 'codex', use_siwc: true };
+    const misconfiguredOriginal = buildAuthFileConfigurationDraft(
+      misconfiguredUnboundRecord,
+      'codex'
+    );
+    expect(misconfiguredOriginal.useSiwc).toBe(true);
+    expect(
+      buildAuthFileConfigurationPatch(
+        misconfiguredUnboundRecord,
+        'codex',
+        misconfiguredOriginal,
+        misconfiguredOriginal,
+        makeFile({ siwc_bind_supported: true, siwc_bound: false })
+      )
+    ).toEqual({
+      errors: {},
+      patch: {},
+    });
+    expect(
+      buildAuthFileConfigurationPatch(
+        misconfiguredUnboundRecord,
+        'codex',
+        misconfiguredOriginal,
+        { ...misconfiguredOriginal, useSiwc: false },
+        makeFile({ siwc_bind_supported: true, siwc_bound: false })
+      )
+    ).toEqual({
+      errors: {},
+      patch: { use_siwc: false },
+    });
+
+    const unsupportedFile = makeFile({ siwc_bind_supported: false, siwc_bound: true });
+    const recordWithSiwcTokens = {
+      type: 'codex',
+      siwc: {
+        access_token: 'siwc-access',
+        refresh_token: 'siwc-refresh',
+        client_id: 'siwc-client',
+      },
+    };
+    const unsupportedOriginal = buildAuthFileConfigurationDraft(recordWithSiwcTokens, 'codex');
+    expect(
+      buildAuthFileConfigurationPatch(
+        recordWithSiwcTokens,
+        'codex',
+        unsupportedOriginal,
+        { ...unsupportedOriginal, useSiwc: true },
+        unsupportedFile
+      )
+    ).toEqual({
+      errors: {},
+      patch: {},
+    });
+
+    const boundByRecordOriginal = buildAuthFileConfigurationDraft(recordWithSiwcTokens, 'codex');
+    expect(
+      buildAuthFileConfigurationPatch(recordWithSiwcTokens, 'codex', boundByRecordOriginal, {
+        ...boundByRecordOriginal,
+        useSiwc: true,
+      })
+    ).toEqual({
+      errors: {},
+      patch: { use_siwc: true },
+    });
+
+    const boundFile = makeFile({ siwc_bind_supported: true, siwc_bound: true });
+    expect(
+      buildAuthFileConfigurationPatch(
+        unboundRecord,
+        'codex',
+        unboundOriginal,
+        { ...unboundOriginal, useSiwc: true },
+        boundFile
+      )
+    ).toEqual({
+      errors: {},
+      patch: { use_siwc: true },
+    });
+
+    const boundEnabledRecord = { ...recordWithSiwcTokens, use_siwc: true };
+    const boundEnabledOriginal = buildAuthFileConfigurationDraft(boundEnabledRecord, 'codex');
+    expect(
+      buildAuthFileConfigurationPatch(
+        boundEnabledRecord,
+        'codex',
+        boundEnabledOriginal,
+        { ...boundEnabledOriginal, useSiwc: false },
+        boundFile
+      )
+    ).toEqual({
+      errors: {},
+      patch: { use_siwc: false },
+    });
+
+    for (const provider of ['xai', 'claude', 'gemini'] as const) {
+      const record = { type: provider };
+      const original = buildAuthFileConfigurationDraft(record, provider);
+      expect(
+        buildAuthFileConfigurationPatch(
+          record,
+          provider,
+          original,
+          { ...original, useSiwc: true },
+          makeFile({ type: provider, provider, siwc_bind_supported: true, siwc_bound: true })
+        )
+      ).toEqual({
+        errors: {},
+        patch: {},
+      });
+    }
+  });
 });
 
 describe('buildRedactedAuthFileConfigurationText', () => {
@@ -528,6 +752,43 @@ describe('buildRedactedAuthFileConfigurationText', () => {
         endpoint: 'wss://stream.example/events',
         callback_url: '[redacted]',
         note: 'keep this non-URL value?yes',
+      },
+    });
+  });
+
+  it('redacts nested SIWC tokens while preserving use_siwc and siwc.expires_at', () => {
+    const source = {
+      type: 'codex',
+      use_siwc: true,
+      access_token: 'outer-access-token',
+      refresh_token: 'outer-refresh-token',
+      siwc: {
+        access_token: 'siwc-access-token',
+        refresh_token: 'siwc-refresh-token',
+        expires_at: '2035-01-01T00:00:00Z',
+      },
+    };
+
+    expect(redactAuthFileConfigurationValue(source)).toEqual({
+      type: 'codex',
+      use_siwc: true,
+      access_token: '[redacted]',
+      refresh_token: '[redacted]',
+      siwc: {
+        access_token: '[redacted]',
+        refresh_token: '[redacted]',
+        expires_at: '2035-01-01T00:00:00Z',
+      },
+    });
+    expect(JSON.parse(buildRedactedAuthFileConfigurationText(source))).toEqual({
+      type: 'codex',
+      use_siwc: true,
+      access_token: '[redacted]',
+      refresh_token: '[redacted]',
+      siwc: {
+        access_token: '[redacted]',
+        refresh_token: '[redacted]',
+        expires_at: '2035-01-01T00:00:00Z',
       },
     });
   });

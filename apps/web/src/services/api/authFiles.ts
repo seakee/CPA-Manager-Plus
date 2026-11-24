@@ -2,7 +2,13 @@
  * 认证文件与 OAuth 排除模型相关 API
  */
 
-import { apiClient, createScopedApiRequestConfig, type ApiClientRequestScope } from './client';
+import {
+  apiClient,
+  createScopedApiRequestConfig,
+  createScopedV8ApiRequestConfig,
+  type ApiClientRequestScope,
+  type ScopedApiRequestConfig,
+} from './client';
 import type { AuthFilesResponse } from '@/types/authFile';
 import type { AuthFileItem, OAuthModelAliasEntry } from '@/types';
 import {
@@ -54,6 +60,7 @@ export type AuthFileFieldsPatch = {
   baseUrl?: null;
   'base-url'?: null;
   websockets?: boolean;
+  use_siwc?: boolean;
   using_api?: boolean;
   usingApi?: null;
   'using-api'?: null;
@@ -802,6 +809,10 @@ export const applyAuthFileFieldsPatchToRecord = (
     next.websockets = fields.websockets;
   }
 
+  if (fields.use_siwc !== undefined) {
+    next.use_siwc = fields.use_siwc;
+  }
+
   if (fields.using_api !== undefined) {
     next.using_api = fields.using_api;
   }
@@ -1133,13 +1144,28 @@ const buildAuthFileStatusPayload = (
 
 export const authFilesApi = {
   list: async (requestScope?: AuthFilesApiRequestScope) => {
-    const response = requestScope
-      ? await apiClient.get<AuthFilesResponse>(
-          '/auth-files',
-          createScopedApiRequestConfig(requestScope)
-        )
-      : await apiClient.get<AuthFilesResponse>('/auth-files');
-    return dedupeAuthFilesResponse(response);
+    const v8Config: ScopedApiRequestConfig = requestScope
+      ? createScopedV8ApiRequestConfig(requestScope)
+      : { cpampV8Namespace: true };
+    try {
+      const response = await apiClient.get<AuthFilesResponse>('/credentials', v8Config);
+      return dedupeAuthFilesResponse(response);
+    } catch (err: unknown) {
+      const status =
+        typeof err === 'object' && err !== null && 'status' in err
+          ? (err as { status?: unknown }).status
+          : undefined;
+      if (status !== 404 && status !== 405) {
+        throw err;
+      }
+      const fallbackResponse = requestScope
+        ? await apiClient.get<AuthFilesResponse>(
+            '/auth-files',
+            createScopedApiRequestConfig(requestScope)
+          )
+        : await apiClient.get<AuthFilesResponse>('/auth-files');
+      return dedupeAuthFilesResponse(fallbackResponse);
+    }
   },
 
   setStatus: (

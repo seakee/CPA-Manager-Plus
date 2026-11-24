@@ -1682,6 +1682,7 @@ func TestIsCPAPluginManagementPath(t *testing.T) {
 	}{
 		{path: "/v0/management/codex-invite/accounts", want: true},
 		{path: "/v0/management/sample-plugin/custom/action", want: true},
+		{path: "/v0/management/custom-auth-url/action", want: true},
 		{path: "/v0/management/accounts", want: false},
 		{path: "/v0/management/api-keys", want: false},
 		{path: "/v0/management/accounts/", want: false},
@@ -1690,6 +1691,23 @@ func TestIsCPAPluginManagementPath(t *testing.T) {
 		{path: "/v0/management/plugins/demo/custom", want: false},
 		{path: "/v0/management/plugin-store/demo/install", want: false},
 		{path: "/v0/management/usage", want: false},
+		{path: "/v0/management/oauth-callback", want: false},
+		{path: "/v0/management/config.yaml", want: false},
+		{path: "/v0/management/oauth-excluded-models", want: false},
+		{path: "/v0/management/oauth-model-alias", want: false},
+		{path: "/v0/management/oauth-request-scoped-errors", want: false},
+		{path: "/v0/management/quota/providers", want: false},
+		{path: "/v0/management/vertex/import", want: false},
+		{path: "/v0/management/logs", want: false},
+		{path: "/v0/management/request-log", want: false},
+		{path: "/v0/management/oauth-callback/", want: false},
+		{path: "/v0/management/oauth-session", want: false},
+		{path: "/v0/management/oauth-session/", want: false},
+		{path: "/v0/management/get-auth-status", want: false},
+		{path: "/v0/management/codex-auth-url", want: false},
+		{path: "/v0/management/kimi-ai-auth-url", want: false},
+		{path: "/v0/management/kimi-ai-auth-url/", want: false},
+		{path: "/v0/management/acme-cloud-auth-url", want: false},
 		{path: "/v0/resource/plugins/codex-invite/invite", want: false},
 		{path: "/v0/management", want: false},
 		{path: "/v0/management/", want: false},
@@ -1806,5 +1824,28 @@ func TestRewritePluginManagementOriginBodyLeavesOtherBodies(t *testing.T) {
 	}
 	if string(raw) != `{"refresh":true}` {
 		t.Fatalf("body = %q", raw)
+	}
+}
+
+func TestRewritePluginManagementOriginBodyRejectsOversizedBody(t *testing.T) {
+	target, err := url.Parse("http://cpa.local:8317")
+	if err != nil {
+		t.Fatalf("parse target: %v", err)
+	}
+
+	oversized := bytes.Repeat([]byte("a"), int(maxPluginManagementOriginBodyBytes)+1)
+	req, err := http.NewRequest(
+		http.MethodPost,
+		"/v0/management/codex-invite/invite",
+		bytes.NewReader(oversized),
+	)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	err = rewritePluginManagementOriginBody(req, target)
+	if !errors.Is(err, errPluginManagementBodyTooLarge) {
+		t.Fatalf("rewritePluginManagementOriginBody() error = %v, want %v", err, errPluginManagementBodyTooLarge)
 	}
 }

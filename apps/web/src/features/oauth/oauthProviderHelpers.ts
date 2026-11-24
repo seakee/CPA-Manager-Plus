@@ -30,7 +30,11 @@ export const resolvePluginOAuthProviderId = (
 ): string => plugin.oauthProvider ?? plugin.id;
 
 export const shouldShowPluginOAuthProvider = (
-  plugin: Pick<PluginListEntry, 'id' | 'oauthProvider' | 'supportsOAuth'>,
+  plugin: Pick<PluginListEntry, 'id' | 'oauthProvider' | 'supportsOAuth'> & {
+    effectiveEnabled?: boolean;
+  },
   builtInProviderIds: ReadonlySet<string>
 ): boolean =>
-  plugin.supportsOAuth && !builtInProviderIds.has(resolvePluginOAuthProviderId(plugin));
+  plugin.supportsOAuth &&
+  plugin.effectiveEnabled !== false &&
+  !builtInProviderIds.has(resolvePluginOAuthProviderId(plugin));

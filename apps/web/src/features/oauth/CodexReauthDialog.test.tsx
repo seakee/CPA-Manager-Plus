@@ -126,14 +126,30 @@ describe('CodexReauthDialog connection lifecycle', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.intervalCallback = null;
+    let nextTimerId = 100;
+    const pollTimers = new Map<number, () => void | Promise<void>>();
     vi.stubGlobal('window', {
-      setTimeout: (callback: () => void, delay?: number) =>
-        globalThis.setTimeout(callback, delay) as unknown as number,
-      clearTimeout: (timer: number) => globalThis.clearTimeout(timer),
-      setInterval: vi.fn((callback: () => void | Promise<void>) => {
-        mocks.intervalCallback = callback;
-        return 1;
-      }),
+      setTimeout: (callback: () => void, delay?: number) => {
+        if (delay && delay >= 1000) {
+          const id = nextTimerId++;
+          pollTimers.set(id, callback);
+          mocks.intervalCallback = callback;
+          return id;
+        }
+        return globalThis.setTimeout(callback, delay) as unknown as number;
+      },
+      clearTimeout: (timer: number) => {
+        if (pollTimers.has(timer)) {
+          const cb = pollTimers.get(timer);
+          pollTimers.delete(timer);
+          if (mocks.intervalCallback === cb) {
+            mocks.intervalCallback = null;
+          }
+          return;
+        }
+        globalThis.clearTimeout(timer);
+      },
+      setInterval: vi.fn(),
       clearInterval: vi.fn(),
       open: vi.fn(),
     });
@@ -190,7 +206,7 @@ describe('CodexReauthDialog connection lifecycle', () => {
       );
     });
     await flushEffects();
-    expect(mocks.startAuth).toHaveBeenCalledWith('codex', REQUEST_SCOPE);
+    expect(mocks.startAuth).toHaveBeenCalledWith('codex', REQUEST_SCOPE, expect.any(AbortSignal));
 
     await act(async () => {
       renderer.update(
@@ -203,7 +219,7 @@ describe('CodexReauthDialog connection lifecycle', () => {
       );
     });
     await flushEffects();
-    expect(mocks.startAuth).toHaveBeenCalledWith('codex', NEXT_REQUEST_SCOPE);
+    expect(mocks.startAuth).toHaveBeenCalledWith('codex', NEXT_REQUEST_SCOPE, expect.any(AbortSignal));
 
     await act(async () => {
       oldRequest.resolve({ url: 'https://auth.example/old', state: 'old-state' });
@@ -248,7 +264,7 @@ describe('CodexReauthDialog connection lifecycle', () => {
       pollingPromise = Promise.resolve(mocks.intervalCallback?.());
     });
     await flushEffects();
-    expect(mocks.getAuthStatus).toHaveBeenCalledWith('state-1', REQUEST_SCOPE);
+    expect(mocks.getAuthStatus).toHaveBeenCalledWith('state-1', REQUEST_SCOPE, expect.any(AbortSignal));
 
     await act(async () => {
       renderer.update(
@@ -301,7 +317,8 @@ describe('CodexReauthDialog connection lifecycle', () => {
     expect(mocks.submitCallback).toHaveBeenCalledWith(
       'codex',
       'http://localhost/callback?code=1',
-      REQUEST_SCOPE
+      REQUEST_SCOPE,
+      expect.any(AbortSignal)
     );
 
     await act(async () => {
@@ -356,7 +373,7 @@ describe('CodexReauthDialog connection lifecycle', () => {
     });
 
     expect(onSuccess).not.toHaveBeenCalled();
-    expect(mocks.getAuthStatus).toHaveBeenCalledWith('state-1', REQUEST_SCOPE);
+    expect(mocks.getAuthStatus).toHaveBeenCalledWith('state-1', REQUEST_SCOPE, expect.any(AbortSignal));
     expect(mocks.intervalCallback).not.toBeNull();
     expect(textContent(renderer.root)).toContain('codex_reauth.callback_accepted');
 
@@ -472,7 +489,7 @@ describe('CodexReauthDialog connection lifecycle', () => {
       await findButton(renderer, 'codex_reauth.submit_callback').props.onClick();
     });
 
-    expect(mocks.getAuthStatus).toHaveBeenCalledWith('state-1', REQUEST_SCOPE);
+    expect(mocks.getAuthStatus).toHaveBeenCalledWith('state-1', REQUEST_SCOPE, expect.any(AbortSignal));
     expect(onSuccess).toHaveBeenCalledTimes(1);
 
     act(() => renderer.unmount());

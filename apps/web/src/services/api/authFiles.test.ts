@@ -27,6 +27,12 @@ vi.mock('./client', () => ({
     headers: { Authorization: `Bearer ${scope.managementKey}` },
     cpampScopedRequest: true,
   }),
+  createScopedV8ApiRequestConfig: (scope: { apiBase: string; managementKey: string }) => ({
+    baseURL: `${scope.apiBase.replace(/\/+$/, '')}/v8/management`,
+    headers: { Authorization: `Bearer ${scope.managementKey}` },
+    cpampScopedRequest: true,
+    cpampV8Namespace: true,
+  }),
 }));
 
 import { applyAuthFileFieldsPatchToRecord, authFilesApi } from './authFiles';
@@ -201,7 +207,7 @@ describe('authFilesApi model endpoints', () => {
 });
 
 describe('authFilesApi list normalization', () => {
-  it('pins list requests to the captured CPA connection', async () => {
+  it('pins list requests to the captured CPA v8 connection', async () => {
     mocks.get.mockResolvedValue({ files: [] });
     const requestScope = {
       apiBase: 'http://old-cpa.local:8317',
@@ -210,11 +216,41 @@ describe('authFilesApi list normalization', () => {
 
     await authFilesApi.list(requestScope);
 
-    expect(mocks.get).toHaveBeenCalledWith('/auth-files', {
-      baseURL: 'http://old-cpa.local:8317/v0/management',
+    expect(mocks.get).toHaveBeenCalledWith('/credentials', {
+      baseURL: 'http://old-cpa.local:8317/v8/management',
       headers: { Authorization: 'Bearer old-cpa-key' },
       cpampScopedRequest: true,
+      cpampV8Namespace: true,
     });
+  });
+
+  it('falls back to /auth-files on pre-v8 404/405 responses and propagates other errors', async () => {
+    const requestScope = {
+      apiBase: 'http://legacy-cpa.local:8317',
+      managementKey: 'legacy-key',
+    };
+    mocks.get
+      .mockRejectedValueOnce(Object.assign(new Error('Not Found'), { status: 404 }))
+      .mockResolvedValueOnce({ files: [{ name: 'codex-legacy.json', type: 'codex' }] });
+
+    const fallback = await authFilesApi.list(requestScope);
+    expect(fallback.files.map((item) => item.name)).toEqual(['codex-legacy.json']);
+    expect(mocks.get).toHaveBeenNthCalledWith(1, '/credentials', {
+      baseURL: 'http://legacy-cpa.local:8317/v8/management',
+      headers: { Authorization: 'Bearer legacy-key' },
+      cpampScopedRequest: true,
+      cpampV8Namespace: true,
+    });
+    expect(mocks.get).toHaveBeenNthCalledWith(2, '/auth-files', {
+      baseURL: 'http://legacy-cpa.local:8317/v0/management',
+      headers: { Authorization: 'Bearer legacy-key' },
+      cpampScopedRequest: true,
+    });
+
+    mocks.get.mockReset();
+    mocks.get.mockRejectedValueOnce(Object.assign(new Error('Unauthorized'), { status: 401 }));
+    await expect(authFilesApi.list()).rejects.toThrow('Unauthorized');
+    expect(mocks.get).toHaveBeenCalledTimes(1);
   });
 
   it('preserves same-name auth file rows when authIndex differs', async () => {
@@ -237,7 +273,7 @@ describe('authFilesApi list normalization', () => {
 
     const result = await authFilesApi.list();
 
-    expect(mocks.get).toHaveBeenCalledWith('/auth-files');
+    expect(mocks.get).toHaveBeenCalledWith('/credentials', { cpampV8Namespace: true });
     expect(result.files).toEqual([
       expect.objectContaining({
         name: 'sub2api-codex-accounts.codex.json',

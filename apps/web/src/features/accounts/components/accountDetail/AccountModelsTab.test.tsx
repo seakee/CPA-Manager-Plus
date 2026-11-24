@@ -56,6 +56,7 @@ const makeDraft = (
   disableCooling: 'inherit',
   requestRetry: '',
   websockets: false,
+  useSiwc: false,
   xaiRoutingMode: 'grok-build',
   baseUrl: '',
   cloakMode: '',

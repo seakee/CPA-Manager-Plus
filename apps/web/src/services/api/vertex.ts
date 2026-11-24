@@ -14,16 +14,24 @@ export interface VertexImportResponse {
 }
 
 export const vertexApi = {
-  importCredential: (file: File, location?: string, requestScope?: ApiClientRequestScope) => {
+  importCredential: (
+    file: File,
+    location?: string,
+    requestScope?: ApiClientRequestScope,
+    signal?: AbortSignal
+  ) => {
     const formData = new FormData();
     formData.append('file', file);
     if (location) {
       formData.append('location', location);
     }
-    return apiClient.postForm<VertexImportResponse>(
-      '/vertex/import',
-      formData,
-      requestScope ? createScopedApiRequestConfig(requestScope) : undefined
-    );
+    const config =
+      requestScope || signal
+        ? {
+            ...(requestScope ? createScopedApiRequestConfig(requestScope) : {}),
+            ...(signal ? { signal } : {}),
+          }
+        : undefined;
+    return apiClient.postForm<VertexImportResponse>('/vertex/import', formData, config);
   },
 };

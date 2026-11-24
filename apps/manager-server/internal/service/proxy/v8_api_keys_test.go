@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -290,5 +291,385 @@ func TestProxyV8ModelsRefreshForwardsOnlyAdminPosts(t *testing.T) {
 				t.Fatalf("%s %s reached upstream unexpectedly", test.method, test.target)
 			}
 		})
+	}
+}
+
+func TestV8OAuthPathAndPredicates(t *testing.T) {
+	methodTests := []struct {
+		path       string
+		wantPath   bool
+		wantMethod string
+	}{
+		{path: "/v8/management/oauth/siwc/bind", wantPath: true, wantMethod: http.MethodPost},
+		{path: "/v8/management/oauth/callback", wantPath: true, wantMethod: http.MethodPost},
+		{path: "/v8/management/oauth/status", wantPath: true, wantMethod: http.MethodGet},
+		{path: "/v8/management/oauth/session", wantPath: true, wantMethod: http.MethodDelete},
+		{path: "/v8/management/oauth", wantPath: false, wantMethod: ""},
+		{path: "/v8/management/oauth/", wantPath: false, wantMethod: ""},
+		{path: "/v8/management/oauth/siwc", wantPath: false, wantMethod: ""},
+		{path: "/v8/management/oauth/siwc/bind/", wantPath: false, wantMethod: ""},
+		{path: "/v8/management/oauth/siwc/bind/extra", wantPath: false, wantMethod: ""},
+		{path: "/v8/management/oauth/status/", wantPath: false, wantMethod: ""},
+		{path: "/v8/management/oauth/status/extra", wantPath: false, wantMethod: ""},
+		{path: "/v8/management/oauth-x", wantPath: false, wantMethod: ""},
+		{path: "", wantPath: false, wantMethod: ""},
+	}
+	for _, test := range methodTests {
+		if got := IsCPAV8OAuthPath(test.path); got != test.wantPath {
+			t.Fatalf("IsCPAV8OAuthPath(%q) = %v, want %v", test.path, got, test.wantPath)
+		}
+		if got := CPAV8OAuthAllowedMethod(test.path); got != test.wantMethod {
+			t.Fatalf("CPAV8OAuthAllowedMethod(%q) = %q, want %q", test.path, got, test.wantMethod)
+		}
+	}
+
+	predicateTests := []struct {
+		target    string
+		canonical bool
+		refused   bool
+	}{
+		{target: "/v8/management/oauth/siwc/bind", canonical: true},
+		{target: "/v8/management/oauth/callback", canonical: true},
+		{target: "/v8/management/oauth/status?state=st_123", canonical: true},
+		{target: "/v8/management/oauth/session?state=st_123", canonical: true},
+		{target: "/v8/management/oauth/siwc/bind/", refused: true},
+		{target: "/v8/management/oauth/callback/", refused: true},
+		{target: "/v8/management/oauth/status/", refused: true},
+		{target: "/v8/management/oauth/session/", refused: true},
+		{target: "/v8//management/oauth/siwc/bind", refused: true},
+		{target: "//v8/management/oauth/callback", refused: true},
+		{target: "/v8/management/oauth//status", refused: true},
+		{target: "/v8/management/oauth/./session", refused: true},
+		{target: "/v8/management/oauth/siwc/bind/../callback", refused: true},
+		{target: "/v8/management/oauth/siwc/bind/../../credentials", refused: true},
+		{target: "/v8/management/oauth/%2e%2e/config", refused: true},
+		{target: "/v8/management/oauth/siwc%2Fbind", refused: true},
+		{target: "/v8/management/oauth/%2E%2E/config", refused: true},
+		{target: "/v8/management/oauth/siwc%2fbind", refused: true},
+		{target: "/v8/management/oauth/%73tatus", refused: true},
+		{target: "/v8/management/oauth/siwc/%62ind", refused: true},
+		{target: "/v8/management/%2e%2e/management/oauth/status", refused: true},
+		// Clean syntax outside the 4 exact paths: answered by router's ordinary 404.
+		{target: "/v8/management/oauth"},
+		{target: "/v8/management/oauth/siwc"},
+		{target: "/v8/management/oauth/siwc/bind/extra"},
+		{target: "/v8/management/oauth/unknown"},
+		{target: "/v1/chat/completions"},
+		{target: "/v8/management//credentials"},
+	}
+	for _, test := range predicateTests {
+		req := httptest.NewRequest(http.MethodGet, test.target, nil)
+		if got := IsCanonicalV8OAuthRequest(req); got != test.canonical {
+			t.Fatalf("IsCanonicalV8OAuthRequest(%q) = %v, want %v", test.target, got, test.canonical)
+		}
+		if got := IsNonCanonicalV8OAuthRequest(req); got != test.refused {
+			t.Fatalf("IsNonCanonicalV8OAuthRequest(%q) = %v, want %v", test.target, got, test.refused)
+		}
+	}
+	if IsCanonicalV8OAuthRequest(nil) || IsNonCanonicalV8OAuthRequest(nil) {
+		t.Fatal("nil request must not match V8 OAuth predicates")
+	}
+}
+
+func TestProxyV8OAuthForwardsOnlyExactAllowedMethodsAndPreservesQuery(t *testing.T) {
+	const savedKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	type observed struct {
+		method string
+		path   string
+		query  string
+		body   string
+	}
+	var seen []observed
+	fixture := newPluginProxyFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		seen = append(seen, observed{
+			method: r.Method,
+			path:   r.URL.Path,
+			query:  r.URL.RawQuery,
+			body:   string(raw),
+		})
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	methodNotAllowed := func(w http.ResponseWriter) {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+
+	validCalls := []struct {
+		method    string
+		target    string
+		body      string
+		wantPath  string
+		wantQuery string
+	}{
+		{
+			method:   http.MethodPost,
+			target:   "/v8/management/oauth/siwc/bind",
+			body:     `{"name":"codex-acct.json"}`,
+			wantPath: "/v8/management/oauth/siwc/bind",
+		},
+		{
+			method:   http.MethodPost,
+			target:   "/v8/management/oauth/callback",
+			body:     `{"provider":"codex","redirect_url":"http://127.0.0.1:1455/auth/callback?state=st_1&code=cd_1"}`,
+			wantPath: "/v8/management/oauth/callback",
+		},
+		{
+			method:    http.MethodGet,
+			target:    "/v8/management/oauth/status?state=st_1",
+			wantPath:  "/v8/management/oauth/status",
+			wantQuery: "state=st_1",
+		},
+		{
+			method:    http.MethodDelete,
+			target:    "/v8/management/oauth/session?state=st_1",
+			wantPath:  "/v8/management/oauth/session",
+			wantQuery: "state=st_1",
+		},
+	}
+	for idx, call := range validCalls {
+		req := httptest.NewRequest(call.method, call.target, strings.NewReader(call.body))
+		req.Header.Set("Authorization", "Bearer caller-admin-token")
+		rr := httptest.NewRecorder()
+		fixture.service.ProxyV8OAuth(rr, req, writeProxyError, methodNotAllowed)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s %s status = %d, want 200 (body=%q)", call.method, call.target, rr.Code, rr.Body.String())
+		}
+		if len(seen) != idx+1 {
+			t.Fatalf("seen count = %d, want %d", len(seen), idx+1)
+		}
+		got := seen[idx]
+		if got.method != call.method || got.path != call.wantPath || got.query != call.wantQuery || got.body != call.body {
+			t.Fatalf("upstream call %d = %#v, want method=%q path=%q query=%q body=%q", idx, got, call.method, call.wantPath, call.wantQuery, call.body)
+		}
+		if (*fixture.upstreamAuthorizations)[idx] != "Bearer "+savedKey {
+			t.Fatalf("upstream auth %d = %q, want saved management key", idx, (*fixture.upstreamAuthorizations)[idx])
+		}
+	}
+
+	for _, test := range []struct {
+		name   string
+		method string
+		target string
+		want   int
+	}{
+		{name: "bind get", method: http.MethodGet, target: "/v8/management/oauth/siwc/bind", want: http.StatusMethodNotAllowed},
+		{name: "bind delete", method: http.MethodDelete, target: "/v8/management/oauth/siwc/bind", want: http.StatusMethodNotAllowed},
+		{name: "callback get", method: http.MethodGet, target: "/v8/management/oauth/callback", want: http.StatusMethodNotAllowed},
+		{name: "callback put", method: http.MethodPut, target: "/v8/management/oauth/callback", want: http.StatusMethodNotAllowed},
+		{name: "status post", method: http.MethodPost, target: "/v8/management/oauth/status?state=st_1", want: http.StatusMethodNotAllowed},
+		{name: "status delete", method: http.MethodDelete, target: "/v8/management/oauth/status?state=st_1", want: http.StatusMethodNotAllowed},
+		{name: "session get", method: http.MethodGet, target: "/v8/management/oauth/session?state=st_1", want: http.StatusMethodNotAllowed},
+		{name: "session post", method: http.MethodPost, target: "/v8/management/oauth/session?state=st_1", want: http.StatusMethodNotAllowed},
+		{name: "options status", method: http.MethodOptions, target: "/v8/management/oauth/status", want: http.StatusMethodNotAllowed},
+		{name: "trailing slash bind", method: http.MethodPost, target: "/v8/management/oauth/siwc/bind/", want: http.StatusNotFound},
+		{name: "trailing slash status", method: http.MethodGet, target: "/v8/management/oauth/status/", want: http.StatusNotFound},
+		{name: "nested subpath", method: http.MethodPost, target: "/v8/management/oauth/siwc/bind/extra", want: http.StatusNotFound},
+		{name: "oauth root", method: http.MethodGet, target: "/v8/management/oauth", want: http.StatusNotFound},
+		{name: "duplicate slash", method: http.MethodGet, target: "/v8//management/oauth/status", want: http.StatusNotFound},
+		{name: "encoded dot segment", method: http.MethodGet, target: "/v8/management/oauth/%2e%2e/config", want: http.StatusNotFound},
+		{name: "encoded slash", method: http.MethodPost, target: "/v8/management/oauth/siwc%2Fbind", want: http.StatusNotFound},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			before := len(*fixture.upstreamPaths)
+			rr := httptest.NewRecorder()
+			fixture.service.ProxyV8OAuth(
+				rr,
+				httptest.NewRequest(test.method, test.target, nil),
+				writeProxyError,
+				methodNotAllowed,
+			)
+			if rr.Code != test.want {
+				t.Fatalf("status = %d, want %d (body=%q)", rr.Code, test.want, rr.Body.String())
+			}
+			if len(*fixture.upstreamPaths) != before {
+				t.Fatalf("%s %s reached upstream unexpectedly", test.method, test.target)
+			}
+		})
+	}
+
+	ctx, mark := WithSavedKeyMark(t.Context())
+	markedReq := httptest.NewRequest(http.MethodGet, "/v8/management/oauth/status?state=st_mark", nil).WithContext(ctx)
+	fixture.service.ProxyV8OAuth(httptest.NewRecorder(), markedReq, writeProxyError, methodNotAllowed)
+	if !mark.Attached() {
+		t.Fatal("expected saved management key mark attached on forwarded V8 OAuth request")
+	}
+
+	unconfiguredStore, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = unconfiguredStore.Close() })
+	unconfiguredSvc := New(managerconfig.New(config.Config{}, unconfiguredStore, nil), unconfiguredStore)
+	unconfiguredRR := httptest.NewRecorder()
+	unconfiguredSvc.ProxyV8OAuth(
+		unconfiguredRR,
+		httptest.NewRequest(http.MethodPost, "/v8/management/oauth/siwc/bind", strings.NewReader(`{"name":"a.json"}`)),
+		writeProxyError,
+		methodNotAllowed,
+	)
+	if unconfiguredRR.Code != http.StatusPreconditionRequired {
+		t.Fatalf("unconfigured status = %d, want %d", unconfiguredRR.Code, http.StatusPreconditionRequired)
+	}
+}
+
+func TestV8CredentialsPathAndPredicates(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{path: "/v8/management/credentials", want: true},
+		{path: "/v8/management/credentials/", want: false},
+		{path: "/v8/management/credentials/verify", want: false},
+		{path: "/v8/management/credentials/status", want: false},
+		{path: "/v8/management/credentials/fields", want: false},
+		{path: "/v8/management/credentials-x", want: false},
+		{path: "", want: false},
+	} {
+		if got := IsCPAV8CredentialsPath(tc.path); got != tc.want {
+			t.Fatalf("IsCPAV8CredentialsPath(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+
+	predicateTests := []struct {
+		target    string
+		canonical bool
+		refused   bool
+	}{
+		{target: "/v8/management/credentials", canonical: true},
+		{target: "/v8/management/credentials?name=codex.json", canonical: true},
+		{target: "/v8/management/credentials/", refused: true},
+		{target: "/v8//management/credentials", refused: true},
+		{target: "//v8/management/credentials", refused: true},
+		{target: "/v8/management/./credentials", refused: true},
+		{target: "/v8/management/credentials/../config", refused: true},
+		{target: "/v8/management/credentials/%2e%2e/config", refused: true},
+		{target: "/v8/management/credentials/%2E%2E/config", refused: true},
+		{target: "/v8/management/%63redentials", refused: true},
+		{target: "/v8/management/credentials%2fverify", refused: true},
+		{target: "/v8/management/credentials/verify"},
+		{target: "/v8/management/credentials/status"},
+		{target: "/v8/management/credentials/fields"},
+		{target: "/v8/management/credentials-x"},
+		{target: "/v8/management/oauth/status"},
+	}
+	for _, tc := range predicateTests {
+		req := httptest.NewRequest(http.MethodGet, tc.target, nil)
+		if got := IsCanonicalV8CredentialsRequest(req); got != tc.canonical {
+			t.Fatalf("IsCanonicalV8CredentialsRequest(%q) = %v, want %v", tc.target, got, tc.canonical)
+		}
+		if got := IsNonCanonicalV8CredentialsRequest(req); got != tc.refused {
+			t.Fatalf("IsNonCanonicalV8CredentialsRequest(%q) = %v, want %v", tc.target, got, tc.refused)
+		}
+	}
+	if IsCanonicalV8CredentialsRequest(nil) || IsNonCanonicalV8CredentialsRequest(nil) {
+		t.Fatal("nil request must not match V8 credentials predicates")
+	}
+}
+
+func TestProxyV8CredentialsForwardsOnlyCanonicalAdminGets(t *testing.T) {
+	const savedKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	type observed struct {
+		method string
+		path   string
+		query  string
+	}
+	var seen []observed
+	fixture := newPluginProxyFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, observed{
+			method: r.Method,
+			path:   r.URL.Path,
+			query:  r.URL.RawQuery,
+		})
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"files":[{"name":"codex.json","siwc_bind_supported":true}]}`))
+	})
+	methodNotAllowed := func(w http.ResponseWriter) {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+
+	for idx, target := range []struct {
+		rawURL    string
+		wantQuery string
+	}{
+		{rawURL: "/v8/management/credentials"},
+		{rawURL: "/v8/management/credentials?name=codex.json", wantQuery: "name=codex.json"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, target.rawURL, nil)
+		req.Header.Set("Authorization", "Bearer caller-admin-token")
+		rr := httptest.NewRecorder()
+		fixture.service.ProxyV8Credentials(rr, req, writeProxyError, methodNotAllowed)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want 200 (body=%q)", target.rawURL, rr.Code, rr.Body.String())
+		}
+		if len(seen) != idx+1 {
+			t.Fatalf("seen count = %d, want %d", len(seen), idx+1)
+		}
+		if seen[idx].method != http.MethodGet || seen[idx].path != "/v8/management/credentials" || seen[idx].query != target.wantQuery {
+			t.Fatalf("upstream call %d = %#v", idx, seen[idx])
+		}
+		if (*fixture.upstreamAuthorizations)[idx] != "Bearer "+savedKey {
+			t.Fatalf("upstream auth %d = %q, want saved management key", idx, (*fixture.upstreamAuthorizations)[idx])
+		}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		method string
+		target string
+		want   int
+	}{
+		{name: "post", method: http.MethodPost, target: "/v8/management/credentials", want: http.StatusMethodNotAllowed},
+		{name: "put", method: http.MethodPut, target: "/v8/management/credentials", want: http.StatusMethodNotAllowed},
+		{name: "patch", method: http.MethodPatch, target: "/v8/management/credentials", want: http.StatusMethodNotAllowed},
+		{name: "delete", method: http.MethodDelete, target: "/v8/management/credentials", want: http.StatusMethodNotAllowed},
+		{name: "options", method: http.MethodOptions, target: "/v8/management/credentials", want: http.StatusMethodNotAllowed},
+		{name: "trailing slash", method: http.MethodGet, target: "/v8/management/credentials/", want: http.StatusNotFound},
+		{name: "verify subpath", method: http.MethodPost, target: "/v8/management/credentials/verify", want: http.StatusNotFound},
+		{name: "status subpath", method: http.MethodPatch, target: "/v8/management/credentials/status", want: http.StatusNotFound},
+		{name: "duplicate slash", method: http.MethodGet, target: "/v8//management/credentials", want: http.StatusNotFound},
+		{name: "encoded unreserved", method: http.MethodGet, target: "/v8/management/%63redentials", want: http.StatusNotFound},
+		{name: "encoded dot segment", method: http.MethodGet, target: "/v8/management/credentials/%2e%2e/config", want: http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := len(*fixture.upstreamPaths)
+			rr := httptest.NewRecorder()
+			fixture.service.ProxyV8Credentials(
+				rr,
+				httptest.NewRequest(tc.method, tc.target, nil),
+				writeProxyError,
+				methodNotAllowed,
+			)
+			if rr.Code != tc.want {
+				t.Fatalf("status = %d, want %d (body=%q)", rr.Code, tc.want, rr.Body.String())
+			}
+			if len(*fixture.upstreamPaths) != before {
+				t.Fatalf("%s %s reached upstream unexpectedly", tc.method, tc.target)
+			}
+		})
+	}
+
+	ctx, mark := WithSavedKeyMark(t.Context())
+	markedReq := httptest.NewRequest(http.MethodGet, "/v8/management/credentials", nil).WithContext(ctx)
+	fixture.service.ProxyV8Credentials(httptest.NewRecorder(), markedReq, writeProxyError, methodNotAllowed)
+	if !mark.Attached() {
+		t.Fatal("expected saved management key mark attached on forwarded V8 credentials request")
+	}
+
+	unconfiguredStore, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = unconfiguredStore.Close() })
+	unconfiguredSvc := New(managerconfig.New(config.Config{}, unconfiguredStore, nil), unconfiguredStore)
+	unconfiguredRR := httptest.NewRecorder()
+	unconfiguredSvc.ProxyV8Credentials(
+		unconfiguredRR,
+		httptest.NewRequest(http.MethodGet, "/v8/management/credentials", nil),
+		writeProxyError,
+		methodNotAllowed,
+	)
+	if unconfiguredRR.Code != http.StatusPreconditionRequired {
+		t.Fatalf("unconfigured status = %d, want %d", unconfiguredRR.Code, http.StatusPreconditionRequired)
 	}
 }

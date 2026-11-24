@@ -11,7 +11,10 @@ const OAUTH_PROVIDER_BY_ACCOUNT_PROVIDER: Record<string, string> = {
   anthropic: 'anthropic',
   antigravity: 'antigravity',
   claude: 'anthropic',
+  devin: 'devin',
   kimi: 'kimi',
+  'kimi-ai': 'kimi-ai',
+  meta: 'meta',
   xai: 'xai',
 };
 

@@ -2809,3 +2809,159 @@ describe('published spend-control diagnostics', () => {
     });
   });
 });
+
+describe('SIWC overview credential metadata', () => {
+  it('includes active, invalid, bound, and unbound SIWC states while omitting stale unbound expiry', () => {
+    const expiresIso = '2035-01-01T00:00:00Z';
+    const expiredIso = '2020-01-01T00:00:00Z';
+
+    const activeViewModel = buildAccountDetailViewModel(
+      makeRow({
+        provider: 'codex',
+        raw: {
+          name: 'codex.json',
+          type: 'codex',
+          provider: 'codex',
+          authIndex: '0',
+          siwc_bind_supported: true,
+          siwc_bound: true,
+          use_siwc: true,
+          siwc_status: 'valid',
+          siwc_expires_at: expiresIso,
+        },
+      })
+    );
+
+    expect(activeViewModel.overview.credential.fields).toEqual(
+      expect.arrayContaining([
+        {
+          key: 'siwcStatus',
+          labelKey: 'siwc.detail_status_label',
+          value: 'siwc.active',
+          valueKind: 'i18n',
+        },
+        {
+          key: 'siwcExpiresAt',
+          labelKey: 'siwc.detail_expires_label',
+          value: Date.parse(expiresIso),
+          valueKind: 'timestamp',
+        },
+      ])
+    );
+
+    const invalidViewModel = buildAccountDetailViewModel(
+      makeRow({
+        provider: 'codex',
+        raw: {
+          name: 'codex-invalid.json',
+          type: 'codex',
+          provider: 'codex',
+          authIndex: '0',
+          siwc_bind_supported: true,
+          siwc_bound: true,
+          use_siwc: true,
+          siwc_status: 'invalid',
+          siwc_expires_at: expiredIso,
+        },
+      })
+    );
+
+    expect(invalidViewModel.overview.credential.fields).toEqual(
+      expect.arrayContaining([
+        {
+          key: 'siwcStatus',
+          labelKey: 'siwc.detail_status_label',
+          value: 'siwc.invalid',
+          valueKind: 'i18n',
+        },
+        {
+          key: 'siwcExpiresAt',
+          labelKey: 'siwc.detail_expires_label',
+          value: Date.parse(expiredIso),
+          valueKind: 'timestamp',
+        },
+      ])
+    );
+
+    const boundViewModel = buildAccountDetailViewModel(
+      makeRow({
+        provider: 'codex',
+        raw: {
+          name: 'codex-bound.json',
+          type: 'codex',
+          provider: 'codex',
+          authIndex: '0',
+          siwc_bind_supported: true,
+          siwc_bound: true,
+          use_siwc: false,
+          siwc_expires_at: expiresIso,
+        },
+      })
+    );
+
+    expect(boundViewModel.overview.credential.fields).toEqual(
+      expect.arrayContaining([
+        {
+          key: 'siwcStatus',
+          labelKey: 'siwc.detail_status_label',
+          value: 'siwc.bound',
+          valueKind: 'i18n',
+        },
+        {
+          key: 'siwcExpiresAt',
+          labelKey: 'siwc.detail_expires_label',
+          value: Date.parse(expiresIso),
+          valueKind: 'timestamp',
+        },
+      ])
+    );
+
+    const unboundViewModel = buildAccountDetailViewModel(
+      makeRow({
+        provider: 'codex',
+        raw: {
+          name: 'codex-unbound.json',
+          type: 'codex',
+          provider: 'codex',
+          authIndex: '0',
+          siwcBindSupported: true,
+          siwcBound: false,
+          useSiwc: false,
+          siwcExpiresAt: expiresIso,
+        },
+      })
+    );
+
+    expect(unboundViewModel.overview.credential.fields).toContainEqual({
+      key: 'siwcStatus',
+      labelKey: 'siwc.detail_status_label',
+      value: 'siwc.unbound',
+      valueKind: 'i18n',
+    });
+    expect(
+      unboundViewModel.overview.credential.fields.find((field) => field.key === 'siwcExpiresAt')
+    ).toBeUndefined();
+  });
+
+  it('omits SIWC metadata when siwc_bind_supported is not enabled', () => {
+    const unsupportedCodex = buildAccountDetailViewModel(makeRow({ provider: 'codex' }));
+    const claude = buildAccountDetailViewModel(
+      makeRow({
+        provider: 'claude',
+        raw: {
+          name: 'claude.json',
+          type: 'claude',
+          provider: 'claude',
+          authIndex: '0',
+        },
+      })
+    );
+
+    expect(unsupportedCodex.overview.credential.fields.map((field) => field.key)).not.toContain(
+      'siwcStatus'
+    );
+    expect(claude.overview.credential.fields.map((field) => field.key)).not.toContain(
+      'siwcStatus'
+    );
+  });
+});

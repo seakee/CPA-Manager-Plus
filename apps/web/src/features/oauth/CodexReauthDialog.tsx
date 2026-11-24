@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
 import { IconCheck, IconCopy, IconExternalLink, IconRefreshCw } from '@/components/ui/icons';
-import { oauthApi } from '@/services/api';
+import { oauthApi, type OAuthStatusResponse } from '@/services/api';
 import type { ApiClientRequestScope } from '@/services/api/client';
 import { useNotificationStore } from '@/stores';
 import { copyToClipboard } from '@/utils/clipboard';
@@ -13,6 +13,7 @@ import {
   isCodexReauthReconciliationError,
   type CodexReauthTarget,
 } from './codexReauthModel';
+import { createOAuthAttempts, type OAuthAttempt } from './oauthAttempts';
 import styles from './CodexReauthDialog.module.scss';
 
 type CodexReauthStatus =
@@ -51,20 +52,20 @@ const isSameDialogContext = (
   left.apiBase === right.apiBase &&
   left.managementKey === right.managementKey;
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  value !== null && typeof value === 'object';
+const CODEX_REAUTH_ATTEMPT_KEY = 'codex-reauth';
 
 const getErrorMessage = (error: unknown): string => {
   if (error instanceof Error) return error.message;
-  if (isRecord(error) && typeof error.message === 'string') return error.message;
+  if (typeof error === 'object' && error !== null && 'message' in error) {
+    if (typeof error.message === 'string') return error.message;
+  }
   return typeof error === 'string' ? error : '';
 };
 
 const getErrorStatus = (error: unknown): number | undefined => {
-  if (!isRecord(error)) return undefined;
+  if (typeof error !== 'object' || error === null || !('status' in error)) return undefined;
   return typeof error.status === 'number' ? error.status : undefined;
 };
-
 export function CodexReauthDialog({
   open,
   target,
@@ -83,7 +84,8 @@ export function CodexReauthDialog({
   const [callbackError, setCallbackError] = useState('');
   const [copiedTarget, setCopiedTarget] = useState<'account' | 'link' | null>(null);
   const [linkRefreshed, setLinkRefreshed] = useState(false);
-  const pollingTimerRef = useRef<number | null>(null);
+  const attemptsRef = useRef(createOAuthAttempts());
+  const activeAttemptRef = useRef<OAuthAttempt | null>(null);
   const feedbackTimerRef = useRef<number | null>(null);
   const successHandledRef = useRef(false);
   const operationGenerationRef = useRef(0);
@@ -125,10 +127,8 @@ export function CodexReauthDialog({
   );
 
   const clearPolling = useCallback(() => {
-    if (pollingTimerRef.current !== null) {
-      window.clearInterval(pollingTimerRef.current);
-      pollingTimerRef.current = null;
-    }
+    attemptsRef.current.invalidate(CODEX_REAUTH_ATTEMPT_KEY);
+    activeAttemptRef.current = null;
   }, []);
 
   const clearFeedbackTimer = useCallback(() => {
@@ -206,14 +206,14 @@ export function CodexReauthDialog({
 
   const handleAuthStatus = useCallback(
     async (
-      response: Awaited<ReturnType<typeof oauthApi.getAuthStatus>>,
+      response: OAuthStatusResponse,
       operationGeneration: number,
       operationContext: CodexReauthDialogContext
-    ) => {
-      if (!isCurrentOperation(operationGeneration, operationContext)) return;
+    ): Promise<'completed' | 'error' | 'waiting' | 'stale'> => {
+      if (!isCurrentOperation(operationGeneration, operationContext)) return 'stale';
       if (response.status === 'ok') {
         await markSuccess(operationGeneration, operationContext);
-        return;
+        return 'completed';
       }
       if (response.status === 'error') {
         operationGenerationRef.current += 1;
@@ -225,28 +225,37 @@ export function CodexReauthDialog({
         setCallbackStatus('error');
         setCallbackError(message);
         showNotification(message, 'error');
+        return 'error';
       }
+      return 'waiting';
     },
     [clearPolling, isCurrentOperation, markSuccess, showNotification, t]
   );
 
   const startPolling = useCallback(
-    (state: string, operationGeneration: number, operationContext: CodexReauthDialogContext) => {
-      clearPolling();
-      pollingTimerRef.current = window.setInterval(async () => {
-        try {
-          const response = await oauthApi.getAuthStatus(state, requestScope);
-          if (!isCurrentOperation(operationGeneration, operationContext)) return;
-          await handleAuthStatus(response, operationGeneration, operationContext);
-        } catch (err: unknown) {
+    (
+      state: string,
+      attempt: OAuthAttempt,
+      operationGeneration: number,
+      operationContext: CodexReauthDialogContext
+    ) => {
+      attempt.poll(
+        () => oauthApi.getAuthStatus(state, requestScope, attempt.signal),
+        async (response) => {
+          if (!isCurrentOperation(operationGeneration, operationContext)) return false;
+          const outcome = await handleAuthStatus(response, operationGeneration, operationContext);
+          return outcome === 'waiting';
+        },
+        (err) => {
           if (!isCurrentOperation(operationGeneration, operationContext)) return;
           operationGenerationRef.current += 1;
           clearPolling();
           const message = getErrorMessage(err) || t('codex_reauth.error');
           setStatus('error');
           setError(message);
-        }
-      }, POLL_INTERVAL_MS);
+        },
+        POLL_INTERVAL_MS
+      );
     },
     [clearPolling, handleAuthStatus, isCurrentOperation, requestScope, t]
   );
@@ -256,7 +265,8 @@ export function CodexReauthDialog({
       const operationGeneration = operationGenerationRef.current + 1;
       const operationContext = activeDialogContextRef.current;
       operationGenerationRef.current = operationGeneration;
-      clearPolling();
+      const attempt = attemptsRef.current.begin(CODEX_REAUTH_ATTEMPT_KEY);
+      activeAttemptRef.current = attempt;
       successHandledRef.current = false;
       oauthStateRef.current = '';
       setAuthUrl('');
@@ -269,7 +279,7 @@ export function CodexReauthDialog({
       setCopiedTarget(null);
       setLinkRefreshed(false);
       try {
-        const response = await oauthApi.startAuth('codex', requestScope);
+        const response = await oauthApi.startAuth('codex', requestScope, attempt.signal);
         if (!isCurrentOperation(operationGeneration, operationContext)) return;
         if (!response.state) {
           const message = t('codex_reauth.missing_state');
@@ -285,7 +295,7 @@ export function CodexReauthDialog({
         if (showRefreshFeedback) {
           showTemporaryFeedback(() => setLinkRefreshed(true));
         }
-        startPolling(response.state, operationGeneration, operationContext);
+        startPolling(response.state, attempt, operationGeneration, operationContext);
       } catch (err: unknown) {
         if (!isCurrentOperation(operationGeneration, operationContext)) return;
         const message = getErrorMessage(err) || t('codex_reauth.error');
@@ -295,7 +305,6 @@ export function CodexReauthDialog({
       }
     },
     [
-      clearPolling,
       isCurrentOperation,
       requestScope,
       showNotification,
@@ -379,13 +388,14 @@ export function CodexReauthDialog({
     setStatus('callbackSubmitting');
     setCallbackStatus(undefined);
     setCallbackError('');
+    const attemptSignal = activeAttemptRef.current?.signal;
     const probeStatus = async () => {
-      const response = await oauthApi.getAuthStatus(state, requestScope);
+      const response = await oauthApi.getAuthStatus(state, requestScope, attemptSignal);
       if (!isCurrentOperation(operationGeneration, operationContext)) return;
       await handleAuthStatus(response, operationGeneration, operationContext);
     };
     try {
-      await oauthApi.submitCallback('codex', redirectUrl, requestScope);
+      await oauthApi.submitCallback('codex', redirectUrl, requestScope, attemptSignal);
       if (!isCurrentOperation(operationGeneration, operationContext)) return;
       setCallbackSubmitting(false);
       setCallbackStatus('success');

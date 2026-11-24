@@ -12,13 +12,14 @@ import {
   REQUEST_TIMEOUT_MS,
   VERSION_HEADER_KEYS,
 } from '@/utils/constants';
-import { computeApiUrl } from '@/utils/connection';
+import { computeApiUrl, computeV8ApiUrl } from '@/utils/connection';
 import { assertPanelManagementTarget } from '@/panel/managementTarget';
 
 export type ApiClientRequestScope = Pick<ApiClientConfig, 'apiBase' | 'managementKey'>;
 
 export type ScopedApiRequestConfig = AxiosRequestConfig & {
   cpampScopedRequest?: true;
+  cpampV8Namespace?: true;
 };
 
 export const createScopedApiRequestConfig = (
@@ -31,6 +32,19 @@ export const createScopedApiRequestConfig = (
       }
     : {},
   cpampScopedRequest: true,
+});
+
+export const createScopedV8ApiRequestConfig = (
+  scope: ApiClientRequestScope
+): ScopedApiRequestConfig => ({
+  baseURL: computeV8ApiUrl(scope.apiBase),
+  headers: scope.managementKey
+    ? {
+        Authorization: `Bearer ${scope.managementKey}`,
+      }
+    : {},
+  cpampScopedRequest: true,
+  cpampV8Namespace: true,
 });
 
 class ApiClient {
@@ -115,17 +129,17 @@ class ApiClient {
   }
 
   private requestTargetsCurrentConfig(config?: AxiosRequestConfig): boolean {
-    const requestBase = String(config?.baseURL ?? '').replace(/\/+$/, '');
+    const stripManagementSuffix = (value: string) =>
+      value.replace(/\/+$/, '').replace(/\/v(?:0|8)\/management$/i, '');
+    const requestBase = stripManagementSuffix(String(config?.baseURL ?? ''));
+    const currentBase = stripManagementSuffix(this.apiBase);
     const requestAuthorization = this.readHeader(
       config?.headers as Record<string, unknown> | undefined,
       ['Authorization']
     );
     const currentAuthorization = this.managementKey ? `Bearer ${this.managementKey}` : '';
 
-    return (
-      requestBase === this.apiBase.replace(/\/+$/, '') &&
-      (requestAuthorization ?? '') === currentAuthorization
-    );
+    return requestBase === currentBase && (requestAuthorization ?? '') === currentAuthorization;
   }
 
   /**
@@ -135,13 +149,17 @@ class ApiClient {
     // 请求拦截器
     this.instance.interceptors.request.use(
       (config) => {
-        const scopedRequest = (config as ScopedApiRequestConfig).cpampScopedRequest === true;
+        const scopedConfig = config as ScopedApiRequestConfig;
+        const scopedRequest = scopedConfig.cpampScopedRequest === true;
+        const v8Namespace = scopedConfig.cpampV8Namespace === true;
         // Explicitly scoped requests retain the connection captured when a multi-step
         // operation began. Regular requests continue to use the current global config.
         if (!scopedRequest) {
-          config.baseURL = this.apiBase;
+          config.baseURL = v8Namespace ? computeV8ApiUrl(this.apiBase) : this.apiBase;
+        } else if (v8Namespace) {
+          config.baseURL = computeV8ApiUrl(String(config.baseURL ?? ''));
         }
-        if (config.url) {
+        if (config.url && !v8Namespace) {
           // Normalize deprecated Gemini endpoint to the current path.
           config.url = config.url.replace(/\/generative-language-api-key\b/g, '/gemini-api-key');
         }

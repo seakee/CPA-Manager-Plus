@@ -300,4 +300,34 @@ describe('plugin API normalizers', () => {
     expect(result.plugins[1]?.metadata?.configFields[0]?.defaultValue).toBe('Asia/Shanghai');
   });
 
+  it('normalizes multi-entry oauth_providers and oauth_provider_entries while keeping legacy fallback', () => {
+    const result = normalizePluginList({
+      plugins: [
+        {
+          id: 'suite-plugin',
+          supports_oauth: true,
+          oauth_providers: ['alpha', 'beta', 'alpha'],
+          oauth_provider_entries: [
+            { identifier: 'alpha', name: 'Alpha', logo: '/v0/resource/plugins/suite/alpha.svg' },
+            { identifier: 'beta', name: 'Beta' },
+          ],
+        },
+        {
+          id: 'legacy-plugin',
+          supports_oauth: true,
+        },
+      ],
+    });
+
+    expect(result.plugins[0]).toMatchObject({
+      oauthProvider: 'alpha',
+      oauthProviders: ['alpha', 'beta'],
+      oauthProviderEntries: [
+        { identifier: 'alpha', name: 'Alpha', logo: '/v0/resource/plugins/suite/alpha.svg' },
+        { identifier: 'beta', name: 'Beta' },
+      ],
+    });
+    expect(result.plugins[1]?.oauthProvider).toBe('legacy-plugin');
+  });
+
 });
