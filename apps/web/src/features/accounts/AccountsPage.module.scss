@@ -14,9 +14,7 @@
 }
 
 .headerActions,
-.batchActions,
 .drawerActions {
-  display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
@@ -237,8 +235,7 @@
   font-size: 13px;
 }
 
-.loadingPanel,
-.tablePanel {
+.loadingPanel {
   border: 1px solid var(--glass-border);
   border-radius: var(--app-radius-lg);
   background: var(--glass-bg);
@@ -280,37 +277,6 @@
   justify-content: center;
 }
 
-.batchBar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border-color);
-
-  @include mobile {
-    align-items: stretch;
-    flex-direction: column;
-  }
-}
-
-.batchSummary {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-
-  > span {
-    color: var(--text-secondary);
-    font-size: 13px;
-    font-weight: 700;
-  }
-
-  > small {
-    color: var(--text-tertiary, var(--text-secondary));
-    font-size: 12px;
-  }
-}
 
 .tableScroller {
   width: 100%;
@@ -351,7 +317,7 @@
   display: grid;
   gap: 8px;
   min-width: 1240px;
-  padding: 10px 12px;
+  padding: 10px var(--list-panel-gutter-x, 16px);
 }
 
 .accountCardHeader,
@@ -434,7 +400,7 @@
   grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
   gap: 14px;
   min-width: 0;
-  padding: 10px 12px;
+  padding: 12px var(--list-panel-gutter-x, 16px);
 }
 
 .accountGridCard {
@@ -2635,15 +2601,6 @@
   color: var(--error-color);
 }
 
-.accountsPagination {
-  --monitor-surface-elevated: color-mix(
-    in srgb,
-    var(--bg-primary) 82%,
-    var(--surface-subtle)
-  );
-  padding: 12px 16px;
-  background: color-mix(in srgb, var(--surface-subtle) 28%, var(--bg-primary));
-}
 
 .compactTable {
   width: 100%;
@@ -5745,7 +5702,6 @@
   color: var(--text-primary);
 }
 
-.tablePanel,
 .loadingPanel,
 .rulePanel {
   border: 1px solid var(--border-color);
@@ -5970,20 +5926,9 @@
   }
 }
 
-.tablePanel {
-  min-width: 0;
-  overflow: hidden;
-}
-
-.batchBar {
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--border-subtle);
-  background: color-mix(in srgb, var(--surface-subtle) 34%, var(--bg-primary));
-}
 
 .tableScroller {
   position: relative;
-  border-top: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
   scrollbar-gutter: stable;
 }
 
@@ -6323,42 +6268,13 @@
     width: 100%;
     min-width: 0;
   }
-  .batchBar,
   .panelHeader {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .accountsPagination {
-    gap: 10px;
-    padding: 10px 12px;
-  }
 }
 
-.batchBar {
-  display: grid;
-  grid-template-columns: minmax(180px, auto) 1fr;
-  align-items: center;
-  gap: 10px 14px;
-}
-
-.batchBar > span {
-  min-width: 0;
-}
-
-.batchActions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 8px;
-  min-width: 0;
-
-  :global(.btn) {
-    height: var(--control-height-sm);
-    min-height: var(--control-height-sm);
-  }
-}
 
 .statusStack {
   gap: 3px;
@@ -6430,13 +6346,6 @@
     grid-column: 1 / -1;
   }
 
-  .batchBar {
-    grid-template-columns: 1fr;
-  }
-
-  .batchActions {
-    justify-content: flex-start;
-  }
 }
 
 @include mobile {
@@ -6466,18 +6375,13 @@
     }
   }
 
-  .batchBarIdle {
+  .accountsHeaderIdle {
     display: none;
-  }
-
-  .batchBar {
-    grid-template-columns: 1fr;
-    align-items: stretch;
   }
 
   .accountCardList,
   .accountGridList {
-    padding: 10px 8px 8px;
+    padding: 10px var(--list-panel-gutter-x, 12px) 8px;
     scroll-margin-top: 56px;
   }
 
@@ -6636,16 +6540,6 @@
     }
   }
 
-  .batchActions {
-    align-items: stretch;
-    flex-direction: column;
-    width: 100%;
-
-    :global(.btn),
-    :global(.select-trigger) {
-      width: 100%;
-    }
-  }
 
   .batchDisplayToggle {
     display: none;

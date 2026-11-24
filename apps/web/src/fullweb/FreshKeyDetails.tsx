@@ -316,17 +316,19 @@ export function FreshKeyRenameModal({
     Boolean(currentRecord) &&
     nameValid &&
     (isDefaultOrigin ? trimmed !== '' : trimmed !== currentRecord!.name);
+  const currentDisplayName = currentRecord
+    ? keyDisplayName(
+        currentRecord,
+        k('installerOrigin'),
+        k('adoptedOrigin'),
+        t('keysUnnamed')
+      )
+    : '';
   const defaultPlaceholder = currentRecord
     ? isDefaultOrigin
-      ? keyDisplayName(
-          currentRecord,
-          k('installerOrigin'),
-          k('adoptedOrigin'),
-          t('keysUnnamed')
-        )
+      ? currentDisplayName
       : k('renamePlaceholder')
     : '';
-
   async function submitWithRecord(baseRecord: Key, submittedName: string) {
     const updated = await client.put<Key>(
       `api-keys/${baseRecord.id}`,
@@ -496,9 +498,13 @@ export function FreshKeyRenameModal({
     >
       {currentRecord && (
         <form id="rename-key-form" className="key-modal-form" onSubmit={handleSave}>
-          <div className="key-operation-target-card">
-            <span className="key-field-label">{k('operationTargetLabel')}</span>
-            <div className="key-operation-target-meta">
+          <div className="key-operation-resource">
+            <span className="key-resource-icon" aria-hidden="true">
+              <FullWebIcon name="key" size={16} />
+            </span>
+            <div className="key-operation-resource-body">
+              <span className="key-operation-resource-label">{k('operationTargetLabel')}</span>
+              <strong>{currentDisplayName}</strong>
               <code>{currentRecord.maskedPreview}</code>
             </div>
           </div>
@@ -509,7 +515,7 @@ export function FreshKeyRenameModal({
             <input
               ref={inputRef}
               id="key-name"
-              className="key-input"
+              className="input"
               maxLength={120}
               disabled={busy}
               placeholder={defaultPlaceholder}

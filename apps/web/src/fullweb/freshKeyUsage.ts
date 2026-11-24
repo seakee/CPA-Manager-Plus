@@ -45,9 +45,33 @@ export interface KeyUsage {
   series: UsagePoint[];
 }
 
+export interface UsageModelCount {
+  model: string;
+  calls: number;
+}
+
+export interface UsageRecentRequest {
+  timestampMs: number;
+  failed: boolean;
+  statusCode?: number;
+  model?: string;
+}
+
+export interface KeyStatusBlock {
+  state: 'idle' | 'success' | 'failure';
+  title?: string;
+}
+
 export interface UsageSummaryItem {
   keyId: string;
   calls: number;
+  success?: number;
+  failure?: number;
+  totalTokens?: number;
+  estimatedCostUsd?: number;
+  topModels?: UsageModelCount[];
+  modelCount?: number;
+  recentRequests?: UsageRecentRequest[];
   lastUsedAtMs: number | null;
   coverage: UsageCoverageState;
 }
@@ -175,6 +199,13 @@ export function parseUsageSummary(value: unknown): UsageSummary | null {
     if (!item || typeof item !== 'object') return null;
     const keyId = field(item, 'keyId');
     const calls = field(item, 'calls');
+    const success = field(item, 'success');
+    const failure = field(item, 'failure');
+    const totalTokens = field(item, 'totalTokens');
+    const estimatedCostUsd = field(item, 'estimatedCostUsd');
+    const rawTopModels = field(item, 'topModels');
+    const modelCount = field(item, 'modelCount');
+    const rawRecentRequests = field(item, 'recentRequests');
     const lastUsedAtMs = field(item, 'lastUsedAtMs');
     const itemCoverage = parseCoverageState(field(item, 'coverage'));
     if (
@@ -185,7 +216,53 @@ export function parseUsageSummary(value: unknown): UsageSummary | null {
       !itemCoverage
     )
       return null;
-    items.push({ keyId, calls, lastUsedAtMs, coverage: itemCoverage });
+
+    const topModels: UsageModelCount[] = [];
+    if (Array.isArray(rawTopModels)) {
+      for (const m of rawTopModels) {
+        if (!m || typeof m !== 'object') continue;
+        const model = field(m, 'model');
+        const mCalls = field(m, 'calls');
+        if (typeof model === 'string' && model.trim() && isCount(mCalls)) {
+          topModels.push({ model: model.trim(), calls: mCalls });
+        }
+      }
+    }
+
+    const recentRequests: UsageRecentRequest[] = [];
+    if (Array.isArray(rawRecentRequests)) {
+      for (const req of rawRecentRequests) {
+        if (!req || typeof req !== 'object') continue;
+        const timestampMs = field(req, 'timestampMs');
+        const failed = field(req, 'failed');
+        const statusCode = field(req, 'statusCode');
+        const model = field(req, 'model');
+        if (isMillis(timestampMs) && typeof failed === 'boolean') {
+          recentRequests.push({
+            timestampMs,
+            failed,
+            ...(isCount(statusCode) && statusCode > 0 ? { statusCode } : {}),
+            ...(typeof model === 'string' && model.trim() ? { model: model.trim() } : {}),
+          });
+        }
+      }
+    }
+
+    items.push({
+      keyId,
+      calls,
+      ...(isCount(success) ? { success } : {}),
+      ...(isCount(failure) ? { failure } : {}),
+      ...(isCount(totalTokens) ? { totalTokens } : {}),
+      ...(typeof estimatedCostUsd === 'number' && Number.isFinite(estimatedCostUsd) && estimatedCostUsd >= 0
+        ? { estimatedCostUsd }
+        : {}),
+      ...(topModels.length > 0 ? { topModels } : {}),
+      ...(isCount(modelCount) ? { modelCount } : {}),
+      ...(recentRequests.length > 0 ? { recentRequests } : {}),
+      lastUsedAtMs,
+      coverage: itemCoverage,
+    });
   }
   return { fromMs, toMs, coverage, items };
 }
@@ -258,6 +335,69 @@ export function usageCountText(value: number | null | undefined, state: UsageSta
   return String(value);
 }
 
+export function usageCompactNumberText(
+  value: number | null | undefined,
+  state: UsageState
+): string {
+  if (state === 'unknown' || state === 'unavailable' || value === null || value === undefined)
+    return '—';
+  const prefix = state === 'partial' && value > 0 ? '≥' : '';
+  if (value >= 1_000_000) {
+    return `${prefix}${(value / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+  }
+  if (value >= 1_000) {
+    return `${prefix}${(value / 1_000).toFixed(1).replace(/\.0$/, '')}K`;
+  }
+  return `${prefix}${value}`;
+}
+
+export function usageCompactUsdText(
+  value: number | null | undefined,
+  state: UsageState
+): string {
+  if (
+    state === 'unknown' ||
+    state === 'unavailable' ||
+    value === null ||
+    value === undefined ||
+    !Number.isFinite(value)
+  ) {
+    return '—';
+  }
+  const prefix = state === 'partial' && value > 0 ? '≥' : '';
+  if (value > 0 && value < 0.01) {
+    return `${prefix}<$0.01`;
+  }
+  if (value >= 1_000) {
+    return `${prefix}$${usageCompactNumberText(Math.round(value), 'complete')}`;
+  }
+  return `${prefix}$${value.toFixed(2)}`;
+}
+
+export function buildKeyStatusBlocks(
+  recentRequests: readonly UsageRecentRequest[] | undefined,
+  slotCount = 10
+): KeyStatusBlock[] {
+  const ordered = [...(recentRequests ?? [])]
+    .filter((item) => Number.isFinite(item.timestampMs))
+    .sort((a, b) => a.timestampMs - b.timestampMs)
+    .slice(-slotCount);
+
+  const idleCount = Math.max(0, slotCount - ordered.length);
+  const blocks: KeyStatusBlock[] = Array.from({ length: idleCount }, () => ({ state: 'idle' as const }));
+  for (const req of ordered) {
+    const d = new Date(req.timestampMs);
+    const timeStr = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    const statusPart = req.failed && req.statusCode ? ` (${req.statusCode})` : '';
+    const modelPart = req.model ? ` · ${req.model}` : '';
+    blocks.push({
+      state: req.failed ? 'failure' : 'success',
+      title: `${timeStr}${statusPart}${modelPart}`,
+    });
+  }
+  return blocks;
+}
+
 // Timestamps in the workspace follow the selected UI language, like the detail
 // metadata beside them.
 export function usageTimeText(value: number | null | undefined): string | null {
@@ -271,4 +411,36 @@ export function usageTimeText(value: number | null | undefined): string | null {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+export function usageCompactTimeText(
+  value: number | null | undefined,
+  mode: 'created' | 'recent',
+  nowMs = Date.now()
+): string | null {
+  if (value === null || value === undefined) return null;
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return null;
+  const now = new Date(nowMs);
+  const sameYear = date.getFullYear() === now.getFullYear();
+  const sameDay =
+    sameYear && date.getMonth() === now.getMonth() && date.getDate() === now.getDate();
+  const locale = fullWebLanguage();
+  if (mode === 'recent' && sameDay) {
+    return date.toLocaleTimeString(locale, {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+  }
+  if (sameYear) {
+    return date.toLocaleString(locale, {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+  }
+  return usageTimeText(value);
 }

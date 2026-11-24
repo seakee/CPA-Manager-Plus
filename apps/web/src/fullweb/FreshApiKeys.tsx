@@ -7,8 +7,9 @@ import { Modal } from '../components/ui/Modal';
 import { SegmentedTabs } from '../components/ui/SegmentedTabs';
 import { Select } from '../components/ui/Select';
 import { PageControlBar } from '../components/common/PageControlBar';
-import { PaginationFooter } from '../components/common/PaginationFooter';
+import { WorkspaceListPanel } from '../components/common/WorkspaceListPanel';
 import { SortControl, type SortDirection } from '../components/ui/SortControl';
+import { useClientPagination, usePersistedViewMode } from '../hooks/list';
 import {
   formatKeyPageSizeOption,
   formatKeyPaginationInfo,
@@ -25,7 +26,11 @@ import { FreshKeyRevocation } from './FreshKeyRevocation';
 import { FreshKeyRegenerate } from './FreshKeyRegenerate';
 import { AccessInfoSummary, type AccessInfo } from './FreshAccessInfo';
 import {
+  buildKeyStatusBlocks,
   parseUsageSummary,
+  usageCompactNumberText,
+  usageCompactTimeText,
+  usageCompactUsdText,
   usageCountText,
   usageCoveragePill,
   usageReasonText,
@@ -198,9 +203,12 @@ export function FreshApiKeys({
   } | null>(null);
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<'all' | 'saved' | 'replaced'>('saved');
-  const [viewMode, setViewMode] = useState<'table' | 'cards'>('table');
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
+  const { effectiveMode: viewMode, setMode: setViewMode } = usePersistedViewMode<
+    'table' | 'cards'
+  >({
+    defaultMode: 'table',
+    validModes: ['table', 'cards'],
+  });
   const [workspaceTab, setWorkspaceTab] = useState<'keys' | 'access'>('keys');
   const [runtimeFilter, setRuntimeFilter] = useState<'all' | 'effective' | 'attention'>('all');
   const [sortBy, setSortBy] = useState<{ key: KeySortKey; direction: SortDirection }>({
@@ -1767,20 +1775,9 @@ export function FreshApiKeys({
   const activeKeys = (keys || []).filter((key) => key.lifecycle !== 'superseded');
   const savedCount = activeKeys.length;
   const replacedCount = (keys || []).length - savedCount;
-  const effectiveActiveKeys = activeKeys.filter(
+  const effectiveCount = activeKeys.filter(
     (key) => key.runtimeState === 'effective_observed'
-  );
-  const effectiveCount = effectiveActiveKeys.length;
-  const gatewayVerified = keys !== null && !gatewayPending && !presenceUnverified;
-  const runtimeAccent = !gatewayVerified || effectiveCount < savedCount ? 'amber' : 'green';
-  const runtimeValue = gatewayVerified ? String(effectiveCount) : '—';
-  const runtimeMeta = !gatewayVerified
-    ? k('summaryGatewaySetupHelp')
-    : savedCount === 0
-      ? k('summaryGatewayIdleHelp')
-      : effectiveCount === savedCount
-        ? k('summaryGatewayConsistent')
-        : `${effectiveCount}/${savedCount} ${k('summaryRuntimeVerifiedCount')}`;
+  ).length;
   const hasCustomSort = !(sortBy.key === 'created' && sortBy.direction === 'desc');
   const hasSearchOrNarrowFilter =
     search.trim() !== '' ||
@@ -1791,25 +1788,19 @@ export function FreshApiKeys({
     filter !== 'saved' ||
     runtimeFilter !== 'all' ||
     hasCustomSort;
-  const usageCalls =
-    usage?.items
-      .filter((item) => item.coverage.state === 'complete' || item.coverage.state === 'partial')
-      .reduce((total, item) => total + item.calls, 0) ?? null;
-  const usageUnavailable =
-    usage === null ||
-    usage.coverage.reason === 'usage_read_failed' ||
-    usage.coverage.state === 'unavailable';
-  const usageTotalText = usageUnavailable
-    ? '—'
-    : usageCountText(usageCalls, usage.coverage.state);
-  const usageShowCoveragePill =
-    !usageUnavailable && !!usage && usage.coverage.state !== 'complete';
-  const totalPages = Math.max(1, Math.ceil(visibleKeys.length / pageSize));
-  const currentPage = Math.min(Math.max(1, page), totalPages);
-  const startIndex = (currentPage - 1) * pageSize;
-  const pagedKeys = visibleKeys.slice(startIndex, startIndex + pageSize);
-  const startItem = visibleKeys.length === 0 ? 0 : startIndex + 1;
-  const endItem = Math.min(startIndex + pageSize, visibleKeys.length);
+  const {
+    page: currentPage,
+    setPage,
+    pageSize,
+    setPageSize,
+    totalPages,
+    startItem,
+    endItem,
+    pageItems: pagedKeys,
+  } = useClientPagination(visibleKeys, {
+    initialPageSize: 20,
+    resetDeps: [search, filter, runtimeFilter, sortBy.key, sortBy.direction],
+  });
   const locked =
     busy ||
     createOpen ||
@@ -1825,26 +1816,144 @@ export function FreshApiKeys({
   const usageCell = (id: string) => {
     const item = usageById.get(id);
     const state = item?.coverage.state ?? 'unknown';
+    const proven = state === 'complete' || state === 'partial';
+    const calls = item?.calls ?? 0;
+    const success = item?.success ?? Math.max(0, calls - (item?.failure ?? 0));
+    const failure = item?.failure ?? 0;
+    const showTokens = proven && item?.totalTokens !== undefined && item.totalTokens > 0;
+    const showCost =
+      proven && item?.estimatedCostUsd !== undefined && item.estimatedCostUsd > 0;
+    const successRate =
+      calls > 0 ? Math.round((success / calls) * 1000) / 10 : null;
+    const statusBlocks =
+      proven && calls > 0 ? buildKeyStatusBlocks(item?.recentRequests) : null;
+    const lastUsedFullText = usageTimeText(item?.lastUsedAtMs) ?? '—';
+    const lastUsedText = usageCompactTimeText(item?.lastUsedAtMs, 'recent') ?? '—';
+    if (!proven) {
+      return (
+        <button
+          type="button"
+          className="key-usage-cell key-usage-trigger"
+          data-testid={'open-key-usage-' + id}
+          disabled={locked}
+          title={usageReasonText(item?.coverage.reason ?? 'usage_read_failed')}
+          onClick={() => openKeyDetails(id, { tab: 'usage' })}
+        >
+          <div className="key-usage-top">
+            <strong>—</strong>
+            <span className={'key-state-pill ' + usageCoveragePill(state)}>
+              {usageStateText(state)}
+            </span>
+          </div>
+          <small title={lastUsedFullText !== '—' ? lastUsedFullText : undefined}>
+            {k('usageLastUsed')}: {lastUsedFullText}
+          </small>
+        </button>
+      );
+    }
+
+    if (calls === 0) {
+      return (
+        <button
+          type="button"
+          className="key-usage-cell key-usage-trigger"
+          data-testid={'open-key-usage-' + id}
+          disabled={locked}
+          title={usageReasonText(item?.coverage.reason ?? 'observed')}
+          onClick={() => openKeyDetails(id, { tab: 'usage' })}
+        >
+          <div className="key-usage-top">
+            <span className="key-recent-idle-pill">
+              <span className="key-recent-idle-dot" aria-hidden="true" />
+              <span>{k('noUsageInWindow')}</span>
+            </span>
+            {state !== 'complete' && (
+              <span className={'key-state-pill ' + usageCoveragePill(state)}>
+                {usageStateText(state)}
+              </span>
+            )}
+          </div>
+          <small title={lastUsedFullText !== '—' ? lastUsedFullText : undefined}>
+            {k('usageLastUsed')}: {lastUsedFullText}
+          </small>
+        </button>
+      );
+    }
+
     return (
       <button
         type="button"
         className="key-usage-cell key-usage-trigger"
         data-testid={'open-key-usage-' + id}
         disabled={locked}
-        title={usageReasonText(item?.coverage.reason ?? 'usage_read_failed')}
+        title={usageReasonText(item?.coverage.reason ?? 'observed')}
         onClick={() => openKeyDetails(id, { tab: 'usage' })}
       >
         <div className="key-usage-top">
-          <strong>{usageCountText(item?.calls, state)}</strong>
+          <span className="key-stat-total" title={k('usageCalls')}>
+            {`${usageCountText(calls, state)} ${k('callsUnit')}`}
+          </span>
+          <span className="key-stat-success" title={k('usageSuccess')}>
+            <FullWebIcon name="check" size={12} />
+            {usageCountText(success, state)}
+          </span>
+          <span className="key-stat-failure" title={k('usageFailure')}>
+            <FullWebIcon name="close" size={12} />
+            {usageCountText(failure, state)}
+          </span>
+          {successRate !== null && state === 'complete' && (
+            <span
+              className={`key-stat-rate ${
+                successRate >= 90
+                  ? 'is-high'
+                  : successRate >= 50
+                    ? 'is-medium'
+                    : 'is-low'
+              }`}
+            >
+              {`${successRate}%`}
+            </span>
+          )}
+          {(showTokens || showCost) && (
+            <span className="key-usage-meta-pill">
+              {showTokens ? `${usageCompactNumberText(item?.totalTokens, state)} tok` : ''}
+              {showTokens && showCost ? ' · ' : ''}
+              {showCost ? usageCompactUsdText(item?.estimatedCostUsd, state) : ''}
+            </span>
+          )}
           {state !== 'complete' && (
             <span className={'key-state-pill ' + usageCoveragePill(state)}>
               {usageStateText(state)}
             </span>
           )}
         </div>
-        <small>
-          {k('usageLastUsed')}: {usageTimeText(item?.lastUsedAtMs) ?? '—'}
-        </small>
+        <div className="key-recent-bar-row">
+          {statusBlocks && item?.recentRequests && item.recentRequests.length > 0 ? (
+            <div
+              className="key-recent-bar"
+              aria-hidden="true"
+              title={k('recentRequestsHint')}
+            >
+              {statusBlocks.map((blk, idx) => (
+                <span
+                  key={idx}
+                  className={`key-recent-block is-${blk.state}`}
+                  title={blk.title}
+                />
+              ))}
+            </div>
+          ) : null}
+          <span
+            className="key-recent-time"
+            title={
+              lastUsedFullText !== '—'
+                ? `${k('usageLastUsed')}: ${lastUsedFullText}`
+                : undefined
+            }
+          >
+            {lastUsedText}
+          </span>
+        </div>
       </button>
     );
   };
@@ -1964,13 +2073,14 @@ export function FreshApiKeys({
         }
         toolbar={
           workspaceTab === 'keys' && keys && keys.length > 0 ? (
-            <>
+            <div className="key-filter-toolbar" data-testid="key-filter-toolbar">
               <div className="key-filter-tabs-row" data-testid="key-lifecycle-tabs">
                 <SegmentedTabs<'saved' | 'all' | 'replaced'>
                   ariaLabel={k('lifecycle')}
                   idBase="key-lifecycle-tab-btn"
                   className="key-lifecycle-tabs"
                   variant="joined"
+                  size="sm"
                   responsiveFullWidth={false}
                   activeTab={filter}
                   onChange={(value) => {
@@ -2002,7 +2112,6 @@ export function FreshApiKeys({
                   })}
                 />
               </div>
-              <div className="key-filter-toolbar">
                 <div className="key-search-field">
                   <Input
                     type="search"
@@ -2078,9 +2187,8 @@ export function FreshApiKeys({
                       {k('clear')}
                     </Button>
                   )}
-                </div>
               </div>
-            </>
+            </div>
           ) : null
         }
       />
@@ -2203,7 +2311,7 @@ export function FreshApiKeys({
                 : t('keysCreate')
         }
         className="key-create-modal"
-        width={540}
+        width={520}
         closeDisabled={
           busy ||
           persistedCopying ||
@@ -2213,7 +2321,7 @@ export function FreshApiKeys({
         onClose={closeCreateResultModal}
         footer={
           !confirmed && !recoveryKey && !secret && !pending ? (
-            <div className="key-modal-footer">
+            <>
               <button
                 className="btn btn-secondary"
                 type="button"
@@ -2236,19 +2344,81 @@ export function FreshApiKeys({
               >
                 {t('keysCreate')}
               </button>
-            </div>
+            </>
+          ) : recoveryKey ? (
+            <>
+              {canDismissRecovery && (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  data-testid="dismiss-create-recovery"
+                  disabled={busy || persistedCopying}
+                  onClick={() => dismissRecoveryKey(false)}
+                >
+                  {recoveryRetired ? k('closeDialog') : k('manageLater')}
+                </button>
+              )}
+              {recoveryKey.key.lifecycle !== 'superseded' && (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  data-testid="copy-recovered-client-secret"
+                  disabled={busy || persistedCopying}
+                  onClick={() => void copyPersistedKeySecret(recoveryKey.key)}
+                >
+                  <FullWebIcon name="copy" />
+                  {k('copyPersistedSecret')}
+                </button>
+              )}
+              {!recoveryRetired &&
+                onRebind &&
+                (recoveryBlocker?.kind === 'key_rejected' ||
+                  recoveryBlocker?.kind === 'target_moved') && (
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    data-testid="recovery-rebind-action"
+                    disabled={busy || persistedCopying}
+                    onClick={() => dismissRecoveryKey(true)}
+                  >
+                    {k('rebindConnection')}
+                  </button>
+                )}
+              {!recoveryRetired &&
+                (recoveryKey.statusUnknown || recoveryKey.key.runtimeState === 'effect_unknown' ? (
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    data-testid="create-reconcile-apply"
+                    disabled={busy || persistedCopying}
+                    onClick={() => void reconcileRecoveryKey()}
+                  >
+                    {k('checkOperationResult')}
+                  </button>
+                ) : !['key_rejected', 'target_moved', 'version_unsupported'].includes(
+                    recoveryBlocker?.kind ?? ''
+                  ) ? (
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    data-testid="create-retry-apply"
+                    disabled={busy || persistedCopying}
+                    onClick={() => void retryApplyRecoveryKey()}
+                  >
+                    {k('retryApplyKey')}
+                  </button>
+                ) : null)}
+            </>
           ) : secret ? (
-            <div className="key-modal-footer">
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={dismissCreatedSecret}
-              >
-                {t('keysDismiss')}
-              </button>
-            </div>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={dismissCreatedSecret}
+            >
+              {t('keysDismiss')}
+            </button>
           ) : confirmed && !recoveryKey ? (
-            <div className="key-modal-footer">
+            <>
               {createdKeyRecord && createdKeyRecord.lifecycle !== 'superseded' && (
                 <button
                   type="button"
@@ -2270,7 +2440,7 @@ export function FreshApiKeys({
               >
                 {t('keysDismiss')}
               </button>
-            </div>
+            </>
           ) : undefined
         }
       >
@@ -2282,28 +2452,31 @@ export function FreshApiKeys({
         {!confirmed && !recoveryKey && !secret && (
           <form
             id="create-key-form"
+            className="key-modal-form"
             hidden={!!pending}
             onSubmit={(event) => {
               event.preventDefault();
               void createKey();
             }}
           >
-            <label className="form-label" htmlFor="create-key-name">
-              {k('createNameLabel')}
-            </label>
-            <input
-              id="create-key-name"
-              className="input"
-              type="text"
-              data-testid="create-key-name-input"
-              aria-label={k('createNameLabel')}
-              placeholder={k('createNamePlaceholder')}
-              maxLength={120}
-              value={createName}
-              disabled={busy || operationPending || !!pending}
-              onChange={(event) => setCreateName(event.target.value)}
-            />
-            <p className="key-field-help">{k('generatedOnServer')}</p>
+            <div className="key-field-group">
+              <label className="key-field-label" htmlFor="create-key-name">
+                {k('createNameLabel')}
+              </label>
+              <input
+                id="create-key-name"
+                className="input"
+                type="text"
+                data-testid="create-key-name-input"
+                aria-label={k('createNameLabel')}
+                placeholder={k('createNamePlaceholder')}
+                maxLength={120}
+                value={createName}
+                disabled={busy || operationPending || !!pending}
+                onChange={(event) => setCreateName(event.target.value)}
+              />
+              <p className="key-field-help">{k('generatedOnServer')}</p>
+            </div>
           </form>
         )}
         {pending && (
@@ -2380,69 +2553,6 @@ export function FreshApiKeys({
               <p>
                 <code>{recoveryKey.key.maskedPreview}</code>
               </p>
-              <div className="key-toolbar-actions">
-                {!recoveryRetired &&
-                  (recoveryKey.statusUnknown || recoveryKey.key.runtimeState === 'effect_unknown' ? (
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      data-testid="create-reconcile-apply"
-                      disabled={busy || persistedCopying}
-                      onClick={() => void reconcileRecoveryKey()}
-                    >
-                      {k('checkOperationResult')}
-                    </button>
-                  ) : !['key_rejected', 'target_moved', 'version_unsupported'].includes(
-                      recoveryBlocker?.kind ?? ''
-                    ) ? (
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      data-testid="create-retry-apply"
-                      disabled={busy || persistedCopying}
-                      onClick={() => void retryApplyRecoveryKey()}
-                    >
-                      {k('retryApplyKey')}
-                    </button>
-                  ) : null)}
-                {!recoveryRetired &&
-                  onRebind &&
-                  (recoveryBlocker?.kind === 'key_rejected' ||
-                    recoveryBlocker?.kind === 'target_moved') && (
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      data-testid="recovery-rebind-action"
-                      disabled={busy || persistedCopying}
-                      onClick={() => dismissRecoveryKey(true)}
-                    >
-                      {k('rebindConnection')}
-                    </button>
-                  )}
-                {recoveryKey.key.lifecycle !== 'superseded' && (
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    data-testid="copy-recovered-client-secret"
-                    disabled={busy || persistedCopying}
-                    onClick={() => void copyPersistedKeySecret(recoveryKey.key)}
-                  >
-                    <FullWebIcon name="copy" />
-                    {k('copyPersistedSecret')}
-                  </button>
-                )}
-                {canDismissRecovery && (
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    data-testid="dismiss-create-recovery"
-                    disabled={busy || persistedCopying}
-                    onClick={() => dismissRecoveryKey(false)}
-                  >
-                    {recoveryRetired ? k('closeDialog') : k('manageLater')}
-                  </button>
-                )}
-              </div>
               {canDismissRecovery && !recoveryRetired && (
                 <p className="key-field-help">{k('recoveryManageLaterHelp')}</p>
               )}
@@ -2563,146 +2673,62 @@ export function FreshApiKeys({
         className="key-list-workspace"
         hidden={workspaceTab !== 'keys'}
       >
-        <div className="key-summary-grid" data-testid="key-summary-grid">
-          {(
-            [
-              {
-                id: 'saved',
-                accent: 'blue',
-                icon: 'key' as const,
-                label: k('summarySaved'),
-                value: keys === null ? '—' : String(savedCount),
-                meta: k('summarySavedHelp'),
-              },
-              {
-                id: 'runtime',
-                accent: runtimeAccent,
-                icon: (!gatewayVerified || effectiveCount < savedCount ? 'alert' : 'shield') as
-                  | 'alert'
-                  | 'shield',
-                label: k('summarySyncedActive'),
-                value: runtimeValue,
-                meta: runtimeMeta,
-              },
-              {
-                id: 'usage',
-                accent: 'indigo',
-                icon: 'chart' as const,
-                label: k('usageSummaryTitle'),
-                value: usageTotalText,
-                meta: usageUnavailable ? (
-                  <>
-                    <span>{k('summaryUsageValue')}</span> · {k('summaryUsageHelp')}
-                  </>
-                ) : usageShowCoveragePill && usage ? (
-                  <>
-                    <span>{usageStateText(usage.coverage.state)}</span> · {k('summaryUsageHelp')}
-                  </>
-                ) : (
-                  k('summaryUsageHelp')
-                ),
-              },
-              {
-                id: 'replaced',
-                accent: 'neutral',
-                icon: 'ban' as const,
-                label: k('summaryReplaced'),
-                value: keys === null ? '—' : String(replacedCount),
-                meta: k('summaryReplacedHelp'),
-              },
-            ] as const
-          ).map((card) => (
-            <div
-              className="card key-summary-card"
-              data-accent={card.accent}
-              key={card.id}
-              data-testid={'key-summary-' + card.id}
-            >
-              <div className="key-summary-head">
-                <span className="key-summary-icon" aria-hidden="true">
-                  <FullWebIcon name={card.icon} size={15} />
-                </span>
-                <span className="key-summary-label">{card.label}</span>
-              </div>
-              <div className="key-summary-body">
-                <strong className="key-summary-value">
-                  {card.id === 'usage' ? <span>{card.value}</span> : card.value}
-                </strong>
-                <small className="key-summary-meta">{card.meta}</small>
-              </div>
-              <div className="key-summary-card-chart" aria-hidden="true">
-                <svg viewBox="0 0 100 30" preserveAspectRatio="none">
-                  <path d="M0,25 Q15,5 30,20 T60,10 T100,25" />
-                </svg>
-              </div>
-            </div>
-          ))}
-        </div>
-        <div
+        <WorkspaceListPanel<'table' | 'cards'>
+          as="div"
           id="key-lifecycle-tabpanel"
           role="tabpanel"
-          aria-labelledby={`key-lifecycle-tab-btn-${filter}`}
-          className="card key-table-panel"
-          data-testid="key-list-panel"
-        >
-          {keys && keys.length > 0 && (
-            <div className="key-table-topbar" data-testid="key-table-topbar">
-              <div className="key-table-topbar-summary">
-                {formatKeyTableCount(visibleKeys.length)}
-              </div>
-              <div
-                className="key-view-toggle"
-                role="group"
-                aria-label={k('viewMode')}
-                data-testid="key-view-toggle"
-              >
-                {(['table', 'cards'] as const).map((mode) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    className={`key-view-btn ${viewMode === mode ? 'is-active' : ''}`}
-                    data-testid={'key-view-' + mode}
-                    aria-pressed={viewMode === mode}
-                    onClick={() => setViewMode(mode)}
-                  >
-                    {k(mode === 'table' ? 'viewTable' : 'viewCards')}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-          {keys === null ? (
-            !error && (
+          ariaLabelledby={`key-lifecycle-tab-btn-${filter}`}
+          testId="key-list-panel"
+          headerTestId="key-table-topbar"
+          showHeader={Boolean(keys && keys.length > 0)}
+          summary={formatKeyTableCount(visibleKeys.length)}
+          viewMode={{
+            idBase: 'key-view-mode',
+            value: viewMode,
+            onChange: setViewMode,
+            tableId: 'table',
+            cardsId: 'cards',
+            tableLabel: k('viewTable'),
+            cardsLabel: k('viewCards'),
+            ariaLabel: k('viewMode'),
+            tableTestId: 'key-view-table',
+            cardsTestId: 'key-view-cards',
+          }}
+          loading={keys === null}
+          loadingFallback={
+            !error ? (
               <div className="key-empty" role="status">
                 <FullWebIcon name="refresh" size={28} />
                 <p>{t('keysLoading')}</p>
               </div>
-            )
-          ) : keys.length === 0 ? (
-            <div className="key-empty">
-              <span className="key-resource-icon">
-                <FullWebIcon name="key" size={26} />
-              </span>
-              <h3>{k('emptyTitle')}</h3>
-              <p>{k('emptyHelp')}</p>
-              <button
-                type="button"
-                className="btn btn-primary btn-sm"
-                data-testid="empty-create-key"
-                disabled={locked || operationPending || !!error || !validKeyNameInput(createName.trim())}
-                onClick={() => {
-                  setConfirmed(false);
-                  setConfirmedEffect(false);
-                  setCreatedKeyId('');
-                  setRecoveryKey(null);
-                  setCreateOpen(true);
-                }}
-              >
-                {t('keysCreate')}
-              </button>
-            </div>
-          ) : visibleKeys.length === 0 ? (
-            !hasSearchOrNarrowFilter && (filter === 'saved' || filter === 'replaced') ? (
+            ) : null
+          }
+          empty={Boolean(keys && (keys.length === 0 || visibleKeys.length === 0))}
+          emptyFallback={
+            keys && keys.length === 0 ? (
+              <div className="key-empty">
+                <span className="key-resource-icon">
+                  <FullWebIcon name="key" size={26} />
+                </span>
+                <h3>{k('emptyTitle')}</h3>
+                <p>{k('emptyHelp')}</p>
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  data-testid="empty-create-key"
+                  disabled={locked || operationPending || !!error || !validKeyNameInput(createName.trim())}
+                  onClick={() => {
+                    setConfirmed(false);
+                    setConfirmedEffect(false);
+                    setCreatedKeyId('');
+                    setRecoveryKey(null);
+                    setCreateOpen(true);
+                  }}
+                >
+                  {t('keysCreate')}
+                </button>
+              </div>
+            ) : !hasSearchOrNarrowFilter && (filter === 'saved' || filter === 'replaced') ? (
               <div className="key-empty" data-testid={`key-empty-tab-${filter}`}>
                 <FullWebIcon name={filter === 'saved' ? 'key' : 'clock'} size={26} />
                 <h3>{k(filter === 'saved' ? 'emptyActiveTab' : 'emptyRevokedTab')}</h3>
@@ -2728,8 +2754,43 @@ export function FreshApiKeys({
                 </button>
               </div>
             )
-          ) : (
-            <div className="key-table-scroll">
+          }
+          pagination={
+            visibleKeys.length > 0
+              ? {
+                  currentPage,
+                  totalPages,
+                  infoText: formatKeyPaginationInfo(
+                    currentPage,
+                    totalPages,
+                    startItem,
+                    endItem,
+                    visibleKeys.length
+                  ),
+                  pageSize,
+                  pageSizeOptions: KEY_PAGE_SIZE_OPTIONS,
+                  pageSizeLabel: k('paginationPageSizeLabel'),
+                  pageSizeAriaLabel: k('paginationPageSizeLabel'),
+                  formatPageSizeOption: formatKeyPageSizeOption,
+                  onPageChange: setPage,
+                  onPageSizeChange: setPageSize,
+                  prevLabel: k('paginationPrev'),
+                  nextLabel: k('paginationNext'),
+                  showPageJump: true,
+                  jumpPrefixLabel: k('paginationJumpPrefix'),
+                  jumpSuffixLabel: k('paginationJumpSuffix'),
+                  jumpInputAriaLabel: k('paginationJumpLabel'),
+                  testIds: {
+                    root: 'key-pagination-bar',
+                    prev: 'key-pagination-prev',
+                    next: 'key-pagination-next',
+                    jumpInput: 'key-pagination-jump-input',
+                  },
+                }
+              : null
+          }
+        >
+          <div className="key-table-scroll">
               <table
                 className={`key-table ${viewMode === 'cards' ? 'is-cards-view' : ''}`}
                 role="table"
@@ -2738,7 +2799,7 @@ export function FreshApiKeys({
                 <thead role="rowgroup">
                   <tr role="row">
                     {(
-                      ['credential', 'originAndCreated', 'lifecycle', 'usageColumn', 'actions'] as const
+                      ['credential', 'lifecycle', 'modelsColumn', 'usageColumn', 'actions'] as const
                     ).map((label) => (
                       <th key={label} scope="col" role="columnheader">
                         {k(label)}
@@ -2750,11 +2811,12 @@ export function FreshApiKeys({
                   {pagedKeys.map((key) => {
                     const originLabel =
                       key.origin === 'installer'
-                        ? k('installerOrigin')
+                        ? k('installerOriginInline')
                         : key.origin === 'adopted'
-                          ? k('adoptedOrigin')
-                          : k('workspaceOrigin');
-                    const createdText = usageTimeText(key.createdAtMs) ?? '—';
+                          ? k('adoptedOriginInline')
+                          : k('workspaceOriginInline');
+                    const createdFullText = usageTimeText(key.createdAtMs) ?? '—';
+                    const createdText = usageCompactTimeText(key.createdAtMs, 'created') ?? '—';
                     const unified = keyUnifiedStatus(key);
                     const revokedText =
                       key.lifecycle === 'superseded' && key.revokedAtMs
@@ -2786,9 +2848,6 @@ export function FreshApiKeys({
                       >
                         <td className="key-col-identity" role="cell" data-label={k('name')}>
                           <div className="key-name-cell">
-                            <span className="key-resource-icon">
-                              <FullWebIcon name="key" size={16} />
-                            </span>
                             <div>
                               <button
                                 type="button"
@@ -2841,18 +2900,25 @@ export function FreshApiKeys({
                                       )}
                                     </span>
                                   )}
+                                <span className="key-meta-pair">
+                                  <span className="key-meta-sep" aria-hidden="true">·</span>
+                                  <span className="key-origin-inline">{originLabel}</span>
+                                </span>
+                                <span className="key-meta-pair">
+                                  <span className="key-meta-sep" aria-hidden="true">·</span>
+                                  <span
+                                    className="key-created-inline"
+                                    title={
+                                      createdFullText !== '—'
+                                        ? `${k('created')}: ${createdFullText}`
+                                        : undefined
+                                    }
+                                  >
+                                    {createdText}
+                                  </span>
+                                </span>
                               </small>
                             </div>
-                          </div>
-                        </td>
-                        <td
-                          className="key-col-origin"
-                          role="cell"
-                          data-label={k('originAndCreated')}
-                        >
-                          <div className="key-origin-cell">
-                            <span className="key-origin-label">{originLabel}</span>
-                            <small>{createdText}</small>
                           </div>
                         </td>
                         <td className="key-col-state" role="cell" data-label={k('lifecycle')}>
@@ -2872,6 +2938,48 @@ export function FreshApiKeys({
                               </small>
                             )}
                           </div>
+                        </td>
+                        <td
+                          className="key-col-models"
+                          role="cell"
+                          data-label={k('modelsColumn')}
+                        >
+                          {(() => {
+                            const usageItem = usageById.get(key.id);
+                            const usageState = usageItem?.coverage.state ?? 'unknown';
+                            const usageProven = usageState === 'complete' || usageState === 'partial';
+                            const topModels = usageProven ? (usageItem?.topModels ?? []) : [];
+                            const totalModels = usageProven
+                              ? (usageItem?.modelCount ?? topModels.length)
+                              : 0;
+                            if (!usageProven || topModels.length === 0) {
+                              return <span className="key-muted-dash">—</span>;
+                            }
+                            const primary = topModels[0];
+                            const extraCount = Math.max(0, totalModels - 1);
+                            const secondaryText = topModels
+                              .slice(1, 3)
+                              .map((m) => `${m.model} (${m.calls})`)
+                              .join(' · ');
+                            return (
+                              <div
+                                className="key-models-cell"
+                                title={topModels.map((m) => `${m.model}: ${m.calls}`).join('\n')}
+                              >
+                                <div className="key-models-top">
+                                  <span className="key-model-chip">{primary.model}</span>
+                                  {extraCount > 0 && (
+                                    <span className="key-model-more">{`+${extraCount}`}</span>
+                                  )}
+                                </div>
+                                <small className="key-models-sub">
+                                  {secondaryText
+                                    ? `${primary.calls} ${k('callsUnit')} · ${secondaryText}`
+                                    : `${primary.calls} ${k('callsUnit')}`}
+                                </small>
+                              </div>
+                            );
+                          })()}
                         </td>
                         <td
                           className="key-col-usage"
@@ -2979,44 +3087,7 @@ export function FreshApiKeys({
                 </tbody>
               </table>
             </div>
-          )}
-          {visibleKeys.length > 0 && (
-            <PaginationFooter
-              variant="flush"
-              currentPage={currentPage}
-              totalPages={totalPages}
-              infoText={formatKeyPaginationInfo(
-                currentPage,
-                totalPages,
-                startItem,
-                endItem,
-                visibleKeys.length
-              )}
-              pageSize={pageSize}
-              pageSizeOptions={KEY_PAGE_SIZE_OPTIONS}
-              pageSizeLabel={k('paginationPageSizeLabel')}
-              pageSizeAriaLabel={k('paginationPageSizeLabel')}
-              formatPageSizeOption={formatKeyPageSizeOption}
-              onPageChange={setPage}
-              onPageSizeChange={(next) => {
-                setPageSize(next);
-                setPage(1);
-              }}
-              prevLabel={k('paginationPrev')}
-              nextLabel={k('paginationNext')}
-              showPageJump
-              jumpPrefixLabel={k('paginationJumpPrefix')}
-              jumpSuffixLabel={k('paginationJumpSuffix')}
-              jumpInputAriaLabel={k('paginationJumpLabel')}
-              testIds={{
-                root: 'key-pagination-bar',
-                prev: 'key-pagination-prev',
-                next: 'key-pagination-next',
-                jumpInput: 'key-pagination-jump-input',
-              }}
-            />
-          )}
-        </div>
+        </WorkspaceListPanel>
         {gatewayPending && (
           <aside className="key-gateway-note">
             <FullWebIcon name="shield" />

@@ -120,16 +120,10 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
 .list {
   display: flex;
   flex-direction: column;
+  gap: 8px;
+  padding: 8px var(--list-panel-gutter-x, 16px) 14px;
   min-width: 0;
   overflow-x: auto;
-  overflow-y: hidden;
-  border-radius: var(--app-radius-lg);
-}
-
-.emptySurface {
-  padding: 0;
-  border-radius: var(--app-radius-lg);
-  overflow: hidden;
 }
 
 .emptyActions {
@@ -149,26 +143,22 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
 }
 
 .tableHeader {
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border-color);
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 700;
-  white-space: nowrap;
+  @include card-row-table-header;
+  min-height: 32px;
+  padding: 2px 14px;
 }
 
 .row {
+  @include card-row-table-surface;
   min-height: 74px;
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--border-subtle);
-  transition: background-color 0.16s ease;
+  padding: 11px 14px;
+  transition:
+    border-color 0.14s ease,
+    background-color 0.14s ease;
 
   &:hover {
-    background: color-mix(in srgb, var(--surface-subtle) 58%, var(--bg-primary));
-  }
-
-  &:last-child {
-    border-bottom: none;
+    border-color: color-mix(in srgb, var(--primary-color) 28%, var(--border-color));
+    background: color-mix(in srgb, var(--primary-color) 3.5%, var(--bg-primary));
   }
 }
 

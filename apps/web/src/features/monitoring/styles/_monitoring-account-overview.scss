@@ -321,6 +321,7 @@
     grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
     align-items: start;
     gap: 16px;
+    padding: 14px var(--list-panel-gutter-x, 16px);
   }
 
   .accountOverviewCard {

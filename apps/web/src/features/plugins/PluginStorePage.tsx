@@ -11,7 +11,7 @@ import {
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { PageControlBar } from '@/components/common/PageControlBar';
-import { PaginationFooter } from '@/components/common/PaginationFooter';
+import { LocalizedPaginationFooter } from '@/components/common/LocalizedPaginationFooter';
 import { Button } from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Input } from '@/components/ui/Input';
@@ -29,6 +29,7 @@ import {
   IconShield,
   IconTrash2,
 } from '@/components/ui/icons';
+import { useClientPagination } from '@/hooks/list';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { pluginsApi, pluginStoreApi } from '@/services/api';
 import { useAuthStore, useConfigStore, useNotificationStore } from '@/stores';
@@ -524,8 +525,6 @@ export function PluginStorePage({
   const [error, setError] = useState<StoreLoadError | null>(null);
   const [filter, setFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState<StoreStatusFilter>('all');
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState<number>(STORE_DEFAULT_PAGE_SIZE);
   const [installingID, setInstallingID] = useState('');
   const [restartRequiredIDs, setRestartRequiredIDs] = useState<string[]>([]);
   const [gateEntry, setGateEntry] = useState<PluginStoreEntry | null>(null);
@@ -731,14 +730,19 @@ export function PluginStorePage({
     [stats.installed, stats.notInstalled, stats.total, stats.updates, t]
   );
 
-  const totalPages = Math.max(1, Math.ceil(visiblePlugins.length / pageSize));
-  const currentPage = Math.min(page, totalPages);
-  const paginatedPlugins = useMemo(() => {
-    const start = (currentPage - 1) * pageSize;
-    return visiblePlugins.slice(start, start + pageSize);
-  }, [currentPage, pageSize, visiblePlugins]);
-  const paginationStartItem = visiblePlugins.length === 0 ? 0 : (currentPage - 1) * pageSize + 1;
-  const paginationEndItem = Math.min(visiblePlugins.length, currentPage * pageSize);
+  const {
+    page: currentPage,
+    setPage,
+    pageSize,
+    setPageSize,
+    totalPages,
+    startItem: paginationStartItem,
+    endItem: paginationEndItem,
+    pageItems: paginatedPlugins,
+  } = useClientPagination(visiblePlugins, {
+    initialPageSize: STORE_DEFAULT_PAGE_SIZE,
+    resetDeps: [filter, statusFilter],
+  });
 
   const restartNames = restartRequiredIDs.map((key) => {
     const entry = data?.plugins.find((plugin) => getStoreEntryKey(plugin) === key);
@@ -1438,34 +1442,17 @@ export function PluginStorePage({
               <div className={styles.grid}>
                 {paginatedPlugins.map((entry) => renderCard(entry))}
               </div>
-              <PaginationFooter
+              <LocalizedPaginationFooter
                 variant="inset"
                 currentPage={currentPage}
                 totalPages={totalPages}
-                infoText={t('monitoring.pagination_info', {
-                  current: currentPage,
-                  total: totalPages,
-                  start: paginationStartItem,
-                  end: paginationEndItem,
-                  count: visiblePlugins.length,
-                })}
+                totalCount={visiblePlugins.length}
+                startItem={paginationStartItem}
+                endItem={paginationEndItem}
                 pageSize={pageSize}
                 pageSizeOptions={STORE_PAGE_SIZE_OPTIONS}
-                pageSizeLabel={t('monitoring.page_size_label')}
-                pageSizeTitle={t('monitoring.page_size_label')}
-                pageSizeAriaLabel={t('monitoring.page_size_label')}
-                formatPageSizeOption={(size) => t('monitoring.page_size_option', { count: size })}
                 onPageChange={setPage}
-                onPageSizeChange={(nextPageSize) => {
-                  setPageSize(nextPageSize);
-                  setPage(1);
-                }}
-                prevLabel={t('monitoring.pagination_prev')}
-                nextLabel={t('monitoring.pagination_next')}
-                showPageJump
-                jumpPrefixLabel={t('monitoring.pagination_jump_prefix')}
-                jumpSuffixLabel={t('monitoring.pagination_jump_suffix')}
-                jumpInputAriaLabel={t('monitoring.pagination_jump_label')}
+                onPageSizeChange={setPageSize}
               />
             </>
           )}

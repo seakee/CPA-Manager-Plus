@@ -2,7 +2,8 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { PageControlBar } from '@/components/common/PageControlBar';
-import { PaginationFooter } from '@/components/common/PaginationFooter';
+import { LocalizedPaginationFooter } from '@/components/common/LocalizedPaginationFooter';
+import { WorkspaceListPanel } from '@/components/common/WorkspaceListPanel';
 import { Button } from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Input } from '@/components/ui/Input';
@@ -17,6 +18,7 @@ import {
   IconTrash2,
   IconX,
 } from '@/components/ui/icons';
+import { useClientPagination } from '@/hooks/list';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import {
@@ -100,8 +102,6 @@ function AccountActionCandidatesPageContent() {
   const [pendingCount, setPendingCount] = useState(0);
   const [filter, setFilter] = useState<StatusFilter>('pending');
   const [search, setSearch] = useState('');
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState('');
@@ -124,7 +124,6 @@ function AccountActionCandidatesPageContent() {
     setPendingCount(0);
     setError('');
     setLoading(true);
-    setPage(1);
     return () => {
       requestIdRef.current += 1;
     };
@@ -217,15 +216,19 @@ function AccountActionCandidatesPageContent() {
     });
   }, [items, search]);
 
-  const totalPages = Math.max(1, Math.ceil(visibleItems.length / pageSize));
-  const currentPage = Math.min(page, totalPages);
-  const paginationStartIndex = visibleItems.length === 0 ? 0 : (currentPage - 1) * pageSize;
-  const paginationStartItem = visibleItems.length === 0 ? 0 : paginationStartIndex + 1;
-  const paginationEndItem = Math.min(visibleItems.length, paginationStartIndex + pageSize);
-  const paginatedItems = useMemo(
-    () => visibleItems.slice(paginationStartIndex, paginationStartIndex + pageSize),
-    [pageSize, paginationStartIndex, visibleItems]
-  );
+  const {
+    page: currentPage,
+    setPage,
+    pageSize,
+    setPageSize,
+    totalPages,
+    startItem: paginationStartItem,
+    endItem: paginationEndItem,
+    pageItems: paginatedItems,
+  } = useClientPagination(visibleItems, {
+    initialPageSize: DEFAULT_PAGE_SIZE,
+    resetDeps: [managerBase, managementKey, filter, search],
+  });
 
   const filterTabItems = useMemo<ReadonlyArray<SegmentedTabItem<StatusFilter>>>(
     () =>
@@ -448,21 +451,13 @@ function AccountActionCandidatesPageContent() {
         }
       />
 
-      <section className={styles.panel}>
-        {error ? (
-          <div className={styles.errorBanner} role="alert">
-            <div className={styles.errorBannerCopy}>
-              <strong>{t('account_actions.load_failed_title')}</strong>
-              <span>{error}</span>
-            </div>
-            <Button variant="secondary" size="sm" onClick={loadCandidates} loading={loading}>
-              <IconRefreshCw size={14} />
-              {t('common.refresh')}
-            </Button>
-          </div>
-        ) : null}
-
-        {visibleItems.length === 0 && loaded ? (
+      <WorkspaceListPanel
+        summary={t('account_actions.list_summary', {
+          count: visibleItems.length,
+          defaultValue: `共 ${visibleItems.length} 条记录`,
+        })}
+        empty={visibleItems.length === 0 && loaded}
+        emptyFallback={
           <EmptyState
             variant="canvas"
             title={
@@ -500,7 +495,36 @@ function AccountActionCandidatesPageContent() {
               )
             }
           />
-        ) : visibleItems.length === 0 ? null : (
+        }
+        footer={
+          <LocalizedPaginationFooter
+            variant="flush"
+            currentPage={currentPage}
+            totalPages={totalPages}
+            totalCount={visibleItems.length}
+            startItem={paginationStartItem}
+            endItem={paginationEndItem}
+            disabled={!loaded || visibleItems.length === 0}
+            pageSize={pageSize}
+            pageSizeOptions={PAGE_SIZE_OPTIONS}
+            onPageChange={setPage}
+            onPageSizeChange={setPageSize}
+          />
+        }
+      >
+        {error ? (
+          <div className={styles.errorBanner} role="alert">
+            <div className={styles.errorBannerCopy}>
+              <strong>{t('account_actions.load_failed_title')}</strong>
+              <span>{error}</span>
+            </div>
+            <Button variant="secondary" size="sm" onClick={loadCandidates} loading={loading}>
+              <IconRefreshCw size={14} />
+              {t('common.refresh')}
+            </Button>
+          </div>
+        ) : null}
+        {visibleItems.length > 0 ? (
           <div className={styles.tableWrap}>
             <table className={styles.table}>
               <thead>
@@ -661,39 +685,8 @@ function AccountActionCandidatesPageContent() {
               </tbody>
             </table>
           </div>
-        )}
-
-        <PaginationFooter
-          variant="flush"
-          currentPage={currentPage}
-          totalPages={totalPages}
-          disabled={!loaded || visibleItems.length === 0}
-          infoText={t('monitoring.pagination_info', {
-            current: currentPage,
-            total: totalPages,
-            start: paginationStartItem,
-            end: paginationEndItem,
-            count: visibleItems.length,
-          })}
-          pageSize={pageSize}
-          pageSizeOptions={PAGE_SIZE_OPTIONS}
-          pageSizeLabel={t('monitoring.page_size_label')}
-          pageSizeTitle={t('monitoring.page_size_label')}
-          pageSizeAriaLabel={t('monitoring.page_size_label')}
-          formatPageSizeOption={(size) => t('monitoring.page_size_option', { count: size })}
-          onPageChange={setPage}
-          onPageSizeChange={(nextPageSize) => {
-            setPageSize(nextPageSize);
-            setPage(1);
-          }}
-          prevLabel={t('monitoring.pagination_prev')}
-          nextLabel={t('monitoring.pagination_next')}
-          showPageJump
-          jumpPrefixLabel={t('monitoring.pagination_jump_prefix')}
-          jumpSuffixLabel={t('monitoring.pagination_jump_suffix')}
-          jumpInputAriaLabel={t('monitoring.pagination_jump_label')}
-        />
-      </section>
+        ) : null}
+      </WorkspaceListPanel>
 
       <Modal
         open={Boolean(evidenceCandidate)}

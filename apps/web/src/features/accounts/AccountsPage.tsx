@@ -8,8 +8,9 @@ import { createPortal } from 'react-dom';
 import { useLocation, useNavigate, type BlockerFunction } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { FloatingActionDock } from '@/components/common/FloatingActionDock';
+import { LocalizedPaginationFooter } from '@/components/common/LocalizedPaginationFooter';
 import { PageControlBar } from '@/components/common/PageControlBar';
-import { PaginationFooter } from '@/components/common/PaginationFooter';
+import { WorkspaceListPanel } from '@/components/common/WorkspaceListPanel';
 import { Button } from '@/components/ui/Button';
 import { Drawer } from '@/components/ui/Drawer';
 import { DropdownMenu, type DropdownMenuItem } from '@/components/ui/DropdownMenu';
@@ -64,11 +65,15 @@ import {
 import {
   getScopedQuotaState,
 } from '@/components/quota/quotaConfigs';
-import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
-import { useInterval } from '@/hooks/useInterval';
+import {
+  useClientPagination,
+  useHeaderRefresh,
+  useInterval,
+  useMediaQuery,
+  usePersistedViewMode,
+} from '@/hooks';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import { useUnsavedChangesGuard } from '@/hooks/useUnsavedChangesGuard';
-import { useMediaQuery } from '@/hooks/useMediaQuery';
 import { getAuthFileIcon } from '@/features/authFiles/constants';
 import {
   useAuthFilesData,
@@ -1464,8 +1469,9 @@ export function AccountsPage() {
     }
   }, [editingNoteState]);
 
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(() => initialWorkspaceUrlState.current.pageSize);
+  const [storedPageSize, setStoredPageSize] = useState(
+    () => initialWorkspaceUrlState.current.pageSize
+  );
   const [usageRows, setUsageRows] = useState<UsageValueRow[]>([]);
   type ScopedAccountHistory = {
     item: MonitoringAccountHistoryItem;
@@ -1632,11 +1638,23 @@ export function AccountsPage() {
   const [accountDisplayMode, setAccountDisplayMode] = useState<QuotaAccountDisplayMode>(
     () => initialWorkspaceUrlState.current.accountDisplayMode
   );
-  const [layoutMode, setLayoutMode] = useState<AccountsLayoutMode>(
+  const [storedLayoutMode, setStoredLayoutMode] = useState<AccountsLayoutMode>(
     () => initialWorkspaceUrlState.current.layoutMode
   );
   const isCompactScreen = useMediaQuery('(max-width: 1024px)');
-  const effectiveLayoutMode = isCompactScreen ? 'grid' : layoutMode;
+  const {
+    mode: layoutMode,
+    effectiveMode: effectiveLayoutMode,
+    setMode: setLayoutMode,
+    switcherHidden: viewSwitcherHidden,
+  } = usePersistedViewMode<AccountsLayoutMode>({
+    defaultMode: 'table',
+    validModes: ['table', 'grid'],
+    compactFallbackMode: 'grid',
+    isCompact: isCompactScreen,
+    value: storedLayoutMode,
+    onChange: setStoredLayoutMode,
+  });
   const [copiedIdentityKey, setCopiedIdentityKey] = useState<string | null>(null);
   const pinnedKeys = usePinnedAccountsStore((state) => state.pinnedKeys);
   const togglePinnedAccount = usePinnedAccountsStore((state) => state.togglePinned);
@@ -4366,14 +4384,27 @@ export function AccountsPage() {
     requestEvidenceBySelectionKey,
   ]);
 
-  const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
-  const currentPage = Math.min(page, totalPages);
-  const pageRows = useMemo(
-    () => filteredRows.slice((currentPage - 1) * pageSize, currentPage * pageSize),
-    [currentPage, filteredRows, pageSize]
-  );
-  const paginationStartItem = filteredRows.length === 0 ? 0 : (currentPage - 1) * pageSize + 1;
-  const paginationEndItem = Math.min(filteredRows.length, currentPage * pageSize);
+  const {
+    page: currentPage,
+    setPage,
+    pageSize,
+    setPageSize,
+    totalPages,
+    startItem: paginationStartItem,
+    endItem: paginationEndItem,
+    pageItems: pageRows,
+  } = useClientPagination(filteredRows, {
+    pageSize: storedPageSize,
+    onPageSizeChange: setStoredPageSize,
+    resetDeps: [
+      operationalFilter,
+      planFilter,
+      providerFilter,
+      quotaBandFilter,
+      search,
+      statusFilter,
+    ],
+  });
   const pageAuthFiles = useMemo(() => pageRows.map((row) => row.raw), [pageRows]);
   const filteredAuthFiles = useMemo(() => filteredRows.map((row) => row.raw), [filteredRows]);
   const selectablePageRows = useMemo(() => pageRows.filter((row) => !row.runtimeOnly), [pageRows]);
@@ -5040,18 +5071,6 @@ export function AccountsPage() {
   );
 
   useEffect(() => {
-    setPage(1);
-  }, [
-    operationalFilter,
-    pageSize,
-    planFilter,
-    providerFilter,
-    quotaBandFilter,
-    search,
-    statusFilter,
-  ]);
-
-  useEffect(() => {
     writeAccountsWorkspaceUiState({
       search,
       providerFilter,
@@ -5214,7 +5233,7 @@ export function AccountsPage() {
       setOauthExcludedEditorProvider(next.editor === 'excluded' ? next.editorProvider : null);
       setOauthModelAliasEditorProvider(next.editor === 'alias' ? next.editorProvider : null);
     },
-    []
+    [setLayoutMode, setPageSize]
   );
 
   useEffect(() => {
@@ -7927,35 +7946,6 @@ export function AccountsPage() {
     </div>
   );
 
-  const renderViewModeSwitcher = () => {
-    if (isCompactScreen) {
-      return null;
-    }
-    return (
-      <SegmentedTabs<'table' | 'grid'>
-        variant="joined"
-        roleMode="group"
-        responsiveFullWidth={false}
-        ariaLabel={t('accounts.view_mode_switcher', { defaultValue: '视图模式' })}
-        activeTab={effectiveLayoutMode}
-        onChange={setLayoutMode}
-        items={[
-          {
-            id: 'table',
-            label: t('accounts.view_mode_table'),
-            title: t('accounts.view_mode_table'),
-            ariaLabel: t('accounts.view_mode_table'),
-          },
-          {
-            id: 'grid',
-            label: t('accounts.view_mode_grid'),
-            title: t('accounts.view_mode_grid'),
-            ariaLabel: t('accounts.view_mode_grid'),
-          },
-        ]}
-      />
-    );
-  };
 
   const renderToolbar = () => (
     <>
@@ -8062,7 +8052,6 @@ export function AccountsPage() {
           <div className={styles.mobileFilterBody}>
             <div className={styles.mobileFilterDisplayMode}>
               {renderAccountDisplayToggle()}
-              {renderViewModeSwitcher()}
             </div>
             {renderAccountFilterFields()}
             <div className={styles.mobileSortField}>{renderAccountSortControls(true)}</div>
@@ -8081,65 +8070,6 @@ export function AccountsPage() {
     );
   };
 
-  const renderBatchBar = () => {
-    const hasSelection = selectionCount > 0;
-    const refreshTargets = hasSelection ? selectedRows : pageRows;
-    const showSelectionControls = isSelectionMode || hasSelection;
-
-    return (
-      <section
-        className={[
-          styles.batchBar,
-          hasSelection || isSelectionMode ? styles.batchBarActive : styles.batchBarIdle,
-        ]
-          .filter(Boolean)
-          .join(' ')}
-      >
-        <div className={styles.batchSummary}>
-          <span>
-            {t('accounts.selected_count', {
-              count: selectionCount,
-            })}
-          </span>
-          <small>
-            {isSelectionMode || hasSelection
-              ? t('accounts.selection_mode_hint')
-              : t('accounts.batch_hint')}
-          </small>
-        </div>
-        <div className={styles.batchActions}>
-          {!isSelectionMode && !hasSelection ? (
-            <Button
-              variant="secondary"
-              size="sm"
-              className={styles.selectionModeButton}
-              onClick={() => setIsSelectionMode(true)}
-              aria-pressed={isSelectionMode}
-            >
-              <IconCheck size={15} />
-              {t('accounts.selection_mode_enter')}
-            </Button>
-          ) : null}
-          {showSelectionControls ? renderSelectionControls() : null}
-          <div className={styles.batchDisplayToggle}>{renderAccountDisplayToggle()}</div>
-          {!hasSelection && !isSelectionMode ? (
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => refreshQuotaRows(refreshTargets)}
-              disabled={disableControls || quotaRefreshing || refreshTargets.length === 0}
-              loading={quotaRefreshing}
-              title={t('accounts.refresh_quota')}
-            >
-              {!quotaRefreshing ? <IconRefreshCw size={15} /> : null}
-              {t('accounts.refresh_quota')}
-            </Button>
-          ) : null}
-          {renderViewModeSwitcher()}
-        </div>
-      </section>
-    );
-  };
 
   const renderFloatingBatchActions = () => {
     if (selectionCount === 0) return null;
@@ -8452,63 +8382,6 @@ export function AccountsPage() {
     );
   };
 
-  const renderPagination = () => {
-    if (filteredRows.length === 0) return null;
-    const pageSizeShort = t('monitoring.page_size_label_short', {
-      defaultValue: t('monitoring.page_size_label'),
-    });
-    const prevShort = t('monitoring.pagination_prev_short', {
-      defaultValue: t('monitoring.pagination_prev'),
-    });
-    const nextShort = t('monitoring.pagination_next_short', {
-      defaultValue: t('monitoring.pagination_next'),
-    });
-    return (
-      <div className={styles.accountsPagination}>
-        <PaginationFooter
-          variant="inset"
-          currentPage={currentPage}
-          totalPages={totalPages}
-          infoText={t('monitoring.pagination_info', {
-            current: currentPage,
-            total: totalPages,
-            start: paginationStartItem,
-            end: paginationEndItem,
-            count: filteredRows.length,
-          })}
-          pageSize={pageSize}
-          pageSizeOptions={PAGE_SIZE_OPTIONS.map((option) => Number(option.value))}
-          pageSizeLabel={
-            pageSizeShort === 'monitoring.page_size_label_short'
-              ? t('monitoring.page_size_label')
-              : pageSizeShort
-          }
-          pageSizeTitle={t('monitoring.page_size_label')}
-          pageSizeAriaLabel={t('monitoring.page_size_label')}
-          formatPageSizeOption={(size) => t('monitoring.page_size_option', { count: size })}
-          onPageChange={setPage}
-          onPageSizeChange={(nextPageSize) => {
-            setPageSize(nextPageSize);
-            setPage(1);
-          }}
-          prevLabel={
-            prevShort === 'monitoring.pagination_prev_short'
-              ? t('monitoring.pagination_prev')
-              : prevShort
-          }
-          nextLabel={
-            nextShort === 'monitoring.pagination_next_short'
-              ? t('monitoring.pagination_next')
-              : nextShort
-          }
-          showPageJump
-          jumpPrefixLabel={t('monitoring.pagination_jump_prefix')}
-          jumpSuffixLabel={t('monitoring.pagination_jump_suffix')}
-          jumpInputAriaLabel={t('monitoring.pagination_jump_label')}
-        />
-      </div>
-    );
-  };
 
   const renderAccountEmptyState = () => (
     <EmptyState
@@ -8912,11 +8785,86 @@ export function AccountsPage() {
     });
   };
 
-  const renderAccountCards = (rowsToRender = pageRows, paged = true) => (
-    <section className={styles.tablePanel}>
-      {paged ? renderBatchBar() : null}
-      {rowsToRender.length > 0 ? (
-        effectiveLayoutMode === 'grid' ? (
+  const renderAccountCards = (rowsToRender = pageRows, paged = true) => {
+    const hasSelection = selectionCount > 0;
+    const refreshTargets = hasSelection ? selectedRows : pageRows;
+    const showSelectionControls = isSelectionMode || hasSelection;
+
+    return (
+      <WorkspaceListPanel<AccountsLayoutMode>
+        showHeader={paged}
+        headerClassName={
+          !isSelectionMode && !hasSelection ? styles.accountsHeaderIdle : undefined
+        }
+        selectionActive={hasSelection || isSelectionMode}
+        summary={t('accounts.selected_count', { count: selectionCount })}
+        hint={
+          isSelectionMode || hasSelection
+            ? t('accounts.selection_mode_hint')
+            : t('accounts.batch_hint')
+        }
+        headerActions={
+          <>
+            {!isSelectionMode && !hasSelection ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                className={styles.selectionModeButton}
+                onClick={() => setIsSelectionMode(true)}
+                aria-pressed={isSelectionMode}
+              >
+                <IconCheck size={15} />
+                {t('accounts.selection_mode_enter')}
+              </Button>
+            ) : null}
+            {showSelectionControls ? renderSelectionControls() : null}
+            <div className={styles.batchDisplayToggle}>{renderAccountDisplayToggle()}</div>
+            {!hasSelection && !isSelectionMode ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => refreshQuotaRows(refreshTargets)}
+                disabled={disableControls || quotaRefreshing || refreshTargets.length === 0}
+                loading={quotaRefreshing}
+                title={t('accounts.refresh_quota')}
+              >
+                {!quotaRefreshing ? <IconRefreshCw size={15} /> : null}
+                {t('accounts.refresh_quota')}
+              </Button>
+            ) : null}
+          </>
+        }
+        viewMode={{
+          idBase: 'accounts-view-mode',
+          value: effectiveLayoutMode,
+          onChange: setLayoutMode,
+          tableId: 'table',
+          cardsId: 'grid',
+          tableLabel: t('accounts.view_mode_table'),
+          cardsLabel: t('accounts.view_mode_grid'),
+          ariaLabel: t('accounts.view_mode_switcher', { defaultValue: '视图模式' }),
+          hidden: viewSwitcherHidden,
+        }}
+        empty={rowsToRender.length === 0}
+        emptyFallback={renderAccountEmptyState()}
+        footer={
+          paged && filteredRows.length > 0 ? (
+            <LocalizedPaginationFooter
+              currentPage={currentPage}
+              totalPages={totalPages}
+              totalCount={filteredRows.length}
+              startItem={paginationStartItem}
+              endItem={paginationEndItem}
+              pageSize={pageSize}
+              pageSizeOptions={PAGE_SIZE_OPTIONS.map((option) => Number(option.value))}
+              compactLabels
+              onPageChange={setPage}
+              onPageSizeChange={setPageSize}
+            />
+          ) : null
+        }
+      >
+        {effectiveLayoutMode === 'grid' ? (
           <div className={styles.accountGridList}>
             {rowsToRender.map((row) => {
               const ctx = resolveAccountRowContext(row);
@@ -9686,13 +9634,10 @@ export function AccountsPage() {
             })}
             </div>
           </div>
-        )
-      ) : (
-        renderAccountEmptyState()
-      )}
-      {paged ? renderPagination() : null}
-    </section>
-  );
+        )}
+      </WorkspaceListPanel>
+    );
+  };
 
   const renderDetailDrawer = () => {
     if (!selectedRow) {

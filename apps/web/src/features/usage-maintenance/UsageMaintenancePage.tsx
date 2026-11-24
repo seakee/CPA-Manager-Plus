@@ -3,7 +3,8 @@ import { useTranslation } from 'react-i18next';
 import { Link, useSearchParams } from 'react-router-dom';
 import { MetricSummaryGrid, type MetricSummaryCardProps } from '@/components/common/MetricSummaryCard';
 import { PageControlBar } from '@/components/common/PageControlBar';
-import { PaginationFooter } from '@/components/common/PaginationFooter';
+import { LocalizedPaginationFooter } from '@/components/common/LocalizedPaginationFooter';
+import { WorkspaceListPanel } from '@/components/common/WorkspaceListPanel';
 import { SplashScreen } from '@/components/common/SplashScreen';
 import { Button } from '@/components/ui/Button';
 import { Drawer } from '@/components/ui/Drawer';
@@ -938,6 +939,64 @@ function UsageMaintenancePageContent() {
             </Button>
           </div>
         }
+        toolbar={
+          activeTab === 'archives' ? (
+            <div className={styles.controlToolbar}>
+              <div className={styles.searchWrap}>
+                <IconSearch size={14} className={styles.searchIcon} aria-hidden="true" />
+                <input
+                  type="search"
+                  className={styles.searchInput}
+                  placeholder={t('usage_maintenance.search_runs_placeholder', {
+                    defaultValue: 'Search run ID or status…',
+                  })}
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  aria-label={t('usage_maintenance.search_runs_placeholder', {
+                    defaultValue: 'Search run ID or status…',
+                  })}
+                  data-testid="usage-maintenance-search-input"
+                />
+                {searchQuery ? (
+                  <button
+                    type="button"
+                    className={styles.searchClearBtn}
+                    onClick={() => setSearchQuery('')}
+                    aria-label={t('common.clear', { defaultValue: 'Clear' })}
+                  >
+                    <IconX size={12} />
+                  </button>
+                ) : null}
+              </div>
+              <SegmentedTabs<ArchiveHistorySource>
+                variant="joined"
+                responsiveFullWidth={false}
+                activeTab={sourceFilter}
+                onChange={(next) => {
+                  setSourceFilter(next);
+                  setCurrentCursor(undefined);
+                  setCursorStack([]);
+                }}
+                items={sourceTabs}
+                ariaLabel={t('usage_maintenance.source_filter')}
+                idBase="usage-maintenance-source-tabs"
+              />
+              <div className={styles.statusSelectWrap}>
+                <Select
+                  size="sm"
+                  value={statusFilter}
+                  options={statusOptions}
+                  onChange={(value) => {
+                    setStatusFilter(value as ArchiveHistoryFilter);
+                    setCurrentCursor(undefined);
+                    setCursorStack([]);
+                  }}
+                  ariaLabel={t('usage_maintenance.status_title')}
+                />
+              </div>
+            </div>
+          ) : undefined
+        }
       />
 
       {loadError ? (
@@ -1043,68 +1102,12 @@ function UsageMaintenancePageContent() {
             </div>
           ) : null}
 
-          <section className={styles.panel} data-testid="usage-maintenance-runs-card">
-            <div className={styles.panelHeader}>
-              <div className={styles.panelHeaderCopy}>
-                <h2 className={styles.panelTitle}>{t('usage_maintenance.archive_records')}</h2>
-              </div>
-              <div className={styles.panelHeaderActions}>
-                <SegmentedTabs<ArchiveHistorySource>
-                  variant="joined"
-                  responsiveFullWidth={false}
-                  activeTab={sourceFilter}
-                  onChange={(next) => {
-                    setSourceFilter(next);
-                    setCurrentCursor(undefined);
-                    setCursorStack([]);
-                  }}
-                  items={sourceTabs}
-                  ariaLabel={t('usage_maintenance.source_filter')}
-                  idBase="usage-maintenance-source-tabs"
-                />
-                <div className={styles.statusSelectWrap}>
-                  <Select
-                    value={statusFilter}
-                    options={statusOptions}
-                    onChange={(value) => {
-                      setStatusFilter(value as ArchiveHistoryFilter);
-                      setCurrentCursor(undefined);
-                      setCursorStack([]);
-                    }}
-                    ariaLabel={t('usage_maintenance.status_title')}
-                    fullWidth={false}
-                  />
-                </div>
-                <div className={styles.searchWrap}>
-                  <IconSearch size={14} className={styles.searchIcon} aria-hidden="true" />
-                  <input
-                    type="search"
-                    className={styles.searchInput}
-                    placeholder={t('usage_maintenance.search_runs_placeholder', {
-                      defaultValue: 'Search run ID or status…',
-                    })}
-                    value={searchQuery}
-                    onChange={(event) => setSearchQuery(event.target.value)}
-                    aria-label={t('usage_maintenance.search_runs_placeholder', {
-                      defaultValue: 'Search run ID or status…',
-                    })}
-                    data-testid="usage-maintenance-search-input"
-                  />
-                  {searchQuery ? (
-                    <button
-                      type="button"
-                      className={styles.searchClearBtn}
-                      onClick={() => setSearchQuery('')}
-                      aria-label={t('common.clear', { defaultValue: 'Clear' })}
-                    >
-                      <IconX size={12} />
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-            </div>
-
-            {filteredRuns.length === 0 ? (
+          <WorkspaceListPanel
+            testId="usage-maintenance-runs-card"
+            summary={t('usage_maintenance.archive_records')}
+            hint={t('usage_maintenance.workspace_cleanup_hint')}
+            empty={filteredRuns.length === 0}
+            emptyFallback={
               <EmptyState
                 variant="canvas"
                 title={
@@ -1128,7 +1131,36 @@ function UsageMaintenancePageContent() {
                   )
                 }
               />
-            ) : (
+            }
+            footer={
+              <LocalizedPaginationFooter
+                variant="flush"
+                showPageJump={false}
+                currentPage={currentPage}
+                totalPages={totalPages}
+                totalCount={totalCount}
+                startItem={startItem}
+                endItem={endItem}
+                disabled={!loaded || loading}
+                infoText={
+                  totalCount > 0
+                    ? `${startItem}-${endItem} / ${totalCount}`
+                    : t('usage_maintenance.records_on_page', { count: filteredRuns.length })
+                }
+                pageSize={pageSize}
+                pageSizeOptions={PAGE_SIZE_OPTIONS}
+                prevLabel={t('usage_maintenance.pagination_prev')}
+                nextLabel={t('usage_maintenance.pagination_next')}
+                onPageChange={handleCursorPageChange}
+                onPageSizeChange={(nextSize) => {
+                  setPageSize(nextSize);
+                  setCurrentCursor(undefined);
+                  setCursorStack([]);
+                }}
+              />
+            }
+          >
+            {filteredRuns.length > 0 ? (
               <>
                 <div className={styles.tableWrap}>
                   <table className={styles.table}>
@@ -1346,34 +1378,8 @@ function UsageMaintenancePageContent() {
                   ))}
                 </div>
               </>
-            )}
-
-            <PaginationFooter
-              variant="flush"
-              currentPage={currentPage}
-              totalPages={totalPages}
-              disabled={!loaded || loading}
-              infoText={
-                totalCount > 0
-                  ? `${startItem}-${endItem} / ${totalCount}`
-                  : t('usage_maintenance.records_on_page', { count: filteredRuns.length })
-              }
-              pageSize={pageSize}
-              pageSizeOptions={PAGE_SIZE_OPTIONS}
-              pageSizeLabel={t('monitoring.page_size_label')}
-              pageSizeTitle={t('monitoring.page_size_label')}
-              pageSizeAriaLabel={t('monitoring.page_size_label')}
-              formatPageSizeOption={(size) => t('monitoring.page_size_option', { count: size })}
-              prevLabel={t('usage_maintenance.pagination_prev')}
-              nextLabel={t('usage_maintenance.pagination_next')}
-              onPageChange={handleCursorPageChange}
-              onPageSizeChange={(nextSize) => {
-                setPageSize(nextSize);
-                setCurrentCursor(undefined);
-                setCursorStack([]);
-              }}
-            />
-          </section>
+            ) : null}
+          </WorkspaceListPanel>
         </>
       ) : null}
 

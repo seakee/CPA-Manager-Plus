@@ -11,6 +11,7 @@ import {
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { PageControlBar } from '@/components/common/PageControlBar';
+import { WorkspaceListPanel } from '@/components/common/WorkspaceListPanel';
 import { Button } from '@/components/ui/Button';
 import { Drawer } from '@/components/ui/Drawer';
 import { DropdownMenu, type DropdownMenuItem } from '@/components/ui/DropdownMenu';
@@ -771,30 +772,6 @@ function InstalledPluginsView({
               aria-label={t('plugin_management.search_label')}
               rightElement={<IconSearch size={16} />}
             />
-            {data ? (
-              <div className={styles.toolbarMeta}>
-                <span className={styles.toolbarMetaStat}>
-                  <span>{t('plugin_management.installed_count')}</span>
-                  <strong>{pluginStats.installed}</strong>
-                </span>
-                <span className={styles.toolbarMetaDivider} aria-hidden="true">
-                  ·
-                </span>
-                <span className={styles.toolbarMetaStat} data-tone="active">
-                  <span>{t('plugin_management.effective_count')}</span>
-                  <strong>{pluginStats.effective}</strong>
-                </span>
-                <span className={styles.toolbarMetaDivider} aria-hidden="true">
-                  ·
-                </span>
-                <span
-                  className={styles.toolbarMetaPath}
-                  title={`${t('plugin_management.plugins_dir')}: ${data.pluginsDir || 'plugins'}`}
-                >
-                  <code>{data.pluginsDir || 'plugins'}</code>
-                </span>
-              </div>
-            ) : null}
           </div>
         }
       />
@@ -808,38 +785,49 @@ function InstalledPluginsView({
           </Button>
         </div>
       ) : null}
-      {loading && !data ? (
-        <div className={styles.list} aria-busy="true">
-          {Array.from({ length: 4 }, (_, index) => (
-            <div key={index} className={styles.skeletonRow} />
-          ))}
-        </div>
-      ) : error && !data ? null : visiblePlugins.length === 0 ? (
-        <section className={styles.emptySurface}>
-          <EmptyState
-            variant="canvas"
-            title={t('plugin_management.no_plugins')}
-            description={t('plugin_management.no_plugins_desc')}
-            action={
-              <div className={styles.emptyActions}>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={loadPlugins}
-                  disabled={!connected || !supportsPlugin}
-                >
-                  <IconRefreshCw size={15} />
-                  {t('plugin_management.refresh')}
-                </Button>
-                <Button variant="primary" size="sm" onClick={onOpenStore}>
-                  <IconPlus size={15} />
-                  {t('plugin_management.install_plugin')}
-                </Button>
-              </div>
-            }
-          />
-        </section>
-      ) : (
+      {error && !data ? null : (
+        <WorkspaceListPanel
+          showHeader={Boolean(data)}
+          summary={
+            data
+              ? `${t('plugin_management.installed_count')} ${pluginStats.installed} · ${t('plugin_management.effective_count')} ${pluginStats.effective}`
+              : undefined
+          }
+          hint={data ? data.pluginsDir || 'plugins' : undefined}
+          loading={loading && !data}
+          loadingFallback={
+            <div className={styles.list} aria-busy="true">
+              {Array.from({ length: 4 }, (_, index) => (
+                <div key={index} className={styles.skeletonRow} />
+              ))}
+            </div>
+          }
+          empty={visiblePlugins.length === 0}
+          emptyFallback={
+            <EmptyState
+              variant="canvas"
+              title={t('plugin_management.no_plugins')}
+              description={t('plugin_management.no_plugins_desc')}
+              action={
+                <div className={styles.emptyActions}>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={loadPlugins}
+                    disabled={!connected || !supportsPlugin}
+                  >
+                    <IconRefreshCw size={15} />
+                    {t('plugin_management.refresh')}
+                  </Button>
+                  <Button variant="primary" size="sm" onClick={onOpenStore}>
+                    <IconPlus size={15} />
+                    {t('plugin_management.install_plugin')}
+                  </Button>
+                </div>
+              }
+            />
+          }
+        >
         <div
           className={styles.list}
           role="table"
@@ -1012,6 +1000,7 @@ function InstalledPluginsView({
             );
           })}
         </div>
+        </WorkspaceListPanel>
       )}
 
       <Drawer

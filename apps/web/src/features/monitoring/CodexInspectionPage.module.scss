@@ -664,61 +664,6 @@
   color: var(--text-secondary);
 }
 
-.resultPaginationBar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: 10px;
-  padding: 10px 12px;
-  border: 1px solid var(--border-color);
-  border-radius: var(--app-radius-md);
-  background: color-mix(in srgb, var(--surface-subtle) 62%, var(--bg-primary));
-}
-
-.resultPaginationInfo {
-  min-width: 0;
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-  line-height: 1.4;
-}
-
-.resultPaginationControls {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 8px;
-  min-width: 0;
-}
-
-.resultPageSizeField {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: var(--control-height-sm);
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.resultPageSizeSelect {
-  width: 118px;
-  flex: 0 0 auto;
-}
-
-.resultPageSizeSelect .resultPageSizeSelectTrigger,
-.resultPageSizeSelectTrigger.resultPageSizeSelectTrigger {
-  min-width: 96px;
-  height: var(--control-height-sm);
-  padding: 0 2px 0 10px;
-  border-radius: var(--app-radius-sm);
-  font-size: 12px;
-  font-weight: 700;
-}
 
 .primaryCell {
   display: grid;
@@ -2541,15 +2486,6 @@
     border-top: 1px dashed var(--border-color);
   }
 
-  .resultPaginationBar {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
-  .resultPaginationControls {
-    justify-content: flex-start;
-    width: 100%;
-  }
 }
 
 @container codex-inspection-page (max-width: 640px) {
@@ -2659,16 +2595,6 @@
     width: 100%;
   }
 
-  .resultPaginationControls {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .resultPageSizeField,
-  .resultPageSizeSelect,
-  .resultPageSizeSelectTrigger {
-    width: 100%;
-  }
 
   .settingsField,
   .settingsFieldWide,
