@@ -4220,7 +4220,11 @@ func uniqueAccountHistoryKeys(keys []string) []string {
 }
 
 func latestAccountRequestTargetValid(target AccountHistoryTarget) bool {
-	return accountHistoryAuthFileSnapshot(target) != ""
+	if accountHistoryAuthFileSnapshot(target) != "" {
+		return true
+	}
+	return strings.TrimSpace(target.AuthIndex) != "" &&
+		strings.TrimSpace(target.AuthProviderSnapshot) != ""
 }
 
 func accountHistoryAuthFileSnapshot(target AccountHistoryTarget) string {

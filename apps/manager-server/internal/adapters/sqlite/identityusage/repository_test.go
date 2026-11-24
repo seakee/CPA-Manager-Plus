@@ -540,3 +540,45 @@ func TestWindowsSuppressesPriorLastUsedWhenUnmappedProjectionExistsInGap(t *test
 		t.Fatalf("Window with unmapped event in (priorMappedTS, fromMS) = %+v, want LastUsedAtMS == nil", got.Totals)
 	}
 }
+
+func TestWindowsPopulatesTopModelsEstimatedCostAndRecentRequests(t *testing.T) {
+	db, repo := setupTestDB(t)
+	ctx := context.Background()
+	hash := sha256Hex("priced-secret")
+	insertIdentity(t, db, testKeyID, "active")
+	insertStagedKey(t, db, testKeyID, hash)
+	insertBinding(t, db, testKeyID, hash, 100, nil)
+
+	if _, err := db.Exec(`insert into model_prices (model, prompt_per_1m, completion_per_1m, cache_per_1m, updated_at_ms)
+		values ('claude-sonnet-4-5', 3.0, 15.0, 0.3, 100)`); err != nil {
+		t.Fatalf("insert model price: %v", err)
+	}
+	if _, err := db.Exec(`insert into usage_events
+		(id, event_hash, request_id, timestamp_ms, timestamp, model, api_key_hash, input_tokens, output_tokens, total_tokens, failed, fail_status_code, created_at_ms)
+		values
+		(1, ?, 'r1', 1000, '2026-01-01T00:00:01Z', 'claude-sonnet-4-5', ?, 1000000, 100000, 1100000, 0, 0, 100),
+		(2, ?, 'r2', 2000, '2026-01-01T00:00:02Z', 'claude-sonnet-4-5', ?, 100000, 0, 100000, 1, 429, 100),
+		(3, ?, 'r3', 3000, '2026-01-01T00:00:03Z', 'gpt-5', ?, 5000, 1000, 6000, 0, 0, 100)`,
+		eventHash(hash, 1), hash, eventHash(hash, 2), hash, eventHash(hash, 3), hash); err != nil {
+		t.Fatalf("insert usage events: %v", err)
+	}
+	insertProjection(t, db, 1, "mapped", testKeyID, hash, 1000)
+	insertProjection(t, db, 2, "mapped", testKeyID, hash, 2000)
+	insertProjection(t, db, 3, "mapped", testKeyID, hash, 3000)
+
+	windows, err := repo.Windows(ctx, []ports.KeyRange{{APIKeyID: testKeyID, FromMS: 500}}, 5000)
+	if err != nil {
+		t.Fatalf("Windows: %v", err)
+	}
+	win := windows[testKeyID]
+	if win.ModelCount != 2 || len(win.TopModels) != 2 || win.TopModels[0].Model != "claude-sonnet-4-5" || win.TopModels[0].Calls != 2 {
+		t.Fatalf("TopModels = %+v (ModelCount=%d)", win.TopModels, win.ModelCount)
+	}
+	// claude-sonnet-4-5: 1.1M input * $3/1M ($3.30) + 0.1M output * $15/1M ($1.50) = $4.80
+	if win.EstimatedCostUSD == nil || *win.EstimatedCostUSD < 4.79 || *win.EstimatedCostUSD > 4.81 {
+		t.Fatalf("EstimatedCostUSD = %v, want ~4.80", win.EstimatedCostUSD)
+	}
+	if len(win.RecentRequests) != 3 || win.RecentRequests[0].TimestampMS != 3000 || !win.RecentRequests[1].Failed || win.RecentRequests[1].StatusCode != 429 {
+		t.Fatalf("RecentRequests = %+v", win.RecentRequests)
+	}
+}
