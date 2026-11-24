@@ -13,6 +13,7 @@ import {
   VERSION_HEADER_KEYS,
 } from '@/utils/constants';
 import { computeApiUrl, computeV8ApiUrl } from '@/utils/connection';
+import { isRecord } from '@/utils/helpers';
 import { assertPanelManagementTarget } from '@/panel/managementTarget';
 
 export type ApiClientRequestScope = Pick<ApiClientConfig, 'apiBase' | 'managementKey'>;
@@ -20,6 +21,14 @@ export type ApiClientRequestScope = Pick<ApiClientConfig, 'apiBase' | 'managemen
 export type ScopedApiRequestConfig = AxiosRequestConfig & {
   cpampScopedRequest?: true;
   cpampV8Namespace?: true;
+};
+
+export const toV8ManagementBaseUrl = (apiBase: string): string => {
+  const normalized = String(apiBase ?? '')
+    .trim()
+    .replace(/\/+$/, '');
+  if (!normalized) return '';
+  return normalized.replace(/\/v0\/management$/i, '/v8/management');
 };
 
 export const createScopedApiRequestConfig = (
@@ -51,7 +60,7 @@ class ApiClient {
   private instance: AxiosInstance;
   private apiBase: string = '';
   private managementKey: string = '';
-
+  private connectionEpoch: number = 0;
   constructor() {
     this.instance = axios.create({
       timeout: REQUEST_TIMEOUT_MS,
@@ -67,14 +76,38 @@ class ApiClient {
    * 设置 API 配置
    */
   setConfig(config: ApiClientConfig): void {
-    this.apiBase = computeApiUrl(config.apiBase);
-    this.managementKey = config.managementKey;
+    const nextApiBase = computeApiUrl(config.apiBase);
+    const nextManagementKey = config.managementKey;
+    if (nextApiBase !== this.apiBase || nextManagementKey !== this.managementKey) {
+      this.connectionEpoch += 1;
+    }
+    this.apiBase = nextApiBase;
+    this.managementKey = nextManagementKey;
 
     if (config.timeout) {
       this.instance.defaults.timeout = config.timeout;
     } else {
       this.instance.defaults.timeout = REQUEST_TIMEOUT_MS;
     }
+  }
+
+  getConnectionEpoch(): number {
+    return this.connectionEpoch;
+  }
+
+  getConnectionScope(): ApiClientRequestScope {
+    return {
+      apiBase: this.apiBase,
+      managementKey: this.managementKey,
+    };
+  }
+
+  createCurrentScopedConfig(): ScopedApiRequestConfig {
+    return createScopedApiRequestConfig(this.getConnectionScope());
+  }
+
+  createCurrentScopedV8Config(): ScopedApiRequestConfig {
+    return createScopedV8ApiRequestConfig(this.getConnectionScope());
   }
 
   private readHeader(headers: Record<string, unknown> | undefined, keys: string[]): string | null {
@@ -155,9 +188,9 @@ class ApiClient {
         // Explicitly scoped requests retain the connection captured when a multi-step
         // operation began. Regular requests continue to use the current global config.
         if (!scopedRequest) {
-          config.baseURL = v8Namespace ? computeV8ApiUrl(this.apiBase) : this.apiBase;
+          config.baseURL = v8Namespace ? toV8ManagementBaseUrl(this.apiBase) : this.apiBase;
         } else if (v8Namespace) {
-          config.baseURL = computeV8ApiUrl(String(config.baseURL ?? ''));
+          config.baseURL = toV8ManagementBaseUrl(String(config.baseURL ?? ''));
         }
         if (config.url && !v8Namespace) {
           // Normalize deprecated Gemini endpoint to the current path.
@@ -216,28 +249,43 @@ class ApiClient {
    * 错误处理
    */
   private handleError(error: unknown): ApiError {
-    const isRecord = (value: unknown): value is Record<string, unknown> =>
-      value !== null && typeof value === 'object';
-
     if (axios.isAxiosError(error)) {
       const responseData: unknown = error.response?.data;
       const responseRecord = isRecord(responseData) ? responseData : null;
       const errorValue = responseRecord?.error;
+      const responseMessage =
+        typeof responseRecord?.message === 'string' ? responseRecord.message.trim() : '';
+      const errorText = typeof errorValue === 'string' ? errorValue.trim() : '';
+      const isMachineErrorCode =
+        Boolean(errorText) && /^[a-z0-9_.-]+$/i.test(errorText) && !errorText.includes(' ');
       const message =
         typeof errorValue === 'string'
-          ? errorValue
+          ? responseMessage
+            ? !errorText || isMachineErrorCode || responseMessage === errorText
+              ? responseMessage
+              : `${errorText}: ${responseMessage}`
+            : errorValue
           : isRecord(errorValue) && typeof errorValue.message === 'string'
             ? errorValue.message
             : typeof responseRecord?.message === 'string'
               ? responseRecord.message
               : error.message || 'Request failed';
+      const rawHeaders: unknown = error.response?.headers;
+      const responseHeaders = isRecord(rawHeaders) ? rawHeaders : undefined;
+      const rawEtag = this.readHeader(responseHeaders, ['etag', 'ETag']);
+      const trimmedEtag = rawEtag?.trim() ? rawEtag.trim() : undefined;
+      const normalizedEtag =
+        trimmedEtag && /^w\//i.test(trimmedEtag)
+          ? trimmedEtag.slice(2).trim() || undefined
+          : trimmedEtag;
       const apiError = new Error(message) as ApiError;
       apiError.name = 'ApiError';
       apiError.status = error.response?.status;
       apiError.code = error.code;
       apiError.details = responseData;
       apiError.data = responseData;
-
+      apiError.headers = responseHeaders;
+      apiError.etag = normalizedEtag;
       // 401 未授权 - 触发登出事件
       if (error.response?.status === 401 && this.requestTargetsCurrentConfig(error.config)) {
         window.dispatchEvent(new Event('unauthorized'));
@@ -300,8 +348,58 @@ class ApiClient {
   /**
    * 获取原始响应（用于下载等场景）
    */
-  async getRaw(url: string, config?: AxiosRequestConfig): Promise<AxiosResponse> {
-    return this.instance.get(url, config);
+  async getRaw<T = BlobPart>(url: string, config?: AxiosRequestConfig): Promise<AxiosResponse<T>> {
+    return this.instance.get<T>(url, config);
+  }
+
+  /**
+   * CPA v8 Management GET 请求
+   */
+  async getV8<T = unknown>(url: string, config?: AxiosRequestConfig): Promise<T> {
+    const response = await this.instance.get<T>(url, {
+      ...(config || {}),
+      cpampV8Namespace: true,
+    } as ScopedApiRequestConfig);
+    return response.data;
+  }
+
+  /**
+   * CPA v8 Management 获取原始响应（含 ETag 等响应头）
+   */
+  async getRawV8<T = unknown>(url: string, config?: AxiosRequestConfig): Promise<AxiosResponse<T>> {
+    return this.instance.get<T>(url, {
+      ...(config || {}),
+      cpampV8Namespace: true,
+    } as ScopedApiRequestConfig);
+  }
+
+  /**
+   * CPA v8 Management PUT 请求
+   */
+  async putV8<T = unknown>(
+    url: string,
+    data?: unknown,
+    config?: AxiosRequestConfig
+  ): Promise<T> {
+    const response = await this.instance.put<T>(url, data, {
+      ...(config || {}),
+      cpampV8Namespace: true,
+    } as ScopedApiRequestConfig);
+    return response.data;
+  }
+
+  /**
+   * CPA v8 Management PUT 请求（保留原始响应与 ETag 头）
+   */
+  async putRawV8<T = unknown>(
+    url: string,
+    data?: unknown,
+    config?: AxiosRequestConfig
+  ): Promise<AxiosResponse<T>> {
+    return this.instance.put<T>(url, data, {
+      ...(config || {}),
+      cpampV8Namespace: true,
+    } as ScopedApiRequestConfig);
   }
 
   /**

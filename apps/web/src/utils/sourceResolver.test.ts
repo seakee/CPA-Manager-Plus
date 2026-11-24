@@ -458,4 +458,141 @@ describe('source resolver', () => {
     expect(resolvedOAuth.type).toBe('meta');
     expect(resolvedOAuth.identityKey).toBe('auth:meta-oauth-1');
   });
+
+  it('prioritizes provider name aliases over prefix and baseUrl host while still matching historical t:<prefix> and m:<maskedKey> sources', () => {
+    const claudeKey = 'sk-ant-1234567890abcdef';
+    const sourceInfoMap = buildSourceInfoMap({
+      interactionsApiKeys: [
+        {
+          name: 'Interactions Studio',
+          prefix: 'inter-pfx',
+          apiKey: 'AIza-interactions-9999',
+          baseUrl: 'https://interactions.googleapis.com',
+          authIndex: 'inter-auth-1',
+        },
+      ],
+      claudeApiKeys: [
+        {
+          name: 'Anthropic Team Alias',
+          prefix: 'legacy-claude-prefix',
+          apiKey: claudeKey,
+          baseUrl: 'https://api.anthropic.com',
+          authIndex: 'claude-auth-1',
+        },
+      ],
+      codexApiKeys: [
+        {
+          name: 'Shared Codex Group',
+          apiKey: 'sk-codex-1111111111aaaa',
+          authIndex: 'codex-g-1',
+        },
+        {
+          name: 'Shared Codex Group',
+          apiKey: 'sk-codex-2222222222bbbb',
+          authIndex: 'codex-g-2',
+        },
+      ],
+      openaiCompatibility: [
+        {
+          name: 'OpenRouter Prod',
+          prefix: 'or-pfx',
+          baseUrl: 'https://openrouter.ai/api/v1',
+          apiKeyEntries: [
+            { apiKey: 'sk-or-1111111111aaaa', authIndex: 'or-1' },
+            { apiKey: 'sk-or-2222222222bbbb', authIndex: 'or-2' },
+          ],
+        },
+      ],
+    });
+
+    expect(
+      resolveSourceDisplay('t:legacy-claude-prefix', '', sourceInfoMap, new Map(), 'claude')
+        .displayName
+    ).toBe('Anthropic Team Alias');
+    expect(
+      resolveSourceDisplay('m:sk-a...cdef', '', sourceInfoMap, new Map(), 'claude-apikey')
+        .displayName
+    ).toBe('Anthropic Team Alias');
+    expect(
+      resolveSourceDisplay('', 'inter-auth-1', sourceInfoMap, new Map(), 'gemini-interactions')
+    ).toMatchObject({
+      displayName: 'Interactions Studio',
+      type: 'interactions',
+      identityKey: 'interactions:0',
+    });
+    expect(resolveSourceDisplay('', 'codex-g-1', sourceInfoMap, new Map()).displayName).toBe(
+      'Shared Codex Group #1'
+    );
+    expect(resolveSourceDisplay('', 'codex-g-2', sourceInfoMap, new Map()).displayName).toBe(
+      'Shared Codex Group #2'
+    );
+    expect(resolveSourceDisplay('', 'or-1', sourceInfoMap, new Map()).displayName).toBe(
+      'OpenRouter Prod #1'
+    );
+    expect(resolveSourceDisplay('', 'or-2', sourceInfoMap, new Map()).displayName).toBe(
+      'OpenRouter Prod #2'
+    );
+  });
+
+  it('coalesces shared t:<prefix> to unsuffixed group name on multi-key native v8 groups and disambiguates mixed name/prefix/host collisions', () => {
+    const sourceInfoMap = buildSourceInfoMap({
+      claudeApiKeys: [
+        {
+          name: 'Anthropic Pool',
+          prefix: 'ant-pool',
+          apiKey: 'sk-ant-1111111111aaaa',
+          authIndex: 'ant-pool-1',
+        },
+        {
+          name: 'Anthropic Pool',
+          prefix: 'ant-pool',
+          apiKey: 'sk-ant-2222222222bbbb',
+          authIndex: 'ant-pool-2',
+          excludedModels: ['*'],
+        },
+      ],
+      codexApiKeys: [
+        {
+          name: 'team-a',
+          apiKey: 'sk-codex-name-11111111',
+          authIndex: 'codex-name-1',
+        },
+        {
+          prefix: 'team-a',
+          apiKey: 'sk-codex-pfx-22222222',
+          authIndex: 'codex-pfx-2',
+        },
+      ],
+    });
+
+    expect(resolveSourceDisplay('', 'ant-pool-1', sourceInfoMap, new Map())).toMatchObject({
+      displayName: 'Anthropic Pool #1',
+      type: 'claude',
+      identityKey: 'claude:0',
+    });
+    expect(resolveSourceDisplay('', 'ant-pool-2', sourceInfoMap, new Map())).toMatchObject({
+      displayName: 'Anthropic Pool #2',
+      type: 'claude',
+      identityKey: 'claude:1',
+    });
+    expect(resolveSourceDisplay('t:ant-pool', '', sourceInfoMap, new Map())).toMatchObject({
+      displayName: 'Anthropic Pool',
+      type: 'claude',
+      identityKey: 'shared:t:ant-pool',
+    });
+    expect(
+      resolveSourceDisplay('t:ant-pool', '', sourceInfoMap, new Map(), 'claude-apikey')
+    ).toMatchObject({
+      displayName: 'Anthropic Pool',
+      type: 'claude',
+    });
+    expect(buildSourceProviderStateMap(sourceInfoMap).get('shared:t:ant-pool')).toBe('mixed');
+
+    expect(resolveSourceDisplay('', 'codex-name-1', sourceInfoMap, new Map()).displayName).toBe(
+      'team-a #1'
+    );
+    expect(resolveSourceDisplay('', 'codex-pfx-2', sourceInfoMap, new Map()).displayName).toBe(
+      'team-a #2'
+    );
+  });
 });

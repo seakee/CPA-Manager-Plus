@@ -8,6 +8,7 @@ import type { Config } from '@/types';
 import type { RawConfigSection } from '@/types/config';
 import { CONFIG_SECTION_KEYS, extractConfigSectionValue } from '@/entities/config/sections';
 import { configApi } from '@/services/api/config';
+import { providersApi } from '@/services/api/providers';
 import { CACHE_EXPIRY_MS } from '@/utils/constants';
 
 interface ConfigCache {
@@ -30,6 +31,28 @@ interface ConfigState {
   clearCache: (section?: RawConfigSection) => void;
   isCacheValid: (section?: RawConfigSection) => boolean;
 }
+
+const PROVIDER_CONFIG_SECTION_LIST: readonly RawConfigSection[] = [
+  'gemini-api-key',
+  'interactions-api-key',
+  'codex-api-key',
+  'xai-api-key',
+  'claude-api-key',
+  'vertex-api-key',
+  'meta-api-key',
+  'openai-compatibility',
+];
+
+const PROVIDER_CONFIG_SECTIONS: Partial<Record<RawConfigSection, true>> = {
+  'gemini-api-key': true,
+  'interactions-api-key': true,
+  'codex-api-key': true,
+  'xai-api-key': true,
+  'claude-api-key': true,
+  'vertex-api-key': true,
+  'meta-api-key': true,
+  'openai-compatibility': true,
+};
 
 let configRequestToken = 0;
 let inFlightConfigRequest: { id: number; promise: Promise<Config> } | null = null;
@@ -74,8 +97,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     }
 
     const requestId = (configRequestToken += 1);
+    const v8WriteVersionBefore = providersApi?.getV8EtagMutationVersion?.();
     try {
-      const requestPromise = configApi.getConfig();
+      const requestPromise = configApi.getConfig({ syncLatestV8Etag: false });
       inFlightConfigRequest = { id: requestId, promise: requestPromise };
       const data = await requestPromise;
       const now = Date.now();
@@ -83,6 +107,16 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       // 如果在请求过程中连接已被切换/登出，则忽略旧请求的结果，避免覆盖新会话的状态
       if (requestId !== configRequestToken) {
         return section ? extractConfigSectionValue(data, section) : data;
+      }
+
+      const v8VersionMatches =
+        v8WriteVersionBefore === undefined ||
+        v8WriteVersionBefore === providersApi?.getV8EtagMutationVersion?.();
+      if (v8VersionMatches && (data.v8Supported !== undefined || data.v8Etag !== undefined)) {
+        providersApi?.setLatestV8ConfigEtag?.(
+          data.v8Supported === false ? undefined : data.v8Etag,
+          { passiveRead: true }
+        );
       }
 
       // 更新缓存
@@ -191,6 +225,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         case 'vertex-api-key':
           nextConfig.vertexApiKeys = value as Config['vertexApiKeys'];
           break;
+        case 'meta-api-key':
+          nextConfig.metaApiKeys = value as Config['metaApiKeys'];
+          break;
         case 'openai-compatibility':
           nextConfig.openaiCompatibility = value as Config['openaiCompatibility'];
           break;
@@ -214,8 +251,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
     if (section) {
       newCache.delete(section);
-      // 同时清除完整配置缓存
+      // 同时清除完整配置缓存以及所有提供商 section 缓存，防止兄弟家族保留过期的 v8Source.etag
       newCache.delete('__full__');
+      PROVIDER_CONFIG_SECTION_LIST.forEach((providerSection) => {
+        newCache.delete(providerSection);
+      });
+      if (!PROVIDER_CONFIG_SECTIONS[section]) {
+        providersApi?.setLatestV8ConfigEtag?.(undefined);
+      }
 
       // Section-level invalidation usually follows an optimistic write path. Invalidate any in-flight
       // full fetch so stale responses can't overwrite newer local changes.
@@ -226,6 +269,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       return;
     } else {
       newCache.clear();
+      providersApi?.setLatestV8ConfigEtag?.(undefined);
     }
 
     // 清除全部缓存一般代表“切换连接/登出/全量刷新”，需要让 in-flight 的旧请求失效

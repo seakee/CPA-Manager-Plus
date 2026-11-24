@@ -266,4 +266,195 @@ describe('buildMonitoringSourceDisplay', () => {
     expect(display.primary).toBe('kuaileshifu');
     expect(display.meta).toBe('openai');
   });
+
+  it('treats CPA synthesized *-apikey runtime labels as generic and overrides them with configured provider aliases', () => {
+    expect(isGenericMonitoringProviderLabel('claude-apikey')).toBe(true);
+    expect(isGenericMonitoringProviderLabel('gemini-interactions')).toBe(true);
+    expect(isGenericMonitoringProviderLabel('interactions-apikey')).toBe(true);
+    expect(isGenericMonitoringProviderLabel('vertex-compat')).toBe(true);
+    expect(isGenericMonitoringProviderLabel('meta-apikey')).toBe(true);
+
+    const sourceInfoMap = buildSourceInfoMap({
+      claudeApiKeys: [
+        {
+          name: 'Anthropic Main',
+          apiKey: 'sk-ant-1111111111aaaa',
+          authIndex: 'claude-idx-1',
+        },
+      ],
+    });
+
+    const display = buildMonitoringSourceDisplay(
+      {
+        authIndex: 'claude-idx-1',
+        source: 'm:sk-a...aaaa',
+        accountSnapshot: 'claude-apikey',
+        authLabelSnapshot: 'claude-apikey',
+        authProviderSnapshot: 'claude',
+        channel: 'claude-apikey',
+      },
+      {
+        authMetaMap: new Map(),
+        channelByAuthIndex: new Map(),
+        sourceInfoMap,
+      }
+    );
+
+    expect(display.primary).toBe('Anthropic Main');
+    expect(display.sourceLabel).toBe('Anthropic Main');
+    expect(display.meta).toBe('claude');
+  });
+
+  it('reflects renamed native and OpenAI API-key providers over stale snapshot and channel labels without affecting OAuth accounts', () => {
+    const sourceInfoMap = buildSourceInfoMap({
+      claudeApiKeys: [
+        {
+          name: 'Claude Renamed Alias',
+          prefix: 'old-claude-prefix',
+          apiKey: 'sk-ant-9999999999zzzz',
+          authIndex: 'claude-rename-idx',
+        },
+      ],
+      openaiCompatibility: [
+        {
+          name: 'OpenRouter Renamed',
+          baseUrl: 'https://openrouter.ai/api/v1',
+          apiKeyEntries: [
+            { apiKey: 'sk-or-1111111111aaaa', authIndex: 'or-rename-1' },
+            { apiKey: 'sk-or-2222222222bbbb', authIndex: 'or-rename-2' },
+          ],
+        },
+      ],
+    });
+
+    const renamedNativeDisplay = buildMonitoringSourceDisplay(
+      {
+        authIndex: 'claude-rename-idx',
+        source: 't:old-claude-prefix',
+        accountSnapshot: 'Old Claude Alias',
+        authLabelSnapshot: 'Old Claude Alias',
+        authProviderSnapshot: 'claude',
+        channel: 'Old Claude Alias',
+      },
+      {
+        authMetaMap: new Map(),
+        channelByAuthIndex: new Map(),
+        sourceInfoMap,
+      }
+    );
+    expect(renamedNativeDisplay.primary).toBe('Claude Renamed Alias');
+    expect(renamedNativeDisplay.sourceLabel).toBe('Claude Renamed Alias');
+    expect(renamedNativeDisplay.account).toBe('Claude Renamed Alias');
+
+    const renamedOpenAIDisplay = buildMonitoringSourceDisplay(
+      {
+        authIndex: 'or-rename-1',
+        source: 'm:sk-o...aaaa',
+        accountSnapshot: 'Old OpenRouter Name',
+        authLabelSnapshot: 'Old OpenRouter Name',
+        authProviderSnapshot: 'openai',
+        channel: 'Old OpenRouter Name',
+      },
+      {
+        authMetaMap: new Map(),
+        channelByAuthIndex: new Map([
+          [
+            'or-rename-1',
+            {
+              key: 'openai:0',
+              name: 'OpenRouter Renamed',
+              baseUrl: 'https://openrouter.ai/api/v1',
+              host: 'openrouter.ai',
+              disabled: false,
+              authIndices: ['or-rename-1', 'or-rename-2'],
+              modelNames: [],
+            },
+          ],
+        ]),
+        sourceInfoMap,
+      }
+    );
+    expect(renamedOpenAIDisplay.primary).toBe('OpenRouter Renamed #1');
+    expect(renamedOpenAIDisplay.sourceLabel).toBe('OpenRouter Renamed #1');
+
+    const oauthMeta = new Map<string, MonitoringAuthMeta>([
+      [
+        'oauth-idx-1',
+        {
+          authIndex: 'oauth-idx-1',
+          label: 'OAuth Team Seat',
+          account: 'seat@example.com',
+          provider: 'codex',
+          status: 'active',
+          disabled: false,
+          unavailable: false,
+          runtimeOnly: false,
+          planType: '',
+          updatedAt: '',
+        },
+      ],
+    ]);
+    const oauthDisplay = buildMonitoringSourceDisplay(
+      {
+        authIndex: 'oauth-idx-1',
+        source: 'codex-oauth.json',
+        authLabelSnapshot: 'Stale OAuth Label',
+        authProviderSnapshot: 'codex',
+      },
+      {
+        authMetaMap: oauthMeta,
+        channelByAuthIndex: new Map(),
+        sourceInfoMap,
+      }
+    );
+    expect(oauthDisplay.sourceLabel).toBe('OAuth Team Seat');
+  });
+
+  it('preserves historical non-generic snapshot account and label when an unmatched authIndex falls back to bySource', () => {
+    const sourceInfoMap = buildSourceInfoMap({
+      codexApiKeys: [
+        {
+          name: 'Current Codex Pool',
+          prefix: 'shared-prefix',
+          apiKey: 'sk-codex-live-11111111',
+          authIndex: 'codex-live-idx',
+        },
+      ],
+    });
+
+    const deletedOAuthDisplay = buildMonitoringSourceDisplay(
+      {
+        authIndex: 'deleted-oauth-idx',
+        source: 't:shared-prefix',
+        accountSnapshot: 'alice@example.com',
+        authLabelSnapshot: 'codex',
+        authProviderSnapshot: 'codex',
+        channel: 'codex',
+      },
+      {
+        authMetaMap: new Map(),
+        channelByAuthIndex: new Map(),
+        sourceInfoMap,
+      }
+    );
+    expect(deletedOAuthDisplay.primary).toBe('ali***@example.com');
+    expect(deletedOAuthDisplay.accountMasked).toBe('ali***@example.com');
+
+    const rotatedKeySnapshotDisplay = buildMonitoringSourceDisplay(
+      {
+        authIndex: 'rotated-out-key-idx',
+        source: 't:shared-prefix',
+        accountSnapshot: 'Legacy Dedicated Relay',
+        authLabelSnapshot: 'Legacy Dedicated Relay',
+        authProviderSnapshot: 'codex',
+      },
+      {
+        authMetaMap: new Map(),
+        channelByAuthIndex: new Map(),
+        sourceInfoMap,
+      }
+    );
+    expect(rotatedKeySnapshotDisplay.primary).toBe('Legacy Dedicated Relay');
+    expect(rotatedKeySnapshotDisplay.sourceLabel).toBe('Legacy Dedicated Relay');
+  });
 });

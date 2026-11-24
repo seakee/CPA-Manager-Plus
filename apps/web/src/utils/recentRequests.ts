@@ -219,3 +219,51 @@ export function statusBarDataFromRecentRequests(buckets: RecentRequestBucket[]):
     totalFailure,
   };
 }
+
+export function compressStatusBarData(
+  statusData: StatusBarData,
+  targetBuckets = 10
+): StatusBarData {
+  const details = statusData.blockDetails;
+  if (targetBuckets <= 0 || details.length <= targetBuckets) {
+    return statusData;
+  }
+
+  const blocks: StatusBlockState[] = [];
+  const blockDetails: StatusBarData['blockDetails'] = [];
+
+  for (let idx = 0; idx < targetBuckets; idx += 1) {
+    const start = Math.floor((idx * details.length) / targetBuckets);
+    const end = Math.floor(((idx + 1) * details.length) / targetBuckets);
+    const group = details.slice(start, Math.max(start + 1, end));
+    const success = group.reduce((sum, item) => sum + item.success, 0);
+    const failure = group.reduce((sum, item) => sum + item.failure, 0);
+    const total = success + failure;
+
+    if (total === 0) {
+      blocks.push('idle');
+    } else if (failure === 0) {
+      blocks.push('success');
+    } else if (success === 0) {
+      blocks.push('failure');
+    } else {
+      blocks.push('mixed');
+    }
+
+    blockDetails.push({
+      success,
+      failure,
+      rate: total > 0 ? success / total : -1,
+      startTime: group[0]?.startTime ?? 0,
+      endTime: group[group.length - 1]?.endTime ?? 0,
+    });
+  }
+
+  return {
+    blocks,
+    blockDetails,
+    successRate: statusData.successRate,
+    totalSuccess: statusData.totalSuccess,
+    totalFailure: statusData.totalFailure,
+  };
+}

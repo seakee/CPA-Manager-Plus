@@ -20,6 +20,7 @@ export const CONFIG_SECTION_KEYS: RawConfigSection[] = [
   'xai-api-key',
   'claude-api-key',
   'vertex-api-key',
+  'meta-api-key',
   'openai-compatibility',
   'oauth-excluded-models',
 ];
@@ -67,6 +68,8 @@ export const extractConfigSectionValue = (config: Config | null, section?: RawCo
       return config.claudeApiKeys;
     case 'vertex-api-key':
       return config.vertexApiKeys;
+    case 'meta-api-key':
+      return config.metaApiKeys;
     case 'openai-compatibility':
       return config.openaiCompatibility;
     case 'oauth-excluded-models':

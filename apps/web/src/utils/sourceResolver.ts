@@ -8,6 +8,7 @@ import {
 
 export interface SourceInfoMapInput {
   geminiApiKeys?: GeminiKeyConfig[];
+  interactionsApiKeys?: GeminiKeyConfig[];
   claudeApiKeys?: ProviderKeyConfig[];
   codexApiKeys?: ProviderKeyConfig[];
   xaiApiKeys?: ProviderKeyConfig[];
@@ -48,7 +49,8 @@ const mergeProviderEnabledState = (
 const registerIdentity = (
   map: Map<string, SourceInfoEntry | null>,
   key: string | null | undefined,
-  entry: SourceInfoEntry
+  entry: SourceInfoEntry,
+  groupNameByEntry?: WeakMap<SourceInfoEntry, string>
 ) => {
   if (!key) return;
 
@@ -59,16 +61,28 @@ const registerIdentity = (
   }
 
   if (existing === null || existing.identityKey === entry.identityKey) return;
-  if (existing.displayName === entry.displayName) {
-    map.set(key, {
-      displayName: existing.displayName,
+  const existingGroupName = groupNameByEntry?.get(existing);
+  const entryGroupName = groupNameByEntry?.get(entry);
+  const sharedDisplayName =
+    existing.displayName === entry.displayName
+      ? existing.displayName
+      : existingGroupName && existingGroupName === entryGroupName
+        ? existingGroupName
+        : null;
+  if (sharedDisplayName) {
+    const mergedEntry: SourceInfoEntry = {
+      displayName: sharedDisplayName,
       type: existing.type === entry.type ? existing.type : '',
       identityKey: `shared:${key}`,
       providerEnabledState: mergeProviderEnabledState(
         existing.providerEnabledState,
         entry.providerEnabledState
       ),
-    });
+    };
+    if (existingGroupName && existingGroupName === entryGroupName) {
+      groupNameByEntry?.set(mergedEntry, existingGroupName);
+    }
+    map.set(key, mergedEntry);
     return;
   }
   map.set(key, null);
@@ -94,31 +108,33 @@ const buildProviderDisplayNames = (
   items: Array<{ prefix?: string; name?: string; baseUrl?: string }>,
   fallbackLabel: string
 ) => {
-  const hostCounts = new Map<string, number>();
-
-  items.forEach((item) => {
-    if (item.prefix?.trim()) return;
-    if (item.name?.trim()) return;
+  const resolved = items.map((item, index) => {
+    const name = item.name?.trim();
+    if (name) return { label: name, kind: 'name' as const };
+    const prefix = item.prefix?.trim();
+    if (prefix) return { label: prefix, kind: 'prefix' as const };
     const host = extractHost(item.baseUrl);
-    if (!host) return;
-    hostCounts.set(host, (hostCounts.get(host) || 0) + 1);
+    if (host) return { label: host, kind: 'host' as const };
+    return { label: `${fallbackLabel} #${index + 1}`, kind: 'fallback' as const };
   });
 
-  const hostOrdinals = new Map<string, number>();
-  return items.map((item, index) => {
-    const prefix = item.prefix?.trim();
-    if (prefix) return prefix;
+  const totalCounts = new Map<string, number>();
+  const nonPrefixCounts = new Map<string, number>();
+  resolved.forEach(({ label, kind }) => {
+    totalCounts.set(label, (totalCounts.get(label) || 0) + 1);
+    if (kind !== 'prefix') {
+      nonPrefixCounts.set(label, (nonPrefixCounts.get(label) || 0) + 1);
+    }
+  });
 
-    const name = item.name?.trim();
-    if (name) return name;
-
-    const host = extractHost(item.baseUrl);
-    if (!host) return `${fallbackLabel} #${index + 1}`;
-    if ((hostCounts.get(host) || 0) <= 1) return host;
-
-    const ordinal = (hostOrdinals.get(host) || 0) + 1;
-    hostOrdinals.set(host, ordinal);
-    return `${host} #${ordinal}`;
+  const ordinals = new Map<string, number>();
+  return resolved.map(({ label }) => {
+    const shouldDisambiguate =
+      (totalCounts.get(label) || 0) > 1 && (nonPrefixCounts.get(label) || 0) > 0;
+    if (!shouldDisambiguate) return label;
+    const ordinal = (ordinals.get(label) || 0) + 1;
+    ordinals.set(label, ordinal);
+    return `${label} #${ordinal}`;
   });
 };
 
@@ -145,8 +161,8 @@ const buildOpenAIKeyDisplayNameMap = (providers: OpenAIProviderConfig[]) => {
       entries.push({
         key: `${providerIndex}:${entryIndex}`,
         name:
-          provider.prefix?.trim() ||
           provider.name?.trim() ||
+          provider.prefix?.trim() ||
           extractHost(provider.baseUrl) ||
           `OpenAI #${providerIndex + 1}`,
       });
@@ -162,6 +178,7 @@ export function buildSourceInfoMap(input: SourceInfoMapInput): SourceInfoMap {
   const bySource = new Map<string, SourceInfoEntry | null>();
   const bySourceAndProvider = new Map<string, SourceInfoEntry | null>();
   const byIdentityKey = new Map<string, SourceInfoEntry>();
+  const groupNameByEntry = new WeakMap<SourceInfoEntry, string>();
 
   const registerProvider = (
     entry: SourceInfoEntry,
@@ -169,19 +186,26 @@ export function buildSourceInfoMap(input: SourceInfoMapInput): SourceInfoMap {
     candidates: Iterable<string>
   ) => {
     authIndices.forEach((authIndex) => {
-      registerIdentity(byAuthIndex, normalizeAuthIndex(authIndex), entry);
+      registerIdentity(byAuthIndex, normalizeAuthIndex(authIndex), entry, groupNameByEntry);
     });
 
     Array.from(candidates).forEach((candidate) => {
-      registerIdentity(bySource, candidate, entry);
-      registerIdentity(bySourceAndProvider, buildProviderSourceKey(entry.type, candidate), entry);
+      registerIdentity(bySource, candidate, entry, groupNameByEntry);
+      registerIdentity(
+        bySourceAndProvider,
+        buildProviderSourceKey(entry.type, candidate),
+        entry,
+        groupNameByEntry
+      );
     });
   };
 
   const providers: Array<{
     items: Array<{
+      name?: string;
       apiKey?: string;
       prefix?: string;
+      baseUrl?: string;
       authIndex?: string;
       excludedModels?: string[];
     }>;
@@ -189,6 +213,7 @@ export function buildSourceInfoMap(input: SourceInfoMapInput): SourceInfoMap {
     label: string;
   }> = [
     { items: input.geminiApiKeys || [], type: 'gemini', label: 'Gemini' },
+    { items: input.interactionsApiKeys || [], type: 'interactions', label: 'Interactions' },
     { items: input.claudeApiKeys || [], type: 'claude', label: 'Claude' },
     { items: input.codexApiKeys || [], type: 'codex', label: 'Codex' },
     { items: input.xaiApiKeys || [], type: 'xai', label: 'xAI' },
@@ -199,15 +224,20 @@ export function buildSourceInfoMap(input: SourceInfoMapInput): SourceInfoMap {
   providers.forEach(({ items, type, label }) => {
     const displayNames = buildProviderDisplayNames(items, label);
     items.forEach((item, index) => {
+      const entry: SourceInfoEntry = {
+        displayName: displayNames[index] || `${label} #${index + 1}`,
+        type,
+        identityKey: buildProviderIdentityKey(type, index),
+        providerEnabledState: buildProviderEnabledState(
+          !hasDisableAllModelsRule(item.excludedModels)
+        ),
+      };
+      const trimmedName = item.name?.trim();
+      if (trimmedName) {
+        groupNameByEntry.set(entry, trimmedName);
+      }
       registerProvider(
-        {
-          displayName: displayNames[index] || `${label} #${index + 1}`,
-          type,
-          identityKey: buildProviderIdentityKey(type, index),
-          providerEnabledState: buildProviderEnabledState(
-            !hasDisableAllModelsRule(item.excludedModels)
-          ),
-        },
+        entry,
         [item.authIndex],
         buildCandidateUsageSourceIds({ apiKey: item.apiKey, prefix: item.prefix })
       );
@@ -275,6 +305,26 @@ export const buildSourceProviderStateMap = (sourceInfoMap: SourceInfoMap) => {
   return map;
 };
 
+const PROVIDER_RAW_TYPE_ALIASES: Record<string, string> = {
+  'gemini-apikey': 'gemini',
+  'gemini-api-key': 'gemini',
+  'gemini-interactions': 'interactions',
+  'interactions-apikey': 'interactions',
+  'interactions-api-key': 'interactions',
+  'claude-apikey': 'claude',
+  'claude-api-key': 'claude',
+  'codex-apikey': 'codex',
+  'codex-api-key': 'codex',
+  'xai-apikey': 'xai',
+  'xai-api-key': 'xai',
+  'meta-apikey': 'meta',
+  'meta-api-key': 'meta',
+  'vertex-apikey': 'vertex',
+  'vertex-api-key': 'vertex',
+  'vertex-compat': 'vertex',
+  'openai-compatibility': 'openai',
+};
+
 export function resolveSourceDisplay(
   sourceRaw: string,
   authIndex: unknown,
@@ -308,8 +358,14 @@ export function resolveSourceDisplay(
   // provider identities. Keep same-provider ambiguity unchanged.
   if (source && (matchedBySource === null || sharedAcrossProviders)) {
     const provider = typeof providerRaw === 'string' ? providerRaw.trim().toLowerCase() : '';
+    const normalizedProvider = provider ? PROVIDER_RAW_TYPE_ALIASES[provider] || provider : '';
     const matchedByProvider = provider
-      ? sourceInfoMap.bySourceAndProvider?.get(buildProviderSourceKey(provider, source))
+      ? (sourceInfoMap.bySourceAndProvider?.get(buildProviderSourceKey(provider, source)) ??
+        (normalizedProvider !== provider
+          ? sourceInfoMap.bySourceAndProvider?.get(
+              buildProviderSourceKey(normalizedProvider, source)
+            )
+          : null))
       : null;
     if (matchedByProvider) return matchedByProvider;
   }

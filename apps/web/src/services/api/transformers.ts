@@ -7,6 +7,8 @@ import {
   type ModelAlias,
   type OpenAIProviderConfig,
   type ProviderKeyConfig,
+  type ProviderV8Family,
+  type ProviderV8GroupSource,
 } from '@/types';
 import type { Config } from '@/types/config';
 import { buildHeaderObject } from '@/utils/headers';
@@ -24,8 +26,9 @@ const normalizeBoolean = (value: unknown): boolean | undefined => {
     const trimmed = value.trim().toLowerCase();
     if (['true', '1', 'yes', 'y', 'on'].includes(trimmed)) return true;
     if (['false', '0', 'no', 'n', 'off'].includes(trimmed)) return false;
+    return undefined;
   }
-  return Boolean(value);
+  return undefined;
 };
 
 export const normalizeClaudeFingerprintProfile = (
@@ -74,21 +77,29 @@ const normalizeModelAliases = (models: unknown): ModelAlias[] => {
       }
       if (!isRecord(item)) return null;
 
-      const name = item.name || item.id || item.model;
+      const nameRaw = item.name || item.id || item.model;
+      if (!nameRaw) return null;
+      const name = String(nameRaw).trim();
       if (!name) return null;
-      const alias = item.alias || item.display_name || item.displayName;
-      const priority = item.priority ?? item['priority'];
-      const testModel = item['test-model'] ?? item.testModel;
-      const entry: ModelAlias = { name: String(name) };
-      if (alias && alias !== name) {
-        entry.alias = String(alias);
+      const entry: ModelAlias = { name };
+      const rawAlias = typeof item.alias === 'string' ? item.alias.trim() : '';
+      if (rawAlias && rawAlias !== name) {
+        entry.alias = rawAlias;
       }
+      const displayName = normalizeString(
+        item['display-name'] ?? item.displayName ?? item.display_name
+      );
+      if (displayName) {
+        entry.displayName = displayName;
+      }
+      const priority = item.priority ?? item['priority'];
       if (priority !== undefined) {
         const parsed = Number(priority);
         if (Number.isFinite(parsed)) {
           entry.priority = parsed;
         }
       }
+      const testModel = item['test-model'] ?? item.testModel;
       if (testModel) {
         entry.testModel = String(testModel);
       }
@@ -101,6 +112,36 @@ const normalizeModelAliases = (models: unknown): ModelAlias[] => {
       );
       if (forceMapping !== undefined) {
         entry.forceMapping = forceMapping;
+      }
+      const maxContextLength = normalizeNumber(
+        item['max-context-length'] ?? item.maxContextLength ?? item.max_context_length
+      );
+      if (maxContextLength !== undefined) {
+        entry.maxContextLength = maxContextLength;
+      }
+      const isCompat = normalizeBoolean(item['is-compat'] ?? item.isCompat ?? item.is_compat);
+      if (isCompat !== undefined) {
+        entry.isCompat = isCompat;
+      }
+      const openapi = normalizeBoolean(item.openapi ?? item['openapi']);
+      if (openapi !== undefined) {
+        entry.openapi = openapi;
+      }
+      const supportConfigurationUpdate = normalizeBoolean(
+        item['support-configuration-update'] ??
+          item.supportConfigurationUpdate ??
+          item.support_configuration_update
+      );
+      if (supportConfigurationUpdate !== undefined) {
+        entry.supportConfigurationUpdate = supportConfigurationUpdate;
+      }
+      const useMaxCompletionTokens = normalizeBoolean(
+        item['use-max-completion-tokens'] ??
+          item.useMaxCompletionTokens ??
+          item.use_max_completion_tokens
+      );
+      if (useMaxCompletionTokens !== undefined) {
+        entry.useMaxCompletionTokens = useMaxCompletionTokens;
       }
       const inputModalities = normalizeExcludedModels(
         item['input-modalities'] ?? item.inputModalities ?? item.input_modalities
@@ -187,7 +228,12 @@ const normalizeApiKeyEntry = (entry: unknown, persistedIndex?: number): ApiKeyEn
       (field) =>
         Object.prototype.hasOwnProperty.call(record, field) && typeof record[field] === 'string'
     );
-  // CPA stores keyless entries as {"api-key": ""} (with optional proxy-url/weight);
+  const hasConnectionPool =
+    record !== null &&
+    (isRecord(record['connection-pool']) ||
+      isRecord(record.connectionPool) ||
+      isRecord(record['connection_pool']));
+  // CPA stores keyless entries as {"api-key": ""} (with optional proxy-url/weight/connection-pool);
   // providers disabled at startup have no runtime auth-index yet. Drop only entries
   // that have neither an explicit api-key field (without unsupported-only headers)
   // nor any other CPA-supported per-entry field.
@@ -196,6 +242,7 @@ const normalizeApiKeyEntry = (entry: unknown, persistedIndex?: number): ApiKeyEn
     !authIndex &&
     !String(proxyUrl ?? '').trim() &&
     weight === undefined &&
+    !hasConnectionPool &&
     (!hasExplicitApiKey || Boolean(headers))
   ) {
     return null;
@@ -208,10 +255,17 @@ const normalizeApiKeyEntry = (entry: unknown, persistedIndex?: number): ApiKeyEn
   };
   if (weight !== undefined) result.weight = weight;
   if (authIndex) result.authIndex = authIndex;
-  return markPersistedOpenAIKeyEntry(result, persistedIndex, hasExplicitApiKey);
+  return markPersistedOpenAIKeyEntry(
+    result,
+    persistedIndex,
+    hasExplicitApiKey || hasConnectionPool
+  );
 };
 
-const normalizeProviderKeyConfig = (item: unknown): ProviderKeyConfig | null => {
+const normalizeProviderKeyConfig = (
+  item: unknown,
+  allowEndpointOnly = false
+): ProviderKeyConfig | null => {
   if (item === undefined || item === null) return null;
   const record = isRecord(item) ? item : null;
   const apiKey = record?.['api-key'] ?? record?.apiKey ?? (typeof item === 'string' ? item : '');
@@ -219,9 +273,14 @@ const normalizeProviderKeyConfig = (item: unknown): ProviderKeyConfig | null => 
   const authIndex = normalizeAuthIndex(
     record?.['auth-index'] ?? record?.authIndex ?? record?.['auth_index']
   );
-  if (!trimmed && !authIndex) return null;
+  if (!trimmed && !authIndex && !allowEndpointOnly) return null;
 
   const config: ProviderKeyConfig = { apiKey: trimmed };
+  const name =
+    record && typeof record.name === 'string' && record.name.trim()
+      ? record.name.trim()
+      : undefined;
+  if (name) config.name = name;
   const priority = record?.priority ?? record?.['priority'];
   if (priority !== undefined && priority !== null && String(priority).trim() !== '') {
     const parsed = Number(priority);
@@ -285,8 +344,12 @@ const normalizeProviderKeyConfig = (item: unknown): ProviderKeyConfig | null => 
     if (strictMode !== undefined) {
       cloak.strictMode = strictMode;
     }
+    const rawSensitiveWords =
+      cloakRaw['sensitive-words'] ?? cloakRaw.sensitiveWords ?? cloakRaw.sensitive_words;
     const sensitiveWords = normalizeExcludedModels(
-      cloakRaw['sensitive-words'] ?? cloakRaw.sensitiveWords ?? cloakRaw.sensitive_words
+      Array.isArray(rawSensitiveWords)
+        ? rawSensitiveWords.filter((item): item is string => typeof item === 'string')
+        : rawSensitiveWords
     );
     if (sensitiveWords.length) {
       cloak.sensitiveWords = sensitiveWords;
@@ -297,15 +360,43 @@ const normalizeProviderKeyConfig = (item: unknown): ProviderKeyConfig | null => 
     if (cacheUserId !== undefined) {
       cloak.cacheUserId = cacheUserId;
     }
-    if (Object.keys(cloak).length) {
-      config.cloak = cloak;
+    const rawWordsReplace =
+      cloakRaw['sensitive-words-replace'] ??
+      cloakRaw.sensitiveWordsReplace ??
+      cloakRaw.sensitive_words_replace;
+    if (isRecord(rawWordsReplace)) {
+      const wordsReplace: Record<string, string> = {};
+      Object.entries(rawWordsReplace).forEach(([word, replacement]) => {
+        if (word && typeof replacement === 'string') {
+          wordsReplace[word] = replacement;
+        }
+      });
+      if (Object.keys(wordsReplace).length > 0) {
+        cloak.sensitiveWordsReplace = wordsReplace;
+      }
     }
+    const rawPatternsReplace =
+      cloakRaw['sensitive-patterns-replace'] ??
+      cloakRaw.sensitivePatternsReplace ??
+      cloakRaw.sensitive_patterns_replace;
+    if (Array.isArray(rawPatternsReplace)) {
+      const patternsReplace = rawPatternsReplace
+        .filter(isRecord)
+        .map((rule) => ({ ...rule }));
+      if (patternsReplace.length > 0) {
+        cloak.sensitivePatternsReplace = patternsReplace;
+      }
+    }
+    config.cloak = cloak;
   }
 
   return config;
 };
 
-const normalizeGeminiKeyConfig = (item: unknown): GeminiKeyConfig | null => {
+const normalizeGeminiKeyConfig = (
+  item: unknown,
+  allowEndpointOnly = false
+): GeminiKeyConfig | null => {
   if (item === undefined || item === null) return null;
   const record = isRecord(item) ? item : null;
   let apiKey = record?.['api-key'] ?? record?.apiKey;
@@ -316,9 +407,14 @@ const normalizeGeminiKeyConfig = (item: unknown): GeminiKeyConfig | null => {
   const authIndex = normalizeAuthIndex(
     record?.['auth-index'] ?? record?.authIndex ?? record?.['auth_index']
   );
-  if (!trimmed && !authIndex) return null;
+  if (!trimmed && !authIndex && !allowEndpointOnly) return null;
 
   const config: GeminiKeyConfig = { apiKey: trimmed };
+  const name =
+    record && typeof record.name === 'string' && record.name.trim()
+      ? record.name.trim()
+      : undefined;
+  if (name) config.name = name;
   const priority = record?.priority ?? record?.['priority'];
   if (priority !== undefined && priority !== null && String(priority).trim() !== '') {
     const parsed = Number(priority);
@@ -357,13 +453,16 @@ const normalizeOpenAIProvider = (provider: unknown): OpenAIProviderConfig | null
   if (!name || !baseUrl) return null;
 
   let apiKeyEntries: ApiKeyEntry[] = [];
-  if (Array.isArray(provider['api-key-entries'])) {
-    apiKeyEntries = provider['api-key-entries']
+  const rawKeyEntries = Array.isArray(provider['api-key-entries'])
+    ? provider['api-key-entries']
+    : Array.isArray(provider.keys)
+      ? provider.keys
+      : Array.isArray(provider['api-keys'])
+        ? provider['api-keys']
+        : null;
+  if (rawKeyEntries) {
+    apiKeyEntries = rawKeyEntries
       .map((entry, index) => normalizeApiKeyEntry(entry, index))
-      .filter(Boolean) as ApiKeyEntry[];
-  } else if (Array.isArray(provider['api-keys'])) {
-    apiKeyEntries = provider['api-keys']
-      .map((key, index) => normalizeApiKeyEntry(key, index))
       .filter(Boolean) as ApiKeyEntry[];
   }
 
@@ -382,6 +481,14 @@ const normalizeOpenAIProvider = (provider: unknown): OpenAIProviderConfig | null
   if (disabled !== undefined) result.disabled = disabled;
   const disableCooling = readCoolingOverride(provider);
   if (disableCooling !== undefined) result.disableCooling = disableCooling;
+  const supportPromptCacheKey = normalizeBoolean(
+    provider['support-prompt-cache-key'] ??
+      provider.supportPromptCacheKey ??
+      provider['support_prompt_cache_key']
+  );
+  if (supportPromptCacheKey !== undefined) {
+    result.supportPromptCacheKey = supportPromptCacheKey;
+  }
   const prefix = normalizePrefix(provider.prefix ?? provider['prefix']);
   if (prefix) result.prefix = prefix;
   if (headers) result.headers = headers;
@@ -394,6 +501,154 @@ const normalizeOpenAIProvider = (provider: unknown): OpenAIProviderConfig | null
   if (authIndex) result.authIndex = authIndex;
   return result;
 };
+
+const ENDPOINT_ONLY_V8_FAMILIES: Partial<Record<ProviderV8Family, true>> = {
+  gemini: true,
+  interactions: true,
+  vertex: true,
+  codex: true,
+  claude: true,
+  xai: true,
+  meta: true,
+};
+
+const extractRawV8FamilyGroups = (
+  rawTreeOrGroups: unknown,
+  family: ProviderV8Family
+): Record<string, unknown>[] => {
+  if (Array.isArray(rawTreeOrGroups)) {
+    return rawTreeOrGroups.filter(isRecord);
+  }
+  if (!isRecord(rawTreeOrGroups)) return [];
+  const direct = rawTreeOrGroups[family];
+  if (Array.isArray(direct)) {
+    return direct.filter(isRecord);
+  }
+  const nestedApiKeys = rawTreeOrGroups['api-keys'];
+  if (isRecord(nestedApiKeys) && Array.isArray(nestedApiKeys[family])) {
+    return nestedApiKeys[family].filter(isRecord);
+  }
+  return [];
+};
+
+const normalizeV8Etag = (etag: unknown): string | undefined => {
+  if (typeof etag !== 'string') return undefined;
+  const trimmed = etag.trim();
+  if (!trimmed) return undefined;
+  if (/^w\//i.test(trimmed)) {
+    const stripped = trimmed.slice(2).trim();
+    return stripped || undefined;
+  }
+  return trimmed;
+};
+
+export function normalizeV8ProviderGroups(
+  rawTreeOrGroups: unknown,
+  family: 'openai-compatibility',
+  etag?: string
+): OpenAIProviderConfig[];
+export function normalizeV8ProviderGroups(
+  rawTreeOrGroups: unknown,
+  family: 'gemini' | 'interactions',
+  etag?: string
+): GeminiKeyConfig[];
+export function normalizeV8ProviderGroups(
+  rawTreeOrGroups: unknown,
+  family: 'vertex' | 'codex' | 'claude' | 'xai' | 'meta',
+  etag?: string
+): ProviderKeyConfig[];
+export function normalizeV8ProviderGroups(
+  rawTreeOrGroups: unknown,
+  family: ProviderV8Family,
+  etag?: string
+): Array<GeminiKeyConfig | ProviderKeyConfig | OpenAIProviderConfig>;
+export function normalizeV8ProviderGroups(
+  rawTreeOrGroups: unknown,
+  family: ProviderV8Family,
+  etag?: string
+): Array<GeminiKeyConfig | ProviderKeyConfig | OpenAIProviderConfig> {
+  const groups = extractRawV8FamilyGroups(rawTreeOrGroups, family);
+  const normalizedEtag = normalizeV8Etag(etag);
+
+  if (family === 'openai-compatibility') {
+    return groups.flatMap((group, groupIndex) => {
+      const normalized = normalizeOpenAIProvider(group);
+      if (!normalized) return [];
+      const v8Source: ProviderV8GroupSource = {
+        family: 'openai-compatibility',
+        groupIndex,
+        group,
+        groups,
+        ...(normalizedEtag ? { etag: normalizedEtag } : {}),
+      };
+      return [{ ...normalized, v8Source }];
+    });
+  }
+
+  return groups.flatMap((group, groupIndex) => {
+    if (!Array.isArray(group.keys)) return [];
+    const groupName =
+      typeof group.name === 'string' && group.name.trim() ? group.name.trim() : undefined;
+    const groupBaseUrl = group['base-url'] ?? group.baseUrl ?? group['base_url'];
+    const allowEndpointOnly =
+      Boolean(ENDPOINT_ONLY_V8_FAMILIES[family]) &&
+      typeof groupBaseUrl === 'string' &&
+      Boolean(groupBaseUrl.trim());
+
+    return group.keys.flatMap((key, keyIndex) => {
+      if (!isRecord(key)) return [];
+      const effective: Record<string, unknown> = { ...group };
+      delete effective.keys;
+      delete effective['auth-index'];
+      delete effective.authIndex;
+      delete effective['auth_index'];
+
+      Object.entries(key).forEach(([field, value]) => {
+        if (value !== null && value !== undefined) {
+          effective[field] = value;
+        } else if (
+          value === null &&
+          (field === 'disable-cooling' ||
+            field === 'disableCooling' ||
+            field === 'disable_cooling') &&
+          group['disable-cooling'] === undefined &&
+          group.disableCooling === undefined &&
+          group['disable_cooling'] === undefined
+        ) {
+          effective[field] = null;
+        }
+      });
+
+      if (groupName) {
+        effective.name = groupName;
+      } else {
+        delete effective.name;
+      }
+
+      const normalized =
+        family === 'gemini' || family === 'interactions'
+          ? normalizeGeminiKeyConfig(effective, allowEndpointOnly)
+          : normalizeProviderKeyConfig(effective, allowEndpointOnly);
+      if (!normalized) return [];
+
+      const v8Source: ProviderV8GroupSource = {
+        family,
+        groupIndex,
+        keyIndex,
+        group,
+        groups,
+        ...(normalizedEtag ? { etag: normalizedEtag } : {}),
+      };
+      return [
+        {
+          ...normalized,
+          ...(groupName ? { name: groupName } : {}),
+          v8Source,
+        },
+      ];
+    });
+  });
+}
 
 const normalizeOauthExcluded = (payload: unknown): Record<string, string[]> | undefined => {
   if (!isRecord(payload)) return undefined;
@@ -546,13 +801,35 @@ export const normalizeConfigResponse = (raw: unknown): Config => {
   if (strategyRaw !== undefined && strategyRaw !== null) {
     config.routingStrategy = String(strategyRaw);
   }
-  const apiKeysRaw = raw['api-keys'] ?? raw.apiKeys;
-  if (Array.isArray(apiKeysRaw)) {
-    config.apiKeys = apiKeysRaw.map((key) => String(key)).filter((key) => key.trim() !== '');
+  const cooldownRaw = isRecord(routing) && isRecord(routing.cooldown) ? routing.cooldown : null;
+  const globalDisableCooling = normalizeBoolean(
+    cooldownRaw
+      ? (cooldownRaw['disable-cooling'] ??
+          cooldownRaw.disableCooling ??
+          cooldownRaw['disable_cooling'])
+      : (raw['disable-cooling'] ?? raw.disableCooling ?? raw['disable_cooling'])
+  );
+  if (globalDisableCooling !== undefined) {
+    config.disableCooling = globalDisableCooling;
   }
+  const apiKeysRaw = raw['api-keys'] ?? raw.apiKeys;
+  const accessRaw = isRecord(raw.access) ? raw.access : null;
+  const clientApiKeysRaw = Array.isArray(apiKeysRaw)
+    ? apiKeysRaw
+    : accessRaw && Array.isArray(accessRaw['api-keys'])
+      ? accessRaw['api-keys']
+      : null;
+  if (clientApiKeysRaw) {
+    config.apiKeys = clientApiKeysRaw
+      .map((key) => String(key))
+      .filter((key) => key.trim() !== '');
+  }
+  const v8ApiKeysMap = isRecord(apiKeysRaw) ? apiKeysRaw : null;
 
   const geminiList = raw['gemini-api-key'] ?? raw.geminiApiKey ?? raw.geminiApiKeys;
-  if (Array.isArray(geminiList)) {
+  if (v8ApiKeysMap && Array.isArray(v8ApiKeysMap.gemini)) {
+    config.geminiApiKeys = normalizeV8ProviderGroups(v8ApiKeysMap, 'gemini');
+  } else if (Array.isArray(geminiList)) {
     config.geminiApiKeys = geminiList
       .map((item) => normalizeGeminiKeyConfig(item))
       .filter(Boolean) as GeminiKeyConfig[];
@@ -560,48 +837,77 @@ export const normalizeConfigResponse = (raw: unknown): Config => {
 
   const interactionsList =
     raw['interactions-api-key'] ?? raw.interactionsApiKey ?? raw.interactionsApiKeys;
-  if (Array.isArray(interactionsList)) {
+  if (v8ApiKeysMap && Array.isArray(v8ApiKeysMap.interactions)) {
+    config.interactionsApiKeys = normalizeV8ProviderGroups(v8ApiKeysMap, 'interactions');
+  } else if (Array.isArray(interactionsList)) {
     config.interactionsApiKeys = interactionsList
       .map((item) => normalizeGeminiKeyConfig(item))
       .filter(Boolean) as GeminiKeyConfig[];
   }
 
   const codexList = raw['codex-api-key'] ?? raw.codexApiKey ?? raw.codexApiKeys;
-  if (Array.isArray(codexList)) {
+  if (v8ApiKeysMap && Array.isArray(v8ApiKeysMap.codex)) {
+    config.codexApiKeys = normalizeV8ProviderGroups(v8ApiKeysMap, 'codex');
+  } else if (Array.isArray(codexList)) {
     config.codexApiKeys = codexList
       .map((item) => normalizeProviderKeyConfig(item))
       .filter(Boolean) as ProviderKeyConfig[];
   }
 
   const xaiList = raw['xai-api-key'] ?? raw.xaiApiKey ?? raw.xaiApiKeys;
-  if (Array.isArray(xaiList)) {
+  if (v8ApiKeysMap && Array.isArray(v8ApiKeysMap.xai)) {
+    config.xaiApiKeys = normalizeV8ProviderGroups(v8ApiKeysMap, 'xai');
+  } else if (Array.isArray(xaiList)) {
     config.xaiApiKeys = xaiList
       .map((item) => normalizeProviderKeyConfig(item))
       .filter(Boolean) as ProviderKeyConfig[];
   }
 
   const claudeList = raw['claude-api-key'] ?? raw.claudeApiKey ?? raw.claudeApiKeys;
-  if (Array.isArray(claudeList)) {
+  if (v8ApiKeysMap && Array.isArray(v8ApiKeysMap.claude)) {
+    config.claudeApiKeys = normalizeV8ProviderGroups(v8ApiKeysMap, 'claude');
+  } else if (Array.isArray(claudeList)) {
     config.claudeApiKeys = claudeList
       .map((item) => normalizeProviderKeyConfig(item))
       .filter(Boolean) as ProviderKeyConfig[];
   }
 
   const vertexList = raw['vertex-api-key'] ?? raw.vertexApiKey ?? raw.vertexApiKeys;
-  if (Array.isArray(vertexList)) {
+  if (v8ApiKeysMap && Array.isArray(v8ApiKeysMap.vertex)) {
+    config.vertexApiKeys = normalizeV8ProviderGroups(v8ApiKeysMap, 'vertex');
+  } else if (Array.isArray(vertexList)) {
     config.vertexApiKeys = vertexList
       .map((item) => normalizeProviderKeyConfig(item))
       .filter(Boolean) as ProviderKeyConfig[];
   }
 
+  const metaList = raw['meta-api-key'] ?? raw.metaApiKey ?? raw.metaApiKeys;
+  if (v8ApiKeysMap && Array.isArray(v8ApiKeysMap.meta)) {
+    config.metaApiKeys = normalizeV8ProviderGroups(v8ApiKeysMap, 'meta');
+  } else if (Array.isArray(metaList)) {
+    config.metaApiKeys = metaList
+      .map((item) => {
+        const hasBaseUrl =
+          isRecord(item) &&
+          typeof (item['base-url'] ?? item.baseUrl) === 'string' &&
+          Boolean(String(item['base-url'] ?? item.baseUrl).trim());
+        return normalizeProviderKeyConfig(item, hasBaseUrl);
+      })
+      .filter(Boolean) as ProviderKeyConfig[];
+  }
+
   const openaiList =
     raw['openai-compatibility'] ?? raw.openaiCompatibility ?? raw.openAICompatibility;
-  if (Array.isArray(openaiList)) {
+  if (v8ApiKeysMap && Array.isArray(v8ApiKeysMap['openai-compatibility'])) {
+    config.openaiCompatibility = normalizeV8ProviderGroups(
+      v8ApiKeysMap,
+      'openai-compatibility'
+    );
+  } else if (Array.isArray(openaiList)) {
     config.openaiCompatibility = openaiList
       .map((item) => normalizeOpenAIProvider(item))
       .filter(Boolean) as OpenAIProviderConfig[];
   }
-
   const oauthExcluded = normalizeOauthExcluded(
     raw['oauth-excluded-models'] ?? raw.oauthExcludedModels
   );

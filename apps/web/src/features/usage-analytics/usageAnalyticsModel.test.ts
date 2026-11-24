@@ -2014,4 +2014,131 @@ describe('usage anomaly drilldown', () => {
       `/monitoring?from_ms=${NOW_MS}&to_ms=${NOW_MS + HOUR_MS}&model=gpt-4o&api_key_hash=abcdef1234&provider=openai&auth_file=codex-auth.json&project_id=project-1&request_type=codex&status=failed&search=req-42&min_latency_ms=10000&cache_status=hit`
     );
   });
+
+  it('displays updated CPA v8 provider aliases for Interactions, native, and OpenAI credentials over stale snapshots', () => {
+    const credentialDisplayContext = {
+      authMetaMap: new Map(),
+      authFileMap: new Map(),
+      sourceInfoMap: buildSourceInfoMap({
+        interactionsApiKeys: [
+          {
+            name: 'Interactions Alias',
+            apiKey: 'AIza-inter-1234567890',
+            authIndex: 'inter-idx-1',
+          },
+        ],
+        claudeApiKeys: [
+          {
+            name: 'Anthropic Renamed',
+            prefix: 'old-claude',
+            apiKey: 'sk-ant-1234567890abcdef',
+            authIndex: 'claude-idx-1',
+          },
+        ],
+        openaiCompatibility: [
+          {
+            name: 'OpenRouter Renamed',
+            baseUrl: 'https://openrouter.ai/api/v1',
+            apiKeyEntries: [{ apiKey: 'sk-or-1111111111aaaa', authIndex: 'or-idx-1' }],
+          },
+        ],
+      }),
+      channelByAuthIndex: new Map(),
+    };
+
+    const rows = buildCredentialRows(
+      [
+        {
+          id: 'cred-interactions',
+          source: 'm:AIza...7890',
+          source_hash: 'hash-inter',
+          auth_index: 'inter-idx-1',
+          auth_file_snapshot: '',
+          account_snapshot: 'interactions-apikey',
+          auth_label_snapshot: 'interactions-apikey',
+          auth_provider_snapshot: 'interactions',
+          calls: 5,
+          success_calls: 5,
+          failure_calls: 0,
+          success_rate: 1,
+          input_tokens: 200,
+          output_tokens: 50,
+          cached_tokens: 0,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 0,
+          total_tokens: 250,
+          cost: 0.25,
+          average_latency_ms: 420,
+          last_seen_ms: NOW_MS,
+        },
+        {
+          id: 'cred-claude',
+          source: 't:old-claude',
+          source_hash: 'hash-claude',
+          auth_index: 'claude-idx-1',
+          auth_file_snapshot: '',
+          account_snapshot: 'Old Claude Name',
+          auth_label_snapshot: 'Old Claude Name',
+          auth_provider_snapshot: 'claude',
+          calls: 2,
+          success_calls: 2,
+          failure_calls: 0,
+          success_rate: 1,
+          input_tokens: 80,
+          output_tokens: 20,
+          cached_tokens: 0,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 0,
+          total_tokens: 100,
+          cost: 0.1,
+          average_latency_ms: 300,
+          last_seen_ms: NOW_MS,
+        },
+        {
+          id: 'cred-openai',
+          source: 'm:sk-o...aaaa',
+          source_hash: 'hash-openai',
+          auth_index: 'or-idx-1',
+          auth_file_snapshot: '',
+          account_snapshot: 'Old OpenRouter',
+          auth_label_snapshot: 'Old OpenRouter',
+          auth_provider_snapshot: 'openai',
+          calls: 1,
+          success_calls: 1,
+          failure_calls: 0,
+          success_rate: 1,
+          input_tokens: 40,
+          output_tokens: 10,
+          cached_tokens: 0,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 0,
+          total_tokens: 50,
+          cost: 0.05,
+          average_latency_ms: 250,
+          last_seen_ms: NOW_MS,
+        },
+      ],
+      undefined,
+      credentialDisplayContext
+    );
+
+    expect(rows[0]).toMatchObject({
+      id: 'cred-interactions',
+      label: 'Interactions Alias',
+      account: 'Interactions Alias',
+      provider: 'interactions',
+    });
+    expect(rows[1]).toMatchObject({
+      id: 'cred-claude',
+      label: 'Anthropic Renamed',
+      account: 'Anthropic Renamed',
+      provider: 'claude',
+    });
+    expect(rows[2]).toMatchObject({
+      id: 'cred-openai',
+      label: 'OpenRouter Renamed',
+      account: 'OpenRouter Renamed',
+      provider: 'openai',
+    });
+  });
 });
