@@ -559,12 +559,13 @@ func TestUpgradeManagedAndExternalNamedCreateAdoptedAliasAndRegenerate(t *testin
 		}
 		cancelCtx, cancelReq := context.WithCancel(ctx)
 		defer cancelReq()
-		cancelTimer := time.AfterFunc(25*time.Millisecond, cancelReq)
-		defer cancelTimer.Stop()
+		handler.credentialGate.setOnWait(cancelReq)
+		defer handler.credentialGate.setOnWait(nil)
 		cancelHttpReq := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"api-keys/"+string(created.Key.ID)+"/secret", bytes.NewBufferString(`{}`)).WithContext(cancelCtx)
 		cancelHttpReq.Header.Set("Content-Type", "application/json")
 		cancelRec := httptest.NewRecorder()
 		handler.serveHTTP(cancelRec, cancelHttpReq, "api-keys/"+string(created.Key.ID)+"/secret")
+		handler.credentialGate.setOnWait(nil)
 		handler.credentialGate.release()
 		if cancelRec.Code != 499 || !strings.Contains(cancelRec.Body.String(), "external_credential_wait_cancelled") {
 			t.Fatalf("cancelled unsettled secret read = %d %s, want 499 external_credential_wait_cancelled", cancelRec.Code, cancelRec.Body.String())
