@@ -1380,6 +1380,21 @@ func TestCompletedManagedUpgradeMountsConsoleResourcesAndIsolatesBridge(t *testi
 			pluginsEnabled = body["enabled"]
 			docMu.Unlock()
 			_, _ = w.Write([]byte(`{"ok":true}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v8/management/config/api-keys":
+			w.Header().Set("ETag", `"upg-etag-1"`)
+			_, _ = w.Write([]byte(`{"claude":[{"name":"claude-upg"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v8/management/config/api-keys/claude":
+			w.Header().Set("ETag", `"upg-etag-1"`)
+			_, _ = w.Write([]byte(`[{"name":"claude-upg"}]`))
+		case r.Method == http.MethodPut && r.URL.Path == "/v8/management/config/api-keys/claude":
+			if r.Header.Get("If-Match") != `"upg-etag-1"` {
+				w.Header().Set("ETag", `"upg-etag-1"`)
+				w.WriteHeader(http.StatusPreconditionFailed)
+				_, _ = w.Write([]byte(`{"error":"precondition_failed"}`))
+				return
+			}
+			w.Header().Set("ETag", `"upg-etag-2"`)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -1570,20 +1585,50 @@ func TestCompletedManagedUpgradeMountsConsoleResourcesAndIsolatesBridge(t *testi
 	if bridgeStatusRes.StatusCode != http.StatusOK {
 		t.Fatalf("GET cpamp/status status = %d, want 200", bridgeStatusRes.StatusCode)
 	}
-	for _, closedPath := range []string{
-		"/upg-console/api/v2/cpamp/setup",
-		"/upg-console/api/v2/cpamp/setup/status",
-		"/upg-console/api/v2/cpamp/v8/management/config/api-keys",
-		"/upg-console/api/v2/cpamp/v0/management/collector/restart",
-		"/upg-console/api/v2/cpamp/v0/management/%2e%2e/status",
-		"/upg-console/api/v2/cpamp/internal/routing/fresh-authority",
-		"/upg-console/api/v2/cpamp/unlisted-internal-route",
-		"/v1/models",
+	v8KeysRes := authReq(http.MethodGet, "/upg-console/api/v2/cpamp/v8/management/config/api-keys", "")
+	v8KeysBody, _ := io.ReadAll(v8KeysRes.Body)
+	_ = v8KeysRes.Body.Close()
+	if v8KeysRes.StatusCode != http.StatusOK || v8KeysRes.Header.Get("ETag") != `"upg-etag-1"` || !strings.Contains(string(v8KeysBody), `"claude-upg"`) {
+		t.Fatalf("GET cpamp/v8/management/config/api-keys status=%d etag=%q body=%s", v8KeysRes.StatusCode, v8KeysRes.Header.Get("ETag"), string(v8KeysBody))
+	}
+	v8PutReq, err := http.NewRequest(http.MethodPut, ts.URL+"/upg-console/api/v2/cpamp/v8/management/config/api-keys/claude", strings.NewReader(`[{"name":"claude-upg-2"}]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v8PutReq.Header.Set("Authorization", "Bearer "+adminKey)
+	v8PutReq.Header.Set("Content-Type", "application/json")
+	v8PutReq.Header.Set("If-Match", `"upg-etag-1"`)
+	v8PutRes, err := http.DefaultClient.Do(v8PutReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = v8PutRes.Body.Close()
+	if v8PutRes.StatusCode != http.StatusOK || v8PutRes.Header.Get("ETag") != `"upg-etag-2"` {
+		t.Fatalf("PUT cpamp/v8/management/config/api-keys/claude status=%d etag=%q", v8PutRes.StatusCode, v8PutRes.Header.Get("ETag"))
+	}
+
+	for _, closed := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/upg-console/api/v2/cpamp/setup"},
+		{http.MethodGet, "/upg-console/api/v2/cpamp/setup/status"},
+		{http.MethodGet, "/upg-console/api/v2/cpamp/v8/management/config"},
+		{http.MethodGet, "/upg-console/api/v2/cpamp/v8/management/config/access/api-keys"},
+		{http.MethodGet, "/upg-console/api/v2/cpamp/v8/management/config/api-keys/unknown"},
+		{http.MethodPut, "/upg-console/api/v2/cpamp/v8/management/config/api-keys"},
+		{http.MethodPatch, "/upg-console/api/v2/cpamp/v8/management/config/api-keys/claude"},
+		{http.MethodDelete, "/upg-console/api/v2/cpamp/v8/management/config/api-keys/claude"},
+		{http.MethodGet, "/upg-console/api/v2/cpamp/v0/management/collector/restart"},
+		{http.MethodGet, "/upg-console/api/v2/cpamp/v0/management/%2e%2e/status"},
+		{http.MethodGet, "/upg-console/api/v2/cpamp/internal/routing/fresh-authority"},
+		{http.MethodGet, "/upg-console/api/v2/cpamp/unlisted-internal-route"},
+		{http.MethodGet, "/v1/models"},
 	} {
-		res := authReq(http.MethodGet, closedPath, "")
+		res := authReq(closed.method, closed.path, "")
 		_ = res.Body.Close()
 		if res.StatusCode != http.StatusNotFound {
-			t.Fatalf("GET %s status = %d, want 404", closedPath, res.StatusCode)
+			t.Fatalf("%s %s status = %d, want 404", closed.method, closed.path, res.StatusCode)
 		}
 	}
 }
@@ -1619,6 +1664,18 @@ func TestCompletedExternalUpgradeMountsUsageRebindAndFencesBridge(t *testing.T) 
 		case r.Method == http.MethodPut && r.URL.Path == "/v0/management/usage-statistics-enabled":
 			statsEnabled.Store(true)
 			_, _ = w.Write([]byte(`{"ok":true}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v8/management/config/api-keys/claude":
+			w.Header().Set("ETag", `"ext-upg-etag-1"`)
+			_, _ = w.Write([]byte(`[{"name":"claude-ext-upg"}]`))
+		case r.Method == http.MethodPut && r.URL.Path == "/v8/management/config/api-keys/claude":
+			if r.Header.Get("If-Match") != `"ext-upg-etag-1"` {
+				w.Header().Set("ETag", `"ext-upg-etag-1"`)
+				w.WriteHeader(http.StatusPreconditionFailed)
+				_, _ = w.Write([]byte(`{"error":"precondition_failed"}`))
+				return
+			}
+			w.Header().Set("ETag", `"ext-upg-etag-2"`)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -1759,6 +1816,27 @@ func TestCompletedExternalUpgradeMountsUsageRebindAndFencesBridge(t *testing.T) 
 	_ = restoredInfoRes.Body.Close()
 	if !restoredInfo.Ready || restoredInfo.ExternalBaseURL != extCPA.URL {
 		t.Fatalf("rebound External access-info was not restored: %+v", restoredInfo)
+	}
+
+	extV8Get := authReq(http.MethodGet, "/ext-console/api/v2/cpamp/v8/management/config/api-keys/claude", "")
+	_ = extV8Get.Body.Close()
+	if extV8Get.StatusCode != http.StatusOK || extV8Get.Header.Get("ETag") != `"ext-upg-etag-1"` {
+		t.Fatalf("GET ext cpamp/v8/management/config/api-keys/claude status=%d etag=%q", extV8Get.StatusCode, extV8Get.Header.Get("ETag"))
+	}
+	extV8PutReq, err := http.NewRequest(http.MethodPut, ts.URL+"/ext-console/api/v2/cpamp/v8/management/config/api-keys/claude", strings.NewReader(`[{"name":"claude-ext-upg-2"}]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	extV8PutReq.Header.Set("Authorization", "Bearer "+adminKey)
+	extV8PutReq.Header.Set("Content-Type", "application/json")
+	extV8PutReq.Header.Set("If-Match", `"ext-upg-etag-1"`)
+	extV8PutRes, err := http.DefaultClient.Do(extV8PutReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = extV8PutRes.Body.Close()
+	if extV8PutRes.StatusCode != http.StatusOK || extV8PutRes.Header.Get("ETag") != `"ext-upg-etag-2"` {
+		t.Fatalf("PUT ext cpamp/v8/management/config/api-keys/claude status=%d etag=%q", extV8PutRes.StatusCode, extV8PutRes.Header.Get("ETag"))
 	}
 }
 

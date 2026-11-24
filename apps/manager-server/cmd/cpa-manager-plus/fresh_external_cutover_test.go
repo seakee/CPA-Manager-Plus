@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -223,22 +225,83 @@ func TestExternalLegacyBridgeBoundsConcurrentRefusals(t *testing.T) {
 }
 
 // TestExternalLegacyBridgeGatesTheV8KeyGroupView proves the External cutover
-// covers the one CPA v8 subtree Manager forwards — and only the shape that
-// actually proxies. The gate must serialize a canonical GET while the credential
-// works and answer the typed blocker locally once the user's CPA refused it, but
-// it must not turn a write or a dirty path into a credential failure: those keep
-// the router's own 405/404 answers.
+// covers CPA v8 provider API-key group reads and whitelisted family PUT writes —
+// both through the legacy router and the Full Web cpamp/ bridge — while keeping
+// root PUT, PATCH/DELETE, unknown families, and dirty paths fail-closed locally.
 func TestExternalLegacyBridgeGatesTheV8KeyGroupView(t *testing.T) {
 	t.Run("admitted", func(t *testing.T) {
-		app, fake := newExternalProbeApp(t)
-
-		before := fake.requests.Load()
-		admitted := gateRequest(t, app, http.MethodGet, "/v8/management/config/api-keys", gateAdmin)
-		if admitted.Code != http.StatusOK {
-			t.Fatalf("admitted read = %d %s", admitted.Code, admitted.Body.String())
+		currentETag := `"ext-etag-v1"`
+		var upstreamRequests int32
+		var sawIfMatch string
+		var sawBody string
+		var mu sync.Mutex
+		extServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			upstreamRequests++
+			mu.Unlock()
+			if r.Header.Get("Authorization") != "Bearer "+externalAuthorityManagement {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("X-CPA-Version", "v8.0.55")
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method == http.MethodPut {
+				raw, _ := io.ReadAll(r.Body)
+				mu.Lock()
+				sawIfMatch = r.Header.Get("If-Match")
+				sawBody = string(raw)
+				currentETag = `"ext-etag-v2"`
+				etag := currentETag
+				mu.Unlock()
+				w.Header().Set("ETag", etag)
+				_, _ = w.Write([]byte(`{"status":"ok"}`))
+				return
+			}
+			mu.Lock()
+			etag := currentETag
+			mu.Unlock()
+			w.Header().Set("ETag", etag)
+			_, _ = w.Write([]byte(`{"claude":[]}`))
+		}))
+		t.Cleanup(extServer.Close)
+		app := newExternalApp(t, extServer.URL, externalAuthorityManagement)
+		count := func() int32 {
+			mu.Lock()
+			defer mu.Unlock()
+			return upstreamRequests
 		}
-		if sent := fake.requests.Load() - before; sent != 1 {
+
+		before := count()
+		admitted := gateRequest(t, app, http.MethodGet, "/v8/management/config/api-keys", gateAdmin)
+		if admitted.Code != http.StatusOK || admitted.Header().Get("ETag") != `"ext-etag-v1"` {
+			t.Fatalf("admitted read = %d etag=%q %s", admitted.Code, admitted.Header().Get("ETag"), admitted.Body.String())
+		}
+		if sent := count() - before; sent != 1 {
 			t.Fatalf("the admitted read reached the CPA %d times, want 1", sent)
+		}
+
+		before = count()
+		bridgedGet := gatewayRequest(t, app, http.MethodGet, "cpamp/v8/management/config/api-keys", "", "")
+		if bridgedGet.Code != http.StatusOK || bridgedGet.Header().Get("ETag") != `"ext-etag-v1"` {
+			t.Fatalf("bridged GET = %d etag=%q %s", bridgedGet.Code, bridgedGet.Header().Get("ETag"), bridgedGet.Body.String())
+		}
+		putReq := httptest.NewRequest(http.MethodPut, currentInstallManagementAPIV2Prefix+"cpamp/v8/management/config/api-keys/claude", strings.NewReader(`[{"name":"claude-ext"}]`))
+		putReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+		putReq.Header.Set("Content-Type", "application/json")
+		putReq.Header.Set("If-Match", `"ext-etag-v1"`)
+		bridgedPut := httptest.NewRecorder()
+		app.canonicalAPI(bridgedPut, putReq)
+		if bridgedPut.Code != http.StatusOK || bridgedPut.Header().Get("ETag") != `"ext-etag-v2"` {
+			t.Fatalf("bridged PUT = %d etag=%q %s", bridgedPut.Code, bridgedPut.Header().Get("ETag"), bridgedPut.Body.String())
+		}
+		if sent := count() - before; sent != 2 {
+			t.Fatalf("bridged GET+PUT reached the CPA %d times, want 2", sent)
+		}
+		mu.Lock()
+		gotIfMatch, gotBody := sawIfMatch, sawBody
+		mu.Unlock()
+		if gotIfMatch != `"ext-etag-v1"` || gotBody != `[{"name":"claude-ext"}]` {
+			t.Fatalf("bridged PUT forwarded If-Match=%q body=%q", gotIfMatch, gotBody)
 		}
 
 		for _, test := range []struct {
@@ -248,15 +311,18 @@ func TestExternalLegacyBridgeGatesTheV8KeyGroupView(t *testing.T) {
 			auth   string
 			want   int
 		}{
-			{name: "put", method: http.MethodPut, path: "/v8/management/config/api-keys", auth: gateAdmin, want: http.StatusMethodNotAllowed},
+			{name: "root put", method: http.MethodPut, path: "/v8/management/config/api-keys", auth: gateAdmin, want: http.StatusMethodNotAllowed},
+			{name: "family patch", method: http.MethodPatch, path: "/v8/management/config/api-keys/claude", auth: gateAdmin, want: http.StatusMethodNotAllowed},
+			{name: "family delete", method: http.MethodDelete, path: "/v8/management/config/api-keys/claude", auth: gateAdmin, want: http.StatusMethodNotAllowed},
 			{name: "options", method: http.MethodOptions, path: "/v8/management/config/api-keys", auth: gateAdmin, want: http.StatusMethodNotAllowed},
+			{name: "unknown family", method: http.MethodPut, path: "/v8/management/config/api-keys/unknown", auth: gateAdmin, want: http.StatusNotFound},
 			{name: "encoded dot segments", method: http.MethodGet, path: "/v8/management/config/api-keys/%2e%2e/config", auth: gateAdmin, want: http.StatusNotFound},
 			{name: "duplicate slash", method: http.MethodGet, path: "/v8/management/config/api-keys//claude", auth: gateAdmin, want: http.StatusNotFound},
 			{name: "leading duplicate slash", method: http.MethodGet, path: "//v8/management/config/api-keys", auth: gateAdmin, want: http.StatusNotFound},
 			{name: "sibling", method: http.MethodGet, path: "/v8/management/config/api-keys-x", auth: gateAdmin, want: http.StatusNotFound},
 		} {
 			t.Run(test.name, func(t *testing.T) {
-				before := fake.requests.Load()
+				before := count()
 				response := gateRequest(t, app, test.method, test.path, test.auth)
 				if response.Code != test.want {
 					t.Fatalf("%s %s = %d %s", test.method, test.path, response.Code, response.Body.String())
@@ -264,7 +330,7 @@ func TestExternalLegacyBridgeGatesTheV8KeyGroupView(t *testing.T) {
 				if response.Header().Get("Location") != "" {
 					t.Fatalf("%s %s redirected instead of refusing", test.method, test.path)
 				}
-				if sent := fake.requests.Load() - before; sent != 0 {
+				if sent := count() - before; sent != 0 {
 					t.Fatalf("%s %s reached the CPA %d times", test.method, test.path, sent)
 				}
 			})
@@ -281,6 +347,15 @@ func TestExternalLegacyBridgeGatesTheV8KeyGroupView(t *testing.T) {
 			t.Fatalf("first read = %d %s", first.Code, first.Body.String())
 		}
 
+		before := fake.requests.Load()
+		bridgedRejectedPut := gatewayRequest(t, app, http.MethodPut, "cpamp/v8/management/config/api-keys/claude", `[]`, "application/json")
+		if bridgedRejectedPut.Code != http.StatusConflict || errorCode(t, bridgedRejectedPut) != freshconfig.ReasonManagementRejected {
+			t.Fatalf("bridged rejected PUT = %d %s", bridgedRejectedPut.Code, bridgedRejectedPut.Body.String())
+		}
+		if sent := fake.requests.Load() - before; sent != 0 {
+			t.Fatalf("bridged rejected PUT reached the CPA %d times", sent)
+		}
+
 		for _, test := range []struct {
 			name   string
 			method string
@@ -290,9 +365,12 @@ func TestExternalLegacyBridgeGatesTheV8KeyGroupView(t *testing.T) {
 			code   string
 		}{
 			{name: "canonical read", method: http.MethodGet, path: "/v8/management/config/api-keys/claude", auth: gateAdmin, want: http.StatusConflict, code: freshconfig.ReasonManagementRejected},
+			{name: "canonical family put", method: http.MethodPut, path: "/v8/management/config/api-keys/claude", auth: gateAdmin, want: http.StatusConflict, code: freshconfig.ReasonManagementRejected},
 			{name: "bad admin key", method: http.MethodGet, path: "/v8/management/config/api-keys", auth: "Bearer wrong-key", want: http.StatusUnauthorized},
-			{name: "put", method: http.MethodPut, path: "/v8/management/config/api-keys", auth: gateAdmin, want: http.StatusMethodNotAllowed},
+			{name: "root put", method: http.MethodPut, path: "/v8/management/config/api-keys", auth: gateAdmin, want: http.StatusMethodNotAllowed},
+			{name: "family patch", method: http.MethodPatch, path: "/v8/management/config/api-keys/claude", auth: gateAdmin, want: http.StatusMethodNotAllowed},
 			{name: "options", method: http.MethodOptions, path: "/v8/management/config/api-keys", auth: gateAdmin, want: http.StatusMethodNotAllowed},
+			{name: "unknown family", method: http.MethodPut, path: "/v8/management/config/api-keys/unknown", auth: gateAdmin, want: http.StatusNotFound},
 			{name: "encoded dot segments", method: http.MethodGet, path: "/v8/management/config/api-keys/%2e%2e/config", auth: gateAdmin, want: http.StatusNotFound},
 			{name: "duplicate slash", method: http.MethodGet, path: "/v8/management/config/api-keys//claude", auth: gateAdmin, want: http.StatusNotFound},
 			{name: "leading duplicate slash", method: http.MethodGet, path: "//v8/management/config/api-keys", auth: gateAdmin, want: http.StatusNotFound},

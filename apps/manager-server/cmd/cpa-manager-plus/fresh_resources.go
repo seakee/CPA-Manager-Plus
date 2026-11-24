@@ -157,14 +157,20 @@ var managerLocalManagementFamilySlugs = []string{
 // the caller's own header, so it is not a presentation of the saved key.
 func legacyBridgePresentsSavedKey(r *http.Request) bool {
 	path := r.URL.Path
-	// The one CPA v8 subtree Manager forwards is the same kind of request: an
-	// admin-authorized GET proxied with the saved management key, so the External
-	// cutover serializes it and files its refusal exactly like a v0 management
-	// read. Only the shape the router will actually proxy counts: every other
-	// method or path shape is answered locally with 405/404, so gating it would
-	// report a credential failure for a request that never presents the key.
+	// The CPA v8 provider API-key endpoints Manager forwards present the saved
+	// management key on canonical GETs (root and whitelisted families) and
+	// canonical PUTs (whitelisted families only). Every other method or path
+	// shape is answered locally with 405/404, so gating it would report a
+	// credential failure for a request that never presents the key.
 	if proxysvc.IsCPAV8APIKeysConfigPath(path) {
-		return r.Method == http.MethodGet && proxysvc.IsCanonicalV8APIKeysConfigRequest(r)
+		if !proxysvc.IsCanonicalV8APIKeysConfigRequest(r) {
+			return false
+		}
+		if r.Method == http.MethodGet {
+			return true
+		}
+		_, isFamily := proxysvc.IsCPAV8APIKeysFamilyPath(path)
+		return isFamily && r.Method == http.MethodPut
 	}
 	if proxysvc.IsCPAV8ModelsRefreshPath(path) {
 		return r.Method == http.MethodPost && proxysvc.IsCanonicalV8ModelsRefreshRequest(r)
@@ -1317,35 +1323,48 @@ func collectStringSliceElements(val any, dst map[string]struct{}) bool {
 	}
 	return true
 }
+func isResolvedYAMLSecret(s string, secrets map[string]struct{}) bool {
+	if _, hit := secrets[s]; hit {
+		return true
+	}
+	_, hit := secrets[strings.TrimSpace(s)]
+	return hit
+}
+
 func scrubResolvedYAMLSecrets(val any, secrets map[string]struct{}) any {
 	if len(secrets) == 0 || val == nil {
 		return val
 	}
 	switch typed := val.(type) {
 	case string:
-		if _, hit := secrets[typed]; hit {
-			return ""
-		}
-		if _, hit := secrets[strings.TrimSpace(typed)]; hit {
+		if isResolvedYAMLSecret(typed, secrets) {
 			return ""
 		}
 		return typed
 	case []any:
 		kept := make([]any, 0, len(typed))
 		for _, elem := range typed {
-			if s, ok := elem.(string); ok {
-				if _, hit := secrets[s]; hit {
-					continue
-				}
-				if _, hit := secrets[strings.TrimSpace(s)]; hit {
-					continue
-				}
+			if s, ok := elem.(string); ok && isResolvedYAMLSecret(s, secrets) {
+				continue
 			}
 			kept = append(kept, scrubResolvedYAMLSecrets(elem, secrets))
 		}
 		return kept
 	case map[string]any:
 		for k, v := range typed {
+			if isResolvedYAMLSecret(k, secrets) {
+				delete(typed, k)
+				continue
+			}
+			typed[k] = scrubResolvedYAMLSecrets(v, secrets)
+		}
+		return typed
+	case map[any]any:
+		for k, v := range typed {
+			if ks, ok := k.(string); ok && isResolvedYAMLSecret(ks, secrets) {
+				delete(typed, k)
+				continue
+			}
 			typed[k] = scrubResolvedYAMLSecrets(v, secrets)
 		}
 		return typed
@@ -1398,12 +1417,16 @@ func sanitizeBridgedConfigYAML(raw []byte) ([]byte, string, error) {
 		switch {
 		case strings.EqualFold(key, "api-keys") || strings.EqualFold(key, "apikeys"):
 			// In v0/v6 config.yaml, top-level api-keys is a sequence of client keys;
-			// in v8 config.yaml, top-level api-keys may be a provider-group map.
-			if _, isProviderMap := val.(map[string]any); !isProviderMap {
+			// in v8 config.yaml, top-level api-keys may be nil or a provider-group map.
+			switch val.(type) {
+			case nil, map[string]any:
+			case []any:
 				if !collectStringSliceElements(val, secrets) {
 					return nil, "", errors.New("expected sequence or mapping api-keys in config.yaml")
 				}
 				resolved[key] = []any{}
+			default:
+				return nil, "", errors.New("expected sequence or mapping api-keys in config.yaml")
 			}
 		case strings.EqualFold(key, "access"):
 			if val == nil {
@@ -1705,7 +1728,7 @@ func legacyBridgePathAllowed(resource, method string) bool {
 		return allowed(http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodDelete)
 	case "v0/management/api-key-aliases":
 		return allowed(http.MethodGet, http.MethodPut)
-	case "v0/management/codex-api-key", "v0/management/claude-api-key", "v0/management/gemini-api-key", "v0/management/interactions-api-key", "v0/management/vertex-api-key", "v0/management/xai-api-key", "v0/management/openai-compatibility":
+	case "v0/management/codex-api-key", "v0/management/claude-api-key", "v0/management/gemini-api-key", "v0/management/interactions-api-key", "v0/management/vertex-api-key", "v0/management/xai-api-key", "v0/management/meta-api-key", "v0/management/openai-compatibility":
 		return allowed(http.MethodGet, http.MethodPut, http.MethodDelete)
 	case "v0/management/config":
 		return allowed(http.MethodGet, http.MethodPut)
@@ -1759,6 +1782,8 @@ func legacyBridgePathAllowed(resource, method string) bool {
 		return allowed(http.MethodPost)
 	case "v0/management/plugins", "v0/management/plugin-store":
 		return allowed(http.MethodGet)
+	case "v8/management/config/api-keys":
+		return allowed(http.MethodGet)
 	case "v8/management/models/refresh":
 		return allowed(http.MethodPost)
 	case "v8/management/credentials":
@@ -1779,6 +1804,9 @@ func legacyBridgePathAllowed(resource, method string) bool {
 }
 
 func legacyBridgeDynamicPathAllowed(resource, method string, allowed func(...string) bool) bool {
+	if _, ok := proxysvc.IsCPAV8APIKeysFamilyPath("/" + resource); ok {
+		return allowed(http.MethodGet, http.MethodPut)
+	}
 	const management = "v0/management/"
 	if !strings.HasPrefix(resource, management) {
 		return false

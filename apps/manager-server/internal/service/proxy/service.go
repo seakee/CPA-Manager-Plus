@@ -95,13 +95,11 @@ type authFileWriteMutation struct {
 const cpaPluginResourcePrefix = "/v0/resource/plugins"
 const cpaManagementPrefix = "/v0/management"
 
-// cpaV8APIKeysConfigPath is the only CPA v8 management subtree Manager Server
-// forwards. It is the v8 provider-key group tree (`api-keys.<family>`, the eight
-// families v8 loads at internal/config/config_v8.go:67-72 in the pinned
-// v8.0.55), whose group names a flattened v0 key list does not carry. Other v8
-// routes stay unreachable because the auth-file and config mutation guards in
-// this package only recognize their v0 paths, and the config root also carries
-// the management secret field.
+// cpaV8APIKeysConfigPath is the CPA v8 upstream provider API-key group root
+// (`api-keys`, with the eight provider families v8 loads at
+// internal/config/config_v8.go:67-72). Root supports GET only; the eight
+// whitelisted family subpaths support GET and PUT. Other v8 config routes
+// (including the config root and `access/api-keys`) remain unreachable.
 const cpaV8APIKeysConfigPath = "/v8/management/config/api-keys"
 const cpaV8ModelsRefreshPath = "/v8/management/models/refresh"
 const cpaV8CredentialsPath = "/v8/management/credentials"
@@ -350,25 +348,27 @@ func (s *Service) proxyWithSavedManagementKey(w http.ResponseWriter, r *http.Req
 	s.proxyToSavedSetup(w, r, writeError, true, false)
 }
 
-// ProxyV8APIKeysConfig forwards read-only CPA v8 provider API-key group views,
-// which carry the group names that the flattened v0 key lists drop.
+// ProxyV8APIKeysConfig forwards CPA v8 upstream provider API-key group reads on
+// the root and whitelisted family endpoints, plus group PUT writes on the eight
+// whitelisted family endpoints only.
 //
-// The method is restricted rather than forwarded: unlike a plugin resource
-// namespace, this is a credentialed management read, and the v8 config surface
-// it lives on also carries writes for the same subtree (PUT/PATCH/DELETE
-// /v8/management/config/access/api-keys and the provider sections). Only GET
-// reaches CPA, and only after a verified CPAMP admin presented its own key; the
-// saved CPA management key is substituted upstream.
+// Root /v8/management/config/api-keys accepts GET only; whitelisted family paths
+// /v8/management/config/api-keys/<family> accept GET and PUT only. Disallowed
+// methods on those paths return 405 Method Not Allowed, while non-whitelisted or
+// non-canonical paths return 404 Not Found. Only verified CPAMP admins reach this
+// proxy, and the saved CPA management key is substituted upstream.
 func (s *Service) ProxyV8APIKeysConfig(w http.ResponseWriter, r *http.Request, writeError func(http.ResponseWriter, int, error), methodNotAllowed func(http.ResponseWriter)) {
-	if !IsCPAV8APIKeysConfigPath(r.URL.Path) || !isCanonicalRequestPath(r.URL) {
+	if r == nil || r.URL == nil || !IsCPAV8APIKeysConfigPath(r.URL.Path) || !isCanonicalRequestPath(r.URL) {
 		writeError(w, http.StatusNotFound, errors.New("proxy path must be under "+cpaV8APIKeysConfigPath))
 		return
 	}
-	if r.Method != http.MethodGet {
+	if !IsCPAV8APIKeysMethodAllowed(r.URL.Path, r.Method) {
 		methodNotAllowed(w)
 		return
 	}
-	s.proxyToSavedSetup(w, r, writeError, true, false)
+	proxiedReq := r.Clone(r.Context())
+	proxiedReq.Header.Set("Accept-Encoding", "identity")
+	s.proxyToSavedSetup(w, proxiedReq, writeError, true, false)
 }
 
 // ProxyV8ModelsRefresh forwards an explicit CPA v8 upstream model-list refresh
@@ -590,7 +590,7 @@ func (s *Service) proxyWithResponseHook(w http.ResponseWriter, r *http.Request, 
 		req.Header.Del(authFileMutationIdentityHeader)
 		req.Header.Del(authFileWriteIdentitiesHeader)
 		req.Header.Del(authFileWriteContentSHA256Header)
-		if ownershipMutation.clearAll || len(ownershipMutation.fileNames) > 0 || len(ownershipMutation.ownershipTargets) > 0 {
+		if IsCPAV8APIKeysConfigPath(req.URL.Path) || ownershipMutation.clearAll || len(ownershipMutation.fileNames) > 0 || len(ownershipMutation.ownershipTargets) > 0 {
 			req.Header.Set("Accept-Encoding", "identity")
 		}
 	}
@@ -612,6 +612,9 @@ func (s *Service) proxyWithResponseHook(w http.ResponseWriter, r *http.Request, 
 			if err := rewriteResponse(response); err != nil {
 				return err
 			}
+		}
+		if rewriteResponse == nil && response != nil {
+			stripUpstreamCORSHeaders(response.Header)
 		}
 		if credentialDeleteIntentID != "" {
 			switch deleteOutcome {
@@ -639,6 +642,18 @@ func (s *Service) proxyWithResponseHook(w http.ResponseWriter, r *http.Request, 
 		return s.restoreInspectionOwnershipDetached(r.Context(), ownershipItemsNotMutated(revokedOwnership, mutation))
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+func stripUpstreamCORSHeaders(header http.Header) {
+	if header == nil {
+		return
+	}
+	header.Del("Access-Control-Allow-Origin")
+	header.Del("Access-Control-Allow-Methods")
+	header.Del("Access-Control-Allow-Headers")
+	header.Del("Access-Control-Allow-Credentials")
+	header.Del("Access-Control-Max-Age")
+	header.Del("Access-Control-Expose-Headers")
 }
 
 func (s *Service) acquireAuthFileMutation(ctx context.Context, mutation authFileOwnershipMutation) (func(), error) {
@@ -1820,6 +1835,12 @@ func (s *Service) ProxyModelList(w http.ResponseWriter, r *http.Request, writeEr
 		req.URL.Host = target.Host
 		req.Host = target.Host
 	}
+	proxy.ModifyResponse = func(response *http.Response) error {
+		if response != nil {
+			stripUpstreamCORSHeaders(response.Header)
+		}
+		return nil
+	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
 		writeError(w, http.StatusBadGateway, err)
 	}
@@ -1866,10 +1887,59 @@ func IsCPAPluginResourcePath(path string) bool {
 	return cleaned == cpaPluginResourcePrefix || strings.HasPrefix(cleaned, cpaPluginResourcePrefix+"/")
 }
 
-// IsCPAV8APIKeysConfigPath matches the v8 API-key config subtree on a path
-// segment boundary, so siblings such as /config/api-keys-x are excluded.
-func IsCPAV8APIKeysConfigPath(path string) bool {
-	return path == cpaV8APIKeysConfigPath || strings.HasPrefix(path, cpaV8APIKeysConfigPath+"/")
+// IsCPAV8APIKeysFamilyPath matches only canonical CPA v8 upstream provider
+// family endpoints under /v8/management/config/api-keys/<family>.
+func IsCPAV8APIKeysFamilyPath(requestPath string) (family string, ok bool) {
+	const prefix = cpaV8APIKeysConfigPath + "/"
+	if !strings.HasPrefix(requestPath, prefix) {
+		return "", false
+	}
+	family = strings.TrimPrefix(requestPath, prefix)
+	switch family {
+	case "gemini",
+		"interactions",
+		"vertex",
+		"codex",
+		"claude",
+		"xai",
+		"meta",
+		"openai-compatibility":
+		return family, true
+	default:
+		return "", false
+	}
+}
+
+// IsCPAV8APIKeysConfigPath matches only the CPA v8 API-key root endpoint or one
+// of the eight whitelisted upstream provider family endpoints.
+func IsCPAV8APIKeysConfigPath(requestPath string) bool {
+	if requestPath == cpaV8APIKeysConfigPath {
+		return true
+	}
+	_, ok := IsCPAV8APIKeysFamilyPath(requestPath)
+	return ok
+}
+
+// IsCPAV8APIKeysMethodAllowed reports whether method is permitted on a
+// canonical CPA v8 API-key configuration path: GET on the root or any
+// whitelisted family endpoint, and PUT on whitelisted family endpoints only.
+func IsCPAV8APIKeysMethodAllowed(requestPath, method string) bool {
+	if !IsCPAV8APIKeysConfigPath(requestPath) {
+		return false
+	}
+	switch method {
+	case http.MethodGet:
+		return true
+	case http.MethodPut:
+		_, isFamily := IsCPAV8APIKeysFamilyPath(requestPath)
+		return isFamily
+	default:
+		return false
+	}
+}
+
+func isCPAV8APIKeysSubtree(requestPath string) bool {
+	return requestPath == cpaV8APIKeysConfigPath || strings.HasPrefix(requestPath, cpaV8APIKeysConfigPath+"/")
 }
 
 // IsCPAV8ModelsRefreshPath matches only the exact CPA v8 upstream model refresh
@@ -1915,6 +1985,26 @@ func IsCPAV8OAuthPath(path string) bool {
 func isCPAV8OAuthSubtree(requestPath string) bool {
 	return requestPath == cpaV8OAuthPrefix || strings.HasPrefix(requestPath, cpaV8OAuthPrefix+"/")
 }
+
+// IsUnexposedCPAV8ManagementSubtreePath reports whether requestPath falls
+// inside one of the CPA v8 management subtrees Manager guards (/config/api-keys/*,
+// /models/refresh/*, /credentials/*, /oauth/*) without matching a whitelisted
+// endpoint.
+func IsUnexposedCPAV8ManagementSubtreePath(requestPath string) bool {
+	if isCPAV8APIKeysSubtree(requestPath) && !IsCPAV8APIKeysConfigPath(requestPath) {
+		return true
+	}
+	if strings.HasPrefix(requestPath, cpaV8ModelsRefreshPath+"/") {
+		return true
+	}
+	if isCPAV8CredentialsSubtree(requestPath) && !IsCPAV8CredentialsPath(requestPath) {
+		return true
+	}
+	if isCPAV8OAuthSubtree(requestPath) && !IsCPAV8OAuthPath(requestPath) {
+		return true
+	}
+	return false
+}
 // isCanonicalRequestPath rejects percent-encoded, dot-segment and duplicate-slash
 // paths. ServeMux does not clean escaped dot segments and redirects the rest, so
 // a prefix check alone would let /api-keys/%2e%2e/... resolve to another upstream
@@ -1958,14 +2048,20 @@ func IsCanonicalV8APIKeysConfigRequest(r *http.Request) bool {
 // are checked, because a duplicate slash in the leading segments no longer
 // starts with the subtree prefix.
 func IsNonCanonicalV8APIKeysConfigRequest(r *http.Request) bool {
-	if r == nil || r.URL == nil || isCanonicalRequestPath(r.URL) {
+	if r == nil || r.URL == nil {
 		return false
 	}
-	if IsCPAV8APIKeysConfigPath(r.URL.Path) {
+	if strings.HasSuffix(r.URL.Path, "/") && IsCPAV8APIKeysConfigPath(strings.TrimSuffix(r.URL.Path, "/")) {
+		return true
+	}
+	if isCanonicalRequestPath(r.URL) {
+		return false
+	}
+	if isCPAV8APIKeysSubtree(r.URL.Path) {
 		return true
 	}
 	cleaned := cleanRequestPath(r.URL.Path)
-	return IsCPAV8APIKeysConfigPath(cleaned) || IsCPAV8APIKeysConfigPath(strings.TrimSuffix(cleaned, "/"))
+	return isCPAV8APIKeysSubtree(cleaned) || isCPAV8APIKeysSubtree(strings.TrimSuffix(cleaned, "/"))
 }
 
 // IsCanonicalV8ModelsRefreshRequest reports whether r is the canonical POST
@@ -1978,7 +2074,13 @@ func IsCanonicalV8ModelsRefreshRequest(r *http.Request) bool {
 // ServeMux would clean onto /v8/management/models/refresh and must be refused
 // with 404 before any redirect can happen.
 func IsNonCanonicalV8ModelsRefreshRequest(r *http.Request) bool {
-	if r == nil || r.URL == nil || isCanonicalRequestPath(r.URL) {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	if strings.HasSuffix(r.URL.Path, "/") && IsCPAV8ModelsRefreshPath(strings.TrimSuffix(r.URL.Path, "/")) {
+		return true
+	}
+	if isCanonicalRequestPath(r.URL) {
 		return false
 	}
 	if IsCPAV8ModelsRefreshPath(r.URL.Path) {

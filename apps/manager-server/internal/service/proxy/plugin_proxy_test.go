@@ -254,3 +254,67 @@ func TestPluginResourceAllowsRedirectWithinPlugin(t *testing.T) {
 		t.Fatalf("location = %q", got)
 	}
 }
+
+func TestPluginManagementAndModelListStripUpstreamCORSHeaders(t *testing.T) {
+	fixture := newPluginProxyFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		w.Header().Set("Access-Control-Max-Age", "600")
+		w.Header().Set("Access-Control-Expose-Headers", "ETag")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+
+	for _, tc := range []struct {
+		name string
+		run  func(*httptest.ResponseRecorder)
+	}{
+		{
+			name: "plugin management admin auth",
+			run: func(rr *httptest.ResponseRecorder) {
+				req := httptest.NewRequest(http.MethodGet, "/v0/management/codex-invite/status", nil)
+				fixture.service.ProxyPluginManagement(rr, req, writeProxyError)
+			},
+		},
+		{
+			name: "plugin management caller auth",
+			run: func(rr *httptest.ResponseRecorder) {
+				req := httptest.NewRequest(http.MethodGet, "/v0/management/codex-invite/status", nil)
+				req.Header.Set("Authorization", "Bearer caller-plugin-token")
+				fixture.service.ProxyPluginManagementWithCallerAuth(rr, req, writeProxyError)
+			},
+		},
+		{
+			name: "model list",
+			run: func(rr *httptest.ResponseRecorder) {
+				req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+				fixture.service.ProxyModelList(rr, req, writeProxyError, func(w http.ResponseWriter) {
+					http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				})
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			tc.run(recorder)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d body=%q", recorder.Code, recorder.Body.String())
+			}
+			for _, headerName := range []string{
+				"Access-Control-Allow-Origin",
+				"Access-Control-Allow-Methods",
+				"Access-Control-Allow-Headers",
+				"Access-Control-Allow-Credentials",
+				"Access-Control-Max-Age",
+				"Access-Control-Expose-Headers",
+			} {
+				if got := recorder.Header().Values(headerName); len(got) != 0 {
+					t.Fatalf("upstream %s survived: %#v", headerName, got)
+				}
+			}
+		})
+	}
+}

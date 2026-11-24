@@ -1421,32 +1421,36 @@ func TestServerCompatProxyRoutes(t *testing.T) {
 	}
 }
 
-// TestServerCompatV8APIKeysConfigProxy pins the one CPA v8 management subtree
-// Manager forwards: read-only provider-key group views for a verified CPAMP
-// admin, with the saved CPA management key. Everything else under
-// /v8/management stays unforwarded, and an escaped or dot-segment path never
-// reaches CPA because ServeMux does not clean it.
+// TestServerCompatV8APIKeysConfigProxy pins the CPA v8 provider API-key
+// routes Manager forwards: root and whitelisted family GET reads plus
+// whitelisted family PUT writes for a verified CPAMP admin, substituting the
+// saved CPA management key and preserving If-Match/ETag headers. Everything
+// else under /v8/management stays unforwarded.
 func TestServerCompatV8APIKeysConfigProxy(t *testing.T) {
 	cpa := testutil.NewCPAMock(t)
 	setup := &store.Setup{CPAUpstreamURL: cpa.URL(), ManagementKey: "management-key", Queue: "usage", PopSide: "right"}
 	handler, _ := newCompatHandler(t, testutil.NewConfig(t), setup)
 
 	for _, tc := range []struct {
+		method string
 		target string
 		path   string
 		query  string
+		body   string
 	}{
-		{target: "/v8/management/config/api-keys?format=json", path: "/v8/management/config/api-keys", query: "format=json"},
-		{target: "/v8/management/config/api-keys/claude", path: "/v8/management/config/api-keys/claude"},
+		{method: http.MethodGet, target: "/v8/management/config/api-keys?format=json", path: "/v8/management/config/api-keys", query: "format=json"},
+		{method: http.MethodGet, target: "/v8/management/config/api-keys/claude", path: "/v8/management/config/api-keys/claude"},
+		{method: http.MethodPut, target: "/v8/management/config/api-keys/claude", path: "/v8/management/config/api-keys/claude", body: `[{"name":"claude-main","api-key":"sk-ant-1"}]`},
+		{method: http.MethodPut, target: "/v8/management/config/api-keys/openai-compatibility", path: "/v8/management/config/api-keys/openai-compatibility", body: `[{"name":"relay","base-url":"https://api.example.com/v1"}]`},
 	} {
-		rr := testutil.Request(t, handler, http.MethodGet, tc.target, "", testutil.AdminKey)
+		rr := testutil.Request(t, handler, tc.method, tc.target, tc.body, testutil.AdminKey)
 		testutil.RequireStatus(t, rr, http.StatusOK)
 		got, ok := cpa.LastRequest(tc.path)
 		if !ok {
 			t.Fatalf("CPA mock did not receive %s", tc.path)
 		}
-		if got.Method != http.MethodGet || got.Authorization != "Bearer management-key" || got.Query != tc.query {
-			t.Fatalf("%s proxy request = %#v", tc.target, got)
+		if got.Method != tc.method || got.Authorization != "Bearer management-key" || got.Query != tc.query || got.Body != tc.body {
+			t.Fatalf("%s %s proxy request = %#v", tc.method, tc.target, got)
 		}
 	}
 
@@ -1459,18 +1463,31 @@ func TestServerCompatV8APIKeysConfigProxy(t *testing.T) {
 		noRedirect bool
 	}{
 		{name: "missing admin key", method: http.MethodGet, target: "/v8/management/config/api-keys", want: http.StatusUnauthorized},
+		{name: "missing admin key on family put", method: http.MethodPut, target: "/v8/management/config/api-keys/claude", want: http.StatusUnauthorized},
 		{name: "wrong admin key", method: http.MethodGet, target: "/v8/management/config/api-keys", key: "wrong-key", want: http.StatusUnauthorized},
 		{name: "CPA management key", method: http.MethodGet, target: "/v8/management/config/api-keys", key: "management-key", want: http.StatusUnauthorized},
+		{name: "CPA management key on family put", method: http.MethodPut, target: "/v8/management/config/api-keys/claude", key: "management-key", want: http.StatusUnauthorized},
 		{name: "options with admin key", method: http.MethodOptions, target: "/v8/management/config/api-keys", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
 		{name: "options without admin key", method: http.MethodOptions, target: "/v8/management/config/api-keys", want: http.StatusMethodNotAllowed},
-		{name: "put", method: http.MethodPut, target: "/v8/management/config/api-keys", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
-		{name: "post", method: http.MethodPost, target: "/v8/management/config/api-keys", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
-		{name: "patch", method: http.MethodPatch, target: "/v8/management/config/api-keys/claude", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
-		{name: "delete", method: http.MethodDelete, target: "/v8/management/config/api-keys", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "options on family", method: http.MethodOptions, target: "/v8/management/config/api-keys/claude", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "root put", method: http.MethodPut, target: "/v8/management/config/api-keys", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "root post", method: http.MethodPost, target: "/v8/management/config/api-keys", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "root patch", method: http.MethodPatch, target: "/v8/management/config/api-keys", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "family post", method: http.MethodPost, target: "/v8/management/config/api-keys/claude", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "family patch", method: http.MethodPatch, target: "/v8/management/config/api-keys/claude", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "root delete", method: http.MethodDelete, target: "/v8/management/config/api-keys", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "family delete", method: http.MethodDelete, target: "/v8/management/config/api-keys/claude", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
 		{name: "head", method: http.MethodHead, target: "/v8/management/config/api-keys", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "unknown family get", method: http.MethodGet, target: "/v8/management/config/api-keys/unknown", key: testutil.AdminKey, want: http.StatusNotFound},
+		{name: "unknown family put", method: http.MethodPut, target: "/v8/management/config/api-keys/unknown", key: testutil.AdminKey, want: http.StatusNotFound},
+		{name: "nested family subpath", method: http.MethodPut, target: "/v8/management/config/api-keys/claude/extra", key: testutil.AdminKey, want: http.StatusNotFound},
+		{name: "trailing slash root", method: http.MethodGet, target: "/v8/management/config/api-keys/", key: testutil.AdminKey, want: http.StatusNotFound},
+		{name: "trailing slash family", method: http.MethodPut, target: "/v8/management/config/api-keys/claude/", key: testutil.AdminKey, want: http.StatusNotFound},
 		{name: "config root", method: http.MethodGet, target: "/v8/management/config", key: testutil.AdminKey, want: http.StatusNotFound},
+		{name: "config root put", method: http.MethodPut, target: "/v8/management/config", key: testutil.AdminKey, want: http.StatusNotFound},
 		{name: "config yaml", method: http.MethodGet, target: "/v8/management/config.yaml", key: testutil.AdminKey, want: http.StatusNotFound},
 		{name: "client keys", method: http.MethodGet, target: "/v8/management/config/access/api-keys", key: testutil.AdminKey, want: http.StatusNotFound},
+		{name: "client keys put", method: http.MethodPut, target: "/v8/management/config/access/api-keys", key: testutil.AdminKey, want: http.StatusNotFound},
 		{name: "sibling config key", method: http.MethodGet, target: "/v8/management/config/api-keys-x", key: testutil.AdminKey, want: http.StatusNotFound},
 		{name: "other v8 route", method: http.MethodGet, target: "/v8/management/credentials/download?name=a.json", key: testutil.AdminKey, want: http.StatusNotFound},
 		{name: "dot segments", method: http.MethodGet, target: "/v8/management/config/api-keys/../../credentials/download", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
@@ -1501,15 +1518,247 @@ func TestServerCompatV8APIKeysConfigProxy(t *testing.T) {
 		})
 	}
 
+	// End-to-end ETag / If-Match conditional update and CORS header exposure.
+	t.Run("etag and if-match roundtrip", func(t *testing.T) {
+		currentETag := `"sha256-v1"`
+		var gotIfMatch string
+		var gotAuth string
+		etagUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotAuth = r.Header.Get("Authorization")
+			gotIfMatch = r.Header.Get("If-Match")
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, PUT, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "*")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Access-Control-Max-Age", "600")
+			w.Header().Set("Access-Control-Expose-Headers", "ETag")
+			w.Header().Set("X-CPA-Version", "v8.1.0")
+			if r.Method == http.MethodPut {
+				if gotIfMatch != currentETag {
+					w.Header().Set("ETag", currentETag)
+					w.WriteHeader(http.StatusPreconditionFailed)
+					_, _ = w.Write([]byte(`{"error":"precondition_failed"}`))
+					return
+				}
+				if currentETag == `"sha256-v1"` {
+					currentETag = `"sha256-v2"`
+				} else {
+					currentETag = `"sha256-v3"`
+				}
+			}
+			w.Header().Set("ETag", currentETag)
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Path == "/v8/management/config/api-keys" {
+				_, _ = w.Write([]byte(`{"claude":[{"name":"claude-alias"}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`[{"name":"claude-alias"}]`))
+		}))
+		defer etagUpstream.Close()
+
+		etagCfg := testutil.NewConfig(t)
+		etagCfg.CORSOrigins = []string{"http://localhost:5173"}
+		etagHandler, _ := newCompatHandler(t, etagCfg, &store.Setup{
+			CPAUpstreamURL: etagUpstream.URL,
+			ManagementKey:  "management-key",
+			Queue:          "usage",
+			PopSide:        "right",
+		})
+
+		assertSingleOriginAndExposeHeaders := func(rr *httptest.ResponseRecorder, wantOrigin string, label string) {
+			t.Helper()
+			origins := rr.Header().Values("Access-Control-Allow-Origin")
+			if wantOrigin == "" {
+				if len(origins) != 0 {
+					t.Fatalf("%s Access-Control-Allow-Origin values = %#v, want empty", label, origins)
+				}
+			} else if len(origins) != 1 || origins[0] != wantOrigin {
+				t.Fatalf("%s Access-Control-Allow-Origin values = %#v, want [%q]", label, origins, wantOrigin)
+			}
+			exposeValues := rr.Header().Values("Access-Control-Expose-Headers")
+			if len(exposeValues) != 1 {
+				t.Fatalf("%s Access-Control-Expose-Headers values = %#v, want 1 value", label, exposeValues)
+			}
+			exposeLower := strings.ToLower(exposeValues[0])
+			for _, required := range []string{
+				"etag",
+				"x-cpa-version",
+				"x-cpa-commit",
+				"x-cpa-build-date",
+				"x-cpa-support-plugin",
+				"x-server-version",
+				"x-server-commit",
+				"x-server-build-date",
+			} {
+				if !strings.Contains(exposeLower, required) {
+					t.Fatalf("%s Access-Control-Expose-Headers = %q, missing %q", label, exposeValues[0], required)
+				}
+			}
+			if got := rr.Header().Get("Access-Control-Allow-Credentials"); got != "" {
+				t.Fatalf("%s leaked Access-Control-Allow-Credentials = %q", label, got)
+			}
+			if got := rr.Header().Get("Access-Control-Max-Age"); got != "" {
+				t.Fatalf("%s leaked Access-Control-Max-Age = %q", label, got)
+			}
+		}
+
+		rootAllowedReq := httptest.NewRequest(http.MethodGet, "/v8/management/config/api-keys", nil)
+		rootAllowedReq.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+		rootAllowedReq.Header.Set("Origin", "http://localhost:5173")
+		rootAllowedRR := httptest.NewRecorder()
+		etagHandler.ServeHTTP(rootAllowedRR, rootAllowedReq)
+		testutil.RequireStatus(t, rootAllowedRR, http.StatusOK)
+		assertSingleOriginAndExposeHeaders(rootAllowedRR, "http://localhost:5173", "allowed root GET")
+
+		rootDisallowedReq := httptest.NewRequest(http.MethodGet, "/v8/management/config/api-keys", nil)
+		rootDisallowedReq.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+		rootDisallowedReq.Header.Set("Origin", "https://disallowed.example")
+		rootDisallowedRR := httptest.NewRecorder()
+		etagHandler.ServeHTTP(rootDisallowedRR, rootDisallowedReq)
+		testutil.RequireStatus(t, rootDisallowedRR, http.StatusOK)
+		assertSingleOriginAndExposeHeaders(rootDisallowedRR, "", "disallowed root GET")
+
+		getReq := httptest.NewRequest(http.MethodGet, "/v8/management/config/api-keys/claude", nil)
+		getReq.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+		getReq.Header.Set("Origin", "http://localhost:5173")
+		getRR := httptest.NewRecorder()
+		etagHandler.ServeHTTP(getRR, getReq)
+		testutil.RequireStatus(t, getRR, http.StatusOK)
+		if getRR.Header().Get("ETag") != `"sha256-v1"` {
+			t.Fatalf("GET ETag=%q", getRR.Header().Get("ETag"))
+		}
+		assertSingleOriginAndExposeHeaders(getRR, "http://localhost:5173", "allowed family GET")
+
+		staleReq := httptest.NewRequest(http.MethodPut, "/v8/management/config/api-keys/claude", strings.NewReader(`[]`))
+		staleReq.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+		staleReq.Header.Set("Origin", "https://disallowed.example")
+		staleReq.Header.Set("If-Match", `"stale"`)
+		staleRR := httptest.NewRecorder()
+		etagHandler.ServeHTTP(staleRR, staleReq)
+		testutil.RequireStatus(t, staleRR, http.StatusPreconditionFailed)
+		if staleRR.Header().Get("ETag") != `"sha256-v1"` || gotIfMatch != `"stale"` {
+			t.Fatalf("stale PUT ETag=%q gotIfMatch=%q", staleRR.Header().Get("ETag"), gotIfMatch)
+		}
+		assertSingleOriginAndExposeHeaders(staleRR, "", "disallowed stale PUT")
+
+		putReq := httptest.NewRequest(http.MethodPut, "/v8/management/config/api-keys/claude", strings.NewReader(`[{"name":"claude-alias"}]`))
+		putReq.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+		putReq.Header.Set("Origin", "http://localhost:5173")
+		putReq.Header.Set("If-Match", `"sha256-v1"`)
+		putRR := httptest.NewRecorder()
+		etagHandler.ServeHTTP(putRR, putReq)
+		testutil.RequireStatus(t, putRR, http.StatusOK)
+		if putRR.Header().Get("ETag") != `"sha256-v2"` || gotIfMatch != `"sha256-v1"` || gotAuth != "Bearer management-key" {
+			t.Fatalf("PUT ETag=%q gotIfMatch=%q gotAuth=%q", putRR.Header().Get("ETag"), gotIfMatch, gotAuth)
+		}
+		assertSingleOriginAndExposeHeaders(putRR, "http://localhost:5173", "allowed family PUT")
+
+		disallowedPutReq := httptest.NewRequest(http.MethodPut, "/v8/management/config/api-keys/claude", strings.NewReader(`[{"name":"claude-alias"}]`))
+		disallowedPutReq.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+		disallowedPutReq.Header.Set("Origin", "https://disallowed.example")
+		disallowedPutReq.Header.Set("If-Match", `"sha256-v2"`)
+		disallowedPutRR := httptest.NewRecorder()
+		etagHandler.ServeHTTP(disallowedPutRR, disallowedPutReq)
+		testutil.RequireStatus(t, disallowedPutRR, http.StatusOK)
+		if disallowedPutRR.Header().Get("ETag") != `"sha256-v3"` {
+			t.Fatalf("disallowed PUT ETag=%q", disallowedPutRR.Header().Get("ETag"))
+		}
+		assertSingleOriginAndExposeHeaders(disallowedPutRR, "", "disallowed family PUT")
+		for _, preflight := range []struct {
+			name          string
+			target        string
+			origin        string
+			requestMethod string
+			want          int
+		}{
+			{
+				name:          "root GET preflight allowed",
+				target:        "/v8/management/config/api-keys",
+				origin:        "http://localhost:5173",
+				requestMethod: http.MethodGet,
+				want:          http.StatusNoContent,
+			},
+			{
+				name:          "family GET preflight allowed",
+				target:        "/v8/management/config/api-keys/claude",
+				origin:        "http://localhost:5173",
+				requestMethod: http.MethodGet,
+				want:          http.StatusNoContent,
+			},
+			{
+				name:          "family PUT preflight allowed",
+				target:        "/v8/management/config/api-keys/claude",
+				origin:        "http://localhost:5173",
+				requestMethod: http.MethodPut,
+				want:          http.StatusNoContent,
+			},
+			{
+				name:          "root PUT preflight rejected",
+				target:        "/v8/management/config/api-keys",
+				origin:        "http://localhost:5173",
+				requestMethod: http.MethodPut,
+				want:          http.StatusMethodNotAllowed,
+			},
+			{
+				name:          "family DELETE preflight rejected",
+				target:        "/v8/management/config/api-keys/claude",
+				origin:        "http://localhost:5173",
+				requestMethod: http.MethodDelete,
+				want:          http.StatusMethodNotAllowed,
+			},
+			{
+				name:          "missing request method rejected",
+				target:        "/v8/management/config/api-keys/claude",
+				origin:        "http://localhost:5173",
+				requestMethod: "",
+				want:          http.StatusMethodNotAllowed,
+			},
+			{
+				name:          "missing origin rejected",
+				target:        "/v8/management/config/api-keys/claude",
+				origin:        "",
+				requestMethod: http.MethodPut,
+				want:          http.StatusMethodNotAllowed,
+			},
+		} {
+			t.Run(preflight.name, func(t *testing.T) {
+				optReq := httptest.NewRequest(http.MethodOptions, preflight.target, nil)
+				if preflight.origin != "" {
+					optReq.Header.Set("Origin", preflight.origin)
+				}
+				if preflight.requestMethod != "" {
+					optReq.Header.Set("Access-Control-Request-Method", preflight.requestMethod)
+				}
+				optReq.Header.Set("Access-Control-Request-Headers", "Authorization, Content-Type, If-Match")
+				optRR := httptest.NewRecorder()
+				etagHandler.ServeHTTP(optRR, optReq)
+				testutil.RequireStatus(t, optRR, preflight.want)
+				if preflight.origin != "" {
+					if gotOrigin := optRR.Header().Get("Access-Control-Allow-Origin"); gotOrigin != preflight.origin {
+						t.Fatalf("Access-Control-Allow-Origin = %q, want %q", gotOrigin, preflight.origin)
+					}
+					if allowHeaders := strings.ToLower(optRR.Header().Get("Access-Control-Allow-Headers")); !strings.Contains(allowHeaders, "if-match") {
+						t.Fatalf("Access-Control-Allow-Headers = %q, want If-Match", optRR.Header().Get("Access-Control-Allow-Headers"))
+					}
+				}
+			})
+		}
+	})
+
 	// v2-only pin: the route stays an admin surface behind
 	// RejectCrossSiteAdmin. A sandboxed plugin document is an opaque-origin
-	// cross-site fetch client, so it cannot use this credentialed read as a
+	// cross-site fetch client, so it cannot use this credentialed surface as a
 	// confused deputy.
-	// A dirty shape gets the same cross-site answer: the rejection runs before
-	// the subtree's own path refusal.
-	for _, target := range []string{"/v8/management/config/api-keys", "/v8/management/config/api-keys//claude"} {
+	for _, tc := range []struct {
+		method string
+		target string
+	}{
+		{method: http.MethodGet, target: "/v8/management/config/api-keys"},
+		{method: http.MethodPut, target: "/v8/management/config/api-keys/claude"},
+		{method: http.MethodGet, target: "/v8/management/config/api-keys//claude"},
+	} {
 		before := len(cpa.Requests())
-		crossSite := httptest.NewRequest(http.MethodGet, target, nil)
+		crossSite := httptest.NewRequest(tc.method, tc.target, nil)
 		crossSite.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
 		crossSite.Header.Set("Sec-Fetch-Site", "cross-site")
 		crossSite.Header.Set("Sec-Fetch-Dest", "empty")
@@ -1517,7 +1766,7 @@ func TestServerCompatV8APIKeysConfigProxy(t *testing.T) {
 		handler.ServeHTTP(crossSiteRR, crossSite)
 		testutil.RequireStatus(t, crossSiteRR, http.StatusForbidden)
 		if requests := cpa.Requests(); len(requests) != before {
-			t.Fatalf("cross-site read of %s reached CPA: %#v", target, requests[before:])
+			t.Fatalf("cross-site %s of %s reached CPA: %#v", tc.method, tc.target, requests[before:])
 		}
 	}
 
@@ -2651,4 +2900,101 @@ func TestServerCompatCPAConnectionValidation(t *testing.T) {
 		rr := testutil.Request(t, handler, http.MethodPost, "/v0/management/cpa-connection/validate", body, testutil.AdminKey)
 		testutil.RequireStatus(t, rr, http.StatusOK)
 	})
+}
+
+func TestServerCompatPluginManagementAndModelListCORS(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		w.Header().Set("Access-Control-Max-Age", "600")
+		w.Header().Set("Access-Control-Expose-Headers", "X-Upstream-Only")
+		w.Header().Set("X-Server-Version", "v7.9.0")
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v0/management/codex-invite/status":
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"gpt-test"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	cfg := testutil.NewConfig(t)
+	cfg.CORSOrigins = []string{"http://localhost:5173"}
+	handler, _ := newCompatHandler(t, cfg, &store.Setup{
+		CPAUpstreamURL: upstream.URL,
+		ManagementKey:  "management-key",
+		Queue:          "usage",
+		PopSide:        "right",
+	})
+
+	for _, route := range []struct {
+		name   string
+		path   string
+		bearer string
+	}{
+		{
+			name:   "plugin management with admin auth",
+			path:   "/v0/management/codex-invite/status",
+			bearer: testutil.AdminKey,
+		},
+		{
+			name:   "plugin management with caller auth",
+			path:   "/v0/management/codex-invite/status",
+			bearer: "caller-plugin-token",
+		},
+		{
+			name: "v1 models",
+			path: "/v1/models",
+		},
+	} {
+		t.Run(route.name+" allowed origin", func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, route.path, nil)
+			if route.bearer != "" {
+				req.Header.Set("Authorization", "Bearer "+route.bearer)
+			}
+			req.Header.Set("Origin", "http://localhost:5173")
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			testutil.RequireStatus(t, rr, http.StatusOK)
+			origins := rr.Header().Values("Access-Control-Allow-Origin")
+			if len(origins) != 1 || origins[0] != "http://localhost:5173" {
+				t.Fatalf("Access-Control-Allow-Origin values = %#v, want [\"http://localhost:5173\"]", origins)
+			}
+			exposeValues := rr.Header().Values("Access-Control-Expose-Headers")
+			if len(exposeValues) != 1 {
+				t.Fatalf("Access-Control-Expose-Headers values = %#v, want 1 value", exposeValues)
+			}
+			exposeLower := strings.ToLower(exposeValues[0])
+			for _, expected := range []string{"x-server-version", "x-server-commit", "x-server-build-date"} {
+				if !strings.Contains(exposeLower, expected) {
+					t.Fatalf("Access-Control-Expose-Headers = %q, missing %q", exposeValues[0], expected)
+				}
+			}
+			if got := rr.Header().Get("Access-Control-Allow-Credentials"); got != "" {
+				t.Fatalf("leaked Access-Control-Allow-Credentials = %q", got)
+			}
+		})
+
+		t.Run(route.name+" disallowed origin", func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, route.path, nil)
+			if route.bearer != "" {
+				req.Header.Set("Authorization", "Bearer "+route.bearer)
+			}
+			req.Header.Set("Origin", "https://disallowed.example")
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			testutil.RequireStatus(t, rr, http.StatusOK)
+			if origins := rr.Header().Values("Access-Control-Allow-Origin"); len(origins) != 0 {
+				t.Fatalf("Access-Control-Allow-Origin values = %#v, want empty", origins)
+			}
+			if got := rr.Header().Get("Access-Control-Allow-Credentials"); got != "" {
+				t.Fatalf("leaked Access-Control-Allow-Credentials = %q", got)
+			}
+		})
+	}
 }

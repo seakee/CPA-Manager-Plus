@@ -131,13 +131,14 @@ func rootHandler(
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Whitelisted CPA v8 routes enforce exact per-path method sets (GET on
-		// /config/api-keys* and /credentials, POST on /models/refresh, and one exact
-		// method per /oauth/* route). Answer bare OPTIONS probes, untrusted origins,
-		// and disallowed preflights with 405 rather than falling through to the
-		// generic 204 preflight branch, while admitting valid CORS preflights when
-		// middleware.WriteCORS trusts the Origin and Access-Control-Request-Method
-		// names a method allowed on that path. This still runs inside
-		// RejectCrossSiteAdmin, so a sandboxed document cannot reach it.
+		// /config/api-keys and /credentials, GET and PUT on /config/api-keys/<family>,
+		// POST on /models/refresh, and one exact method per /oauth/* route). Answer
+		// bare OPTIONS probes, untrusted origins, and disallowed preflights with 405
+		// rather than falling through to the generic 204 preflight branch, while
+		// admitting valid CORS preflights when middleware.WriteCORS trusts the Origin
+		// and Access-Control-Request-Method names a method allowed on that path. This
+		// still runs inside RejectCrossSiteAdmin, so a sandboxed document cannot
+		// reach it.
 		if (proxysvc.IsCPAV8APIKeysConfigPath(r.URL.Path) ||
 			proxysvc.IsCPAV8ModelsRefreshPath(r.URL.Path) ||
 			proxysvc.IsCPAV8CredentialsPath(r.URL.Path) ||
@@ -150,6 +151,10 @@ func rootHandler(
 				return
 			}
 			response.MethodNotAllowed(w)
+			return
+		}
+		if proxysvc.IsUnexposedCPAV8ManagementSubtreePath(r.URL.Path) {
+			http.NotFound(w, r)
 			return
 		}
 		if r.Method == http.MethodOptions {
@@ -250,7 +255,7 @@ func hasManagementFamilyPrefix(requestPath, family string) bool {
 func isAllowedCPAV8PreflightMethod(path, method string) bool {
 	switch {
 	case proxysvc.IsCPAV8APIKeysConfigPath(path):
-		return method == http.MethodGet
+		return proxysvc.IsCPAV8APIKeysMethodAllowed(path, method)
 	case proxysvc.IsCPAV8ModelsRefreshPath(path):
 		return method == http.MethodPost
 	case proxysvc.IsCPAV8CredentialsPath(path):

@@ -33,6 +33,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
+	"gopkg.in/yaml.v3"
 )
 
 func TestFreshLegacyRouterDoesNotRequireEmbeddedIdentityWorker(t *testing.T) {
@@ -227,6 +228,10 @@ func TestLegacyBridgePathAllowlistCoversExistingReadAndAuthFlows(t *testing.T) {
 		{resource: "v0/management/kimi-ai-auth-url", method: http.MethodGet, allowed: true},
 		{resource: "v0/management/devin-auth-url", method: http.MethodGet, allowed: true},
 		{resource: "v0/management/meta-auth-url", method: http.MethodGet, allowed: true},
+		{resource: "v0/management/meta-api-key", method: http.MethodGet, allowed: true},
+		{resource: "v0/management/meta-api-key", method: http.MethodPut, allowed: true},
+		{resource: "v0/management/meta-api-key", method: http.MethodDelete, allowed: true},
+		{resource: "v0/management/meta-api-key", method: http.MethodPost, allowed: false},
 		{resource: "v0/management/acme-cloud-auth-url", method: http.MethodGet, allowed: true},
 		{resource: "v0/management/acme-cloud-auth-url", method: http.MethodPost, allowed: false},
 		{resource: "v0/management/-auth-url", method: http.MethodGet, allowed: false},
@@ -318,6 +323,36 @@ func TestLegacyBridgePathAllowlistCoversExistingReadAndAuthFlows(t *testing.T) {
 		{resource: "v0/management/request-error-logs/%2e%2e", method: http.MethodGet, allowed: false},
 		{resource: "v0/management/usage/import-sessions/a%2Fb/chunk", method: http.MethodPut, allowed: false},
 		{resource: "v0/management/oauth-callback", method: http.MethodGet, allowed: false},
+		{resource: "v8/management/config/api-keys", method: http.MethodGet, allowed: true},
+		{resource: "v8/management/config/api-keys", method: http.MethodPut, allowed: false},
+		{resource: "v8/management/config/api-keys", method: http.MethodPatch, allowed: false},
+		{resource: "v8/management/config/api-keys", method: http.MethodDelete, allowed: false},
+		{resource: "v8/management/config/api-keys/gemini", method: http.MethodGet, allowed: true},
+		{resource: "v8/management/config/api-keys/gemini", method: http.MethodPut, allowed: true},
+		{resource: "v8/management/config/api-keys/interactions", method: http.MethodGet, allowed: true},
+		{resource: "v8/management/config/api-keys/interactions", method: http.MethodPut, allowed: true},
+		{resource: "v8/management/config/api-keys/vertex", method: http.MethodGet, allowed: true},
+		{resource: "v8/management/config/api-keys/vertex", method: http.MethodPut, allowed: true},
+		{resource: "v8/management/config/api-keys/codex", method: http.MethodGet, allowed: true},
+		{resource: "v8/management/config/api-keys/codex", method: http.MethodPut, allowed: true},
+		{resource: "v8/management/config/api-keys/claude", method: http.MethodGet, allowed: true},
+		{resource: "v8/management/config/api-keys/claude", method: http.MethodPut, allowed: true},
+		{resource: "v8/management/config/api-keys/xai", method: http.MethodGet, allowed: true},
+		{resource: "v8/management/config/api-keys/xai", method: http.MethodPut, allowed: true},
+		{resource: "v8/management/config/api-keys/meta", method: http.MethodGet, allowed: true},
+		{resource: "v8/management/config/api-keys/meta", method: http.MethodPut, allowed: true},
+		{resource: "v8/management/config/api-keys/openai-compatibility", method: http.MethodGet, allowed: true},
+		{resource: "v8/management/config/api-keys/openai-compatibility", method: http.MethodPut, allowed: true},
+		{resource: "v8/management/config/api-keys/claude", method: http.MethodPatch, allowed: false},
+		{resource: "v8/management/config/api-keys/claude", method: http.MethodDelete, allowed: false},
+		{resource: "v8/management/config/api-keys/unknown", method: http.MethodGet, allowed: false},
+		{resource: "v8/management/config/api-keys/unknown", method: http.MethodPut, allowed: false},
+		{resource: "v8/management/config/api-keys/claude/extra", method: http.MethodGet, allowed: false},
+		{resource: "v8/management/config/api-keys/claude/extra", method: http.MethodPut, allowed: false},
+		{resource: "v8/management/config", method: http.MethodGet, allowed: false},
+		{resource: "v8/management/config", method: http.MethodPut, allowed: false},
+		{resource: "v8/management/config/access/api-keys", method: http.MethodGet, allowed: false},
+		{resource: "v8/management/config/access/api-keys", method: http.MethodPut, allowed: false},
 		{resource: "v8/management/credentials", method: http.MethodGet, allowed: true},
 		{resource: "v8/management/credentials", method: http.MethodPost, allowed: false},
 		{resource: "v8/management/credentials", method: http.MethodPut, allowed: false},
@@ -753,6 +788,132 @@ func TestFreshUsageRuntimeConfigSparsePatchAndMixedCaseBodyKeysPreserveTLSSkipVe
 	app.serveLegacyResource(&muxRec, req, clone, opRec.Operation, "usage-service/config")
 	if muxRec.Code != http.StatusBadRequest {
 		t.Fatalf("expected controller to reject mixed-case body cleanly, got %d %s", muxRec.Code, muxRec.Body.String())
+	}
+}
+
+func TestFreshManagedBridgedV8APIKeysReadAndConditionalWrite(t *testing.T) {
+	hostCtx, stopHost := context.WithCancel(t.Context())
+	defer stopHost()
+
+	mgmtKey := strings.Repeat("b", 64)
+	currentETag := `"managed-etag-v1"`
+	var lastIfMatch string
+	var lastBody string
+	cpaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+mgmtKey {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v8/management/config/api-keys":
+			w.Header().Set("ETag", currentETag)
+			_, _ = w.Write([]byte(`{"claude":[{"name":"claude-prod"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v8/management/config/api-keys/claude":
+			w.Header().Set("ETag", currentETag)
+			_, _ = w.Write([]byte(`[{"name":"claude-prod"}]`))
+		case r.Method == http.MethodPut && r.URL.Path == "/v8/management/config/api-keys/claude":
+			raw, _ := io.ReadAll(r.Body)
+			lastBody = string(raw)
+			lastIfMatch = r.Header.Get("If-Match")
+			if lastIfMatch != currentETag {
+				w.Header().Set("ETag", currentETag)
+				w.WriteHeader(http.StatusPreconditionFailed)
+				_, _ = w.Write([]byte(`{"error":"precondition_failed"}`))
+				return
+			}
+			currentETag = `"managed-etag-v2"`
+			w.Header().Set("ETag", currentETag)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer cpaServer.Close()
+
+	opened, app := newUsageCompletionApplication(t, hostCtx, config.Config{
+		CPAUpstreamURL: cpaServer.URL,
+		CollectorMode:  "http",
+		PollInterval:   50 * time.Millisecond,
+	})
+	current, err := app.store.Load(hostCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protectedKey, err := opened.Protector.ProtectString(mgmtKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeObs := validInstallationRuntime()
+	if _, err := app.store.Update(hostCtx, current.Operation.Identity, current.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+			Strategy:                      bootstrap.NewManaged,
+			Stage:                         "committed",
+			TargetIdentity:                string(runtimeObs.Identity),
+			TargetGeneration:              uint64(runtimeObs.Generation),
+			TargetArtifactID:              string(runtimeObs.ActiveGatewayArtifact.ArtifactID),
+			DestinationConnectionIdentity: freshstrategy.ManagedDestinationIdentity(cpaServer.URL),
+		}
+		r.Operation.ProductComplete = true
+		r.Connection = &model.ManagerCPAConnectionConfig{
+			CPABaseURL:    cpaServer.URL,
+			ManagementKey: protectedKey,
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	callBridge := func(method, resource, body, ifMatch string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(method, currentInstallManagementAPIV2Prefix+resource, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if ifMatch != "" {
+			req.Header.Set("If-Match", ifMatch)
+		}
+		rec := httptest.NewRecorder()
+		app.canonicalAPI(rec, req)
+		return rec
+	}
+
+	rootRes := callBridge(http.MethodGet, "cpamp/v8/management/config/api-keys", "", "")
+	if rootRes.Code != http.StatusOK || rootRes.Header().Get("ETag") != `"managed-etag-v1"` {
+		t.Fatalf("GET root = %d etag=%q body=%s", rootRes.Code, rootRes.Header().Get("ETag"), rootRes.Body.String())
+	}
+
+	staleRes := callBridge(http.MethodPut, "cpamp/v8/management/config/api-keys/claude", `[]`, `"wrong-etag"`)
+	if staleRes.Code != http.StatusPreconditionFailed || staleRes.Header().Get("ETag") != `"managed-etag-v1"` {
+		t.Fatalf("stale PUT = %d etag=%q body=%s", staleRes.Code, staleRes.Header().Get("ETag"), staleRes.Body.String())
+	}
+
+	putBody := `[{"name":"claude-prod-2","keys":[{"api-key":"sk-ant-2"}]}]`
+	putRes := callBridge(http.MethodPut, "cpamp/v8/management/config/api-keys/claude", putBody, `"managed-etag-v1"`)
+	if putRes.Code != http.StatusOK || putRes.Header().Get("ETag") != `"managed-etag-v2"` {
+		t.Fatalf("PUT family = %d etag=%q body=%s", putRes.Code, putRes.Header().Get("ETag"), putRes.Body.String())
+	}
+	if lastIfMatch != `"managed-etag-v1"` || lastBody != putBody {
+		t.Fatalf("bridged PUT If-Match=%q body=%q", lastIfMatch, lastBody)
+	}
+
+	for _, blocked := range []struct {
+		method   string
+		resource string
+	}{
+		{http.MethodPut, "cpamp/v8/management/config/api-keys"},
+		{http.MethodPatch, "cpamp/v8/management/config/api-keys/claude"},
+		{http.MethodDelete, "cpamp/v8/management/config/api-keys/claude"},
+		{http.MethodGet, "cpamp/v8/management/config/api-keys/unknown"},
+		{http.MethodPut, "cpamp/v8/management/config/api-keys/unknown"},
+		{http.MethodGet, "cpamp/v8/management/config"},
+		{http.MethodGet, "cpamp/v8/management/config/access/api-keys"},
+	} {
+		res := callBridge(blocked.method, blocked.resource, `{}`, "")
+		if res.Code != http.StatusNotFound {
+			t.Fatalf("%s %s = %d %s, want 404", blocked.method, blocked.resource, res.Code, res.Body.String())
+		}
 	}
 }
 
@@ -1428,5 +1589,75 @@ func TestCompletedUpgradeBridgeV8CredentialsAndOAuth(t *testing.T) {
 	}
 	if len(hits) != before {
 		t.Fatalf("rejected upgrade requests reached CPA %d times, want 0", len(hits)-before)
+	}
+}
+
+func TestSanitizeBridgedConfigYAMLPreservesNullV8APIKeysWhileScrubbingAccessAPIKeys(t *testing.T) {
+	raw := []byte("config-version: 8\napi-keys:\naccess:\n  api-keys:\n    - sk-client\n")
+	sanitized, ct, err := sanitizeBridgedConfigYAML(raw)
+	if err != nil {
+		t.Fatalf("sanitizeBridgedConfigYAML: %v", err)
+	}
+	if !strings.HasPrefix(ct, "application/yaml") {
+		t.Fatalf("content-type = %q, want application/yaml", ct)
+	}
+	if strings.Contains(string(sanitized), "sk-client") {
+		t.Fatalf("sanitized YAML retained client secret:\n%s", string(sanitized))
+	}
+	var decoded map[string]any
+	if err := yaml.Unmarshal(sanitized, &decoded); err != nil {
+		t.Fatalf("unmarshal sanitized YAML: %v\n%s", err, string(sanitized))
+	}
+	if decoded["config-version"] != 8 {
+		t.Fatalf("config-version = %#v, want 8", decoded["config-version"])
+	}
+	apiKeysVal, hasAPIKeys := decoded["api-keys"]
+	if !hasAPIKeys || apiKeysVal != nil {
+		t.Fatalf("top-level api-keys = %#v (present=%v), want nil\n%s", apiKeysVal, hasAPIKeys, string(sanitized))
+	}
+	accessMap, ok := decoded["access"].(map[string]any)
+	if !ok {
+		t.Fatalf("access = %#v, want map[string]any", decoded["access"])
+	}
+	accessKeys, ok := accessMap["api-keys"].([]any)
+	if !ok || len(accessKeys) != 0 {
+		t.Fatalf("access.api-keys = %#v, want empty slice", accessMap["api-keys"])
+	}
+}
+
+func TestFreshCanonicalLegacyBridgeForwardsMetaAPIKeyToCPA(t *testing.T) {
+	var forwarded atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+externalAuthorityManagement {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.Method == http.MethodGet && r.URL.Path == "/v0/management/meta-api-key" {
+			forwarded.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"meta-api-key":[{"api-key":"sk-meta-1","base-url":"https://meta.example/v1"}]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	app := newExternalApp(t, srv.URL, externalAuthorityManagement)
+	app.routing = freshrouting.New(app.store, activeAdoptRoutingDriver{store: app.store})
+
+	req := httptest.NewRequest(http.MethodGet, currentInstallManagementAPIV2Prefix+"cpamp/v0/management/meta-api-key", nil)
+	req.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+	rr := httptest.NewRecorder()
+	app.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /api/v2/cpamp/v0/management/meta-api-key = %d %s, want 200", rr.Code, rr.Body.String())
+	}
+	if got := forwarded.Load(); got != 1 {
+		t.Fatalf("upstream CPA forwarded count = %d, want 1", got)
+	}
+	if !strings.Contains(rr.Body.String(), "sk-meta-1") {
+		t.Fatalf("unexpected response body: %s", rr.Body.String())
 	}
 }
