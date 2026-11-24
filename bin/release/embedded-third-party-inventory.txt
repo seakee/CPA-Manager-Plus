@@ -113,8 +113,8 @@
     "apps/manager-server/go.sum": "sha256:5e4167f8c1008dfa3925975b218562277120fe05cebbdad6c06f91271c206f03",
     "apps/runtime-supervisor/go.mod": "sha256:05ddebf81d0e395d7629c0dc2ae61368065f1c8427dd845aca9f50152ff06589",
     "apps/runtime-supervisor/go.sum": "sha256:5e4167f8c1008dfa3925975b218562277120fe05cebbdad6c06f91271c206f03",
-    "apps/web/package.json": "sha256:481f5e4e89cd5bcdfc5ac68f06d2cd64d0659babbb69dcbb356469ad05cd6542",
-    "package-lock.json": "sha256:a5c36ede978ce19dc43e88ca4a76f7c9b6243f31de3c2faf4955d08ea1220ab4"
+    "apps/web/package.json": "sha256:901e56f62179dd3968bf3defe35de7be48c98e7f0d2fa85209d9e7ac90353743",
+    "package-lock.json": "sha256:7827ffde97ce554990d2e6fec9bdb5a4c246d30a0c7bf26ca7e3daf63b6df497"
   },
   "schemaVersion": 1,
   "status": "SOURCE_MANIFESTS_VERIFIED",
@@ -124,7 +124,7 @@
     "@uiw/react-codemirror": "^4.25.3",
     "axios": "^1.20.0",
     "echarts": "^6.1.0",
-    "i18next": "^26.2.0",
+    "i18next": "^26.7.2",
     "motion": "^12.34.3",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
