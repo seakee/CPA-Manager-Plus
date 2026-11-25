@@ -1047,6 +1047,80 @@ func TestAcquireArtifactPreCommitFailureStageCleanupOwnership(t *testing.T) {
 	runtimeupdate.SetAcquireStageHooksForTesting(nil, nil)
 }
 
+func TestUnfinishedAcquisitionCanReplaceOfflineBaselineAfterImageChange(t *testing.T) {
+	for _, name := range []string{"offline baseline", "legacy offline baseline", "running child", "staged destination", "user update"} {
+		t.Run(name, func(t *testing.T) {
+			env := newSlimAcquireTestEnv(t)
+			first, err := env.executor.UploadArtifact(t.Context(), bytes.NewReader(env.archive), int64(len(env.archive)))
+			if err != nil || first.Phase != ArtifactPhaseSucceeded {
+				t.Fatalf("first acquire = %+v, %v", first, err)
+			}
+			origin, err := env.selectionStore.LoadProvenance()
+			if err != nil || origin.Origin != selection.OriginBaselineAcquire || origin.ArtifactID != env.pinnedID ||
+				origin.OperationID != first.ID || origin.BaselineVersionAtCommit != env.pinnedVersion {
+				t.Fatalf("first provenance = %+v, %v", origin, err)
+			}
+			switch name {
+			case "legacy offline baseline":
+				if err := os.Remove(filepath.Join(env.selectionRoot, "selection-provenance.json")); err != nil {
+					t.Fatal(err)
+				}
+			case "running child":
+				env.process.state = cpaprocess.Observation{State: cpaprocess.StateRunning, InstanceID: 1}
+			case "staged destination":
+				if err := env.executor.EnableDestination(filepath.Join(env.supervisorRoot, "destination"), filepath.Join(env.root, "auth"), "127.0.0.1:8317", nil); err != nil {
+					t.Fatal(err)
+				}
+				_, err := env.executor.StageDestination(t.Context(), DestinationRequest{
+					OperationID: "fresh:destination", ExpectedRuntimeIdentity: "runtime-s2a", ExpectedRuntimeGeneration: 1,
+					ExpectedActiveArtifactID: env.pinnedID, SourceIdentity: "managed:" + string(env.pinnedID),
+					SourceClass: SourceClassNewManaged, APIKeys: []string{initialClientKeyFixture()},
+					ManagementKey: string(bytes.Repeat([]byte("c"), 64)),
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "user update":
+				origin.Origin = selection.OriginUserUpdate
+				if err := env.selectionStore.WriteProvenance(origin); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			const version = "8.0.56"
+			binary := []byte("#!/bin/sh\necho next-image-baseline\n")
+			digest := fmt.Sprintf("sha256:%x", sha256.Sum256(binary))
+			manifest := fmt.Sprintf(`{"schemaVersion":1,"engine":"cpa","version":%q,"artifactId":%q}`, version, digest)
+			if err := os.WriteFile(env.manifestPath, []byte(manifest), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := env.executor.EnableArtifactAcquisition(env.manifestPath, WithAcquisitionPlatform("linux", "amd64")); err != nil {
+				t.Fatal(err)
+			}
+			archive := buildAcquireTarGzip(t,
+				acquireArchiveEntry{name: "cli-proxy-api", typeflag: tar.TypeReg, data: binary},
+				acquireArchiveEntry{name: "LICENSE", typeflag: tar.TypeReg, data: []byte("MIT License\n")},
+			)
+			next, err := env.executor.UploadArtifact(t.Context(), bytes.NewReader(archive), int64(len(archive)))
+			selected, loadErr := env.selectionStore.Load(selection.Bundled(env.missingBundled, env.manifestPath))
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			if name == "offline baseline" || name == "legacy offline baseline" {
+				if err != nil || next.Phase != ArtifactPhaseSucceeded || selected.ArtifactID != artifact.ID(digest) {
+					t.Fatalf("replacement = %+v, %v; selection = %+v", next, err, selected)
+				}
+				got, err := env.selectionStore.LoadProvenance()
+				if err != nil || got.ArtifactID != selected.ArtifactID || got.Origin != selection.OriginBaselineAcquire || got.BaselineVersionAtCommit != version || got.OperationID != next.ID {
+					t.Fatalf("new provenance = %+v, %v", got, err)
+				}
+			} else if ArtifactErrorCode(err) != ArtifactCodeArtifactConflict || selected.ArtifactID != env.pinnedID {
+				t.Fatalf("protected selection = %+v, %v", selected, err)
+			}
+		})
+	}
+}
+
 func TestUploadArtifactAdmissionAndAlwaysVerifiesUploadedBytes(t *testing.T) {
 	// 1. Full image (bundled pinned binary active) + valid upload -> 409 artifact_already_active without reading body, origin stays bundled, no selection.json.
 	fullEnv := newSlimAcquireTestEnv(t)
@@ -1437,4 +1511,280 @@ func TestUploadArtifactNilContextAndInvalidEmptyInputsPreserveCurrentOp(t *testi
 	if err != nil || op.Phase != ArtifactPhaseSucceeded {
 		t.Fatalf("UploadArtifact(nil ctx) = %+v, err=%v; want succeeded", op, err)
 	}
+}
+
+func TestArtifactStatusUnlocksReplaceableOfflineBaselineAfterPinnedChange(t *testing.T) {
+	const nextVersion = "8.0.56"
+	nextBinary := []byte("#!/bin/sh\necho next-slim-baseline-8.0.56\n")
+	nextDigest := artifact.ID(fmt.Sprintf("sha256:%x", sha256.Sum256(nextBinary)))
+	nextArchive := buildAcquireTarGzip(t,
+		acquireArchiveEntry{name: "cli-proxy-api", typeflag: tar.TypeReg, data: nextBinary},
+		acquireArchiveEntry{name: "LICENSE", typeflag: tar.TypeReg, data: []byte("MIT License\n")},
+	)
+	upgradePinnedManifest := func(t *testing.T, env *acquireTestEnv, extraOpts ...AcquisitionOption) {
+		t.Helper()
+		manifest := fmt.Sprintf(`{"schemaVersion":1,"engine":"cpa","version":%q,"artifactId":%q}`, nextVersion, nextDigest)
+		if err := os.WriteFile(env.manifestPath, []byte(manifest), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		opts := append([]AcquisitionOption{WithAcquisitionPlatform("linux", "amd64")}, extraOpts...)
+		if err := env.executor.EnableArtifactAcquisition(env.manifestPath, opts...); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("offline baseline unlocked then re-acquired via AcquireArtifact", func(t *testing.T) {
+		env := newSlimAcquireTestEnv(t)
+		first, err := env.executor.UploadArtifact(t.Context(), bytes.NewReader(env.archive), int64(len(env.archive)))
+		if err != nil || first.Phase != ArtifactPhaseSucceeded {
+			t.Fatalf("initial UploadArtifact = %+v, %v", first, err)
+		}
+
+		upgradePinnedManifest(t, env, WithOfficialAcquisitionSource(&stubAcquireSource{
+			downloadFn: func(_ context.Context, version string, dst io.Writer, _ runtimeupdate.ProgressFunc) error {
+				if version != nextVersion {
+					return fmt.Errorf("unexpected version %q", version)
+				}
+				_, writeErr := dst.Write(nextArchive)
+				return writeErr
+			},
+		}))
+
+		status, err := env.executor.ArtifactStatus()
+		if err != nil {
+			t.Fatalf("ArtifactStatus() after slim upgrade error = %v", err)
+		}
+		if status.Active != nil || !status.Required || status.Pinned.Version != nextVersion || status.Pinned.ArtifactID != nextDigest {
+			t.Fatalf("ArtifactStatus() after slim upgrade = %+v; want Active=nil Required=true Pinned=%s/%s", status, nextVersion, nextDigest)
+		}
+
+		op, started, err := env.executor.AcquireArtifact(t.Context(), ArtifactAcquireRequest{Source: ArtifactSourceGitHub})
+		if err != nil || !started || op.Source != ArtifactSourceGitHub {
+			t.Fatalf("AcquireArtifact(github) = %+v, started=%v, err=%v", op, started, err)
+		}
+		settled := awaitAcquisitionTerminal(t, env.executor)
+		if settled.Required || settled.Active == nil || settled.Active.ArtifactID != nextDigest ||
+			settled.Active.Origin != ArtifactOriginAcquired || settled.Operation == nil || settled.Operation.Phase != ArtifactPhaseSucceeded {
+			t.Fatalf("ArtifactStatus() after replacement AcquireArtifact = %+v; want Active=%s Required=false", settled, nextDigest)
+		}
+	})
+
+	t.Run("legacy offline baseline without provenance sidecar unlocked", func(t *testing.T) {
+		env := newSlimAcquireTestEnv(t)
+		if _, err := env.executor.UploadArtifact(t.Context(), bytes.NewReader(env.archive), int64(len(env.archive))); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(filepath.Join(env.selectionRoot, "selection-provenance.json")); err != nil {
+			t.Fatal(err)
+		}
+		upgradePinnedManifest(t, env)
+
+		status, err := env.executor.ArtifactStatus()
+		if err != nil || status.Active != nil || !status.Required {
+			t.Fatalf("ArtifactStatus() for legacy offline baseline = %+v, %v; want Active=nil Required=true", status, err)
+		}
+	})
+
+	t.Run("legacy offline baseline with execution group leaves 0755 stage permissions untouched", func(t *testing.T) {
+		gid := uint32(os.Getgid())
+		if gid == 0 {
+			if os.Geteuid() != 0 {
+				t.Skip("current process has GID 0 without root privileges")
+			}
+			gid = 1
+		}
+		env := newSlimAcquireTestEnv(t)
+		stageStore, err := runtimeupdate.NewStoreWithExecutionGroup(env.stageRoot, gid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		selectionStore, err := selection.NewStore(env.selectionRoot, stageStore)
+		if err != nil {
+			t.Fatal(err)
+		}
+		selected, err := selectionStore.Load(selection.Bundled(env.missingBundled, env.manifestPath))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := env.executor.EnableActivateUpdate(selected, env.observer, selectionStore, readinessFunc(func(context.Context) readiness.State {
+			return readiness.Ready
+		})); err != nil {
+			t.Fatal(err)
+		}
+		env.stageStore = stageStore
+		env.selectionStore = selectionStore
+
+		stageDir := filepath.Join(env.stageRoot, env.pinnedVersion)
+		t.Cleanup(func() { _ = os.Chmod(stageDir, 0o700) })
+		if _, err := env.executor.UploadArtifact(t.Context(), bytes.NewReader(env.archive), int64(len(env.archive))); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(stageDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(filepath.Join(env.selectionRoot, "selection-provenance.json")); err != nil {
+			t.Fatal(err)
+		}
+		beforeInfo, err := os.Lstat(stageDir)
+		if err != nil || beforeInfo.Mode().Perm() != 0o755 {
+			t.Fatalf("legacy stage mode before ArtifactStatus() = %v, %v; want 0755", beforeInfo, err)
+		}
+		upgradePinnedManifest(t, env)
+
+		status, err := env.executor.ArtifactStatus()
+		if err != nil || status.Active != nil || !status.Required {
+			t.Fatalf("ArtifactStatus() for 0755 legacy offline baseline = %+v, %v; want Active=nil Required=true", status, err)
+		}
+		afterInfo, err := os.Lstat(stageDir)
+		if err != nil || afterInfo.Mode().Perm() != 0o755 {
+			t.Fatalf("legacy stage mode after ArtifactStatus() = %o, %v; want 0755 untouched", afterInfo.Mode().Perm(), err)
+		}
+		if !stageStore.HasAcquiredStageReadOnly(env.pinnedVersion, env.pinnedID) {
+			t.Fatal("HasAcquiredStageReadOnly() = false for valid legacy stage")
+		}
+		if stageStore.HasAcquiredStageReadOnly(env.pinnedVersion, nextDigest) ||
+			stageStore.HasAcquiredStageReadOnly("9.9.9", env.pinnedID) ||
+			(*runtimeupdate.Store)(nil).HasAcquiredStageReadOnly(env.pinnedVersion, env.pinnedID) {
+			t.Fatal("HasAcquiredStageReadOnly() = true for mismatched/missing/nil inputs")
+		}
+		afterReadOnlyInfo, err := os.Lstat(stageDir)
+		if err != nil || afterReadOnlyInfo.Mode().Perm() != 0o755 {
+			t.Fatalf("legacy stage mode after HasAcquiredStageReadOnly() = %o, %v; want 0755 untouched", afterReadOnlyInfo.Mode().Perm(), err)
+		}
+	})
+
+	t.Run("user_update origin preserves conflict", func(t *testing.T) {
+		env := newSlimAcquireTestEnv(t)
+		first, err := env.executor.UploadArtifact(t.Context(), bytes.NewReader(env.archive), int64(len(env.archive)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := env.selectionStore.WriteProvenance(selection.Provenance{
+			SchemaVersion:           selection.SchemaVersion,
+			ArtifactID:              env.pinnedID,
+			Origin:                  selection.OriginUserUpdate,
+			BaselineVersionAtCommit: env.pinnedVersion,
+			OperationID:             first.ID,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		upgradePinnedManifest(t, env)
+
+		status, err := env.executor.ArtifactStatus()
+		if err != nil || status.Active == nil || status.Active.ArtifactID != env.pinnedID ||
+			status.Active.Origin != ArtifactOriginAcquired || status.Required {
+			t.Fatalf("ArtifactStatus() for user_update = %+v, %v; want Active=%s Required=false", status, err, env.pinnedID)
+		}
+		if _, _, err := env.executor.AcquireArtifact(t.Context(), ArtifactAcquireRequest{Source: ArtifactSourceGitHub}); ArtifactErrorCode(err) != ArtifactCodeArtifactConflict {
+			t.Fatalf("AcquireArtifact() for user_update = %v, want %q", err, ArtifactCodeArtifactConflict)
+		}
+	})
+
+	t.Run("staged destination preserves conflict", func(t *testing.T) {
+		env := newSlimAcquireTestEnv(t)
+		if _, err := env.executor.UploadArtifact(t.Context(), bytes.NewReader(env.archive), int64(len(env.archive))); err != nil {
+			t.Fatal(err)
+		}
+		if err := env.executor.EnableDestination(filepath.Join(env.supervisorRoot, "destination"), filepath.Join(env.root, "auth"), "127.0.0.1:8317", nil); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := env.executor.StageDestination(t.Context(), DestinationRequest{
+			OperationID:               "fresh:destination",
+			ExpectedRuntimeIdentity:   "runtime-s2a",
+			ExpectedRuntimeGeneration: 1,
+			ExpectedActiveArtifactID:  env.pinnedID,
+			SourceIdentity:            "managed:" + string(env.pinnedID),
+			SourceClass:               SourceClassNewManaged,
+			APIKeys:                   []string{initialClientKeyFixture()},
+			ManagementKey:             string(bytes.Repeat([]byte("c"), 64)),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		upgradePinnedManifest(t, env)
+
+		status, err := env.executor.ArtifactStatus()
+		if err != nil || status.Active == nil || status.Active.ArtifactID != env.pinnedID || status.Required {
+			t.Fatalf("ArtifactStatus() with staged destination = %+v, %v; want Active=%s Required=false", status, err, env.pinnedID)
+		}
+	})
+
+	t.Run("running CPA process preserves conflict", func(t *testing.T) {
+		env := newSlimAcquireTestEnv(t)
+		if _, err := env.executor.UploadArtifact(t.Context(), bytes.NewReader(env.archive), int64(len(env.archive))); err != nil {
+			t.Fatal(err)
+		}
+		env.process.state = cpaprocess.Observation{State: cpaprocess.StateRunning, InstanceID: 1, PID: 4242}
+		upgradePinnedManifest(t, env)
+
+		status, err := env.executor.ArtifactStatus()
+		if err != nil || status.Active == nil || status.Active.ArtifactID != env.pinnedID || status.Required {
+			t.Fatalf("ArtifactStatus() with running CPA = %+v, %v; want Active=%s Required=false", status, err, env.pinnedID)
+		}
+	})
+
+	t.Run("corrupt selection-provenance.json preserves conflict", func(t *testing.T) {
+		env := newSlimAcquireTestEnv(t)
+		if _, err := env.executor.UploadArtifact(t.Context(), bytes.NewReader(env.archive), int64(len(env.archive))); err != nil {
+			t.Fatal(err)
+		}
+		provPath := filepath.Join(env.selectionRoot, "selection-provenance.json")
+		if err := os.WriteFile(provPath, []byte("{corrupt-provenance\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		upgradePinnedManifest(t, env)
+
+		status, err := env.executor.ArtifactStatus()
+		if err != nil || status.Active == nil || status.Active.ArtifactID != env.pinnedID || status.Required {
+			t.Fatalf("ArtifactStatus() with corrupt provenance = %+v, %v; want Active=%s Required=false", status, err, env.pinnedID)
+		}
+		if _, _, err := env.executor.AcquireArtifact(t.Context(), ArtifactAcquireRequest{Source: ArtifactSourceGitHub}); ArtifactErrorCode(err) != ArtifactCodeArtifactConflict {
+			t.Fatalf("AcquireArtifact() with corrupt provenance = %v, want %q", err, ArtifactCodeArtifactConflict)
+		}
+	})
+
+	t.Run("in-flight update prepare operation preserves conflict until settled", func(t *testing.T) {
+		env := newSlimAcquireTestEnv(t)
+		if _, err := env.executor.UploadArtifact(t.Context(), bytes.NewReader(env.archive), int64(len(env.archive))); err != nil {
+			t.Fatal(err)
+		}
+		upgradePinnedManifest(t, env)
+
+		env.executor.setPrepareProgress("prepare-in-flight", PrepareProgress{Phase: "downloading"})
+		statusDuringPrepare, err := env.executor.ArtifactStatus()
+		if err != nil || statusDuringPrepare.Active == nil || statusDuringPrepare.Active.ArtifactID != env.pinnedID || statusDuringPrepare.Required {
+			t.Fatalf("ArtifactStatus() during in-flight prepare = %+v, %v; want Active=%s Required=false", statusDuringPrepare, err, env.pinnedID)
+		}
+		if _, _, err := env.executor.AcquireArtifact(t.Context(), ArtifactAcquireRequest{Source: ArtifactSourceGitHub}); ArtifactErrorCode(err) != ArtifactCodeArtifactConflict {
+			t.Fatalf("AcquireArtifact() during in-flight prepare = %v, want %q", err, ArtifactCodeArtifactConflict)
+		}
+
+		env.executor.clearPrepareProgress("prepare-in-flight")
+		env.executor.prepareMu.Lock()
+		statusDuringPrepareGate, err := env.executor.ArtifactStatus()
+		env.executor.prepareMu.Unlock()
+		if err != nil || statusDuringPrepareGate.Active == nil || statusDuringPrepareGate.Active.ArtifactID != env.pinnedID || statusDuringPrepareGate.Required {
+			t.Fatalf("ArtifactStatus() while prepareMu held = %+v, %v; want Active=%s Required=false", statusDuringPrepareGate, err, env.pinnedID)
+		}
+
+		statusAfterPrepare, err := env.executor.ArtifactStatus()
+		if err != nil || statusAfterPrepare.Active != nil || !statusAfterPrepare.Required {
+			t.Fatalf("ArtifactStatus() after prepare settled = %+v, %v; want Active=nil Required=true", statusAfterPrepare, err)
+		}
+	})
+
+	t.Run("ambiguous active selection preserves conflict", func(t *testing.T) {
+		env := newSlimAcquireTestEnv(t)
+		if _, err := env.executor.UploadArtifact(t.Context(), bytes.NewReader(env.archive), int64(len(env.archive))); err != nil {
+			t.Fatal(err)
+		}
+		env.executor.mu.Lock()
+		env.executor.activeSelectionAmbiguous = true
+		env.executor.mu.Unlock()
+		upgradePinnedManifest(t, env)
+
+		status, err := env.executor.ArtifactStatus()
+		if err != nil || status.Active == nil || status.Active.ArtifactID != env.pinnedID || status.Required {
+			t.Fatalf("ArtifactStatus() with ambiguous selection = %+v, %v; want Active=%s Required=false", status, err, env.pinnedID)
+		}
+	})
 }

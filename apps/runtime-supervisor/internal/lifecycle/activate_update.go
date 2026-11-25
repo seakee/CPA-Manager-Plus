@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/artifact"
@@ -46,6 +48,34 @@ type activeSelectionStore interface {
 	ResolveFinalized(string) (selection.Descriptor, error)
 	Revalidate(selection.Descriptor) (selection.Descriptor, error)
 	Commit(selection.Descriptor) error
+}
+
+type activationIntentStore interface {
+	LoadActivationIntent(runtimeIdentity, operationID string) (selection.ActivationIntent, error)
+	WriteActivationIntent(selection.ActivationIntent) error
+	LoadPersistedSelection() (selection.Descriptor, bool, error)
+}
+
+var (
+	activateConfiguredExecutors sync.Map // map[*Executor]struct{}
+	executorIntentStores        sync.Map // map[*Executor]activationIntentStore
+)
+
+func writeSelectionProvenance(store activeSelectionStore, artifactID artifact.ID, origin, baselineVersion, operationID string) {
+	writer, ok := store.(interface {
+		WriteProvenance(selection.Provenance) error
+	})
+	if !ok {
+		return
+	}
+	if err := writer.WriteProvenance(selection.Provenance{
+		SchemaVersion: selection.SchemaVersion, ArtifactID: artifactID,
+		Origin: origin, BaselineVersionAtCommit: baselineVersion, OperationID: operationID,
+	}); err != nil {
+		// The selection is already authoritative. A failed advisory write must
+		// not roll back a committed selection or the associated process.
+		log.Printf("record CPA selection provenance for operation %s: %v", operationID, err)
+	}
 }
 
 type activationReadiness interface {
@@ -103,6 +133,12 @@ func (e *Executor) EnableActivateUpdate(
 	e.artifact = observer
 	e.selections = selections
 	e.readiness = ready
+	activateConfiguredExecutors.Store(e, struct{}{})
+	if intentStore, ok := selections.(activationIntentStore); ok && !isNilActivationIntentStore(intentStore) {
+		executorIntentStores.Store(e, intentStore)
+	} else {
+		executorIntentStores.Delete(e)
+	}
 	if _, ok := e.journal.(*activationDestinationJournal); !ok {
 		e.journal = &activationDestinationJournal{inner: e.journal, executor: e}
 	}
@@ -158,6 +194,10 @@ func (e *Executor) ActivateUpdate(ctx context.Context, request ActivateUpdateReq
 	if observer == nil || selections == nil || ready == nil {
 		return journal.Operation{}, ErrUnsupportedActivation
 	}
+	intentStore, ok := selections.(activationIntentStore)
+	if !ok {
+		return journal.Operation{}, ErrUnsupportedActivation
+	}
 	intent := journal.Intent{
 		OperationID:               request.OperationID,
 		OperationType:             UpdateOperationActivate,
@@ -170,6 +210,11 @@ func (e *Executor) ActivateUpdate(ctx context.Context, request ActivateUpdateReq
 		return journal.Operation{}, submissionError(err)
 	}
 	if found {
+		if operation.State == journal.StateSucceeded {
+			if err := e.verifyAppliedActivation(request, intentStore, observer); err != nil {
+				return journal.Operation{}, err
+			}
+		}
 		return operation, nil
 	}
 	if e.activeSelectionAmbiguous {
@@ -196,6 +241,11 @@ func (e *Executor) ActivateUpdate(ctx context.Context, request ActivateUpdateReq
 		return journal.Operation{}, journal.ErrOperationStateConflict
 	}
 
+	activationIntent := selection.ActivationIntent{
+		SchemaVersion: selection.SchemaVersion, OperationID: request.OperationID,
+		RuntimeIdentity: e.authority.RuntimeIdentity, TargetVersion: request.TargetVersion,
+		TargetArtifactID: candidate.ArtifactID, PreviousArtifactID: prior.ArtifactID,
+	}
 	oldTarget, err := e.process.PrepareStop()
 	if err != nil {
 		if errors.Is(err, cpaprocess.ErrStateConflict) {
@@ -206,6 +256,9 @@ func (e *Executor) ActivateUpdate(ctx context.Context, request ActivateUpdateReq
 	defer oldTarget.Release()
 	oldInstance := e.process.Observe().InstanceID
 
+	if err := intentStore.WriteActivationIntent(activationIntent); err != nil {
+		return journal.Operation{}, fmt.Errorf("%w: record activation target: %w", ErrPersistenceUnavailable, err)
+	}
 	operation, created, err := e.journal.Begin(preconditionCtx, e.authority, intent)
 	if err != nil {
 		e.failRecoveryForAmbiguousBegin(err)
@@ -234,6 +287,9 @@ func (e *Executor) ActivateUpdate(ctx context.Context, request ActivateUpdateReq
 	oldTarget.Release()
 
 	candidate, err = selections.Revalidate(candidate)
+	if err == nil && candidate.ArtifactID != activationIntent.TargetArtifactID {
+		err = ErrActiveArtifactMismatch
+	}
 	if err != nil {
 		return e.rollbackActivation(operation, intent.OperationID, prior, oldInstance, 0,
 			"activation_target_changed", err, operationDeadline)
@@ -270,6 +326,9 @@ func (e *Executor) ActivateUpdate(ctx context.Context, request ActivateUpdateReq
 		return e.completeManualIntervention(operation, intent.OperationID,
 			"active_selection_persistence_failed", err)
 	}
+	if version := e.activationBaselineVersion(prior); version != "" {
+		writeSelectionProvenance(selections, candidate.ArtifactID, selection.OriginUserUpdate, version, intent.OperationID)
+	}
 
 	// The durable selection commit is the point of no return. Every later
 	// ordinary lifecycle/recovery spawn consumes B, and no terminal evidence
@@ -283,6 +342,94 @@ func (e *Executor) ActivateUpdate(ctx context.Context, request ActivateUpdateReq
 	}
 	e.armFreshRecovery(started)
 	return result, nil
+}
+
+// A successful journal replay is not proof that the same digest is still
+// active. Verify the exact target recorded before this operation could run.
+func isNilActivationIntentStore(store activationIntentStore) bool {
+	if store == nil {
+		return true
+	}
+	v := reflect.ValueOf(store)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
+}
+
+func (e *Executor) isActivateUpdateConfigured() bool {
+	if e == nil {
+		return false
+	}
+	_, ok := activateConfiguredExecutors.Load(e)
+	return ok
+}
+
+func (e *Executor) resolveActivationIntentStore() (activationIntentStore, bool) {
+	if e == nil {
+		return nil, false
+	}
+	raw, ok := executorIntentStores.Load(e)
+	if !ok || raw == nil {
+		return nil, false
+	}
+	store, ok := raw.(activationIntentStore)
+	if !ok || isNilActivationIntentStore(store) {
+		return nil, false
+	}
+	return store, true
+}
+
+func (e *Executor) verifyAppliedActivation(request ActivateUpdateRequest, store activationIntentStore, observer activeArtifactRefresher) error {
+	if e.activeSelectionAmbiguous {
+		return journal.ErrOperationStateConflict
+	}
+	record, err := store.LoadActivationIntent(request.ExpectedRuntimeIdentity, request.OperationID)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return journal.ErrOperationStateConflict
+		}
+		return fmt.Errorf("%w: %w", ErrPersistenceUnavailable, err)
+	}
+	if record.OperationID != request.OperationID ||
+		record.RuntimeIdentity != e.authority.RuntimeIdentity || record.TargetVersion != request.TargetVersion ||
+		!record.TargetArtifactID.IsValid() || !record.PreviousArtifactID.IsValid() ||
+		record.TargetArtifactID == record.PreviousArtifactID ||
+		record.PreviousArtifactID != request.ExpectedActiveArtifactID {
+		return journal.ErrOperationStateConflict
+	}
+	persisted, hasPersisted, selErr := store.LoadPersistedSelection()
+	if selErr != nil {
+		return fmt.Errorf("%w: %w", ErrPersistenceUnavailable, selErr)
+	}
+	if !hasPersisted {
+		return journal.ErrOperationStateConflict
+	}
+	if persisted.Version == record.TargetVersion && persisted.ArtifactID != record.TargetArtifactID {
+		return journal.ErrOperationStateConflict
+	}
+	selected := e.currentDescriptorLocked()
+	if !selected.IsFinalizedStage() || selected.Version != record.TargetVersion || selected.ArtifactID != record.TargetArtifactID {
+		return ErrActiveArtifactMismatch
+	}
+	return refreshExpectedActiveArtifact(observer, selected, record.TargetArtifactID)
+}
+
+func (e *Executor) activationBaselineVersion(prior selection.Descriptor) string {
+	manifest := prior.MetadataPath
+	if state, err := e.acquisitionState(); err == nil {
+		manifest = state.manifestPath // Immutable after acquisition configuration.
+	} else if prior.IsFinalizedStage() {
+		return ""
+	}
+	pinned, err := loadPinnedArtifactManifest(manifest)
+	if err != nil {
+		log.Printf("read CPA baseline version for selection provenance: %v", err)
+		return ""
+	}
+	return pinned.Version
 }
 
 func mapTargetStageError(err error) error {

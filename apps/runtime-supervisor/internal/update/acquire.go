@@ -282,6 +282,22 @@ func (s *Store) HasAcquiredStage(version string, expectedArtifactID artifact.ID)
 	return err == nil && complete
 }
 
+// HasAcquiredStageReadOnly reports whether version has a finalized stage
+// matching expectedArtifactID that also includes a verified LICENSE file,
+// without mutating directory ownership, permissions, or fsync state.
+func (s *Store) HasAcquiredStageReadOnly(version string, expectedArtifactID artifact.ID) bool {
+	if s == nil || ValidateVersion(version) != nil || !expectedArtifactID.IsValid() {
+		return false
+	}
+	finalPath := filepath.Join(s.root, version)
+	metadata, found, err := s.verifyFinalizedPath(finalPath, version)
+	if err != nil || !found || metadata.ArtifactID != expectedArtifactID {
+		return false
+	}
+	info, err := os.Lstat(filepath.Join(finalPath, stagedLicenseName))
+	return err == nil && info.Mode().IsRegular()
+}
+
 func (s *Store) verifyAcquiredFinal(finalPath, version string, expectedArtifactID artifact.ID) (Metadata, bool, bool, error) {
 	metadata, found, err := s.verifyFinalizedPath(finalPath, version)
 	if !found && err == nil {

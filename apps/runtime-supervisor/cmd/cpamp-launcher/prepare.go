@@ -117,6 +117,7 @@ type PrepareConfig struct {
 	ReapChildren            func()
 	TokenFile               string
 	SeedConfigPath          string
+	SeedLineagePath         string
 	PasswdPath              string
 	GroupPath               string
 	ExplicitRuntimeToken    string
@@ -127,6 +128,7 @@ type PrepareConfig struct {
 	CPAExecutablePath       string
 	CPAArtifactManifestPath string
 	RuntimeCPAAddr          string
+	manifestFromEnv         bool
 }
 
 // PreparedRuntime holds the resolved paths, validated identities, and secret
@@ -187,6 +189,7 @@ func PrepareConfigFromEnv() PrepareConfig {
 		QuiesceTimeout:          CPAQuiescenceTimeout,
 		TokenFile:               envOrDefault("CPAMP_RUNTIME_TOKEN_FILE", DefaultRuntimeTokenFile),
 		SeedConfigPath:          DefaultSeedConfigPath,
+		SeedLineagePath:         DefaultSeedLineagePath,
 		PasswdPath:              DefaultPasswdPath,
 		GroupPath:               DefaultGroupPath,
 		ExplicitRuntimeToken:    os.Getenv("CPAMP_RUNTIME_TOKEN"),
@@ -197,6 +200,7 @@ func PrepareConfigFromEnv() PrepareConfig {
 		CPAExecutablePath:       envOrDefault("CPAMP_CPA_EXECUTABLE", DefaultCPAExecutablePath),
 		CPAArtifactManifestPath: envOrDefault("CPAMP_CPA_ARTIFACT_MANIFEST", DefaultCPAArtifactManifestPath),
 		RuntimeCPAAddr:          envOrDefault("CPAMP_RUNTIME_CPA_ADDR", DefaultRuntimeCPAAddr),
+		manifestFromEnv:         os.Getenv("CPAMP_CPA_ARTIFACT_MANIFEST") != "",
 	}
 }
 
@@ -264,7 +268,7 @@ func prepareContext(ctx context.Context, cfg PrepareConfig, sys System) (*Prepar
 	if err != nil {
 		return nil, fmt.Errorf("failed to read seed configuration %s: %w", cfg.SeedConfigPath, err)
 	}
-	enforceV8, err := shouldEnforceV8Bootstrap(DefaultCPAArtifactManifestPath, sys)
+	enforceV8, err := shouldEnforceV8Bootstrap(resolveBootstrapManifestPath(cfg, layout), sys)
 	if err != nil {
 		return nil, err
 	}
@@ -272,7 +276,7 @@ func prepareContext(ctx context.Context, cfg PrepareConfig, sys System) (*Prepar
 	bootstrapState := v8BootstrapReady
 	if enforceV8 {
 		bootstrapIdentity = computeBootstrapIdentity(seedBytes)
-		bootstrapState, err = checkV8Bootstrap(layout, seedBytes, bootstrapIdentity, sys)
+		bootstrapState, err = checkV8Bootstrap(layout, bootstrapIdentity, cfg.SeedLineagePath, sys)
 		if err != nil {
 			return nil, err
 		}
@@ -330,16 +334,21 @@ func prepareContext(ctx context.Context, cfg PrepareConfig, sys System) (*Prepar
 		return nil, err
 	}
 
-	if err := ensureGatewayConfig(layout.GatewayConfigPath, seedBytes, sys); err != nil {
+	if err := ensureGatewayConfig(layout.GatewayConfigPath, seedBytes, cpaUID, cpaGID, sys); err != nil {
 		return nil, err
 	}
 
 	if bootstrapState == v8BootstrapInitialize {
+		if err := sys.Chown(layout.GatewayDir, cpaUID, cpaGID); err != nil {
+			return nil, fmt.Errorf("failed to chown gateway directory %s: %w", layout.GatewayDir, err)
+		}
+		if err := sys.Chmod(layout.GatewayDir, GatewayDirMode); err != nil {
+			return nil, fmt.Errorf("failed to chmod gateway directory %s: %w", layout.GatewayDir, err)
+		}
 		if err := initV8Bootstrap(layout, bootstrapIdentity, sys); err != nil {
 			return nil, err
 		}
 	}
-
 	if err := repairGatewayTree(ctx, layout, cpaUID, cpaGID, sys); err != nil {
 		return nil, err
 	}
@@ -397,7 +406,8 @@ func applyPrepareDefaults(cfg PrepareConfig) PrepareConfig {
 	if cfg.TokenFile == "" {
 		cfg.TokenFile = filepath.Join(cfg.DataDir, "runtime-secret", "token")
 	}
-	if cfg.SeedConfigPath == "" {
+	cfg.SeedLineagePath = ResolveSeedLineagePath(cfg.SeedConfigPath, cfg.SeedLineagePath)
+	if strings.TrimSpace(cfg.SeedConfigPath) == "" {
 		cfg.SeedConfigPath = DefaultSeedConfigPath
 	}
 	if cfg.PasswdPath == "" {
@@ -421,7 +431,7 @@ func applyPrepareDefaults(cfg PrepareConfig) PrepareConfig {
 	if cfg.CPAExecutablePath == "" {
 		cfg.CPAExecutablePath = DefaultCPAExecutablePath
 	}
-	if cfg.CPAArtifactManifestPath == "" {
+	if strings.TrimSpace(cfg.CPAArtifactManifestPath) == "" {
 		cfg.CPAArtifactManifestPath = DefaultCPAArtifactManifestPath
 	}
 	if cfg.RuntimeCPAAddr == "" {
@@ -626,9 +636,128 @@ const (
 	v8BootstrapInitialize
 )
 
+const (
+	maxSeedLineageBytes     = 64 << 10
+	maxBootstrapConfigBytes = 64 << 10
+)
+
+func isPathWithin(targetPath, rootPath string) bool {
+	cleanTarget := filepath.Clean(strings.TrimSpace(targetPath))
+	cleanRoot := filepath.Clean(strings.TrimSpace(rootPath))
+	if cleanTarget == "" || cleanRoot == "" || cleanRoot == "." {
+		return false
+	}
+	if cleanTarget == cleanRoot {
+		return true
+	}
+	if cleanRoot == string(filepath.Separator) {
+		return strings.HasPrefix(cleanTarget, string(filepath.Separator))
+	}
+	return strings.HasPrefix(cleanTarget, cleanRoot+string(filepath.Separator))
+}
+
+func resolveBootstrapManifestPath(cfg PrepareConfig, layout RuntimeLayout) string {
+	manifestPath := strings.TrimSpace(cfg.CPAArtifactManifestPath)
+	if manifestPath == "" || cfg.manifestFromEnv {
+		return DefaultCPAArtifactManifestPath
+	}
+	if isPathWithin(manifestPath, layout.DataDir) ||
+		isPathWithin(manifestPath, layout.RuntimeRoot) ||
+		isPathWithin(manifestPath, DedicatedRuntimeMountPoint) ||
+		isPathWithin(manifestPath, layout.TokenDir) {
+		return DefaultCPAArtifactManifestPath
+	}
+	return manifestPath
+}
+
+func readTrustedSeedLineage(seedLineagePath string, sys System) ([]byte, bool, error) {
+	if _, isOSSys := sys.(osSystem); isOSSys {
+		fd, err := unix.Openat(unix.AT_FDCWD, seedLineagePath, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ENOENT) {
+				return nil, false, nil
+			}
+			return nil, false, v8Refuse("invalid or untrusted seed lineage")
+		}
+		var st unix.Stat_t
+		if err := unix.Fstat(fd, &st); err != nil {
+			_ = unix.Close(fd)
+			return nil, false, v8Refuse("invalid or untrusted seed lineage")
+		}
+		if (st.Mode&unix.S_IFMT) != unix.S_IFREG ||
+			(st.Mode&(unix.S_ISUID|unix.S_ISGID|unix.S_ISVTX)) != 0 ||
+			int(st.Uid) != RootUID || int(st.Gid) != RootGID ||
+			(st.Mode&0o022) != 0 || st.Size <= 0 || st.Size > maxSeedLineageBytes {
+			_ = unix.Close(fd)
+			return nil, false, v8Refuse("invalid or untrusted seed lineage")
+		}
+		f := os.NewFile(uintptr(fd), seedLineagePath)
+		if f == nil {
+			_ = unix.Close(fd)
+			return nil, false, v8Refuse("invalid or untrusted seed lineage")
+		}
+		data, readErr := io.ReadAll(io.LimitReader(f, maxSeedLineageBytes+1))
+		closeErr := f.Close()
+		if readErr != nil || closeErr != nil || len(data) == 0 || len(data) > maxSeedLineageBytes {
+			return nil, false, v8Refuse("invalid or untrusted seed lineage")
+		}
+		return data, true, nil
+	}
+
+	info, err := sys.Lstat(seedLineagePath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, v8Refuse("invalid or untrusted seed lineage")
+	}
+	if info.Mode&fs.ModeSymlink != 0 || info.Mode.Type() != 0 || !info.Mode.IsRegular() ||
+		info.Mode&(fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky) != 0 ||
+		info.UnixPerm()&0o7022 != 0 ||
+		info.UID != RootUID || info.GID != RootGID ||
+		info.Size <= 0 || info.Size > maxSeedLineageBytes {
+		return nil, false, v8Refuse("invalid or untrusted seed lineage")
+	}
+	data, err := sys.ReadFile(seedLineagePath)
+	if err != nil || len(data) == 0 || len(data) > maxSeedLineageBytes {
+		return nil, false, v8Refuse("invalid or untrusted seed lineage")
+	}
+	return data, true, nil
+}
+
+// acceptsHistoricalBootstrap reads the append-only list shipped with the launcher,
+// failing closed when the lineage file is untrusted or malformed.
+func acceptsHistoricalBootstrap(identity, seedLineagePath string, sys System) (bool, error) {
+	if strings.TrimSpace(seedLineagePath) == "" {
+		seedLineagePath = DefaultSeedLineagePath
+	}
+	data, exists, err := readTrustedSeedLineage(seedLineagePath, sys)
+	if err != nil || !exists {
+		return false, err
+	}
+	var lineage struct {
+		SchemaVersion               int      `json:"schemaVersion"`
+		AcceptedBootstrapIdentities []string `json:"acceptedBootstrapIdentities"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&lineage) != nil || lineage.SchemaVersion != 1 ||
+		lineage.AcceptedBootstrapIdentities == nil ||
+		!errors.Is(decoder.Decode(new(any)), io.EOF) {
+		return false, v8Refuse("invalid or untrusted seed lineage")
+	}
+	for _, entry := range lineage.AcceptedBootstrapIdentities {
+		digest, ok := strings.CutPrefix(entry, BootstrapIdentityPrefix)
+		if !ok || !artifact.ID("sha256:"+digest).IsValid() {
+			return false, v8Refuse("invalid or untrusted seed lineage")
+		}
+	}
+	return slices.Contains(lineage.AcceptedBootstrapIdentities, identity), nil
+}
+
 // checkV8Bootstrap performs every v8 refusal check without mutating the volume,
 // so an untrusted volume is refused before any chown or write happens.
-func checkV8Bootstrap(layout RuntimeLayout, seedBytes []byte, identity string, sys System) (v8BootstrapState, error) {
+func checkV8Bootstrap(layout RuntimeLayout, identity, seedLineagePath string, sys System) (v8BootstrapState, error) {
 	rootStat, rootErr := sys.Lstat(layout.RuntimeRoot)
 	rootExists := rootErr == nil
 	if rootErr != nil && !errors.Is(rootErr, fs.ErrNotExist) {
@@ -650,10 +779,11 @@ func checkV8Bootstrap(layout RuntimeLayout, seedBytes []byte, identity string, s
 	}
 
 	if markerExists {
-		if markerStat.Mode&fs.ModeSymlink != 0 || !markerStat.Mode.IsRegular() {
+		if markerStat.Mode&fs.ModeSymlink != 0 || markerStat.Mode.Type() != 0 || !markerStat.Mode.IsRegular() {
 			return v8BootstrapReady, v8Refuse("invalid bootstrap identity")
 		}
-		if markerStat.UID != RootUID || markerStat.GID != RootGID || markerStat.UnixPerm() != BootstrapFileMode {
+		if markerStat.Mode&(fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky) != 0 ||
+			markerStat.UID != RootUID || markerStat.GID != RootGID || markerStat.UnixPerm() != BootstrapFileMode {
 			return v8BootstrapReady, v8Refuse("untrusted bootstrap identity")
 		}
 		markerBytes, err := sys.ReadFile(layout.BootstrapMarkerPath)
@@ -662,22 +792,34 @@ func checkV8Bootstrap(layout RuntimeLayout, seedBytes []byte, identity string, s
 		}
 		markerContent := strings.TrimRight(string(markerBytes), "\n")
 		if markerContent != identity {
-			return v8BootstrapReady, v8Refuse("different bootstrap identity")
+			accepted, lineageErr := acceptsHistoricalBootstrap(markerContent, seedLineagePath, sys)
+			if lineageErr != nil {
+				return v8BootstrapReady, lineageErr
+			}
+			if !accepted {
+				return v8BootstrapReady, v8Refuse("different bootstrap identity")
+			}
 		}
 
 		gwStat, gwErr := sys.Lstat(layout.GatewayDir)
-		if gwErr != nil || gwStat.Mode&fs.ModeSymlink != 0 || !gwStat.Mode.IsDir() {
+		if gwErr != nil || gwStat.Mode&fs.ModeSymlink != 0 || gwStat.Mode.Type() != fs.ModeDir || !gwStat.Mode.IsDir() {
 			return v8BootstrapReady, v8Refuse("invalid Gateway directory")
+		}
+		if gwStat.Mode&(fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky) != 0 ||
+			gwStat.UID != CPAUID || gwStat.GID != CPAGID || gwStat.UnixPerm() != GatewayDirMode {
+			return v8BootstrapReady, v8Refuse("untrusted Gateway directory ownership or permissions")
 		}
 
 		cfgStat, cfgErr := sys.Lstat(layout.GatewayConfigPath)
-		if cfgErr != nil || cfgStat.Mode&fs.ModeSymlink != 0 || !cfgStat.Mode.IsRegular() {
+		if cfgErr != nil || cfgStat.Mode&fs.ModeSymlink != 0 || cfgStat.Mode.Type() != 0 || !cfgStat.Mode.IsRegular() {
 			return v8BootstrapReady, v8Refuse("missing or invalid bootstrap config")
 		}
-
-		cfgBytes, err := sys.ReadFile(layout.GatewayConfigPath)
-		if err != nil || !bytes.Equal(seedBytes, cfgBytes) {
-			return v8BootstrapReady, v8Refuse("modified or incompatible bootstrap config")
+		if cfgStat.Mode&(fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky) != 0 ||
+			cfgStat.UID != CPAUID || cfgStat.GID != CPAGID || cfgStat.UnixPerm() != GatewayConfigMode {
+			return v8BootstrapReady, v8Refuse("untrusted bootstrap config ownership or permissions")
+		}
+		if cfgStat.Size <= 0 || cfgStat.Size > maxBootstrapConfigBytes {
+			return v8BootstrapReady, v8Refuse("invalid bootstrap config size")
 		}
 		return v8BootstrapReady, nil
 	}
@@ -809,7 +951,7 @@ func prepareRuntimeToken(tokenFile, explicitToken string, sys System) (string, e
 	return runtimeToken, nil
 }
 
-func ensureGatewayConfig(configPath string, seedBytes []byte, sys System) error {
+func ensureGatewayConfig(configPath string, seedBytes []byte, uid, gid int, sys System) error {
 	exists, err := checkGatewayConfigFile(configPath, sys)
 	if err != nil {
 		return err
@@ -823,6 +965,12 @@ func ensureGatewayConfig(configPath string, seedBytes []byte, sys System) error 
 	if writeErr := sys.WriteFile(tmpFile, seedBytes, GatewayConfigMode); writeErr != nil {
 		_ = sys.Remove(tmpFile)
 		return errors.New("failed to initialize Gateway configuration")
+	}
+	// Publish the config with its final owner before installing the marker.
+	// The marker and config must both survive cancellation during the walk.
+	if chownErr := sys.Chown(tmpFile, uid, gid); chownErr != nil {
+		_ = sys.Remove(tmpFile)
+		return errors.New("failed to set Gateway configuration ownership")
 	}
 	if chmodErr := sys.Chmod(tmpFile, GatewayConfigMode); chmodErr != nil {
 		_ = sys.Remove(tmpFile)

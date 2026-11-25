@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"crypto/sha256"
+	"fmt"
 
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/journal"
 	runtimeupdate "github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/update"
@@ -43,7 +44,7 @@ func (e *Executor) ObserveUpdateOperation(ctx context.Context, request ObserveUp
 	if err := request.Validate(); err != nil {
 		return journal.Operation{}, err
 	}
-	if e.closed.Load() {
+	if e == nil || e.closed.Load() {
 		return journal.Operation{}, ErrPersistenceUnavailable
 	}
 	operation, found, err := e.journal.Resolve(ctx, e.authority, journal.Intent{
@@ -58,6 +59,36 @@ func (e *Executor) ObserveUpdateOperation(ctx context.Context, request ObserveUp
 	}
 	if !found {
 		return journal.Operation{}, journal.ErrOperationNotFound
+	}
+	if request.OperationType == UpdateOperationActivate && operation.State == journal.StateSucceeded && e.isActivateUpdateConfigured() {
+		intentStore, ok := e.resolveActivationIntentStore()
+		if !ok {
+			return journal.Operation{}, fmt.Errorf("%w: activation intent store unavailable", ErrPersistenceUnavailable)
+		}
+		record, loadErr := intentStore.LoadActivationIntent(request.ExpectedRuntimeIdentity, request.OperationID)
+		if loadErr != nil {
+			return journal.Operation{}, fmt.Errorf("%w: %w", ErrPersistenceUnavailable, loadErr)
+		}
+		if record.OperationID != request.OperationID ||
+			record.RuntimeIdentity != request.ExpectedRuntimeIdentity ||
+			record.TargetVersion != request.TargetVersion ||
+			!record.TargetArtifactID.IsValid() ||
+			!record.PreviousArtifactID.IsValid() ||
+			record.TargetArtifactID == record.PreviousArtifactID {
+			return journal.Operation{}, fmt.Errorf("%w: activation intent mismatch", ErrPersistenceUnavailable)
+		}
+		if operation.RuntimeGeneration == e.authority.RuntimeGeneration {
+			sel, hasSel, selErr := intentStore.LoadPersistedSelection()
+			if selErr != nil {
+				return journal.Operation{}, fmt.Errorf("%w: %w", ErrPersistenceUnavailable, selErr)
+			}
+			if !hasSel {
+				return journal.Operation{}, fmt.Errorf("%w: active selection missing for succeeded activation", ErrPersistenceUnavailable)
+			}
+			if sel.Version == record.TargetVersion && sel.ArtifactID != record.TargetArtifactID {
+				return journal.Operation{}, fmt.Errorf("%w: active selection digest mismatches activation intent target", journal.ErrOperationStateConflict)
+			}
+		}
 	}
 	return operation, nil
 }

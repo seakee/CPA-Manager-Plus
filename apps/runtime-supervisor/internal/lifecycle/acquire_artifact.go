@@ -497,16 +497,24 @@ func (e *Executor) ArtifactStatus() (ArtifactStatusResponse, error) {
 	if err != nil {
 		return ArtifactStatusResponse{}, err
 	}
-	if _, _, _, storeErr := e.resolveAcquisitionStores(); storeErr != nil {
+	selections, stageStore, _, storeErr := e.resolveAcquisitionStores()
+	if storeErr != nil {
 		return ArtifactStatusResponse{}, storeErr
 	}
 
 	var active *ArtifactActiveStatus
 	e.mu.Lock()
 	observer := e.artifact
-	descriptor := e.active
-	e.mu.Unlock()
-	if observer != nil {
+	descriptor := e.currentDescriptorLocked()
+	ambiguous := e.activeSelectionAmbiguous
+	procState := e.process.Observe().State
+	processRunning := procState != cpaprocess.StateNotStarted && procState != cpaprocess.StateExited
+	replaceableBaseline := descriptor.IsFinalizedStage() &&
+		(descriptor.ArtifactID != pinned.ArtifactID || (descriptor.Version != "" && descriptor.Version != pinned.Version)) &&
+		!processRunning &&
+		!ambiguous &&
+		e.mayReplaceAcquiredBaselineLocked(descriptor, selections, stageStore)
+	if !replaceableBaseline && observer != nil {
 		if observed := observer.Observation(); observed != nil && observed.ArtifactID.IsValid() {
 			origin := ArtifactOriginBundled
 			if descriptor.IsFinalizedStage() {
@@ -518,6 +526,7 @@ func (e *Executor) ArtifactStatus() (ArtifactStatusResponse, error) {
 			}
 		}
 	}
+	e.mu.Unlock()
 	return ArtifactStatusResponse{
 		SchemaVersion: ArtifactSchemaVersion,
 		Pinned:        pinned,
@@ -899,6 +908,9 @@ func (e *Executor) evaluateAcquisitionAdmissionLocked(
 	processRunning := procState != cpaprocess.StateNotStarted && procState != cpaprocess.StateExited
 	if descriptor.IsFinalizedStage() {
 		if descriptor.ArtifactID != pinned.ArtifactID || (descriptor.Version != "" && descriptor.Version != pinned.Version) {
+			if !processRunning && e.mayReplaceAcquiredBaselineLocked(descriptor, selections, stageStore) {
+				return false, nil
+			}
 			return false, &ArtifactError{
 				Code: ArtifactCodeArtifactConflict,
 				Err:  runtimeupdate.ErrArtifactConflict,
@@ -992,6 +1004,48 @@ func (e *Executor) evaluateAcquisitionAdmissionLocked(
 	return true, nil
 }
 
+// A destination snapshot is already a durable commitment to the selected
+// executable, even if the Manager has not completed the wizard yet. Never
+// move that fence, or replace an artifact explicitly selected by user update.
+func (e *Executor) hasActiveUpdateOperationLocked() bool {
+	e.prepareProgressMu.Lock()
+	preparing := len(e.prepareProgress) > 0
+	e.prepareProgressMu.Unlock()
+	if preparing {
+		return true
+	}
+	if !e.prepareMu.TryLock() {
+		return true
+	}
+	e.prepareMu.Unlock()
+	return false
+}
+
+func (e *Executor) mayReplaceAcquiredBaselineLocked(descriptor selection.Descriptor, selections activeSelectionStore, stages *runtimeupdate.Store) bool {
+	if e.hasActiveUpdateOperationLocked() {
+		return false
+	}
+	if e.destination != nil {
+		staged, err := e.destination.load()
+		if err != nil || staged != nil {
+			return false
+		}
+	}
+	store, ok := selections.(interface {
+		LoadProvenance() (selection.Provenance, error)
+	})
+	if !ok {
+		return false
+	}
+	provenance, err := store.LoadProvenance()
+	if err == nil {
+		return provenance.ArtifactID == descriptor.ArtifactID && provenance.Origin == selection.OriginBaselineAcquire
+	}
+	// Pre-sidecar baselines have a verified acquisition stage including its
+	// LICENSE. A damaged or stale sidecar is not legacy evidence.
+	return errors.Is(err, os.ErrNotExist) && stages != nil && stages.HasAcquiredStageReadOnly(descriptor.Version, descriptor.ArtifactID)
+}
+
 func (e *Executor) executeArtifactAcquisition(
 	ctx context.Context,
 	state *artifactAcquisitionState,
@@ -1038,7 +1092,7 @@ func (e *Executor) executeArtifactAcquisition(
 	}
 
 	updatePhase(ArtifactPhaseInstalling)
-	if err := e.commitAcquiredStage(state, pinned, selections, stageStore, observer, stageRes.CreatedStage); err != nil {
+	if err := e.commitAcquiredStage(state, opID, pinned, selections, stageStore, observer, stageRes.CreatedStage); err != nil {
 		return failOperation(err)
 	}
 
@@ -1080,6 +1134,7 @@ func (e *Executor) preverifyDestinationSyncLocked(artifactID artifact.ID) error 
 
 func (e *Executor) commitAcquiredStage(
 	state *artifactAcquisitionState,
+	opID string,
 	pinned ArtifactPinnedStatus,
 	selections activeSelectionStore,
 	stageStore *runtimeupdate.Store,
@@ -1164,6 +1219,7 @@ func (e *Executor) commitAcquiredStage(
 		}
 		return cleanupCreatedStage(&ArtifactError{Code: ArtifactCodeInstallFailed, Err: err})
 	}
+	writeSelectionProvenance(selections, candidate.ArtifactID, selection.OriginBaselineAcquire, pinned.Version, opID)
 	e.active = candidate
 	e.executable = candidate.ExecutablePath
 
