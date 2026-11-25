@@ -31,6 +31,7 @@ export type WorkspaceListPanelProps<Mode extends string = 'table' | 'grid'> = {
   selectionActive?: boolean;
   headerActions?: ReactNode;
   viewMode?: WorkspaceListViewModeConfig<Mode>;
+  banner?: ReactNode;
   loading?: boolean;
   loadingFallback?: ReactNode;
   empty?: boolean;
@@ -62,6 +63,7 @@ export function WorkspaceListPanel<Mode extends string = 'table' | 'grid'>({
   selectionActive = false,
   headerActions,
   viewMode,
+  banner,
   loading = false,
   loadingFallback,
   empty = false,
@@ -189,7 +191,10 @@ export function WorkspaceListPanel<Mode extends string = 'table' | 'grid'>({
         </div>
       ) : null}
 
-      <div className={bodyClasses}>{renderedBody}</div>
+      <div className={bodyClasses}>
+        {hasContent(banner) ? banner : null}
+        {renderedBody}
+      </div>
 
       {renderedFooter}
     </Component>

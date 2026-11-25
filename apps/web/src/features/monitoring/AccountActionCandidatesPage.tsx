@@ -456,6 +456,20 @@ function AccountActionCandidatesPageContent() {
           count: visibleItems.length,
           defaultValue: `共 ${visibleItems.length} 条记录`,
         })}
+        banner={
+          error ? (
+            <div className={styles.errorBanner} role="alert">
+              <div className={styles.errorBannerCopy}>
+                <strong>{t('account_actions.load_failed_title')}</strong>
+                <span>{error}</span>
+              </div>
+              <Button variant="secondary" size="sm" onClick={loadCandidates} loading={loading}>
+                <IconRefreshCw size={14} />
+                {t('common.refresh')}
+              </Button>
+            </div>
+          ) : null
+        }
         empty={visibleItems.length === 0 && loaded}
         emptyFallback={
           <EmptyState
@@ -512,18 +526,6 @@ function AccountActionCandidatesPageContent() {
           />
         }
       >
-        {error ? (
-          <div className={styles.errorBanner} role="alert">
-            <div className={styles.errorBannerCopy}>
-              <strong>{t('account_actions.load_failed_title')}</strong>
-              <span>{error}</span>
-            </div>
-            <Button variant="secondary" size="sm" onClick={loadCandidates} loading={loading}>
-              <IconRefreshCw size={14} />
-              {t('common.refresh')}
-            </Button>
-          </div>
-        ) : null}
         {visibleItems.length > 0 ? (
           <div className={styles.tableWrap}>
             <table className={styles.table}>

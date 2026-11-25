@@ -300,4 +300,43 @@ describe('Page header and footer primitives', () => {
 
     act(() => renderer.unmount());
   });
+
+  it('preserves WorkspaceListPanel banner across empty and loading fallbacks', () => {
+    let renderer!: ReactTestRenderer;
+    act(() => {
+      renderer = create(
+        <WorkspaceListPanel
+          summary="共 0 条"
+          banner={<div role="alert" data-testid="panel-banner">刷新失败</div>}
+          empty
+          emptyFallback={<div data-testid="empty-box">暂无数据</div>}
+        >
+          <div data-testid="list-body">rows</div>
+        </WorkspaceListPanel>
+      );
+    });
+
+    expect(renderer.root.findAllByProps({ 'data-testid': 'panel-banner' })).toHaveLength(1);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'empty-box' })).toHaveLength(1);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'list-body' })).toHaveLength(0);
+
+    act(() => {
+      renderer.update(
+        <WorkspaceListPanel
+          summary="加载中"
+          banner={<div role="alert" data-testid="panel-banner">重试告警</div>}
+          loading
+          loadingFallback={<div data-testid="loading-box">加载骨架</div>}
+        >
+          <div data-testid="list-body">rows</div>
+        </WorkspaceListPanel>
+      );
+    });
+
+    expect(renderer.root.findAllByProps({ 'data-testid': 'panel-banner' })).toHaveLength(1);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'loading-box' })).toHaveLength(1);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'list-body' })).toHaveLength(0);
+
+    act(() => renderer.unmount());
+  });
 });
