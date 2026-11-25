@@ -3,10 +3,17 @@ import { useTranslation } from 'react-i18next';
 import type { JSX } from 'react';
 import { Button } from '@/components/ui/Button';
 import {
+  DrawerEmptyBox,
+  DrawerNotice,
+  DrawerSectionCard,
+} from '@/components/common/WorkspaceDrawer';
+import {
   IconBinary,
   IconChartLine,
   IconCheck,
+  IconDatabaseZap,
   IconDollarSign,
+  IconModelCluster,
   IconRefreshCw,
 } from '@/components/ui/icons';
 import type { AccountDetailViewModel } from '@/features/accounts/model/accountDetailViewModel';
@@ -146,81 +153,89 @@ export function AccountQuotaTab({
   useInterval(() => setNowMs(Date.now()), shouldShowResetRecords ? 60_000 : null);
 
   return (
-    <div className={styles.quotaTab} data-account-quota-tab="true">
-      <div className={styles.quotaTabHeader}>
-        <div className={styles.quotaPageHeading}>
-          <h2 className={styles.quotaPageTitle}>{t('accounts.detail_tab_quota')}</h2>
-          <p>{t('accounts.detail_quota_window_usage_desc')}</p>
-        </div>
-        <div className={styles.quotaTabActions}>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={onRefreshHistory}
-            disabled={!historyAvailable || historyRefreshing}
-            loading={historyRefreshing}
-            title={!historyAvailable ? t('accounts.history_unavailable') : undefined}
-          >
-            {!historyRefreshing ? <IconRefreshCw size={15} /> : null}
-            {t('accounts.refresh_history')}
-          </Button>
-        </div>
-      </div>
-
-      <section className={styles.quotaSummaryPanel} data-account-quota-usage-summary="true">
-        <div className={styles.quotaSummaryHeading}>
-          <h3>{t('accounts.detail_total_usage', { defaultValue: '凭证总体用量' })}</h3>
-          <div className={styles.quotaSummaryMeta}>
+    <div
+      className={styles.quotaTab}
+      role="region"
+      aria-label={t('accounts.detail_tab_quota')}
+      data-account-quota-tab="true"
+    >
+      <DrawerSectionCard
+        variant="highlight"
+        icon={<IconChartLine size={18} />}
+        title={t('accounts.detail_total_usage', { defaultValue: '凭证总体用量' })}
+        headingLevel="h3"
+        hint={
+          <span className={styles.quotaSummaryMeta}>
             <span>{t('accounts.detail_usage_time_range', { defaultValue: '统计时间范围' })}</span>
             <strong>
               {history
                 ? `${formatTime(history.firstSeenMs)} — ${formatTime(history.lastSeenMs)}`
                 : t('accounts.detail_usage_time_empty', { defaultValue: '暂无使用时间范围' })}
             </strong>
-          </div>
-        </div>
+          </span>
+        }
+        metaActions={
+          <Button
+            variant="secondary"
+            size="xs"
+            onClick={onRefreshHistory}
+            disabled={!historyAvailable || historyRefreshing}
+            loading={historyRefreshing}
+            title={!historyAvailable ? t('accounts.history_unavailable') : undefined}
+          >
+            {!historyRefreshing ? <IconRefreshCw size={13} /> : null}
+            {t('accounts.refresh_history')}
+          </Button>
+        }
+        dataAttributes={{ 'data-account-quota-usage-summary': 'true' }}
+      >
         <div className={styles.quotaSummaryMetrics} data-account-quota-metrics="true">
           <MetricCell
-            icon={<IconChartLine size={20} />}
+            icon={<IconChartLine size={15} />}
             tone="blue"
             label={t('accounts.detail_total_requests')}
             value={history ? formatCompactNumber(history.totalRequests) : '-'}
             valueTitle={history ? formatNumber(history.totalRequests) : undefined}
           />
           <MetricCell
-            icon={<IconBinary size={20} />}
+            icon={<IconBinary size={15} />}
             tone="teal"
             label={t('accounts.detail_total_tokens')}
             value={history ? formatCompactNumber(history.totalTokens) : '-'}
             valueTitle={history ? formatNumber(history.totalTokens) : undefined}
           />
           <MetricCell
-            icon={<IconDollarSign size={20} />}
+            icon={<IconDollarSign size={15} />}
             tone="amber"
             label={t('accounts.detail_total_cost')}
             value={history?.totalCost != null ? formatUsd(history.totalCost) : '-'}
+            valueTitle={history?.totalCost != null ? formatUsd(history.totalCost) : undefined}
           />
           <MetricCell
-            icon={<IconCheck size={20} />}
+            icon={<IconCheck size={15} />}
             tone="green"
             label={t('accounts.detail_success_rate')}
             value={formatPercent(history?.successRate, 2)}
           />
         </div>
-      </section>
+      </DrawerSectionCard>
 
-      {windowUsageError ? <div className={styles.errorBox}>{windowUsageError}</div> : null}
+      {windowUsageError ? (
+        <DrawerNotice tone="danger" role="alert">
+          {windowUsageError}
+        </DrawerNotice>
+      ) : null}
 
       {standardWindows.length > 0 || allWindows.length === 0 ? (
-        <section className={styles.quotaSection} data-quota-window-group="standard">
-          <div className={styles.quotaSectionHeading}>
-            <h3>{t('accounts.detail_quota_standard_title', { defaultValue: '标准额度' })}</h3>
-            <span>
-              {t('accounts.detail_quota_standard_desc', {
-                defaultValue: '账号级配额；窗口边界可用时提供区间统计。',
-              })}
-            </span>
-          </div>
+        <DrawerSectionCard
+          icon={<IconDatabaseZap size={15} />}
+          title={t('accounts.detail_quota_standard_title', { defaultValue: '标准额度' })}
+          headingLevel="h3"
+          hint={t('accounts.detail_quota_standard_desc', {
+            defaultValue: '账号级配额；窗口边界可用时提供区间统计。',
+          })}
+          dataAttributes={{ 'data-quota-window-group': 'standard' }}
+        >
           {standardWindows.length > 0 ? (
             <div className={styles.quotaCardList}>
               {standardWindows.map((window) => (
@@ -233,21 +248,21 @@ export function AccountQuotaTab({
               ))}
             </div>
           ) : (
-            <p className={styles.quotaEmpty}>{t('accounts.detail_no_quota_windows')}</p>
+            <DrawerEmptyBox>{t('accounts.detail_no_quota_windows')}</DrawerEmptyBox>
           )}
-        </section>
+        </DrawerSectionCard>
       ) : null}
 
       {modelWindows.length > 0 ? (
-        <section className={styles.quotaSection} data-quota-window-group="model">
-          <div className={styles.quotaSectionHeading}>
-            <h3>{t('accounts.detail_quota_model_title', { defaultValue: '模型额度' })}</h3>
-            <span>
-              {t('accounts.detail_quota_model_desc', {
-                defaultValue: '模型范围配额；窗口边界可用时提供区间统计。',
-              })}
-            </span>
-          </div>
+        <DrawerSectionCard
+          icon={<IconModelCluster size={15} />}
+          title={t('accounts.detail_quota_model_title', { defaultValue: '模型额度' })}
+          headingLevel="h3"
+          hint={t('accounts.detail_quota_model_desc', {
+            defaultValue: '模型范围配额；窗口边界可用时提供区间统计。',
+          })}
+          dataAttributes={{ 'data-quota-window-group': 'model' }}
+        >
           <div className={styles.quotaCardList}>
             {modelWindows.map((window) => (
               <QuotaWindowCard
@@ -258,19 +273,19 @@ export function AccountQuotaTab({
               />
             ))}
           </div>
-        </section>
+        </DrawerSectionCard>
       ) : null}
 
       {otherQuotaItems.length > 0 ? (
-        <section className={styles.quotaSection} data-quota-window-group="other">
-          <div className={styles.quotaSectionHeading}>
-            <h3>{t('accounts.detail_quota_other_items', { defaultValue: '其他额度项' })}</h3>
-            <span>
-              {t('accounts.detail_quota_other_items_desc', {
-                defaultValue: '金额、产品及其他不属于已识别标准或模型窗口的额度。',
-              })}
-            </span>
-          </div>
+        <DrawerSectionCard
+          icon={<IconDollarSign size={15} />}
+          title={t('accounts.detail_quota_other_items', { defaultValue: '其他额度项' })}
+          headingLevel="h3"
+          hint={t('accounts.detail_quota_other_items_desc', {
+            defaultValue: '金额、产品及其他不属于已识别标准或模型窗口的额度。',
+          })}
+          dataAttributes={{ 'data-quota-window-group': 'other' }}
+        >
           <div className={styles.quotaCardList}>
             {otherQuotaItems.map((window) => (
               <QuotaWindowCard
@@ -281,54 +296,47 @@ export function AccountQuotaTab({
               />
             ))}
           </div>
-        </section>
+        </DrawerSectionCard>
       ) : null}
 
       {shouldShowResetRecords ? (
-        <section
+        <DrawerSectionCard
           id="quota-reset-records"
-          className={styles.quotaSection}
-          data-account-quota-evidence="true"
-          data-account-quota-reset-records="true"
-          data-account-detail-anchor="reset-records"
+          icon={<IconRefreshCw size={15} />}
+          title={t('accounts.detail_quota_reset_records', { defaultValue: '重置记录' })}
+          headingLevel="h3"
+          hint={t('codex_quota.reset_credits_card_subtitle')}
+          metaActions={
+            <div className={styles.quotaResetHeaderActions}>
+              {detailView.quota.resetCreditsAvailableCount !== null ? (
+                <div className={styles.quotaResetCount} data-quota-reset-count="true">
+                  <span>{t('codex_quota.reset_credits_available_label')}</span>
+                  <strong>{detailView.quota.resetCreditsAvailableCount}</strong>
+                  <span className={styles.quotaResetCountUnit}>
+                    {t('codex_quota.reset_credits_unit')}
+                  </span>
+                </div>
+              ) : null}
+              <Button
+                variant="secondary"
+                size="xs"
+                className={styles.quotaResetAction}
+                data-quota-reset-action="true"
+                onClick={onResetQuota}
+                disabled={resetQuotaDisabled}
+              >
+                <IconRefreshCw size={13} />
+                {t('codex_quota.reset_action_button')}
+              </Button>
+            </div>
+          }
+          dataAttributes={{
+            'data-account-quota-evidence': 'true',
+            'data-account-quota-reset-records': 'true',
+            'data-account-detail-anchor': 'reset-records',
+          }}
         >
           <div className={styles.quotaResetCard} data-quota-evidence-panel="reset">
-            <div className={styles.quotaResetHeader}>
-              <div className={styles.quotaResetHeaderMain}>
-                <span
-                  className={`${styles.quotaPanelIcon} ${styles.quotaResetIcon}`}
-                  aria-hidden="true"
-                >
-                  <IconRefreshCw size={16} />
-                </span>
-                <div className={styles.quotaResetTitle}>
-                  <h3>{t('accounts.detail_quota_reset_records', { defaultValue: '重置记录' })}</h3>
-                  <span>{t('codex_quota.reset_credits_card_subtitle')}</span>
-                </div>
-              </div>
-              <div className={styles.quotaResetHeaderActions}>
-                {detailView.quota.resetCreditsAvailableCount !== null ? (
-                  <div className={styles.quotaResetCount} data-quota-reset-count="true">
-                    <span>{t('codex_quota.reset_credits_available_label')}</span>
-                    <strong>{detailView.quota.resetCreditsAvailableCount}</strong>
-                    <span className={styles.quotaResetCountUnit}>
-                      {t('codex_quota.reset_credits_unit')}
-                    </span>
-                  </div>
-                ) : null}
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  className={styles.quotaResetAction}
-                  data-quota-reset-action="true"
-                  onClick={onResetQuota}
-                  disabled={resetQuotaDisabled}
-                >
-                  <IconRefreshCw size={14} />
-                  {t('codex_quota.reset_action_button')}
-                </Button>
-              </div>
-            </div>
             {detailView.quota.resetCreditsAvailableCount === 0 ? (
               <div className={styles.quotaResetAvailabilityNote} role="status">
                 {t('codex_quota.reset_credits_unavailable_label')}
@@ -366,7 +374,7 @@ export function AccountQuotaTab({
               </div>
             ) : null}
           </div>
-        </section>
+        </DrawerSectionCard>
       ) : null}
     </div>
   );

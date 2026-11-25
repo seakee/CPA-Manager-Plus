@@ -1,5 +1,12 @@
 import { useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
+import {
+  DrawerDefinitionList,
+  DrawerDlRow,
+  DrawerNotice,
+  DrawerSectionCard,
+  DrawerTabPanel,
+} from '@/components/common/WorkspaceDrawer';
 import { SelectionCheckbox } from '@/components/ui/SelectionCheckbox';
 import {
   IconCalendar,
@@ -42,7 +49,6 @@ export function UsageMaintenanceRunDrawerContent({
   working = false,
   actionError,
   statusToneClass,
-  renderActions,
   onCopyText,
 }: RunDrawerProps) {
   const { t, i18n } = useTranslation();
@@ -59,15 +65,11 @@ export function UsageMaintenanceRunDrawerContent({
   const recentSegments = segments.slice(-20).reverse();
 
   return (
-    <div className={styles.drawerBody} data-testid="usage-maintenance-detail-drawer">
-      <div className={styles.mobileRunHeader}>
-        <span className={`${styles.statusPill} ${statusToneClass(run.status)}`}>
-          <span className={styles.statusDot} aria-hidden="true" />
-          {statusLabel(run.status)}
-        </span>
-        {renderActions(run)}
-      </div>
-
+    <DrawerTabPanel testId="usage-maintenance-detail-drawer">
+      <DrawerSectionCard
+        icon={<IconShieldCheck size={15} />}
+        title={t('usage_maintenance.run_steps_label', { defaultValue: 'Archive stages' })}
+      >
       <ol
         className={styles.stepper}
         aria-label={t('usage_maintenance.run_steps_label', { defaultValue: 'Archive stages' })}
@@ -98,70 +100,65 @@ export function UsageMaintenanceRunDrawerContent({
           </li>
         ))}
       </ol>
+        {run.status === 'failed' || run.has_error || actionError ? (
+          <DrawerNotice
+            tone="danger"
+            role="alert"
+            icon={<IconTriangleAlert size={15} />}
+            title={t('usage_maintenance.run_failed_alert_title', {
+              defaultValue: 'Task Stopped Due to Error',
+            })}
+          >
+            {actionError ||
+              t('usage_maintenance.run_failed_alert_desc', {
+                defaultValue:
+                  'This archive run encountered an error. You can retry or inspect technical details.',
+              })}
+          </DrawerNotice>
+        ) : null}
 
-      {run.status === 'failed' || run.has_error || actionError ? (
-        <div className={`${styles.alertBanner} ${styles.alertDanger}`} role="alert">
-          <div className={styles.alertStack}>
-            <strong className={styles.alertHeading}>
-              <IconTriangleAlert size={15} aria-hidden="true" />
-              <span>
-                {t('usage_maintenance.run_failed_alert_title', {
-                  defaultValue: 'Task Stopped Due to Error',
-                })}
-              </span>
-            </strong>
-            <span>
-              {actionError ||
-                t('usage_maintenance.run_failed_alert_desc', {
-                  defaultValue:
-                    'This archive run encountered an error. You can retry or inspect technical details.',
-                })}
-            </span>
+        <dl className={styles.runCountsGrid}>
+          <div className={styles.inlineMetric}>
+            <dt className={styles.inlineMetricLabel}>
+              {t('usage_maintenance.workspace_record_count')}
+            </dt>
+            <dd className={styles.inlineMetricValue}>
+              {run.event_count.toLocaleString(i18n.language)}
+            </dd>
           </div>
-        </div>
-      ) : null}
+          <div className={styles.inlineMetric}>
+            <dt className={styles.inlineMetricLabel}>{t('usage_maintenance.archived_count')}</dt>
+            <dd className={styles.inlineMetricValue}>
+              {run.archived_event_count.toLocaleString(i18n.language)}
+            </dd>
+          </div>
+          <div className={styles.inlineMetric}>
+            <dt className={styles.inlineMetricLabel}>{t('usage_maintenance.deleted_events')}</dt>
+            <dd className={styles.inlineMetricValue}>
+              {run.deleted_event_count.toLocaleString(i18n.language)}
+            </dd>
+          </div>
+        </dl>
 
-      <dl className={styles.runCountsGrid}>
-        <div className={styles.inlineMetric}>
-          <dt className={styles.inlineMetricLabel}>
-            {t('usage_maintenance.workspace_record_count')}
-          </dt>
-          <dd className={styles.inlineMetricValue}>
-            {run.event_count.toLocaleString(i18n.language)}
-          </dd>
-        </div>
-        <div className={styles.inlineMetric}>
-          <dt className={styles.inlineMetricLabel}>{t('usage_maintenance.archived_count')}</dt>
-          <dd className={styles.inlineMetricValue}>
-            {run.archived_event_count.toLocaleString(i18n.language)}
-          </dd>
-        </div>
-        <div className={styles.inlineMetric}>
-          <dt className={styles.inlineMetricLabel}>{t('usage_maintenance.deleted_events')}</dt>
-          <dd className={styles.inlineMetricValue}>
-            {run.deleted_event_count.toLocaleString(i18n.language)}
-          </dd>
-        </div>
-      </dl>
+        <DrawerDefinitionList>
+          <DrawerDlRow label={t('usage_maintenance.cutoff')} mono>
+            {formatTime(run.cutoff_timestamp_ms)}
+          </DrawerDlRow>
+        </DrawerDefinitionList>
 
-      <div className={styles.cutoffSummaryBar}>
-        <span className={styles.flatRowMeta}>{t('usage_maintenance.cutoff')}</span>
-        <strong className={styles.mono}>{formatTime(run.cutoff_timestamp_ms)}</strong>
-      </div>
-
-      {run.status === 'verified' ? (
-        <p className={styles.flatRowMeta}>{t('usage_maintenance.workspace_existing_scope')}</p>
-      ) : null}
-      {run.status === 'completed' ? (
-        <p className={styles.flatRowMeta}>{t('usage_maintenance.delete_storage_note')}</p>
-      ) : null}
-      {run.status === 'failed' ? (
-        <p className={styles.flatRowMeta}>{t('usage_maintenance.resume_detail_note')}</p>
-      ) : null}
-      {active ? (
-        <p className={styles.flatRowMeta}>{t('usage_maintenance.stop_waiting_note')}</p>
-      ) : null}
-
+        {run.status === 'verified' ? (
+          <p className={styles.flatRowMeta}>{t('usage_maintenance.workspace_existing_scope')}</p>
+        ) : null}
+        {run.status === 'completed' ? (
+          <p className={styles.flatRowMeta}>{t('usage_maintenance.delete_storage_note')}</p>
+        ) : null}
+        {run.status === 'failed' ? (
+          <p className={styles.flatRowMeta}>{t('usage_maintenance.resume_detail_note')}</p>
+        ) : null}
+        {active ? (
+          <p className={styles.flatRowMeta}>{t('usage_maintenance.stop_waiting_note')}</p>
+        ) : null}
+      </DrawerSectionCard>
       <details
         className={styles.detailsCollapse}
         open={active || run.status === 'failed' || run.has_error || Boolean(progress)}
@@ -281,89 +278,53 @@ export function UsageMaintenanceRunDrawerContent({
       <details className={styles.detailsCollapse}>
         <summary>{t('usage_maintenance.workspace_technical')}</summary>
         <div className={styles.detailsCollapseBody}>
-          <dl className={styles.drawerKvGrid}>
-            <div className={`${styles.inlineMetric} ${styles.inlineMetricFull}`}>
-              <dt className={styles.inlineMetricLabel}>
-                {t('usage_maintenance.technical_run_id')}
-              </dt>
-              <dd className={styles.copyValueRow}>
-                <code className={styles.mono}>{run.id}</code>
-                <button
-                  type="button"
-                  className={styles.iconActionBtn}
-                  title={`${t('common.copy')} ID`}
-                  aria-label={`${t('common.copy')} ${run.id}`}
-                  onClick={() =>
-                    onCopyText(
-                      run.id,
-                      t('usage_maintenance.run_id_copied', {
-                        defaultValue: 'Task ID copied to clipboard',
-                      })
-                    )
-                  }
-                >
-                  <IconCopy size={13} />
-                </button>
-              </dd>
-            </div>
-            <div className={styles.inlineMetric}>
-              <dt className={styles.inlineMetricLabel}>{t('usage_maintenance.technical_mode')}</dt>
-              <dd className={styles.inlineMetricValue}>
-                {t(`usage_maintenance.run_mode_${run.mode}`, { defaultValue: run.mode })}
-              </dd>
-            </div>
-            <div className={styles.inlineMetric}>
-              <dt className={styles.inlineMetricLabel}>
-                {t('usage_maintenance.technical_resume_status')}
-              </dt>
-              <dd className={styles.inlineMetricValue}>
-                {run.resume_status ? statusLabel(run.resume_status) : '—'}
-              </dd>
-            </div>
-            <div className={styles.inlineMetric}>
-              <dt className={styles.inlineMetricLabel}>
-                {t('usage_maintenance.preview_target_event')}
-              </dt>
-              <dd className={styles.inlineMetricValue}>
-                {run.target_event_id.toLocaleString(i18n.language)}
-              </dd>
-            </div>
-            <div className={styles.inlineMetric}>
-              <dt className={styles.inlineMetricLabel}>
-                {t('usage_maintenance.uncompressed_size')}
-              </dt>
-              <dd className={styles.inlineMetricValue}>
-                {formatFileSize(run.archived_uncompressed_bytes)}
-              </dd>
-            </div>
-            <div className={styles.inlineMetric}>
-              <dt className={styles.inlineMetricLabel}>
-                {t('usage_maintenance.compressed_size')}
-              </dt>
-              <dd className={styles.inlineMetricValue}>
-                {formatFileSize(run.archived_compressed_bytes)}
-              </dd>
-            </div>
-            <div className={styles.inlineMetric}>
-              <dt className={styles.inlineMetricLabel}>{t('usage_maintenance.verified_at')}</dt>
-              <dd className={styles.inlineMetricValue}>{formatTime(run.verified_at_ms)}</dd>
-            </div>
-            <div className={styles.inlineMetric}>
-              <dt className={styles.inlineMetricLabel}>{t('usage_maintenance.updated_at')}</dt>
-              <dd className={styles.inlineMetricValue}>{formatTime(run.updated_at_ms)}</dd>
-            </div>
+          <DrawerDefinitionList>
+            <DrawerDlRow
+              label={t('usage_maintenance.technical_run_id')}
+              mono
+              copyTitle={`${t('common.copy')} ID`}
+              copyAriaLabel={`${t('common.copy')} ${run.id}`}
+              onCopy={() =>
+                onCopyText(
+                  run.id,
+                  t('usage_maintenance.run_id_copied', {
+                    defaultValue: 'Task ID copied to clipboard',
+                  })
+                )
+              }
+            >
+              <code>{run.id}</code>
+            </DrawerDlRow>
+            <DrawerDlRow label={t('usage_maintenance.technical_mode')}>
+              {t(`usage_maintenance.run_mode_${run.mode}`, { defaultValue: run.mode })}
+            </DrawerDlRow>
+            <DrawerDlRow label={t('usage_maintenance.technical_resume_status')}>
+              {run.resume_status ? statusLabel(run.resume_status) : '—'}
+            </DrawerDlRow>
+            <DrawerDlRow label={t('usage_maintenance.preview_target_event')} mono>
+              {run.target_event_id.toLocaleString(i18n.language)}
+            </DrawerDlRow>
+            <DrawerDlRow label={t('usage_maintenance.uncompressed_size')} mono>
+              {formatFileSize(run.archived_uncompressed_bytes)}
+            </DrawerDlRow>
+            <DrawerDlRow label={t('usage_maintenance.compressed_size')} mono>
+              {formatFileSize(run.archived_compressed_bytes)}
+            </DrawerDlRow>
+            <DrawerDlRow label={t('usage_maintenance.verified_at')} mono>
+              {formatTime(run.verified_at_ms)}
+            </DrawerDlRow>
+            <DrawerDlRow label={t('usage_maintenance.updated_at')} mono>
+              {formatTime(run.updated_at_ms)}
+            </DrawerDlRow>
             {maintenance?.active_lock ? (
-              <div className={`${styles.inlineMetric} ${styles.inlineMetricFull}`}>
-                <dt className={styles.inlineMetricLabel}>{t('usage_maintenance.lock_title')}</dt>
-                <dd className={styles.inlineMetricValue}>
-                  {t(`usage_maintenance.operation_${maintenance.active_lock.operation}`, {
-                    defaultValue: maintenance.active_lock.operation,
-                  })}{' '}
-                  · {maintenance.active_lock.run_id}
-                </dd>
-              </div>
+              <DrawerDlRow label={t('usage_maintenance.lock_title')}>
+                {t(`usage_maintenance.operation_${maintenance.active_lock.operation}`, {
+                  defaultValue: maintenance.active_lock.operation,
+                })}{' '}
+                · {maintenance.active_lock.run_id}
+              </DrawerDlRow>
             ) : null}
-          </dl>
+          </DrawerDefinitionList>
 
           {recentSegments.length === 0 ? (
             <p className={styles.flatRowMeta}>{t('usage_maintenance.no_segments')}</p>
@@ -420,7 +381,7 @@ export function UsageMaintenanceRunDrawerContent({
           )}
         </div>
       </details>
-    </div>
+    </DrawerTabPanel>
   );
 }
 
@@ -455,14 +416,13 @@ export function UsageMaintenanceDeleteConfirmationView({
   };
 
   return (
-    <div className={styles.drawerBody} data-testid="usage-maintenance-delete-confirmation">
+    <DrawerTabPanel testId="usage-maintenance-delete-confirmation">
       <p className={styles.flatRowMeta}>{t('usage_maintenance.delete_confirm_lead')}</p>
 
       {run.status === 'failed' ? (
-        <div className={`${styles.alertBanner} ${styles.alertWarn}`} role="alert">
-          <IconTriangleAlert size={15} aria-hidden="true" />
-          <span>{t('usage_maintenance.delete_confirm_retry_note')}</span>
-        </div>
+        <DrawerNotice tone="warning" role="alert" icon={<IconTriangleAlert size={15} />}>
+          {t('usage_maintenance.delete_confirm_retry_note')}
+        </DrawerNotice>
       ) : null}
 
       <div className={styles.deleteHeroCard}>
@@ -559,6 +519,6 @@ export function UsageMaintenanceDeleteConfirmationView({
           </span>
         }
       />
-    </div>
+    </DrawerTabPanel>
   );
 }

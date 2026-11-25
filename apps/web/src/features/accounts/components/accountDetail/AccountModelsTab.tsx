@@ -4,7 +4,12 @@ import { Button } from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Input } from '@/components/ui/Input';
 import { SegmentedTabs } from '@/components/ui/SegmentedTabs';
-import { IconCopy, IconRefreshCw } from '@/components/ui/icons';
+import { IconCopy, IconModelCluster, IconRefreshCw } from '@/components/ui/icons';
+import {
+  DrawerNotice,
+  DrawerSectionCard,
+  DrawerStatusPill,
+} from '@/components/common/WorkspaceDrawer';
 import type { AccountRow } from '@/features/accounts/model/accountRows';
 import {
   buildAccountModelRuleDiff,
@@ -48,6 +53,7 @@ interface AccountModelsTabProps {
   onManageGlobalRules: () => void;
   onOpenAdvancedRules: () => void;
   onCopyText: (value: string) => void;
+  hideInlineActions?: boolean;
 }
 
 const getScopeTranslationKey = (scope: AccountModelRuleScope) => {
@@ -109,6 +115,7 @@ export function AccountModelsTab({
   onManageGlobalRules,
   onOpenAdvancedRules,
   onCopyText,
+  hideInlineActions = false,
 }: AccountModelsTabProps) {
   const { t } = useTranslation();
   const serverVersion = useAuthStore((state) => state.serverVersion);
@@ -373,176 +380,198 @@ export function AccountModelsTab({
       aria-label={t('accounts.detail_tab_models')}
       aria-busy={loading || modelDefinitionsLoading || globalExcludedState === 'loading'}
     >
-      <div className={styles.accountModelsHeader}>
-        <div className={styles.accountModelsSummary}>
-          <strong>
-            {t('accounts.detail_models_summary', { count: projection.rows.length, file: fileName })}
-          </strong>
-        </div>
-        <div className={styles.headerActions}>
-          <Button variant="secondary" size="sm" onClick={onManageGlobalRules}>
-            {t('accounts.model_manage_global_rules')}
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={onRefresh}
-            disabled={loading || refreshing}
-            loading={refreshing}
-          >
-            {!refreshing ? <IconRefreshCw size={14} /> : null}
-            {t('common.refresh')}
-          </Button>
-        </div>
-      </div>
-
       {row.runtimeOnly ? (
-        <div className={styles.configurationReadOnlyNotice} role="note">
+        <DrawerNotice tone="warning" role="note">
           {t('accounts.config_runtime_only_desc')}
-        </div>
+        </DrawerNotice>
       ) : sharedSourceReadOnly ? (
-        <div className={styles.configurationReadOnlyNotice} role="note">
+        <DrawerNotice tone="warning" role="note">
           {t('accounts.config_shared_source_read_only', { count: sourceMemberCount })}
-        </div>
+        </DrawerNotice>
       ) : row.disabled ? (
-        <div className={styles.configurationReadOnlyNotice} role="note">
+        <DrawerNotice tone="warning" role="note">
           {t('accounts.config_disabled_read_only')}
-        </div>
+        </DrawerNotice>
       ) : !state || state.loading ? (
-        <div className={styles.accountModelsInlineStatus} role="status">
-          <span>{t('accounts.config_loading')}</span>
-        </div>
+        <DrawerNotice tone="neutral" role="status">
+          {t('accounts.config_loading')}
+        </DrawerNotice>
       ) : state?.error ? (
-        <div className={styles.accountModelsWarning} role="alert">
-          <span>{t('accounts.model_config_unavailable')}</span>
-          <Button variant="secondary" size="xs" onClick={() => void editor.reload()}>
-            {t('common.retry')}
-          </Button>
-        </div>
+        <DrawerNotice
+          tone="warning"
+          role="alert"
+          action={
+            <Button variant="secondary" size="xs" onClick={() => void editor.reload()}>
+              {t('common.retry')}
+            </Button>
+          }
+        >
+          {t('accounts.model_config_unavailable')}
+        </DrawerNotice>
       ) : null}
 
       {globalExcludedState === 'loading' ? (
-        <div className={styles.accountModelsInlineStatus} role="status">
-          <span>{t('accounts.model_global_rules_loading')}</span>
-        </div>
+        <DrawerNotice tone="neutral" role="status">
+          {t('accounts.model_global_rules_loading')}
+        </DrawerNotice>
       ) : globalExcludedState === 'error' || globalExcludedState === 'unsupported' ? (
-        <div className={styles.accountModelsWarning} role="note">
+        <DrawerNotice tone="warning" role="note">
           {t('accounts.model_global_rules_unavailable')}
-        </div>
+        </DrawerNotice>
       ) : null}
 
       {modelDefinitionsError === 'failed' ? (
-        <div className={styles.accountModelsWarning} role="note">
+        <DrawerNotice tone="warning" role="note">
           {t('accounts.model_definitions_partial')}
-        </div>
+        </DrawerNotice>
       ) : null}
 
       {showPartialUnsupported ? (
-        <div className={styles.accountModelsWarning} role="note">
+        <DrawerNotice tone="warning" role="note">
           {t('accounts.model_runtime_list_unsupported')}
-        </div>
+        </DrawerNotice>
       ) : null}
 
       {hasUnresolvedRows && !modelDefinitionsLoading ? (
-        <div className={styles.accountModelsWarning} role="note">
+        <DrawerNotice tone="warning" role="note">
           {t('accounts.model_rule_mapping_unavailable')}
-        </div>
+        </DrawerNotice>
       ) : null}
 
       {precedenceUnknown ? (
-        <div className={styles.accountModelsWarning} role="note">
+        <DrawerNotice tone="warning" role="note">
           {t('accounts.model_precedence_unknown', { count: projection.globalRules.length })}
-        </div>
+        </DrawerNotice>
       ) : null}
 
       {precedenceUnknownWithoutGlobalRules ? (
-        <div className={styles.accountModelsWarning} role="note">
+        <DrawerNotice tone="warning" role="note">
           {t('accounts.model_precedence_unknown_no_global')}
-        </div>
+        </DrawerNotice>
       ) : null}
 
       {globalInheritanceChange && !sharedSourceReadOnly ? (
-        <div className={styles.accountModelsWarning} role="note">
+        <DrawerNotice tone="warning" role="note">
           {t(
             globalInheritanceChange === 'stops'
               ? 'accounts.model_change_stops_inheriting_global'
               : 'accounts.model_change_resumes_inheriting_global',
             { count: projection.globalRules.length }
           )}
-        </div>
+        </DrawerNotice>
       ) : null}
 
       {showLoadFailed || showPartialFailed ? (
-        <div className={styles.accountModelsWarning} role="alert">
-          <span>{t('accounts.model_load_failed')}</span>
-          <Button variant="secondary" size="xs" onClick={onRefresh}>
-            {t('common.retry')}
-          </Button>
-        </div>
+        <DrawerNotice
+          tone="danger"
+          role="alert"
+          action={
+            <Button variant="secondary" size="xs" onClick={onRefresh}>
+              {t('common.retry')}
+            </Button>
+          }
+        >
+          {t('accounts.model_load_failed')}
+        </DrawerNotice>
       ) : null}
 
-      {editorReady && !sharedSourceReadOnly ? (
-        <div className={styles.configurationToolbar}>
-          <div className={styles.accountModelsChangeSummary} aria-live="polite">
-            {dirty ? (
-              <>
-                <span className={styles.configurationDirtyBadge}>
-                  {t('accounts.config_unsaved')}
-                </span>
-                {modelRulesDirty ? (
-                  <span>
-                    {t('accounts.model_change_summary', {
-                      added: diff.added.length,
-                      removed: diff.removed.length,
-                      unchanged: diff.unchanged.length,
-                    })}
-                  </span>
-                ) : (
-                  <span>{t('accounts.model_other_config_changes')}</span>
-                )}
-              </>
-            ) : (
-              <span>{t('accounts.model_changes_empty')}</span>
-            )}
-          </div>
-          <div className={styles.configurationToolbarActions}>
+      <DrawerSectionCard
+        variant="default"
+        icon={<IconModelCluster size={15} />}
+        title={t('accounts.detail_models_summary', { count: projection.rows.length, file: fileName })}
+        headingLevel="h3"
+        titleBadge={
+          disabledCount > 0 ? (
+            <DrawerStatusPill tone="warning">
+              {t('accounts.model_filter_disabled', { count: disabledCount })}
+            </DrawerStatusPill>
+          ) : undefined
+        }
+        metaActions={
+          <div className={styles.headerActions}>
+            <Button variant="secondary" size="xs" onClick={onManageGlobalRules}>
+              {t('accounts.model_manage_global_rules')}
+            </Button>
             <Button
               variant="secondary"
-              size="sm"
-              onClick={editor.reset}
-              disabled={!dirty || state?.saving}
+              size="xs"
+              onClick={onRefresh}
+              disabled={loading || refreshing}
+              loading={refreshing}
             >
-              {t('common.reset')}
-            </Button>
-            <Button
-              size="sm"
-              onClick={() => void editor.save()}
-              loading={state?.saving}
-              disabled={!canSave || row.disabled}
-            >
-              {t('common.save')}
+              {!refreshing ? <IconRefreshCw size={13} /> : null}
+              {t('common.refresh')}
             </Button>
           </div>
-        </div>
-      ) : null}
+        }
+      >
+        {editorReady && !sharedSourceReadOnly && (!hideInlineActions || dirty) ? (
+          <div className={styles.configurationToolbar}>
+            <div className={styles.accountModelsChangeSummary} aria-live="polite">
+              {dirty ? (
+                <>
+                  {!hideInlineActions ? (
+                    <span className={styles.configurationDirtyBadge}>
+                      {t('accounts.config_unsaved')}
+                    </span>
+                  ) : null}
+                  {modelRulesDirty ? (
+                    <span>
+                      {t('accounts.model_change_summary', {
+                        added: diff.added.length,
+                        removed: diff.removed.length,
+                        unchanged: diff.unchanged.length,
+                      })}
+                    </span>
+                  ) : (
+                    <span>{t('accounts.model_other_config_changes')}</span>
+                  )}
+                </>
+              ) : (
+                <span>{t('accounts.model_changes_empty')}</span>
+              )}
+            </div>
+            {!hideInlineActions ? (
+              <div className={styles.configurationToolbarActions}>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={editor.reset}
+                  disabled={!dirty || state?.saving}
+                >
+                  {t('common.reset')}
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={() => void editor.save()}
+                  loading={state?.saving}
+                  disabled={!canSave || row.disabled}
+                >
+                  {t('common.save')}
+                </Button>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
 
-      <div className={styles.accountModelsControls}>
-        <Input
-          value={query}
-          placeholder={t('accounts.model_search_placeholder')}
-          aria-label={t('accounts.model_search_label')}
-          onChange={(event) => setQuery(event.target.value)}
-        />
-        <SegmentedTabs<AccountModelFilter>
-          items={filterItems}
-          activeTab={filter}
-          onChange={setFilter}
-          ariaLabel={t('accounts.model_filter_label')}
-          idBase="account-model-filter"
-          equalWidth
-          fullWidth
-        />
-      </div>
+        <div className={styles.accountModelsControls}>
+          <Input
+            value={query}
+            placeholder={t('accounts.model_search_placeholder')}
+            aria-label={t('accounts.model_search_label')}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+          <SegmentedTabs<AccountModelFilter>
+            items={filterItems}
+            activeTab={filter}
+            onChange={setFilter}
+            ariaLabel={t('accounts.model_filter_label')}
+            idBase="account-model-filter"
+            variant="joined"
+            size="sm"
+            responsiveFullWidth={false}
+          />
+        </div>
 
       {projection.advancedCredentialRules.length > 0 ||
       projection.advancedGlobalRules.length > 0 ? (
@@ -649,7 +678,8 @@ export function AccountModelsTab({
             );
           })}
         </div>
-      )}
+        )}
+      </DrawerSectionCard>
     </div>
   );
 }

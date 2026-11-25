@@ -172,25 +172,27 @@
 
 .customDateField {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  gap: 5px;
 }
 
 .customDateLabel {
-  font-size: 12.5px;
   color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.35;
 }
 
 .customDateInput {
-  height: var(--control-height-sm);
-  min-height: var(--control-height-sm);
-  padding: 0 10px;
+  height: var(--control-height-md);
+  min-height: var(--control-height-md);
+  padding: 0 11px;
   border: 1px solid var(--app-input-border);
   border-radius: var(--app-radius-sm);
   background: var(--app-input-bg);
   color: var(--text-primary);
   font-size: 13px;
+  line-height: 1.4;
   font-family: inherit;
   transition: border-color 150ms ease, background-color 150ms ease;
 

@@ -12,7 +12,6 @@ import { PublicApiError, type PublicApiClient } from './publicApi';
 import {
   parseKeyUsage,
   usageCountText,
-  usageCoveragePill,
   usageReasonText,
   usageStateText,
   usageTimeText,
@@ -40,8 +39,53 @@ import { Drawer } from '../components/ui/Drawer';
 import { Modal } from '../components/ui/Modal';
 import { SegmentedTabs } from '../components/ui/SegmentedTabs';
 import { Button } from '../components/ui/Button';
+import { MetricSummaryGrid } from '../components/common/MetricSummaryCard';
+import {
+  DRAWER_WIDTH,
+  DrawerActionFooter,
+  DrawerBodyShell,
+  DrawerCopyableMeta,
+  DrawerDangerButton,
+  DrawerDefinitionList,
+  DrawerDlRow,
+  DrawerIdentityHeader,
+  DrawerNotice,
+  DrawerScopePill,
+  DrawerSectionCard,
+  DrawerStatusPill,
+  DrawerTabBar,
+  DrawerTabPanel,
+  DrawerViewport,
+  type DrawerStatusTone,
+} from '../components/common/WorkspaceDrawer';
 
 type UsageWindow = '24h' | '7d' | '30d';
+
+function statusPillTone(pillClass: string): DrawerStatusTone {
+  switch (pillClass) {
+    case 'is-effective':
+      return 'success';
+    case 'is-muted':
+      return 'neutral';
+    case 'is-pending':
+    default:
+      return 'warning';
+  }
+}
+
+function usageCoverageTone(state: UsageState): DrawerStatusTone {
+  switch (state) {
+    case 'complete':
+      return 'success';
+    case 'partial':
+      return 'warning';
+    case 'unavailable':
+      return 'danger';
+    case 'unknown':
+    default:
+      return 'neutral';
+  }
+}
 
 function detailTime(value: number) {
   const date = new Date(value);
@@ -642,7 +686,6 @@ export function FreshKeyDetails({
     state: 'unknown' as UsageState,
     reason: 'usage_read_failed',
   };
-  const usageStateClass = usageCoveragePill(usageCoverage.state);
 
   useEffect(() => {
     active.current = true;
@@ -1405,7 +1448,7 @@ export function FreshKeyDetails({
     <>
       <Drawer
         open={open && visible}
-        width="clamp(540px, 45vw, 720px)"
+        width={DRAWER_WIDTH.MD}
         className="key-detail-drawer"
         bodyRef={detailDrawerBodyRef}
         closeLabel={t('keysCloseDetails')}
@@ -1414,531 +1457,540 @@ export function FreshKeyDetails({
         onClose={onClose}
         title={
           record ? (
-            <div className="key-drawer-title-identity">
-              <span className="key-drawer-title-icon" aria-hidden="true">
-                <FullWebIcon name="key" size={22} />
-              </span>
-              <div className="key-drawer-title-stack">
-                <div className="key-drawer-title-row">
-                  <h3 className="key-drawer-title-primary" title={displayName}>
-                    {displayName}
-                  </h3>
-                  {!superseded && (
-                    <button
-                      type="button"
-                      className="key-drawer-title-edit-btn"
-                      data-testid="detail-edit-name"
-                      aria-label={k('rename')}
-                      title={k('rename')}
-                      disabled={busy || applyPending || applyUnknown}
-                      onClick={() => setEditing(true)}
+            <DrawerIdentityHeader
+              icon={<FullWebIcon name="key" size={18} />}
+              iconBoxed
+              title={displayName}
+              titleAs="h3"
+              titleTrailing={
+                !superseded ? (
+                  <button
+                    type="button"
+                    className="key-drawer-title-edit-btn"
+                    data-testid="detail-edit-name"
+                    aria-label={k('rename')}
+                    title={k('rename')}
+                    disabled={busy || applyPending || applyUnknown}
+                    onClick={() => setEditing(true)}
+                  >
+                    <FullWebIcon name="edit" size={14} />
+                  </button>
+                ) : undefined
+              }
+              metaItems={[
+                unifiedStatus ? (
+                  <DrawerStatusPill key="status" tone={statusPillTone(unifiedStatus.pillClass)} dot>
+                    <span data-testid="detail-runtime-state">{k(unifiedStatus.labelKey)}</span>
+                  </DrawerStatusPill>
+                ) : null,
+                <span key="secret" className="key-drawer-meta-secret">
+                  {!superseded ? (
+                    <DrawerCopyableMeta
+                      onCopy={copySavedSecret}
+                      copied={copyFeedback === 'copied'}
+                      ariaLabel={k('copyKey')}
+                      title={k('copyKey')}
+                      disabled={busy || copying || applyPending || applyUnknown}
+                      testId="copy-saved-client-secret"
                     >
-                      <FullWebIcon name="edit" size={14} />
-                    </button>
+                      <code>{record.maskedPreview}</code>
+                    </DrawerCopyableMeta>
+                  ) : (
+                    <code>{record.maskedPreview}</code>
                   )}
-                  {unifiedStatus && (
+                  {copyFeedback && (
                     <span
-                      className={'key-state-pill ' + unifiedStatus.pillClass}
-                      data-testid="detail-runtime-state"
+                      role="status"
+                      className={`key-copy-inline-status ${
+                        copyFeedback === 'copied' ? 'is-copied' : 'is-failed'
+                      }`}
+                      data-testid="copy-saved-client-secret-feedback"
                     >
-                      {k(unifiedStatus.labelKey)}
+                      {k(copyFeedback === 'copied' ? 'keyCopied' : 'keyCopyFailed')}
                     </span>
                   )}
-                </div>
-                <div className="key-drawer-title-meta">
-                  <span className="key-drawer-meta-secret">
-                    {!superseded ? (
-                      <button
-                        type="button"
-                        className="key-drawer-meta-secret-copy"
-                        data-testid="copy-saved-client-secret"
-                        aria-label={k('copyKey')}
-                        title={k('copyKey')}
-                        disabled={busy || copying || applyPending || applyUnknown}
-                        onClick={() => void copySavedSecret()}
-                      >
-                        <code>{record.maskedPreview}</code>
-                        <FullWebIcon
-                          name={copyFeedback === 'copied' ? 'check' : 'copy'}
-                          size={12}
-                        />
-                      </button>
-                    ) : (
-                      <code>{record.maskedPreview}</code>
-                    )}
-                    {copyFeedback && (
-                      <span
-                        role="status"
-                        className={`key-copy-inline-status ${
-                          copyFeedback === 'copied' ? 'is-copied' : 'is-failed'
-                        }`}
-                        data-testid="copy-saved-client-secret-feedback"
-                      >
-                        {k(copyFeedback === 'copied' ? 'keyCopied' : 'keyCopyFailed')}
-                      </span>
-                    )}
-                  </span>
-                  {showOriginInMeta && (
-                    <>
-                      <span className="key-drawer-meta-sep" aria-hidden="true">
-                        ·
-                      </span>
-                      <span>{originLabel}</span>
-                    </>
-                  )}
-                  {createdTime && (
-                    <>
-                      <span className="key-drawer-meta-sep" aria-hidden="true">
-                        ·
-                      </span>
-                      <time dateTime={createdTime.iso}>{createdTime.label}</time>
-                    </>
-                  )}
-                </div>
-              </div>
-            </div>
+                </span>,
+                showOriginInMeta ? <span key="origin">{originLabel}</span> : null,
+                createdTime ? (
+                  <time key="created" dateTime={createdTime.iso}>
+                    {createdTime.label}
+                  </time>
+                ) : null,
+              ]}
+            />
           ) : (
-            <span>{t('keysDetails')}</span>
+            <DrawerIdentityHeader
+              icon={<FullWebIcon name="key" size={18} />}
+              iconBoxed
+              title={t('keysDetails')}
+              titleAs="h3"
+            />
           )
         }
         footer={
-          <div className="key-drawer-actions">
-            <div className="key-drawer-footer-left">
-              {record && !superseded && (
-                <button
+          <DrawerActionFooter
+            rightTestId={
+              record && !superseded && onRequestOperation ? 'key-detail-operation-entry' : undefined
+            }
+            left={
+              <>
+                {record && !superseded && onRequestOperation && (
+                  <DrawerDangerButton
+                    type="button"
+                    data-testid="detail-revoke-key"
+                    disabled={
+                      busy || applyPending || applyUnknown || editing || Boolean(operationPending)
+                    }
+                    onClick={() => onRequestOperation('revoke')}
+                  >
+                    {k('quickRevoke')}
+                  </DrawerDangerButton>
+                )}
+                <Button
                   type="button"
-                  className="btn btn-secondary btn-sm"
-                  data-testid="detail-copy-secret"
-                  disabled={busy || copying || applyPending || applyUnknown}
-                  onClick={() => void copySavedSecret()}
+                  variant="secondary"
+                  size="sm"
+                  aria-label={t('keysReadDetails')}
+                  disabled={busy || applyPending || applyUnknown}
+                  onClick={() => {
+                    void read(ownerEpoch.current);
+                    void readUsage(ownerEpoch.current, activeUsageWindow);
+                  }}
                 >
-                  <FullWebIcon name="copy" size={14} />
-                  <span>{k('copyFullKey')}</span>
-                </button>
-              )}
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                aria-label={t('keysReadDetails')}
-                disabled={busy || applyPending || applyUnknown}
-                onClick={() => {
-                  void read(ownerEpoch.current);
-                  void readUsage(ownerEpoch.current, activeUsageWindow);
-                }}
-              >
-                <FullWebIcon name="refresh" size={14} />
-                {t('keysReadDetails')}
-              </Button>
-            </div>
-            {record && !superseded && onRequestOperation && (
-              <div className="key-drawer-footer-right" data-testid="key-detail-operation-entry">
-                <button
+                  <FullWebIcon name="refresh" size={14} />
+                  {t('keysReadDetails')}
+                </Button>
+              </>
+            }
+            right={
+              record && !superseded ? (
+                <>
+                  {onRequestOperation && (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      data-testid="detail-regenerate-key"
+                      disabled={
+                        busy || applyPending || applyUnknown || editing || Boolean(operationPending)
+                      }
+                      onClick={() => onRequestOperation('regenerate')}
+                    >
+                      {k('regenerateKey')}
+                    </Button>
+                  )}
+                  <Button
+                    type="button"
+                    variant="primary"
+                    size="sm"
+                    data-testid="detail-copy-secret"
+                    disabled={busy || copying || applyPending || applyUnknown}
+                    onClick={() => void copySavedSecret()}
+                  >
+                    <FullWebIcon name={copyFeedback === 'copied' ? 'check' : 'copy'} size={14} />
+                    {k('copyFullKey')}
+                  </Button>
+                </>
+              ) : (
+                <Button
                   type="button"
-                  className="btn btn-secondary btn-sm"
-                  data-testid="detail-regenerate-key"
-                  disabled={busy || applyPending || applyUnknown || editing || Boolean(operationPending)}
-                  onClick={() => onRequestOperation('regenerate')}
+                  variant="secondary"
+                  size="sm"
+                  disabled={!canClose()}
+                  onClick={close}
                 >
-                  {k('regenerateKey')}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-sm key-danger"
-                  data-testid="detail-revoke-key"
-                  disabled={busy || applyPending || applyUnknown || editing || Boolean(operationPending)}
-                  onClick={() => onRequestOperation('revoke')}
-                >
-                  {k('quickRevoke')}
-                </button>
-              </div>
-            )}
-          </div>
+                  {k('closeDialog')}
+                </Button>
+              )
+            }
+          />
         }
       >
-        <section className="key-detail-workspace key-drawer-body-shell" aria-busy={busy}>
-          <div
-            className="key-drawer-tabs"
-            role="tablist"
-            aria-label={t('keysDetails')}
-            onKeyDown={(event) => {
-              if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-              event.preventDefault();
-              const next =
-                event.key === 'Home'
-                  ? 'overview'
-                  : event.key === 'End'
-                    ? 'usage'
-                    : detailTab === 'overview'
-                      ? 'usage'
-                      : 'overview';
-              switchDetailTab(next);
-              event.currentTarget
-                .querySelector<HTMLButtonElement>(`[data-testid="key-detail-tab-${next}"]`)
-                ?.focus();
-            }}
-          >
-            <button
-              type="button"
-              role="tab"
-              id="key-detail-tab-btn-overview"
-              tabIndex={detailTab === 'overview' ? 0 : -1}
-              aria-selected={detailTab === 'overview'}
-              aria-controls="key-detail-panel-overview"
-              className={detailTab === 'overview' ? 'is-active' : ''}
-              data-testid="key-detail-tab-overview"
-              onClick={() => switchDetailTab('overview')}
-            >
-              {k('detailTabOverview')}
-            </button>
-            <button
-              type="button"
-              role="tab"
-              id="key-detail-tab-btn-usage"
-              tabIndex={detailTab === 'usage' ? 0 : -1}
-              aria-selected={detailTab === 'usage'}
-              aria-controls="key-detail-panel-usage"
-              className={detailTab === 'usage' ? 'is-active' : ''}
-              data-testid="key-detail-tab-usage"
-              onClick={() => switchDetailTab('usage')}
-            >
-              {k('detailTabUsage')}
-            </button>
-          </div>
-          {busy && (
-            <p role="status" className="key-notice">
-              {t('keysLoading')}
-            </p>
-          )}
-          {message && !editing && (
-            <p role="status" className="key-notice key-notice-warning">
-              <FullWebIcon name="info" />
-              <span>{message}</span>
-            </p>
-          )}
-          {record && (
-            <>
-              <div
-                id="key-detail-panel-overview"
-                role="tabpanel"
-                aria-labelledby="key-detail-tab-btn-overview"
-                className="key-detail-columns key-drawer-tab-panel"
-                data-testid="key-detail-panel-overview"
-                hidden={detailTab !== 'overview'}
-              >
-                <section
-                  className="key-overview-decision-card"
-                  data-overview-tone={
-                    revokedOrSuperseded
-                      ? 'revoked'
-                      : record.runtimeState === 'effective_observed'
-                        ? 'active'
-                        : 'warning'
-                  }
+        <DrawerBodyShell
+          className="key-detail-workspace"
+          ariaBusy={busy}
+          tabs={
+            <DrawerTabBar
+              ariaLabel={t('keysDetails')}
+              activeTab={detailTab}
+              onChange={switchDetailTab}
+              scrollContainerRef={detailDrawerBodyRef}
+              items={[
+                {
+                  id: 'overview',
+                  label: k('detailTabOverview'),
+                  testId: 'key-detail-tab-overview',
+                  tabDomId: 'key-detail-tab-btn-overview',
+                  panelId: 'key-detail-panel-overview',
+                },
+                {
+                  id: 'usage',
+                  label: k('detailTabUsage'),
+                  testId: 'key-detail-tab-usage',
+                  tabDomId: 'key-detail-tab-btn-usage',
+                  panelId: 'key-detail-panel-usage',
+                },
+              ]}
+            />
+          }
+        >
+          <DrawerViewport>
+            {busy && (
+              <DrawerNotice tone="info" icon={<FullWebIcon name="clock" size={16} />} role="status">
+                {t('keysLoading')}
+              </DrawerNotice>
+            )}
+            {message && !editing && (
+              <DrawerNotice tone="warning" icon={<FullWebIcon name="info" size={16} />} role="status">
+                {message}
+              </DrawerNotice>
+            )}
+            {record && (
+              <>
+                <DrawerTabPanel
+                  id="key-detail-panel-overview"
+                  labelledBy="key-detail-tab-btn-overview"
+                  asTabPanel
+                  testId="key-detail-panel-overview"
+                  hidden={detailTab !== 'overview'}
                 >
-                  <div className="key-overview-kpi-strip" data-testid="key-overview-kpi-strip">
-                    <div className="key-overview-kpi-item">
-                      <span>{k('overviewCalls24h')}</span>
-                      <strong>
-                        {usageCountText(overviewUsage?.totals?.calls, overviewCoverageState)}
-                      </strong>
+                  {revokedOrSuperseded ? (
+                    <DrawerNotice tone="neutral" title={t('keysRevokedHistory')} role="status">
+                      {k('detailRevokedHelp')}
+                    </DrawerNotice>
+                  ) : gatewayPending && record.runtimeState === 'not_applied' ? (
+                    <DrawerNotice
+                      tone="warning"
+                      icon={<FullWebIcon name="alert" size={16} />}
+                      role="status"
+                    >
+                      {k('connectionPending')}
+                    </DrawerNotice>
+                  ) : record.runtimeState === 'effective_observed' ? null : record.runtimeState ===
+                      'effect_unknown' || applyUnknown ? (
+                    <DrawerNotice
+                      tone="warning"
+                      icon={<FullWebIcon name="alert" size={16} />}
+                      role="alert"
+                      testId="detail-apply-recovery"
+                    >
+                      <div className="key-drawer-status-notice-body">
+                        <p>{k('detailUnknownHelp')}</p>
+                        {applyAborted && applyError !== k('operationAborted') && (
+                          <p data-testid="detail-apply-aborted">{k('operationAborted')}</p>
+                        )}
+                        {(applyError || record.effectCode) && (
+                          <p data-testid="detail-apply-blocker-reason">
+                            {applyError || k(effectBlockerTextKey(record.effectCode))}
+                          </p>
+                        )}
+                        {applyErrorDetail &&
+                          (applyErrorCode || record.effectCode) ===
+                            'external_management_key_rejected' && (
+                            <details
+                              className="fresh-external-blocker-detail"
+                              data-testid="detail-apply-blocker-detail"
+                            >
+                              <summary>{x('details')}</summary>
+                              <p>{applyErrorDetail}</p>
+                            </details>
+                          )}
+                        <div className="key-toolbar-actions">
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            data-testid="detail-reconcile-apply"
+                            disabled={busy || applyPending}
+                            onClick={() => void reconcileApply()}
+                          >
+                            {k('checkOperationResult')}
+                          </button>
+                          {onRebind &&
+                            [
+                              'external_management_key_rejected',
+                              'external_target_moved',
+                            ].includes(applyErrorCode || record.effectCode || '') && (
+                              <button
+                                type="button"
+                                className="btn btn-primary btn-sm"
+                                data-testid="detail-rebind-action"
+                                disabled={busy || applyPending}
+                                onClick={onRebind}
+                              >
+                                {k('rebindConnection')}
+                              </button>
+                            )}
+                        </div>
+                      </div>
+                    </DrawerNotice>
+                  ) : (
+                    <DrawerNotice
+                      tone="warning"
+                      icon={<FullWebIcon name="alert" size={16} />}
+                      role="alert"
+                      testId="detail-apply-recovery"
+                    >
+                      <div className="key-drawer-status-notice-body">
+                        <p>{k('detailApplyHelp')}</p>
+                        {applyAborted && applyError !== k('operationAborted') && (
+                          <p data-testid="detail-apply-aborted">{k('operationAborted')}</p>
+                        )}
+                        {(applyError || record.effectCode) && (
+                          <p data-testid="detail-apply-blocker-reason">
+                            {applyError || k(effectBlockerTextKey(record.effectCode))}
+                          </p>
+                        )}
+                        {applyErrorDetail &&
+                          (applyErrorCode || record.effectCode) ===
+                            'external_management_key_rejected' && (
+                            <details
+                              className="fresh-external-blocker-detail"
+                              data-testid="detail-apply-blocker-detail"
+                            >
+                              <summary>{x('details')}</summary>
+                              <p>{applyErrorDetail}</p>
+                            </details>
+                          )}
+                        <div className="key-toolbar-actions">
+                          {![
+                            'external_management_key_rejected',
+                            'external_target_moved',
+                            'external_cpa_version_unsupported',
+                          ].includes(applyErrorCode) && (
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              data-testid="detail-retry-apply"
+                              disabled={busy || applyPending}
+                              onClick={() => void retryApply()}
+                            >
+                              {k('retryApplyKey')}
+                            </button>
+                          )}
+                          {onRebind &&
+                            [
+                              'external_management_key_rejected',
+                              'external_target_moved',
+                            ].includes(applyErrorCode || record.effectCode || '') && (
+                              <button
+                                type="button"
+                                className="btn btn-primary btn-sm"
+                                data-testid="detail-rebind-action"
+                                disabled={busy || applyPending}
+                                onClick={onRebind}
+                              >
+                                {k('rebindConnection')}
+                              </button>
+                            )}
+                        </div>
+                      </div>
+                    </DrawerNotice>
+                  )}
+                  <DrawerSectionCard
+                    variant="highlight"
+                    icon={<FullWebIcon name="chart" size={18} />}
+                    title={k('usageSummaryTitle')}
+                    titleBadge={<DrawerScopePill>{k('usageWindow24h')}</DrawerScopePill>}
+                    metaActions={
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="xs"
+                        onClick={() => switchDetailTab('usage')}
+                      >
+                        {k('viewUsage')} →
+                      </Button>
+                    }
+                  >
+                    <div data-testid="key-overview-kpi-strip">
+                      <MetricSummaryGrid
+                        density="compact"
+                        columns={3}
+                        cards={[
+                          {
+                            label: k('overviewCalls24h'),
+                            value: usageCountText(overviewUsage?.totals?.calls, overviewCoverageState),
+                            meta: '',
+                            icon: 'calls',
+                            accent: 'blue',
+                          },
+                          {
+                            label: k('overviewTokens24h'),
+                            value: usageCountText(
+                              overviewUsage?.totals?.totalTokens,
+                              overviewCoverageState
+                            ),
+                            meta: '',
+                            icon: 'tokens',
+                            accent: 'indigo',
+                          },
+                          {
+                            label: k('usageLastUsed'),
+                            value: overviewLastUsedText,
+                            meta: '',
+                            icon: 'latency',
+                            accent: 'teal',
+                          },
+                        ]}
+                      />
                     </div>
-                    <div className="key-overview-kpi-item">
-                      <span>{k('overviewTokens24h')}</span>
-                      <strong>
-                        {usageCountText(overviewUsage?.totals?.totalTokens, overviewCoverageState)}
-                      </strong>
-                    </div>
-                    <div className="key-overview-kpi-item">
-                      <span>{k('usageLastUsed')}</span>
-                      <strong>{overviewLastUsedText}</strong>
-                    </div>
-                  </div>
-                  <dl className="key-detail-meta-grid" data-testid="key-detail-metadata">
-                    <div>
-                      <dt>{k('created')}</dt>
-                      <dd>
+                  </DrawerSectionCard>
+                  <DrawerSectionCard
+                    variant="default"
+                    icon={<FullWebIcon name="info" size={15} />}
+                    title={t('keysDetails')}
+                  >
+                    <DrawerDefinitionList testId="key-detail-metadata">
+                      <DrawerDlRow label={k('created')}>
                         {createdTime ? (
                           <time dateTime={createdTime.iso}>{createdTime.label}</time>
                         ) : (
                           '—'
                         )}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>{k('originLabel')}</dt>
-                      <dd>{k(keyOriginTextKey(record.origin))}</dd>
-                    </div>
-                    {lastRotatedTime && (
-                      <div>
-                        <dt>{k('lastRotatedLabel')}</dt>
-                        <dd data-testid="detail-last-rotated-at">
-                          <time dateTime={lastRotatedTime.iso}>{lastRotatedTime.label}</time>
-                        </dd>
-                      </div>
-                    )}
-                    {revokedTime && (
-                      <div>
-                        <dt>{k('revokedAtLabel')}</dt>
-                        <dd>
-                          <time dateTime={revokedTime.iso}>{revokedTime.label}</time>
-                        </dd>
-                      </div>
-                    )}
-                    <div>
-                      <dt>{t('keysIdentity')}</dt>
-                      <dd>
-                        <div className="key-id-copy-row">
-                          <code className="key-id-code" title={id}>
-                            {id}
-                          </code>
-                          <button
-                            type="button"
-                            className="key-inline-copy-btn"
-                            data-testid="detail-copy-key-id"
-                            aria-label={`${k('copyKey')}: ${t('keysIdentity')}`}
-                            title={t('keysCopy')}
-                            onClick={() => void copyKeyId()}
-                          >
-                            <FullWebIcon
-                              name={idCopyFeedback === 'copied' ? 'check' : 'copy'}
-                              size={12}
-                            />
-                          </button>
-                        </div>
-                      </dd>
-                    </div>
-                    {record.operationId && (
-                      <div className="key-detail-op-meta">
-                        <dt>{k('operationIdLabel')}</dt>
-                        <dd>
-                          <code data-testid="detail-operation-id">{record.operationId}</code>
-                        </dd>
-                      </div>
-                    )}
-                  </dl>
-                  {record.origin === 'adopted' && (
-                    <p className="key-field-help key-adopted-note">{k('adoptedOriginNote')}</p>
-                  )}
-                </section>
-                {revokedOrSuperseded ? (
-                  <div className="key-drawer-status-notice is-revoked" role="status">
-                    <strong>{t('keysRevokedHistory')}</strong>
-                    <p>{k('detailRevokedHelp')}</p>
-                  </div>
-                ) : gatewayPending && record.runtimeState === 'not_applied' ? (
-                  <div className="key-drawer-status-notice is-warning" role="status">
-                    <p>{k('connectionPending')}</p>
-                  </div>
-                ) : record.runtimeState === 'effective_observed' ? null : record.runtimeState ===
-                    'effect_unknown' || applyUnknown ? (
-                  <div
-                    className="key-drawer-status-notice is-warning"
-                    role="alert"
-                    data-testid="detail-apply-recovery"
-                  >
-                    <FullWebIcon name="alert" size={16} />
-                    <div className="key-drawer-status-notice-body">
-                      <p>{k('detailUnknownHelp')}</p>
-                      {applyAborted && applyError !== k('operationAborted') && (
-                        <p data-testid="detail-apply-aborted">{k('operationAborted')}</p>
-                      )}
-                      {(applyError || record.effectCode) && (
-                        <p data-testid="detail-apply-blocker-reason">
-                          {applyError || k(effectBlockerTextKey(record.effectCode))}
-                        </p>
-                      )}
-                      {applyErrorDetail &&
-                        (applyErrorCode || record.effectCode) ===
-                          'external_management_key_rejected' && (
-                          <details
-                            className="fresh-external-blocker-detail"
-                            data-testid="detail-apply-blocker-detail"
-                          >
-                            <summary>{x('details')}</summary>
-                            <p>{applyErrorDetail}</p>
-                          </details>
-                        )}
-                      <div className="key-toolbar-actions">
-                        <button
-                          type="button"
-                          className="btn btn-secondary btn-sm"
-                          data-testid="detail-reconcile-apply"
-                          disabled={busy || applyPending}
-                          onClick={() => void reconcileApply()}
+                      </DrawerDlRow>
+                      <DrawerDlRow label={k('originLabel')}>
+                        {k(keyOriginTextKey(record.origin))}
+                      </DrawerDlRow>
+                      {lastRotatedTime && (
+                        <DrawerDlRow
+                          label={k('lastRotatedLabel')}
+                          valueTestId="detail-last-rotated-at"
                         >
-                          {k('checkOperationResult')}
-                        </button>
-                        {onRebind &&
-                          [
-                            'external_management_key_rejected',
-                            'external_target_moved',
-                          ].includes(applyErrorCode || record.effectCode || '') && (
-                            <button
-                              type="button"
-                              className="btn btn-primary btn-sm"
-                              data-testid="detail-rebind-action"
-                              disabled={busy || applyPending}
-                              onClick={onRebind}
-                            >
-                              {k('rebindConnection')}
-                            </button>
-                          )}
-                      </div>
-                    </div>
-                  </div>
-                ) : (
-                  <div
-                    className="key-drawer-status-notice is-warning"
-                    role="alert"
-                    data-testid="detail-apply-recovery"
-                  >
-                    <FullWebIcon name="alert" size={16} />
-                    <div className="key-drawer-status-notice-body">
-                      <p>{k('detailApplyHelp')}</p>
-                      {applyAborted && applyError !== k('operationAborted') && (
-                        <p data-testid="detail-apply-aborted">{k('operationAborted')}</p>
+                          <time dateTime={lastRotatedTime.iso}>{lastRotatedTime.label}</time>
+                        </DrawerDlRow>
                       )}
-                      {(applyError || record.effectCode) && (
-                        <p data-testid="detail-apply-blocker-reason">
-                          {applyError || k(effectBlockerTextKey(record.effectCode))}
+                      {revokedTime && (
+                        <DrawerDlRow label={k('revokedAtLabel')}>
+                          <time dateTime={revokedTime.iso}>{revokedTime.label}</time>
+                        </DrawerDlRow>
+                      )}
+                      <DrawerDlRow
+                        label={t('keysIdentity')}
+                        mono
+                        onCopy={copyKeyId}
+                        copied={idCopyFeedback === 'copied'}
+                        copyAriaLabel={`${k('copyKey')}: ${t('keysIdentity')}`}
+                        copyTitle={t('keysCopy')}
+                        copyTestId="detail-copy-key-id"
+                      >
+                        <code className="key-id-code" title={id}>
+                          {id}
+                        </code>
+                      </DrawerDlRow>
+                      {record.operationId && (
+                        <DrawerDlRow label={k('operationIdLabel')} mono>
+                          <code data-testid="detail-operation-id">{record.operationId}</code>
+                        </DrawerDlRow>
+                      )}
+                    </DrawerDefinitionList>
+                    {record.origin === 'adopted' && (
+                      <p className="key-field-help key-adopted-note">{k('adoptedOriginNote')}</p>
+                    )}
+                  </DrawerSectionCard>
+                  {!revokedOrSuperseded && (
+                    <AccessInfoSummary
+                      client={client}
+                      auth={auth}
+                      onUnauthorized={onUnauthorized}
+                      info={accessInfo ?? undefined}
+                      reloadToken={reloadToken}
+                      compact
+                      clientOnly
+                      defaultProtocolsCollapsed={false}
+                      testIdPrefix="detail-access-info"
+                    />
+                  )}
+                </DrawerTabPanel>
+                <DrawerTabPanel
+                  id="key-detail-panel-usage"
+                  labelledBy="key-detail-tab-btn-usage"
+                  asTabPanel
+                  testId="key-detail-panel-usage"
+                  hidden={detailTab !== 'usage'}
+                >
+                  <DrawerSectionCard
+                    variant="highlight"
+                    icon={<FullWebIcon name="chart" size={18} />}
+                    title={k('usageSectionTitle')}
+                    testId="key-detail-usage-policy"
+                    metaActions={
+                      <div className="key-usage-links" data-testid="key-usage-links">
+                        <CrossPageLink
+                          route="/monitoring"
+                          apiKeyId={id}
+                          className="btn btn-secondary btn-sm"
+                          testId="detail-link-monitoring"
+                          disabled={!canClose()}
+                          onNavigate={close}
+                        >
+                          {k('usageLinkMonitoring')}
+                        </CrossPageLink>
+                        <CrossPageLink
+                          route="/usage-analytics"
+                          apiKeyId={id}
+                          className="btn btn-secondary btn-sm"
+                          testId="detail-link-analytics"
+                          disabled={!canClose()}
+                          onNavigate={close}
+                        >
+                          {k('usageLinkAnalytics')}
+                        </CrossPageLink>
+                      </div>
+                    }
+                  >
+                    <div className="key-usage-filter-row">
+                      <div data-testid="usage-window-tabs">
+                        <SegmentedTabs
+                          items={[
+                            { id: '24h', label: k('usageWindow24h') },
+                            { id: '7d', label: k('usageWindow7d') },
+                            { id: '30d', label: k('usageWindow30d') },
+                          ]}
+                          activeTab={activeUsageWindow}
+                          onChange={(next) => switchUsageWindow(next as UsageWindow)}
+                          ariaLabel={k('usageWindowLabel')}
+                          idBase="key-usage-window"
+                          className="key-usage-window-tabs"
+                          variant="joined"
+                          size="sm"
+                          responsiveFullWidth={false}
+                        />
+                      </div>
+                      {usage && usage.totals && (
+                        <p className="key-usage-window-meta">
+                          <strong>{k('usageWindowLabel')}:</strong> {detailTime(usage.fromMs).label} —{' '}
+                          {detailTime(usage.toMs).label}
                         </p>
                       )}
-                      {applyErrorDetail &&
-                        (applyErrorCode || record.effectCode) ===
-                          'external_management_key_rejected' && (
-                          <details
-                            className="fresh-external-blocker-detail"
-                            data-testid="detail-apply-blocker-detail"
-                          >
-                            <summary>{x('details')}</summary>
-                            <p>{applyErrorDetail}</p>
-                          </details>
-                        )}
-                      <div className="key-toolbar-actions">
-                        {![
-                          'external_management_key_rejected',
-                          'external_target_moved',
-                          'external_cpa_version_unsupported',
-                        ].includes(applyErrorCode) && (
-                          <button
-                            type="button"
-                            className="btn btn-secondary btn-sm"
-                            data-testid="detail-retry-apply"
-                            disabled={busy || applyPending}
-                            onClick={() => void retryApply()}
-                          >
-                            {k('retryApplyKey')}
-                          </button>
-                        )}
-                        {onRebind &&
-                          [
-                            'external_management_key_rejected',
-                            'external_target_moved',
-                          ].includes(applyErrorCode || record.effectCode || '') && (
-                            <button
-                              type="button"
-                              className="btn btn-primary btn-sm"
-                              data-testid="detail-rebind-action"
-                              disabled={busy || applyPending}
-                              onClick={onRebind}
-                            >
-                              {k('rebindConnection')}
-                            </button>
-                          )}
-                      </div>
                     </div>
-                  </div>
-                )}
-                {!revokedOrSuperseded && (
-                  <AccessInfoSummary
-                    client={client}
-                    auth={auth}
-                    onUnauthorized={onUnauthorized}
-                    info={accessInfo ?? undefined}
-                    reloadToken={reloadToken}
-                    compact
-                    clientOnly
-                    defaultProtocolsCollapsed={false}
-                    testIdPrefix="detail-access-info"
-                  />
-                )}
-              </div>
-              <div
-                id="key-detail-panel-usage"
-                role="tabpanel"
-                aria-labelledby="key-detail-tab-btn-usage"
-                className="key-detail-columns key-drawer-tab-panel"
-                data-testid="key-detail-panel-usage"
-                hidden={detailTab !== 'usage'}
-              >
-                <section className="key-detail-section" data-testid="key-detail-usage-policy">
-                  <header className="key-usage-toolbar-row">
-                    <div data-testid="usage-window-tabs">
-                      <SegmentedTabs
-                        items={[
-                          { id: '24h', label: k('usageWindow24h') },
-                          { id: '7d', label: k('usageWindow7d') },
-                          { id: '30d', label: k('usageWindow30d') },
-                        ]}
-                        activeTab={activeUsageWindow}
-                        onChange={(next) => switchUsageWindow(next as UsageWindow)}
-                        ariaLabel={k('usageWindowLabel')}
-                        idBase="key-usage-window"
-                        className="key-usage-window-tabs"
-                        size="sm"
-                        responsiveFullWidth={false}
-                      />
-                    </div>
-                    <div className="key-usage-links" data-testid="key-usage-links">
-                      <CrossPageLink
-                        route="/monitoring"
-                        apiKeyId={id}
-                        className="btn btn-secondary btn-sm"
-                        testId="detail-link-monitoring"
-                        disabled={!canClose()}
-                        onNavigate={close}
-                      >
-                        {k('usageLinkMonitoring')}
-                      </CrossPageLink>
-                      <CrossPageLink
-                        route="/usage-analytics"
-                        apiKeyId={id}
-                        className="btn btn-secondary btn-sm"
-                        testId="detail-link-analytics"
-                        disabled={!canClose()}
-                        onNavigate={close}
-                      >
-                        {k('usageLinkAnalytics')}
-                      </CrossPageLink>
-                    </div>
-                  </header>
-                  <div className="key-detail-section-body">
                     {!usage && !usageFailed ? (
-                      <p className="key-detail-description" role="status">
+                      <p className="key-field-help" role="status">
                         {k('usageReading')}
                       </p>
                     ) : (
                       <>
                         {usageCoverage.state !== 'complete' && (
-                          <div className="key-usage-coverage" data-testid="key-usage-state">
-                            <div>
-                              <span className="key-field-label">{k('usageCoverageLabel')}</span>
-                              <span className={'key-state-pill ' + usageStateClass}>
-                                {usageStateText(usageCoverage.state)}
+                          <DrawerNotice
+                            tone={usageCoverage.state === 'unavailable' ? 'danger' : 'warning'}
+                            icon={<FullWebIcon name="alert" size={16} />}
+                            role="status"
+                            testId="key-usage-state"
+                            title={
+                              <span className="key-usage-coverage-title">
+                                <span>{k('usageCoverageLabel')}</span>
+                                <DrawerStatusPill tone={usageCoverageTone(usageCoverage.state)} dot>
+                                  {usageStateText(usageCoverage.state)}
+                                </DrawerStatusPill>
                               </span>
-                            </div>
+                            }
+                          >
                             <p data-testid="key-usage-reason">
                               {usageReasonText(usageCoverage.reason)}
                             </p>
-                          </div>
+                          </DrawerNotice>
                         )}
                         {usage && usage.totals && (
                           <>
-                            <p className="key-usage-window-meta">
-                              <strong>{k('usageWindowLabel')}:</strong>{' '}
-                              {detailTime(usage.fromMs).label} — {detailTime(usage.toMs).label}
-                            </p>
                             <dl
                               className="key-usage-stat-grid key-usage-totals"
                               data-testid="key-usage-totals"
@@ -1982,100 +2034,106 @@ export function FreshKeyDetails({
                                 <dd>{usageTimeText(usage.totals.lastUsedAtMs) ?? '—'}</dd>
                               </div>
                             </dl>
-                            {usage.series.length > 0 && (maxBucketCalls > 0 || isZeroSeries) ? (
-                              <div className="key-usage-series" data-testid="key-usage-series">
-                                <div className="key-usage-series-head">
-                                  <span className="key-field-label">
-                                    {k('usageSeriesTitle')}
-                                    {isZeroSeries ? ` · ${k('usageNoCalls')}` : ''}
-                                  </span>
-                                  <span className="key-usage-legend">
-                                    <span className="key-usage-legend-item is-success">
-                                      {k('usageSuccess')}
-                                    </span>
-                                    <span className="key-usage-legend-item is-failure">
-                                      {k('usageFailure')}
-                                    </span>
-                                  </span>
-                                </div>
-                                <div
-                                  className="key-usage-bars"
-                                  data-testid="key-usage-bars"
-                                  role="list"
-                                  aria-label={k('usageSeriesTitle')}
+                            {!(
+                              usage.series.length > 0 &&
+                              (maxBucketCalls > 0 || isZeroSeries)
+                            ) &&
+                              (usage.coverage.state === 'complete' ||
+                                usage.coverage.state === 'partial') && (
+                                <p
+                                  className="key-usage-empty-state"
+                                  data-testid="key-usage-empty"
                                 >
-                                  {usage.series.map((point) => {
-                                    const totalPct =
-                                      maxBucketCalls > 0
-                                        ? Math.max(
-                                            6,
-                                            Math.round((point.calls / maxBucketCalls) * 100)
-                                          )
-                                        : 0;
-                                    const failureCalls = Math.min(point.failure, point.calls);
-                                    const successCalls = Math.max(0, point.calls - failureCalls);
-                                    const failurePct =
-                                      point.calls > 0
-                                        ? Math.round((failureCalls / point.calls) * 100)
-                                        : 0;
-                                    const successPct =
-                                      point.calls > 0 ? Math.max(0, 100 - failurePct) : 0;
-                                    const timeLabel = detailTime(point.bucketMs).label;
-                                    const tooltip = `${timeLabel} · ${usageCountText(point.calls, usage.coverage.state)} ${k('usageCalls')}${failureCalls > 0 ? ` (${usageCountText(failureCalls, usage.coverage.state)} ${k('usageFailure')})` : ''} · ${usageCountText(point.totalTokens, usage.coverage.state)} ${k('usageTotalTokens')}`;
-                                    return (
-                                      <div
-                                        key={point.bucketMs}
-                                        className="key-usage-bar-col"
-                                        role="listitem"
-                                        tabIndex={0}
-                                        title={tooltip}
-                                        aria-label={tooltip}
-                                      >
-                                        {point.calls > 0 ? (
-                                          <div
-                                            className="key-usage-bar-stack"
-                                            style={{ height: `${totalPct}%` }}
-                                          >
-                                            {failureCalls > 0 && (
-                                              <span
-                                                className="key-usage-bar-failure"
-                                                style={{ height: `${failurePct}%` }}
-                                              />
-                                            )}
-                                            {successCalls > 0 && (
-                                              <span
-                                                className="key-usage-bar-success"
-                                                style={{ height: `${successPct}%` }}
-                                              />
-                                            )}
-                                          </div>
-                                        ) : (
-                                          <div className="key-usage-bar-empty" />
-                                        )}
-                                      </div>
-                                    );
-                                  })}
-                                </div>
-                              </div>
-                            ) : usage.coverage.state === 'complete' ||
-                              usage.coverage.state === 'partial' ? (
-                              <p
-                                className="key-usage-empty-state"
-                                data-testid="key-usage-empty"
-                              >
-                                {k('usageNoCalls')}
-                              </p>
-                            ) : null}
+                                  {k('usageNoCalls')}
+                                </p>
+                              )}
                           </>
                         )}
                       </>
                     )}
-                  </div>
-                </section>
-              </div>
-            </>
-          )}
-        </section>
+                  </DrawerSectionCard>
+                  {usage &&
+                    usage.totals &&
+                    usage.series.length > 0 &&
+                    (maxBucketCalls > 0 || isZeroSeries) && (
+                      <DrawerSectionCard
+                        variant="default"
+                        icon={<FullWebIcon name="trendingUp" size={15} />}
+                        title={`${k('usageSeriesTitle')}${isZeroSeries ? ` · ${k('usageNoCalls')}` : ''}`}
+                        testId="key-usage-series"
+                        metaActions={
+                          <span className="key-usage-legend">
+                            <span className="key-usage-legend-item is-success">
+                              {k('usageSuccess')}
+                            </span>
+                            <span className="key-usage-legend-item is-failure">
+                              {k('usageFailure')}
+                            </span>
+                          </span>
+                        }
+                      >
+                        <div
+                          className="key-usage-bars"
+                          data-testid="key-usage-bars"
+                          role="list"
+                          aria-label={k('usageSeriesTitle')}
+                        >
+                          {usage.series.map((point) => {
+                            const totalPct =
+                              maxBucketCalls > 0
+                                ? Math.max(6, Math.round((point.calls / maxBucketCalls) * 100))
+                                : 0;
+                            const failureCalls = Math.min(point.failure, point.calls);
+                            const successCalls = Math.max(0, point.calls - failureCalls);
+                            const failurePct =
+                              point.calls > 0
+                                ? Math.round((failureCalls / point.calls) * 100)
+                                : 0;
+                            const successPct =
+                              point.calls > 0 ? Math.max(0, 100 - failurePct) : 0;
+                            const timeLabel = detailTime(point.bucketMs).label;
+                            const tooltip = `${timeLabel} · ${usageCountText(point.calls, usage.coverage.state)} ${k('usageCalls')}${failureCalls > 0 ? ` (${usageCountText(failureCalls, usage.coverage.state)} ${k('usageFailure')})` : ''} · ${usageCountText(point.totalTokens, usage.coverage.state)} ${k('usageTotalTokens')}`;
+                            return (
+                              <div
+                                key={point.bucketMs}
+                                className="key-usage-bar-col"
+                                role="listitem"
+                                tabIndex={0}
+                                title={tooltip}
+                                aria-label={tooltip}
+                              >
+                                {point.calls > 0 ? (
+                                  <div
+                                    className="key-usage-bar-stack"
+                                    style={{ height: `${totalPct}%` }}
+                                  >
+                                    {failureCalls > 0 && (
+                                      <span
+                                        className="key-usage-bar-failure"
+                                        style={{ height: `${failurePct}%` }}
+                                      />
+                                    )}
+                                    {successCalls > 0 && (
+                                      <span
+                                        className="key-usage-bar-success"
+                                        style={{ height: `${successPct}%` }}
+                                      />
+                                    )}
+                                  </div>
+                                ) : (
+                                  <div className="key-usage-bar-empty" />
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </DrawerSectionCard>
+                    )}
+                </DrawerTabPanel>
+              </>
+            )}
+          </DrawerViewport>
+        </DrawerBodyShell>
       </Drawer>
       <FreshKeyRenameModal
         open={open && editing}

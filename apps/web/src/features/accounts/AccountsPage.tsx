@@ -11,6 +11,20 @@ import { FloatingActionDock } from '@/components/common/FloatingActionDock';
 import { LocalizedPaginationFooter } from '@/components/common/LocalizedPaginationFooter';
 import { PageControlBar } from '@/components/common/PageControlBar';
 import { WorkspaceListPanel } from '@/components/common/WorkspaceListPanel';
+import {
+  DRAWER_WIDTH,
+  DrawerActionFooter,
+  DrawerBodyShell,
+  DrawerCopyableMeta,
+  DrawerIdentityHeader,
+  DrawerNotice,
+  DrawerStatusPill,
+  DrawerTabBar,
+  DrawerTabPanel,
+  DrawerViewport,
+  type DrawerStatusTone,
+  type DrawerTabItem,
+} from '@/components/common/WorkspaceDrawer';
 import { Button } from '@/components/ui/Button';
 import { Drawer } from '@/components/ui/Drawer';
 import { DropdownMenu, type DropdownMenuItem } from '@/components/ui/DropdownMenu';
@@ -28,7 +42,6 @@ import {
   IconDollarSign,
   IconSend,
   IconChartLine,
-  IconCopy,
   IconDownload,
   IconEye,
   IconEyeOff,
@@ -74,7 +87,12 @@ import {
 } from '@/hooks';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import { useUnsavedChangesGuard } from '@/hooks/useUnsavedChangesGuard';
-import { getAuthFileIcon } from '@/features/authFiles/constants';
+import {
+  QUOTA_PROVIDER_TYPES,
+  getAuthFileIcon,
+  parseExcludedModelsText,
+  type QuotaProviderType,
+} from '@/features/authFiles/constants';
 import {
   useAuthFilesData,
   type AuthFilesCredentialMutation,
@@ -207,6 +225,10 @@ import {
   buildAccountDetailViewModel,
   buildOverviewRecentStatus,
 } from '@/features/accounts/model/accountDetailViewModel';
+import {
+  buildAccountModelRuleDiff,
+  buildAccountModelRuleProjection,
+} from '@/features/accounts/model/accountModelRules';
 import {
   ACCOUNT_SORT_DEFAULT_DIRECTIONS,
   ACCOUNT_SORT_FIELD_OPTIONS,
@@ -1220,6 +1242,27 @@ const getHealthStatusClass = (status: AccountListHealthStatusKey) => {
       return styles.badgeMuted;
     default:
       return styles.badgeNeutral;
+  }
+};
+
+const getHealthStatusTone = (status: AccountListHealthStatusKey): DrawerStatusTone => {
+  switch (status) {
+    case 'available':
+      return 'success';
+    case 'five_hour_cooldown':
+    case 'weekly_cooldown':
+    case 'monthly_cooldown':
+    case 'limited':
+    case 'partial':
+      return 'warning';
+    case 'five_hour_exhausted':
+    case 'weekly_exhausted':
+    case 'monthly_exhausted':
+    case 'exception':
+    case 'reauth':
+      return 'danger';
+    default:
+      return 'neutral';
   }
 };
 
@@ -9645,21 +9688,14 @@ export function AccountsPage() {
         <Drawer
           open={false}
           onClose={() => setSelectedRowKey(null)}
-          width="clamp(540px, 45vw, 720px)"
+          width={DRAWER_WIDTH.LG}
           className={styles.accountDetailDrawer}
         />
       );
     }
 
     const providerIcon = getAuthFileIcon(selectedRow.provider, resolvedTheme);
-
-    const detailTabs: Array<{ id: DetailTab; label: string }> = [
-      { id: 'overview', label: t('accounts.detail_tab_overview') },
-      { id: 'quota', label: t('accounts.detail_tab_quota') },
-      { id: 'config', label: t('accounts.detail_tab_config') },
-      { id: 'models', label: t('accounts.detail_tab_models') },
-      { id: 'diagnostics', label: t('accounts.detail_tab_diagnostics') },
-    ];
+    const visualSurface = providerIcon ? 'bare' : 'boxed';
     const valueRow =
       usageRows.find((row) => row.row?.selectionKey === selectedRow.selectionKey) ??
       usageRows.find((row) => !row.row && row.fileName === selectedRow.fileName);
@@ -9741,6 +9777,63 @@ export function AccountsPage() {
       !featureAvailability.managerServiceBase ||
       !managementKey;
     const modelsTargetMatches = modelsSelectionKey === selectedRow.selectionKey;
+    const modelPreview = modelsTargetMatches
+      ? buildAccountModelRuleProjection({
+          provider: modelsFileType || selectedRow.provider,
+          runtimeModels: modelsList,
+          modelDefinitions,
+          credentialRules: parseExcludedModelsText(
+            configurationEditor.draft?.excludedModelsText ?? ''
+          ),
+          globalRules: oauthState.excludedError === 'ready' ? oauthState.excluded : {},
+          globalRulesKnown: oauthState.excludedError === 'ready',
+          credentialRulesShared: configurationEditor.sharedSourceReadOnly,
+          credentialPrefix: configurationEditor.state?.originalDraft?.prefix ?? '',
+        })
+      : null;
+    const modelRuleDiff = buildAccountModelRuleDiff(
+      configurationEditor.state?.originalDraft?.excludedModelsText ?? '',
+      configurationEditor.draft?.excludedModelsText ?? ''
+    );
+    const isModelsDirty =
+      modelRuleDiff.added.length > 0 ||
+      modelRuleDiff.removed.length > 0 ||
+      (configurationEditor.dirty && detailTab === 'models');
+    const detailTabs: DrawerTabItem<DetailTab>[] = [
+      {
+        id: 'overview',
+        label: t('accounts.detail_tab_overview'),
+        tabDomId: 'accounts-detail-tab-overview',
+        panelId: 'accounts-detail-tab-panel',
+      },
+      {
+        id: 'quota',
+        label: t('accounts.detail_tab_quota'),
+        tabDomId: 'accounts-detail-tab-quota',
+        panelId: 'accounts-detail-tab-panel',
+      },
+      {
+        id: 'config',
+        label: t('accounts.detail_tab_config'),
+        dirty: configurationEditor.dirty,
+        tabDomId: 'accounts-detail-tab-config',
+        panelId: 'accounts-detail-tab-panel',
+      },
+      {
+        id: 'models',
+        label: t('accounts.detail_tab_models'),
+        count: modelPreview?.rows.length || undefined,
+        dirty: isModelsDirty,
+        tabDomId: 'accounts-detail-tab-models',
+        panelId: 'accounts-detail-tab-panel',
+      },
+      {
+        id: 'diagnostics',
+        label: t('accounts.detail_tab_diagnostics'),
+        tabDomId: 'accounts-detail-tab-diagnostics',
+        panelId: 'accounts-detail-tab-panel',
+      },
+    ];
 
     const renderActiveDetail = () => {
       if (detailTab === 'quota') {
@@ -9765,6 +9858,7 @@ export function AccountsPage() {
             disableControls={disableControls}
             editor={configurationEditor}
             onCopyText={copyTextWithNotification}
+            hideInlineActions
           />
         );
       }
@@ -9795,6 +9889,7 @@ export function AccountsPage() {
             onManageGlobalRules={() => void changeActiveView('oauth')}
             onOpenAdvancedRules={() => void openAccountDetail(selectedRow, 'config')}
             onCopyText={copyTextWithNotification}
+            hideInlineActions
           />
         );
       }
@@ -9838,6 +9933,39 @@ export function AccountsPage() {
     const selectedCredentialRefreshing =
       credentialRefreshing[getAuthFileSelectionKey(selectedRow.raw)] === true;
     const selectedQuotaRefreshing = isManualQuotaRefreshing(selectedRow);
+    const canRefreshSelectedQuota =
+      !selectedRow.runtimeOnly &&
+      QUOTA_PROVIDER_TYPES.has(selectedRow.provider as QuotaProviderType);
+    const needsReauth = detailView.health.status === 'reauth';
+    const isConfigurationEditable =
+      !selectedRow.runtimeOnly && !configurationEditor.sharedSourceReadOnly;
+    const isActiveTabEditable =
+      detailTab === 'config'
+        ? isConfigurationEditable
+        : detailTab === 'models'
+          ? isConfigurationEditable && !selectedRow.disabled
+          : false;
+    const showConfigFooterActions =
+      isActiveTabEditable || (configurationEditor.dirty && isConfigurationEditable);
+    const healthTooltipParams = formatQuotaResetTooltipParams(
+      detailView.health.tooltipParams,
+      detailView.health.resetAtMs,
+      i18n.language,
+      detailView.quota.cooldown?.recoverAtMs
+    );
+    const identityExtraMeta = [
+      selectedRow.authIndex ? `#${selectedRow.authIndex}` : '',
+      selectedRow.projectId || '',
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    const statusToggleDisabled =
+      disableControls ||
+      configurationEditor.dirty ||
+      configurationSaving ||
+      statusUpdating ||
+      selectedRow.runtimeOnly;
+
     const drawerMoreItems: DropdownMenuItem[] = [
       {
         key: 'models',
@@ -9900,126 +10028,194 @@ export function AccountsPage() {
         open
         onClose={closeAccountDetail}
         onBeforeClose={confirmConfigurationDiscard}
-        width="clamp(540px, 45vw, 720px)"
+        closeDisabled={configurationSaving}
+        width={DRAWER_WIDTH.LG}
         className={styles.accountDetailDrawer}
         bodyRef={detailDrawerBodyRef}
         title={
-          <div className={styles.drawerTitleIdentity}>
-            <span
-              className={styles.drawerProviderIcon}
-              data-account-provider-icon={selectedRow.provider}
-              aria-hidden="true"
-            >
-              {providerIcon ? <img src={providerIcon} alt="" /> : <IconKey size={24} />}
-            </span>
-            <div className={styles.drawerTitleStack}>
-              <strong className={styles.drawerTitlePrimary} title={selectedRow.accountLabel}>
-                {getDisplayAccount(selectedRow)}
-              </strong>
-              <span className={styles.drawerTitleMeta}>
-                {getProviderLabel(selectedRow.provider, t)} ·{' '}
-                <span title={detailView.identity.planPresentation?.fullLabel}>
-                  {detailView.identity.planPresentation?.shortLabel ?? '-'}
-                </span>{' '}
-                ·{' '}
-                <button
-                  type="button"
-                  className={styles.drawerFileNameCopy}
-                  onClick={() => copyTextWithNotification(selectedRow.fileName)}
-                  title={t('common.copy', { defaultValue: '点击复制' })}
-                  aria-label={`${t('common.copy', { defaultValue: '点击复制' })} ${getDisplayFileName(selectedRow.fileName)}`}
-                >
-                  {getDisplayFileName(selectedRow.fileName)}
-                  <IconCopy size={12} />
-                </button>
-              </span>
-            </div>
-          </div>
+          <DrawerIdentityHeader
+            icon={providerIcon ? <img src={providerIcon} alt="" /> : <IconKey size={22} />}
+            iconBoxed={!providerIcon}
+            iconDataAttributes={{
+              'data-account-provider-icon': selectedRow.provider,
+              'data-provider-icon-surface': visualSurface,
+            }}
+            title={getDisplayAccount(selectedRow)}
+            titleText={selectedRow.accountLabel}
+            metaItems={[
+              getProviderLabel(selectedRow.provider, t),
+              detailView.identity.planPresentation?.shortLabel ? (
+                <span key="plan" title={detailView.identity.planPresentation.fullLabel}>
+                  {detailView.identity.planPresentation.shortLabel}
+                </span>
+              ) : null,
+              <DrawerStatusPill
+                key="status"
+                tone={getHealthStatusTone(detailView.health.status)}
+                dot
+                title={t(detailView.health.tooltipKey, healthTooltipParams)}
+              >
+                {t(detailView.health.labelKey)}
+              </DrawerStatusPill>,
+              <DrawerCopyableMeta
+                key="file"
+                onCopy={() => copyTextWithNotification(selectedRow.fileName)}
+                title={t('common.copy', { defaultValue: '点击复制' })}
+                ariaLabel={`${t('common.copy', { defaultValue: '点击复制' })} ${getDisplayFileName(selectedRow.fileName)}`}
+              >
+                {getDisplayFileName(selectedRow.fileName)}
+              </DrawerCopyableMeta>,
+              identityExtraMeta || null,
+              configurationEditor.dirty ? (
+                <DrawerStatusPill key="dirty" tone="warning">
+                  {t('accounts.config_unsaved')}
+                </DrawerStatusPill>
+              ) : null,
+            ]}
+          />
         }
         footer={
-          <div className={styles.drawerActions}>
-            {detailView.health.status === 'reauth' ? (
-              <Button
-                variant="primary"
-                onClick={() => handleReauthAccount(selectedRow.raw)}
-                disabled={disableControls || configurationSaving || selectedRow.runtimeOnly}
-              >
-                <IconShield size={16} />
-                {t('accounts.recommend_action_reauth')}
-              </Button>
-            ) : null}
-            <Button
-              variant="secondary"
-              onClick={() => void refreshAccountQuota(selectedRow, 'detail')}
-              loading={quotaRefreshing || selectedQuotaRefreshing}
-              disabled={disableControls || selectedQuotaRefreshing || selectedRow.runtimeOnly}
-            >
-              {!quotaRefreshing && !selectedQuotaRefreshing ? <IconRefreshCw size={16} /> : null}
-              {t('accounts.refresh_quota')}
-            </Button>
-            <Button
-              variant={selectedRow.disabled ? 'secondary' : 'danger'}
-              onClick={() => handleBatchStatus(selectedRow.disabled, [selectedRow])}
-              disabled={
-                disableControls || configurationSaving || statusUpdating || selectedRow.runtimeOnly
-              }
-            >
-              {selectedRow.disabled ? t('accounts.enable') : t('accounts.disable')}
-            </Button>
-            <DropdownMenu
-              items={drawerMoreItems}
-              ariaLabel={t('accounts.drawer_more_actions')}
-              triggerTitle={t('accounts.drawer_more_actions')}
-              triggerLabel={t('accounts.batch_more')}
-              triggerIcon={<IconMoreVertical size={16} />}
-              triggerClassName={styles.drawerMoreActions}
-            />
-          </div>
+          <DrawerActionFooter
+            left={
+              <>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => handleBatchStatus(selectedRow.disabled, [selectedRow])}
+                  disabled={statusToggleDisabled}
+                  title={
+                    configurationEditor.dirty
+                      ? t('ai_providers.drawer_toggle_disabled_dirty', {
+                          defaultValue: '存在未保存修改，请先保存或重置配置',
+                        })
+                      : undefined
+                  }
+                >
+                  {selectedRow.disabled ? t('accounts.enable') : t('accounts.disable')}
+                </Button>
+                <div className={styles.drawerMoreMenu}>
+                  <DropdownMenu
+                    items={drawerMoreItems}
+                    ariaLabel={t('accounts.drawer_more_actions')}
+                    triggerTitle={t('accounts.drawer_more_actions')}
+                    triggerLabel={t('accounts.batch_more')}
+                    triggerIcon={<IconMoreVertical size={16} />}
+                    triggerClassName={styles.drawerMoreActions}
+                  />
+                </div>
+              </>
+            }
+            right={
+              showConfigFooterActions ? (
+                <>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={configurationEditor.reset}
+                    disabled={!configurationEditor.dirty || configurationSaving}
+                  >
+                    {t('common.reset')}
+                  </Button>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onClick={() => void configurationEditor.save()}
+                    loading={configurationSaving}
+                    disabled={
+                      !configurationEditor.canSave ||
+                      (detailTab === 'models' && selectedRow.disabled)
+                    }
+                  >
+                    {t('common.save')}
+                  </Button>
+                </>
+              ) : (
+                <>
+                  {canRefreshSelectedQuota ? (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => void refreshAccountQuota(selectedRow, 'detail')}
+                      loading={quotaRefreshing || selectedQuotaRefreshing}
+                      disabled={
+                        disableControls || selectedQuotaRefreshing || selectedRow.runtimeOnly
+                      }
+                    >
+                      {!quotaRefreshing && !selectedQuotaRefreshing ? (
+                        <IconRefreshCw size={15} />
+                      ) : null}
+                      {t('accounts.refresh_quota')}
+                    </Button>
+                  ) : null}
+                  {needsReauth ? (
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={() => handleReauthAccount(selectedRow.raw)}
+                      disabled={disableControls || configurationSaving || selectedRow.runtimeOnly}
+                    >
+                      <IconShield size={15} />
+                      {t('accounts.recommend_action_reauth')}
+                    </Button>
+                  ) : detailTab === 'overview' && isConfigurationEditable ? (
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={() => void openAccountDetail(selectedRow, 'config')}
+                      disabled={disableControls}
+                    >
+                      {t('ai_providers.drawer_edit_config_btn', { defaultValue: '编辑配置' })}
+                    </Button>
+                  ) : null}
+                </>
+              )
+            }
+          />
         }
       >
-        <div className={styles.drawerBodyShell} data-detail-tab={detailTab}>
-          {selectedRow.disabled ? (
-            <div className={styles.drawerDisabledNotice} role="status">
-              <span>
-                {t('accounts.detail_disabled_notice_title', { defaultValue: '账号已禁用' })}
-              </span>
-              <p>
+        <DrawerBodyShell
+          dataAttributes={{ 'data-detail-tab': detailTab }}
+          tabs={
+            <DrawerTabBar<DetailTab>
+              items={detailTabs}
+              activeTab={detailTab}
+              onChange={(nextTab) => void openAccountDetail(selectedRow, nextTab)}
+              ariaLabel={t('accounts.detail_tablist_label')}
+              idBase="accounts-detail"
+              scrollContainerRef={detailDrawerBodyRef}
+            />
+          }
+        >
+          <DrawerViewport>
+            {selectedRow.disabled ? (
+              <DrawerNotice
+                tone="danger"
+                title={t('accounts.detail_disabled_notice_title', { defaultValue: '账号已禁用' })}
+                action={
+                  <Button
+                    variant="secondary"
+                    size="xs"
+                    onClick={() => handleBatchStatus(true, [selectedRow])}
+                    disabled={statusToggleDisabled}
+                  >
+                    {t('accounts.enable')}
+                  </Button>
+                }
+              >
                 {t('accounts.detail_disabled_notice_desc', {
                   defaultValue:
                     '此账号当前不接收业务请求，但仍可刷新额度和维护配置。点击底部“启用”按钮可恢复请求路由。',
                 })}
-              </p>
-            </div>
-          ) : null}
-          <div
-            className={styles.drawerTabs}
-            role="tablist"
-            aria-label={t('accounts.detail_tablist_label')}
-          >
-            {detailTabs.map((tab) => (
-              <button
-                key={tab.id}
-                type="button"
-                role="tab"
-                id={`accounts-detail-tab-${tab.id}`}
-                aria-selected={detailTab === tab.id}
-                aria-controls="accounts-detail-tab-panel"
-                className={detailTab === tab.id ? styles.drawerTabActive : ''}
-                onClick={() => void openAccountDetail(selectedRow, tab.id)}
-              >
-                {tab.label}
-              </button>
-            ))}
-          </div>
-          <div
-            id="accounts-detail-tab-panel"
-            className={styles.drawerTabPanel}
-            role="tabpanel"
-            aria-labelledby={`accounts-detail-tab-${detailTab}`}
-          >
-            {renderActiveDetail()}
-          </div>
-        </div>
+              </DrawerNotice>
+            ) : null}
+            <DrawerTabPanel
+              id="accounts-detail-tab-panel"
+              labelledBy={`accounts-detail-tab-${detailTab}`}
+            >
+              {renderActiveDetail()}
+            </DrawerTabPanel>
+          </DrawerViewport>
+        </DrawerBodyShell>
       </Drawer>
     );
   };

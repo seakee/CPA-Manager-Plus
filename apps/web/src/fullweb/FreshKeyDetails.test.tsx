@@ -5,6 +5,7 @@ import { FreshKeyDetails } from './FreshKeyDetails';
 import { createPublicApiClient } from './publicApi';
 import { fullWebText as t } from '../i18n/fullweb';
 import { keyWorkspaceText as k } from '../i18n/freshKeyWorkspace';
+import { workspaceDrawerStyles } from '../components/common/WorkspaceDrawer';
 
 // Renderer tests exercise domain state; browser acceptance covers the shared
 // portal, focus, animation and close controls.
@@ -1686,7 +1687,9 @@ describe('Canonical key detail and rename', () => {
       if (!node || typeof node !== 'object' || !('children' in node)) return '';
       return readMetaText(node.children);
     };
-    const subtitleMeta = renderer.root.findByProps({ className: 'key-drawer-title-meta' });
+    const subtitleMeta = renderer.root.findByProps({
+      className: workspaceDrawerStyles.drawerTitleMeta,
+    });
     expect(readMetaText(subtitleMeta)).not.toContain(k('installerOrigin'));
 
     // Empty zero-call window renders centered key-usage-empty-state.

@@ -331,8 +331,8 @@ export function usageReasonText(reason: string): string {
 export function usageCountText(value: number | null | undefined, state: UsageState): string {
   if (state === 'unknown' || state === 'unavailable' || value === null || value === undefined)
     return '—';
-  if (state === 'partial') return value === 0 ? '—' : `≥${value}`;
-  return String(value);
+  if (state === 'partial') return value === 0 ? '—' : `≥${value.toLocaleString()}`;
+  return value.toLocaleString();
 }
 
 export function usageCompactNumberText(

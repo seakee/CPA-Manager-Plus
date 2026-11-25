@@ -6,6 +6,17 @@ import { PageControlBar } from '@/components/common/PageControlBar';
 import { LocalizedPaginationFooter } from '@/components/common/LocalizedPaginationFooter';
 import { WorkspaceListPanel } from '@/components/common/WorkspaceListPanel';
 import { SplashScreen } from '@/components/common/SplashScreen';
+import {
+  DRAWER_WIDTH,
+  DrawerActionFooter,
+  DrawerBodyShell,
+  DrawerCopyableMeta,
+  DrawerIdentityHeader,
+  DrawerStatusPill,
+  DrawerViewport,
+  useDrawerSubViewEscape,
+  type DrawerStatusTone,
+} from '@/components/common/WorkspaceDrawer';
 import { Button } from '@/components/ui/Button';
 import { Drawer } from '@/components/ui/Drawer';
 import { EmptyState } from '@/components/ui/EmptyState';
@@ -112,6 +123,38 @@ export function UsageMaintenancePage() {
   );
   const { managerServiceBase } = usePanelFeatureAvailability();
   return <UsageMaintenancePageContent key={`${connectionScope}:${managerServiceBase}`} />;
+}
+
+function resolveUsageRunDrawerTone(status: string): DrawerStatusTone {
+  if (status === 'completed' || status === 'verified' || status === 'archived') {
+    return 'success';
+  }
+  if (status === 'failed') return 'danger';
+  if (status === 'cancelled') return 'neutral';
+  if (status === 'archiving' || status === 'verifying' || status === 'deleting') {
+    return 'warning';
+  }
+  return 'info';
+}
+
+function UsageMaintenanceSubViewEscape({
+  createConfirmStep,
+  createWorking,
+  onBackCreateConfirm,
+  deleteStepOpen,
+  deleteWorking,
+  onBackDeleteConfirm,
+}: {
+  createConfirmStep: boolean;
+  createWorking: boolean;
+  onBackCreateConfirm: () => void;
+  deleteStepOpen: boolean;
+  deleteWorking: boolean;
+  onBackDeleteConfirm: () => void;
+}) {
+  useDrawerSubViewEscape(createConfirmStep, onBackCreateConfirm, createWorking);
+  useDrawerSubViewEscape(deleteStepOpen, onBackDeleteConfirm, deleteWorking);
+  return null;
 }
 
 function UsageMaintenancePageContent() {
@@ -1400,19 +1443,47 @@ function UsageMaintenancePageContent() {
         />
       ) : null}
 
+      <UsageMaintenanceSubViewEscape
+        createConfirmStep={createConfirmStep && createDrawerOpen}
+        createWorking={createWorking}
+        onBackCreateConfirm={() => setCreateConfirmStep(false)}
+        deleteStepOpen={Boolean(selectedRunId && deleteTargetRun)}
+        deleteWorking={Boolean(actingRunId)}
+        onBackDeleteConfirm={() => {
+          setDeleteTargetRun(null);
+          setDeleteAcknowledged(false);
+        }}
+      />
+
       <Drawer
         open={createDrawerOpen}
         onClose={closeCreateDrawer}
-        width="min(640px, 100vw)"
+        width={DRAWER_WIDTH.MD}
         title={
-          createConfirmStep
-            ? t('usage_maintenance.archive_prepare_confirm_title')
-            : t('usage_maintenance.new_archive')
+          <DrawerIdentityHeader
+            icon={<IconPlus size={18} />}
+            iconBoxed
+            title={
+              createConfirmStep
+                ? t('usage_maintenance.archive_prepare_confirm_title')
+                : t('usage_maintenance.new_archive')
+            }
+            metaItems={[
+              <DrawerStatusPill key="step" tone={createConfirmStep ? 'warning' : 'info'}>
+                {createConfirmStep ? '2 / 2' : '1 / 2'}
+              </DrawerStatusPill>,
+              <span key="intent">
+                {createIntent === 'cleanup'
+                  ? t('usage_maintenance.intent_cleanup', { defaultValue: '归档并清理' })
+                  : t('usage_maintenance.intent_archive', { defaultValue: '仅生成归档' })}
+              </span>,
+            ]}
+          />
         }
         footer={
-          <div className={styles.rowActions}>
-            {createConfirmStep ? (
-              <>
+          createConfirmStep ? (
+            <DrawerActionFooter
+              left={
                 <Button
                   variant="secondary"
                   size="sm"
@@ -1421,6 +1492,8 @@ function UsageMaintenancePageContent() {
                 >
                   {t('common.back')}
                 </Button>
+              }
+              right={
                 <Button
                   variant="primary"
                   size="sm"
@@ -1431,175 +1504,236 @@ function UsageMaintenancePageContent() {
                 >
                   {t('usage_maintenance.archive_prepare_confirm_button')}
                 </Button>
-              </>
-            ) : (
-              <>
-                <Button variant="secondary" size="sm" onClick={closeCreateDrawer}>
-                  {t('common.cancel')}
-                </Button>
-                {createWorking ? (
+              }
+            />
+          ) : (
+            <DrawerActionFooter
+              left={
+                createWorking ? (
                   <Button variant="secondary" size="sm" onClick={handleStopGuidedCreate}>
                     {t('usage_maintenance.archive_prepare_stop')}
                   </Button>
-                ) : null}
-                <Button
-                  variant="primary"
-                  size="sm"
-                  disabled={
-                    createWorking ||
-                    !preview ||
-                    preview.event_count <= 0 ||
-                    previewLoading ||
-                    Boolean(previewError) ||
-                    hasActiveMutex ||
-                    archiveReadinessBlocked
-                  }
-                  onClick={() => setCreateConfirmStep(true)}
-                  data-testid="usage-maintenance-create-btn"
-                >
-                  {t('common.next')}
-                </Button>
-              </>
-            )}
-          </div>
+                ) : undefined
+              }
+              right={
+                <>
+                  <Button variant="secondary" size="sm" onClick={closeCreateDrawer}>
+                    {t('common.cancel')}
+                  </Button>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    disabled={
+                      createWorking ||
+                      !preview ||
+                      preview.event_count <= 0 ||
+                      previewLoading ||
+                      Boolean(previewError) ||
+                      hasActiveMutex ||
+                      archiveReadinessBlocked
+                    }
+                    onClick={() => setCreateConfirmStep(true)}
+                    data-testid="usage-maintenance-create-btn"
+                  >
+                    {t('common.next')}
+                  </Button>
+                </>
+              }
+            />
+          )
         }
       >
-        {maintenance ? (
-          <UsageMaintenanceCreateDrawerContent
-            maintenance={maintenance}
-            intent={createIntent}
-            retentionSelection={retentionSelection}
-            customCutoff={customCutoff}
-            referenceNowMS={referenceNowMS}
-            resolvedCutoffMS={resolvedCutoffMS}
-            recommendedDays={recommendedDays}
-            rawRange={rawRange}
-            preview={preview}
-            previewLoading={previewLoading}
-            previewError={previewError}
-            working={createWorking}
-            hasActiveMutex={hasActiveMutex}
-            archiveReadinessBlocked={archiveReadinessBlocked}
-            confirmStep={createConfirmStep}
-            onChangeIntent={setCreateIntent}
-            onSelectRetention={(next) => {
-              setReferenceNowMS(Date.now());
-              setRetentionSelection(next);
-            }}
-            onChangeCustomCutoff={(value) => {
-              setReferenceNowMS(Date.now());
-              setCustomCutoff(value);
-            }}
-            onRetryPreview={() => setPreviewRefreshToken((value) => value + 1)}
-            onViewHistory={closeCreateDrawer}
-          />
-        ) : (
-          <SplashScreen variant="content" />
-        )}
+        <DrawerBodyShell>
+          <DrawerViewport>
+            {maintenance ? (
+              <UsageMaintenanceCreateDrawerContent
+                maintenance={maintenance}
+                intent={createIntent}
+                retentionSelection={retentionSelection}
+                customCutoff={customCutoff}
+                referenceNowMS={referenceNowMS}
+                resolvedCutoffMS={resolvedCutoffMS}
+                recommendedDays={recommendedDays}
+                rawRange={rawRange}
+                preview={preview}
+                previewLoading={previewLoading}
+                previewError={previewError}
+                working={createWorking}
+                hasActiveMutex={hasActiveMutex}
+                archiveReadinessBlocked={archiveReadinessBlocked}
+                confirmStep={createConfirmStep}
+                onChangeIntent={setCreateIntent}
+                onSelectRetention={(next) => {
+                  setReferenceNowMS(Date.now());
+                  setRetentionSelection(next);
+                }}
+                onChangeCustomCutoff={(value) => {
+                  setReferenceNowMS(Date.now());
+                  setCustomCutoff(value);
+                }}
+                onRetryPreview={() => setPreviewRefreshToken((value) => value + 1)}
+                onViewHistory={closeCreateDrawer}
+              />
+            ) : (
+              <SplashScreen variant="content" />
+            )}
+          </DrawerViewport>
+        </DrawerBodyShell>
       </Drawer>
 
       <Drawer
         open={Boolean(selectedRunId)}
         onClose={closeRunDrawer}
-        width={deleteTargetRun ? 'min(680px, 100vw)' : 'min(600px, 100vw)'}
+        width={DRAWER_WIDTH.MD}
         title={
-          deleteTargetRun
-            ? t('usage_maintenance.delete_confirm_title')
-            : t('usage_maintenance.run_detail_title', {
-                defaultValue: selectedRunId
-                  ? t('usage_maintenance.archive_task_label', { runId: selectedRunId })
-                  : undefined,
-              })
+          <DrawerIdentityHeader
+            icon={deleteTargetRun ? <IconTrash2 size={18} /> : <IconClock size={18} />}
+            iconBoxed
+            title={
+              deleteTargetRun
+                ? t('usage_maintenance.delete_confirm_title')
+                : t('usage_maintenance.run_detail_title', {
+                    defaultValue: selectedRunId
+                      ? t('usage_maintenance.archive_task_label', { runId: selectedRunId })
+                      : undefined,
+                  })
+            }
+            metaItems={[
+              freshestDetail ? (
+                <DrawerStatusPill
+                  key="run-status"
+                  tone={resolveUsageRunDrawerTone(freshestDetail.run.status)}
+                  dot
+                >
+                  {t(`usage_maintenance.run_status_${freshestDetail.run.status}`, {
+                    defaultValue: freshestDetail.run.status,
+                  })}
+                </DrawerStatusPill>
+              ) : null,
+              selectedRunId ? (
+                <DrawerCopyableMeta
+                  key="run-id"
+                  onCopy={() =>
+                    void handleCopyText(
+                      selectedRunId,
+                      t('usage_maintenance.run_id_copied', {
+                        defaultValue: 'Task ID copied to clipboard',
+                      })
+                    )
+                  }
+                  title={`${t('common.copy')} ID`}
+                >
+                  {selectedRunId}
+                </DrawerCopyableMeta>
+              ) : null,
+            ]}
+          />
         }
         footer={
           deleteTargetRun ? (
-            <div className={styles.rowActions}>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => {
-                  setDeleteTargetRun(null);
-                  setDeleteAcknowledged(false);
-                }}
-              >
-                {t('common.back')}
-              </Button>
-              <Button
-                variant="danger"
-                size="sm"
-                loading={actingRunId === deleteTargetRun.id}
-                disabled={deleteBlocked || !deleteAcknowledged || Boolean(actingRunId)}
-                onClick={() => void handleConfirmDeleteRun()}
-                data-testid="usage-maintenance-confirm-delete-btn"
-              >
-                {t('usage_maintenance.delete_confirm_button', {
-                  count: Math.max(
-                    0,
-                    deleteTargetRun.event_count - deleteTargetRun.deleted_event_count
-                  ).toLocaleString(i18n.language),
-                })}
-              </Button>
-            </div>
+            <DrawerActionFooter
+              left={
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    setDeleteTargetRun(null);
+                    setDeleteAcknowledged(false);
+                  }}
+                >
+                  {t('common.back')}
+                </Button>
+              }
+              right={
+                <Button
+                  variant="danger"
+                  size="sm"
+                  loading={actingRunId === deleteTargetRun.id}
+                  disabled={deleteBlocked || !deleteAcknowledged || Boolean(actingRunId)}
+                  onClick={() => void handleConfirmDeleteRun()}
+                  data-testid="usage-maintenance-confirm-delete-btn"
+                >
+                  {t('usage_maintenance.delete_confirm_button', {
+                    count: Math.max(
+                      0,
+                      deleteTargetRun.event_count - deleteTargetRun.deleted_event_count
+                    ).toLocaleString(i18n.language),
+                  })}
+                </Button>
+              }
+            />
           ) : freshestDetail ? (
-            <div className={styles.rowActions}>
-              <Button
-                variant="ghost"
-                size="sm"
-                loading={detailLoading}
-                onClick={() => {
-                  if (selectedRunId) void refreshRunDetail(selectedRunId);
-                }}
-              >
-                <IconRefreshCw size={14} aria-hidden="true" />
-                <span>{t('common.refresh')}</span>
-              </Button>
-              {renderRunActions(freshestDetail.run, false)}
-              <Button variant="secondary" size="sm" onClick={closeRunDrawer}>
-                {isArchiveRunActiveStatus(freshestDetail.run.status)
-                  ? t('usage_maintenance.minimize')
-                  : freshestDetail.run.status === 'completed' ||
-                      freshestDetail.run.status === 'verified' ||
-                      freshestDetail.run.status === 'cancelled'
-                    ? t('usage_maintenance.done')
-                    : t('common.close')}
-              </Button>
-            </div>
+            <DrawerActionFooter
+              left={
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  loading={detailLoading}
+                  onClick={() => {
+                    if (selectedRunId) void refreshRunDetail(selectedRunId);
+                  }}
+                >
+                  <IconRefreshCw size={14} aria-hidden="true" />
+                  <span>{t('common.refresh')}</span>
+                </Button>
+              }
+              right={
+                <>
+                  {renderRunActions(freshestDetail.run, false)}
+                  <Button variant="secondary" size="sm" onClick={closeRunDrawer}>
+                    {isArchiveRunActiveStatus(freshestDetail.run.status)
+                      ? t('usage_maintenance.minimize')
+                      : freshestDetail.run.status === 'completed' ||
+                          freshestDetail.run.status === 'verified' ||
+                          freshestDetail.run.status === 'cancelled'
+                        ? t('usage_maintenance.done')
+                        : t('common.close')}
+                  </Button>
+                </>
+              }
+            />
           ) : (
-            <div className={styles.rowActions}>
-              <Button variant="secondary" size="sm" onClick={closeRunDrawer}>
-                {t('common.close')}
-              </Button>
-            </div>
+            <DrawerActionFooter
+              right={
+                <Button variant="secondary" size="sm" onClick={closeRunDrawer}>
+                  {t('common.close')}
+                </Button>
+              }
+            />
           )
         }
       >
-        {deleteTargetRun ? (
-          <UsageMaintenanceDeleteConfirmationView
-            run={deleteTargetRun}
-            deletionEnabled={Boolean(maintenance?.readiness.archive_delete_enabled)}
-            acknowledged={deleteAcknowledged}
-            onToggleAcknowledged={setDeleteAcknowledged}
-          />
-        ) : detailLoading && !freshestDetail ? (
-          <SplashScreen variant="content" />
-        ) : detailError && !freshestDetail ? (
-          <EmptyState
-            variant="inline"
-            title={t('usage_maintenance.archive_response_invalid')}
-            description={detailError}
-          />
-        ) : freshestDetail ? (
-          <UsageMaintenanceRunDrawerContent
-            archive={freshestDetail}
-            maintenance={maintenance}
-            intent={createIntent}
-            working={actingRunId === freshestDetail.run.id || createWorking}
-            actionError={detailError || null}
-            statusToneClass={getRunStatusToneClass}
-            renderActions={(run) => renderRunActions(run, false)}
-            onCopyText={(text, message) => void handleCopyText(text, message)}
-          />
-        ) : null}
+        <DrawerBodyShell>
+          <DrawerViewport>
+            {deleteTargetRun ? (
+              <UsageMaintenanceDeleteConfirmationView
+                run={deleteTargetRun}
+                deletionEnabled={Boolean(maintenance?.readiness.archive_delete_enabled)}
+                acknowledged={deleteAcknowledged}
+                onToggleAcknowledged={setDeleteAcknowledged}
+              />
+            ) : detailLoading && !freshestDetail ? (
+              <SplashScreen variant="content" />
+            ) : detailError && !freshestDetail ? (
+              <EmptyState
+                variant="inline"
+                title={t('usage_maintenance.archive_response_invalid')}
+                description={detailError}
+              />
+            ) : freshestDetail ? (
+              <UsageMaintenanceRunDrawerContent
+                archive={freshestDetail}
+                maintenance={maintenance}
+                intent={createIntent}
+                working={actingRunId === freshestDetail.run.id || createWorking}
+                actionError={detailError || null}
+                statusToneClass={getRunStatusToneClass}
+                renderActions={(run) => renderRunActions(run, false)}
+                onCopyText={(text, message) => void handleCopyText(text, message)}
+              />
+            ) : null}
+          </DrawerViewport>
+        </DrawerBodyShell>
       </Drawer>
 
       <Modal
