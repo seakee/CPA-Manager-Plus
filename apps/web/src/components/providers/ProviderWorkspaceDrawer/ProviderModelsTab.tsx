@@ -4,9 +4,16 @@ import { Button } from '@/components/ui/Button';
 import { SelectionCheckbox } from '@/components/ui/SelectionCheckbox';
 import { InfoTooltip } from '@/components/ui/InfoTooltip';
 import { Input } from '@/components/ui/Input';
-import { Modal } from '@/components/ui/Modal';
 import { ModelInputList } from '@/components/ui/ModelInputList';
-import { IconModelCluster, IconPlus, IconShield } from '@/components/ui/icons';
+import {
+  IconChevronLeft,
+  IconModelCluster,
+  IconPlus,
+  IconRefreshCw,
+  IconSearch,
+  IconShield,
+  IconX,
+} from '@/components/ui/icons';
 import type { ModelInfo } from '@/utils/models';
 import type { ModelEntry } from '../types';
 import type { ProviderKind } from '../ProviderTable/rowData';
@@ -18,13 +25,9 @@ export interface ProviderModelsTabProps {
   activeKind: ProviderKind;
   form: ProviderDrawerFormState;
   setForm: Dispatch<SetStateAction<ProviderDrawerFormState>>;
-  isDirty: boolean;
-  canSave: boolean;
   saving: boolean;
   actionsDisabled: boolean;
   configuredModelCount: number;
-  onReset: () => void;
-  onSave: () => void;
   // Discovery
   modelDiscoveryOpen: boolean;
   setModelDiscoveryOpen: (open: boolean) => void;
@@ -47,18 +50,16 @@ export interface ProviderModelsTabProps {
   applySelectedDiscoveredModels: () => void;
 }
 
+const cleanHeadingText = (text: string): string =>
+  text.replace(/\s*[（(](?:可选|必填|optional|required)[)）]/gi, '').replace(/[:：]\s*$/, '');
+
 export function ProviderModelsTab({
-  mode,
   activeKind,
   form,
   setForm,
-  isDirty,
-  canSave,
   saving,
   actionsDisabled,
   configuredModelCount,
-  onReset,
-  onSave,
   modelDiscoveryOpen,
   setModelDiscoveryOpen,
   modelDiscoveryEndpoint,
@@ -77,7 +78,6 @@ export function ProviderModelsTab({
   handleSelectVisibleModels,
   handleClearModelDiscoverySelection,
   fetchModelDiscovery,
-  applySelectedDiscoveredModels,
 }: ProviderModelsTabProps) {
   const { t } = useTranslation();
   const [modelFilter, setModelFilter] = useState('');
@@ -217,41 +217,223 @@ export function ProviderModelsTab({
           ? t('ai_providers.gemini_models_search_placeholder')
           : t('ai_providers.openai_models_search_placeholder');
 
-  return (
-    <div className={styles.drawerTabPanel}>
-      {mode === 'view-edit' && isDirty && (
-        <div className={styles.configurationTopBar} role="status">
-          <div className={styles.configurationTopStatus}>
-            <span className={styles.tabDirtyDot} aria-hidden="true" />
-            <span>{t('ai_providers.drawer_unsaved_changes', { defaultValue: '未保存更改' })}</span>
-          </div>
-          <div className={styles.configurationTopActions}>
+  const excludedPlaceholder = useMemo(() => {
+    if (activeKind === 'claude') {
+      return 'claude-3-5-haiku*\n*-legacy';
+    }
+    if (activeKind === 'codex') {
+      return 'gpt-4o-mini*\no1-preview*';
+    }
+    if (activeKind === 'xai') {
+      return 'grok-2*\n*-vision-beta';
+    }
+    if (activeKind === 'gemini' || activeKind === 'vertex' || activeKind === 'interactions') {
+      return 'gemini-1.5-*\n*-exp';
+    }
+    return t('ai_providers.excluded_models_placeholder');
+  }, [activeKind, t]);
+
+  const excludedExampleToken =
+    activeKind === 'claude'
+      ? 'claude-3-5-haiku*'
+      : activeKind === 'xai'
+        ? 'grok-2*'
+        : activeKind === 'gemini' || activeKind === 'vertex' || activeKind === 'interactions'
+          ? 'gemini-1.5-*'
+          : 'gpt-4o-mini*';
+
+  const modelNamePlaceholder = useMemo(() => {
+    if (activeKind === 'vertex') {
+      return t('ai_providers.vertex_model_name_placeholder');
+    }
+    if (activeKind === 'claude') {
+      return t('ai_providers.claude_model_name_placeholder');
+    }
+    if (activeKind === 'codex') {
+      return t('ai_providers.codex_model_name_placeholder', {
+        defaultValue: '例如 gpt-5.3-codex',
+      });
+    }
+    if (activeKind === 'xai') {
+      return t('ai_providers.xai_model_name_placeholder', {
+        defaultValue: '例如 grok-3',
+      });
+    }
+    if (activeKind === 'gemini' || activeKind === 'interactions') {
+      return t('ai_providers.gemini_model_name_placeholder', {
+        defaultValue: '例如 gemini-2.5-pro',
+      });
+    }
+    if (activeKind === 'openai') {
+      return t('ai_providers.openai_model_name_placeholder', {
+        defaultValue: '例如 gpt-4.1 或 deepseek-chat',
+      });
+    }
+    return t('common.model_name_placeholder');
+  }, [activeKind, t]);
+
+  if (supportsDiscovery && modelDiscoveryOpen) {
+    return (
+      <div className={styles.drawerTabPanel} data-testid="drawer-model-discovery-subview">
+        <section className={`${styles.sectionCard} ${styles.discoverySubViewCard}`}>
+          <div className={styles.sectionHeader}>
+            <div className={styles.discoveryHeaderLeft}>
+              <Button
+                variant="ghost"
+                size="xs"
+                className={styles.discoveryBackBtn}
+                onClick={() => setModelDiscoveryOpen(false)}
+              >
+                <IconChevronLeft size={14} />
+                {t('ai_providers.model_discovery_back_btn', { defaultValue: '返回映射列表' })}
+              </Button>
+              <span className={styles.discoveryHeaderDivider} aria-hidden="true" />
+              <h4>{discoveryModalTitle}</h4>
+              {modelsLoaded && discoveredModels.length > 0 && (
+                <span className={styles.tabCountBadge}>
+                  {discoveredModelsFiltered.length}/{discoveredModels.length}
+                </span>
+              )}
+            </div>
             <Button
               variant="secondary"
               size="xs"
-              onClick={() => {
-                setModelFilter('');
-                setPinnedEditOrigIndex(null);
-                onReset();
-              }}
-              disabled={controlsDisabled}
+              onClick={() => void fetchModelDiscovery()}
+              loading={modelDiscoveryFetching}
             >
-              {t('common.reset', { defaultValue: '重置' })}
-            </Button>
-            <Button
-              variant="primary"
-              size="xs"
-              onClick={onSave}
-              loading={saving}
-              disabled={!canSave || controlsDisabled}
-            >
-              {t('ai_providers.drawer_save_config', { defaultValue: '保存配置' })}
+              <IconRefreshCw size={13} />
+              {t('common.refresh')}
             </Button>
           </div>
-        </div>
-      )}
 
-      {/* 模型映射列表区 */}
+          <div className={styles.preflightEndpointBar}>
+            <span className={styles.httpMethodBadge}>GET</span>
+            <span className={styles.preflightUrl}>{modelDiscoveryEndpoint || '—'}</span>
+          </div>
+
+          {modelDiscoveryError && (
+            <div className={styles.inlineError} role="alert">
+              {modelDiscoveryError}
+            </div>
+          )}
+
+          <div className={styles.modelDiscoveryToolbar}>
+            <div className={styles.discoverySearchBox}>
+              <Input
+                placeholder={discoverySearchPlaceholder}
+                value={modelDiscoverySearch}
+                onChange={(e) => setModelDiscoverySearch(e.target.value)}
+                rightElement={
+                  modelDiscoverySearch ? (
+                    <button
+                      type="button"
+                      className={styles.inputEyeBtn}
+                      onClick={() => setModelDiscoverySearch('')}
+                      aria-label={t('common.clear', { defaultValue: '清除' })}
+                    >
+                      <IconX size={13} />
+                    </button>
+                  ) : (
+                    <IconSearch size={14} />
+                  )
+                }
+              />
+            </div>
+            <div className={styles.sectionMetaActions}>
+              {modelDiscoverySelected.size > 0 && (
+                <span className={styles.officialBadge}>
+                  {t('ai_providers.model_discovery_selected_count', {
+                    count: modelDiscoverySelected.size,
+                    defaultValue: '已选 {{count}}',
+                  })}
+                </span>
+              )}
+              {visibleDiscoverableModelNames.length > 0 && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={
+                    allVisibleSelected
+                      ? handleClearModelDiscoverySelection
+                      : handleSelectVisibleModels
+                  }
+                >
+                  {allVisibleSelected
+                    ? t('common.clear_selection', { defaultValue: '取消全选' })
+                    : t('common.select_all', { defaultValue: '全选当前' })}
+                </Button>
+              )}
+            </div>
+          </div>
+
+          {modelDiscoveryFetching && !modelsLoaded ? (
+            <div className={styles.overviewEmptyState}>
+              {t('ai_providers.fetching_models_loading', {
+                defaultValue: '正在获取上游模型列表...',
+              })}
+            </div>
+          ) : !modelsLoaded && modelDiscoveryError ? null : !discoveredModels.length ||
+            discoveredModelsFiltered.length === 0 ? (
+            <div className={styles.overviewEmptyState}>
+              {t('ai_providers.no_discovered_models', { defaultValue: '暂无可展示的模型' })}
+            </div>
+          ) : (
+            <div className={styles.modelDiscoveryList}>
+              {discoveredModelsFiltered.map((model) => {
+                const cleanName =
+                  activeKind === 'gemini' || activeKind === 'interactions'
+                    ? model.name.replace(/^\/?models\//i, '').trim()
+                    : model.name.trim();
+                const alreadyAdded = configuredModelNames.has(cleanName.toLowerCase());
+                const checked = alreadyAdded || modelDiscoverySelected.has(cleanName);
+
+                return (
+                  <div
+                    key={`${model.name}-${model.alias ?? ''}`}
+                    className={`${styles.modelDiscoveryRow} ${
+                      checked && !alreadyAdded ? styles.modelDiscoveryRowSelected : ''
+                    }`}
+                  >
+                    <SelectionCheckbox
+                      checked={checked}
+                      disabled={alreadyAdded}
+                      onChange={() => toggleModelDiscoverySelection(model.name)}
+                      ariaLabel={cleanName}
+                      label={
+                        <div className={styles.modelDiscoveryMeta}>
+                          <div className={styles.modelDiscoveryNameRow}>
+                            <span>
+                              <strong className={styles.fieldValueMono}>{cleanName}</strong>
+                              {model.alias && model.alias !== cleanName && (
+                                <span className={styles.modelDiscoveryAlias}>
+                                  ({model.alias})
+                                </span>
+                              )}
+                            </span>
+                            {alreadyAdded && (
+                              <span className={styles.modelDiscoveryAddedBadge}>
+                                {t('ai_providers.model_already_added', { defaultValue: '已添加' })}
+                              </span>
+                            )}
+                          </div>
+                          {model.description && (
+                            <span className={styles.modelDiscoveryDesc}>{model.description}</span>
+                          )}
+                        </div>
+                      }
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      </div>
+    );
+  }
+
+  return (
+    <div className={styles.drawerTabPanel}>
       <section className={styles.sectionCard}>
         <div className={styles.sectionHeader}>
           <div className={styles.sectionHeading}>
@@ -335,13 +517,13 @@ export function ProviderModelsTab({
                 ? handleRemoveVisibleModel
                 : undefined
             }
-            namePlaceholder={
-              activeKind === 'vertex'
-                ? t('ai_providers.vertex_model_name_placeholder')
-                : activeKind === 'claude'
-                  ? t('ai_providers.claude_model_name_placeholder')
-                  : t('common.model_name_placeholder')
-            }
+            nameColumnLabel={t('ai_providers.model_upstream_column_label', {
+              defaultValue: '上游模型 ID',
+            })}
+            aliasColumnLabel={t('ai_providers.model_alias_column_label', {
+              defaultValue: '对外调用别名（可选）',
+            })}
+            namePlaceholder={modelNamePlaceholder}
             aliasPlaceholder={
               activeKind === 'vertex'
                 ? t('ai_providers.vertex_model_alias_placeholder')
@@ -378,6 +560,7 @@ export function ProviderModelsTab({
             thinkingUnknownLevelsLabel={t('ai_providers.thinking_unknown_levels_label')}
             thinkingUnknownLevelsHint={t('ai_providers.thinking_unknown_levels_hint')}
             className={styles.modelListStack}
+            itemClassName={styles.modelEntryRow}
             rowClassName={styles.modelInputRow}
             inputClassName={styles.modelInputField}
             removeButtonClassName={styles.modelRowRemoveButton}
@@ -391,18 +574,20 @@ export function ProviderModelsTab({
           <div className={styles.sectionHeader}>
             <div className={styles.sectionHeading}>
               <IconShield size={15} />
-              <h4>{t('ai_providers.excluded_models_label')}</h4>
+              <h4>{cleanHeadingText(t('ai_providers.excluded_models_label'))}</h4>
             </div>
           </div>
           <p className={styles.sectionHint}>
-            {t('ai_providers.excluded_models_workspace_hint', {
-              defaultValue: '每行一条模型名称或通配模式（例如 gpt-4*）。停用状态规则会自动保留在底层，不会在此暴露。',
+            {t('ai_providers.excluded_models_workspace_hint_v2', {
+              example: excludedExampleToken,
+              defaultValue:
+                '每行一条上游模型名或通配规则（如 {{example}}）；渠道停用标记由系统底层自动维护。',
             })}
           </p>
           <textarea
-            className="input"
-            rows={4}
-            placeholder={t('ai_providers.excluded_models_placeholder')}
+            className={`input ${styles.monoInput}`}
+            rows={3}
+            placeholder={excludedPlaceholder}
             value={form.excludedText}
             onChange={(e) => setForm((prev) => ({ ...prev, excludedText: e.target.value }))}
             disabled={controlsDisabled}
@@ -410,151 +595,6 @@ export function ProviderModelsTab({
         </section>
       )}
 
-      {/* 上游模型获取 Modal */}
-      {supportsDiscovery && (
-        <Modal
-          open={modelDiscoveryOpen}
-          onClose={() => setModelDiscoveryOpen(false)}
-          title={discoveryModalTitle}
-          width={640}
-          footer={
-            <>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => setModelDiscoveryOpen(false)}
-              >
-                {t('common.cancel')}
-              </Button>
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={applySelectedDiscoveredModels}
-                disabled={controlsDisabled || modelDiscoverySelected.size === 0 || modelDiscoveryFetching}
-              >
-                {t('ai_providers.apply_selected_models_btn', {
-                  defaultValue: '添加所选模型 ({{count}})',
-                  count: modelDiscoverySelected.size,
-                })}
-              </Button>
-            </>
-          }
-        >
-          <div className={styles.modelDiscoveryContent}>
-            <div className={styles.modelDiscoveryEndpointBox}>
-              <span className={styles.fieldLabel}>{t('ai_providers.openai_models_fetch_url_label')}</span>
-              <div className={styles.modelDiscoveryEndpointRow}>
-                <Input
-                  value={modelDiscoveryEndpoint}
-                  readOnly
-                  className={styles.monoInput}
-                />
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => void fetchModelDiscovery()}
-                  loading={modelDiscoveryFetching}
-                >
-                  {t('common.refresh')}
-                </Button>
-              </div>
-            </div>
-
-            {modelDiscoveryError && (
-              <div className={styles.inlineError} role="alert">
-                {modelDiscoveryError}
-              </div>
-            )}
-
-            <div className={styles.modelDiscoveryToolbar}>
-              <Input
-                placeholder={discoverySearchPlaceholder}
-                value={modelDiscoverySearch}
-                onChange={(e) => setModelDiscoverySearch(e.target.value)}
-              />
-              {visibleDiscoverableModelNames.length > 0 && (
-                <div className={styles.sectionMetaActions}>
-                  <Button
-                    variant="secondary"
-                    size="xs"
-                    onClick={
-                      allVisibleSelected
-                        ? handleClearModelDiscoverySelection
-                        : handleSelectVisibleModels
-                    }
-                  >
-                    {allVisibleSelected
-                      ? t('common.clear_selection', { defaultValue: '取消全选' })
-                      : t('common.select_all', { defaultValue: '全选当前' })}
-                  </Button>
-                </div>
-              )}
-            </div>
-
-            {modelDiscoveryFetching && !modelsLoaded ? (
-              <div className={styles.emptyHint}>
-                {t('ai_providers.fetching_models_loading', { defaultValue: '正在获取上游模型列表...' })}
-              </div>
-            ) : !modelsLoaded && modelDiscoveryError ? null : !discoveredModels.length ||
-              discoveredModelsFiltered.length === 0 ? (
-              <div className={styles.emptyHint}>
-                {t('ai_providers.no_discovered_models', { defaultValue: '暂无可展示的模型' })}
-              </div>
-            ) : (
-              <div className={styles.modelDiscoveryList}>
-                {discoveredModelsFiltered.map((model) => {
-                  const cleanName =
-                    activeKind === 'gemini' || activeKind === 'interactions'
-                      ? model.name.replace(/^\/?models\//i, '').trim()
-                      : model.name.trim();
-                  const alreadyAdded = configuredModelNames.has(cleanName.toLowerCase());
-                  const checked = alreadyAdded || modelDiscoverySelected.has(cleanName);
-
-                  return (
-                    <div
-                      key={`${model.name}-${model.alias ?? ''}`}
-                      className={`${styles.modelDiscoveryRow} ${
-                        checked && !alreadyAdded ? styles.modelDiscoveryRowSelected : ''
-                      }`}
-                    >
-                      <SelectionCheckbox
-                        checked={checked}
-                        disabled={alreadyAdded}
-                        onChange={() => toggleModelDiscoverySelection(model.name)}
-                        ariaLabel={cleanName}
-                        label={
-                          <div className={styles.modelDiscoveryMeta}>
-                            <div className={styles.modelDiscoveryNameRow}>
-                              <span>
-                                <strong className={styles.fieldValueMono}>{cleanName}</strong>
-                                {model.alias && model.alias !== cleanName && (
-                                  <span className={styles.modelDiscoveryAlias}>
-                                    ({model.alias})
-                                  </span>
-                                )}
-                              </span>
-                              {alreadyAdded && (
-                                <span className={styles.modelDiscoveryAddedBadge}>
-                                  {t('ai_providers.model_already_added', { defaultValue: '已添加' })}
-                                </span>
-                              )}
-                            </div>
-                            {model.description && (
-                              <span className={styles.modelDiscoveryDesc}>
-                                {model.description}
-                              </span>
-                            )}
-                          </div>
-                        }
-                      />
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </Modal>
-      )}
     </div>
   );
 }

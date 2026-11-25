@@ -33,6 +33,8 @@ interface ModelInputListProps {
   disabled?: boolean;
   namePlaceholder?: string;
   aliasPlaceholder?: string;
+  nameColumnLabel?: string;
+  aliasColumnLabel?: string;
   hideAddButton?: boolean;
   onAdd?: () => void;
   onRemove?: (index: number) => void;
@@ -76,6 +78,8 @@ export function ModelInputList({
   disabled = false,
   namePlaceholder = 'model-name',
   aliasPlaceholder = 'alias (optional)',
+  nameColumnLabel,
+  aliasColumnLabel,
   hideAddButton = false,
   onAdd,
   onRemove,
@@ -224,6 +228,14 @@ export function ModelInputList({
 
   return (
     <div className={containerClassName}>
+      {(nameColumnLabel || aliasColumnLabel) && currentEntries.length > 0 && (
+        <div className={styles.columnHeaderRow} aria-hidden="true">
+          <span className={styles.columnHeaderLabel}>{nameColumnLabel}</span>
+          <span className={styles.columnHeaderSep} />
+          <span className={styles.columnHeaderLabel}>{aliasColumnLabel}</span>
+          <span className={styles.columnHeaderActionSpacer} />
+        </div>
+      )}
       {currentEntries.map((entry, index) => {
         const modelOrdinal = `${modelFallbackLabel} ${index + 1}`;
         const modelContext = entry.name.trim()
@@ -266,11 +278,15 @@ export function ModelInputList({
               </Button>
             </div>
             {(showForceMapping || showModalities) && (
-              <div className={styles.advancedRow}>
+              <div
+                className={`${styles.advancedRow}${
+                  showModalities ? ` ${styles.advancedRowWithModalities}` : ''
+                }`}
+              >
                 {showForceMapping && (
                   <ToggleSwitch
+                    size="sm"
                     label={forceMappingLabel}
-                    labelPosition="left"
                     checked={Boolean(entry.forceMapping)}
                     onChange={(forceMapping) => updateAdvancedEntry(index, { forceMapping })}
                     disabled={disabled}

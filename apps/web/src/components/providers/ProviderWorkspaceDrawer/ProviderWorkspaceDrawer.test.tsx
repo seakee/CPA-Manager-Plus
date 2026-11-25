@@ -104,8 +104,20 @@ vi.mock('@/services/api', () => ({
   apiCallApi: {
     request: mocks.apiCallRequest,
   },
-  getApiCallErrorMessage: (result: { statusCode: number }) => `HTTP ${result.statusCode}`,
-  getApiCallErrorDetails: (result: { statusCode: number }) => `HTTP ${result.statusCode}`,
+  getApiCallErrorMessage: (result: {
+    statusCode: number;
+    body?: { error?: { message?: string } };
+    bodyText?: string;
+  }) => {
+    const msg = result.body?.error?.message;
+    if (msg) return `${result.statusCode} ${msg}`;
+    if (result.bodyText) return `${result.statusCode} ${result.bodyText}`;
+    return `HTTP ${result.statusCode}`;
+  },
+  getApiCallErrorDetails: (result: { statusCode: number; bodyText?: string }) =>
+    result.bodyText
+      ? `HTTP ${result.statusCode} | Body: ${result.bodyText}`
+      : `HTTP ${result.statusCode}`,
   readBackClaudeConfigAfterSave: mocks.readBackClaudeConfigAfterSave,
   verifyClaudeFingerprintInRawConfig: mocks.verifyClaudeFingerprintInRawConfig,
 }));
@@ -801,6 +813,18 @@ describe('ProviderWorkspaceDrawer', () => {
     });
     expect(extractText(renderer!.root)).toContain('sk-ant-secret-9999');
 
+
+    // Overview clean labels (no "(可选)"), historical stats vs recent 200m window separation, and inactive-weight hint
+    const overviewText = extractText(renderer!.root);
+    expect(overviewText).not.toContain('(可选)');
+    expect(overviewText).toContain(i18n.t('ai_providers.endpoint_prefix_label', { defaultValue: '前缀' }));
+    expect(overviewText).toContain(i18n.t('ai_providers.overview_cloak_label', { defaultValue: '请求伪装' }));
+    expect(overviewText).toContain(
+      i18n.t('accounts.detail_overview_recent_status_title', { defaultValue: '最近状态' })
+    );
+    expect(overviewText).toContain(
+      i18n.t('ai_providers.card_history_title', { defaultValue: '历史用量' })
+    );
     // Config tab alias input disabled when v8AliasSupported is false
     const configTab = findTabByText(
       renderer!.root,
@@ -2791,7 +2815,7 @@ describe('ProviderWorkspaceDrawer', () => {
       .filter((btn) =>
         extractText(btn).trim().includes(i18n.t('common.reset', { defaultValue: '重置' }))
       );
-    expect(resetButtons.length).toBeGreaterThanOrEqual(2);
+    expect(resetButtons).toHaveLength(1);
     const footerResetBtn = resetButtons[resetButtons.length - 1];
     await act(async () => {
       footerResetBtn.props.onClick();
@@ -3679,5 +3703,419 @@ describe('ProviderWorkspaceDrawer', () => {
         .findAllByType('input')
         .find((input) => input.props.placeholder === customModelPlaceholder)?.props.value
     ).toBe('claude-sonnet-4-5');
+  });
+
+  it('enforces single-authority footer, Overview alias->upstream direction, Config key masking, and Connectivity quick-model chips + preflight preview', async () => {
+    const rows = buildProviderRows({
+      gemini: [],
+      codex: [],
+      claude: [
+        {
+          name: 'Claude Official',
+          apiKey: 'sk-ant-secret-01',
+          baseUrl: 'https://api.anthropic.com',
+          prefix: 'cl',
+          models: [
+            { name: 'claude-sonnet-4-5', alias: 'sonnet' },
+            { name: 'claude-3-5-haiku-latest', alias: 'haiku' },
+          ],
+        },
+      ],
+      xai: [],
+      vertex: [],
+      openai: [],
+      usageByProvider: emptyUsageByProvider,
+    });
+
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <ProviderWorkspaceDrawer
+          open
+          mode="view-edit"
+          row={rows[0]}
+          usageByProvider={emptyUsageByProvider}
+          onClose={vi.fn()}
+          onSaved={vi.fn()}
+          onToggleEnabled={vi.fn()}
+          onDelete={vi.fn()}
+        />
+      );
+    });
+    renderers.push(renderer);
+    await flush();
+
+    // 1. Overview: alias -> upstream model direction and no "排除规则 0 条" noise
+    const overviewText = extractText(renderer.root);
+    expect(overviewText).toMatch(/sonnet\s*→\s*claude-sonnet-4-5/);
+    expect(overviewText).not.toContain(
+      i18n.t('ai_providers.overview_excluded_models_count', { count: 0 })
+    );
+
+    // 2. Connectivity (clean): footer right shows Close instead of duplicate primary CTA, quick chips switch model, preflight shows POST endpoint
+    await act(async () => {
+      findTabByText(
+        renderer.root,
+        i18n.t('ai_providers.drawer_tab_connectivity', { defaultValue: '测活诊断' })
+      )!.props.onClick();
+    });
+    await flush();
+
+    const connectivityText = extractText(renderer.root);
+    expect(connectivityText).toContain('POST');
+    expect(connectivityText).toContain('https://api.anthropic.com/v1/messages');
+    expect(connectivityText).toContain(
+      i18n.t('ai_providers.connectivity_using_saved_badge', { defaultValue: '已同步保存配置' })
+    );
+
+    const toggleModelListBtn = renderer.root
+      .findAllByType('button')
+      .find(
+        (btn) =>
+          btn.props['aria-label'] ===
+          i18n.t('ai_providers.connectivity_toggle_model_list', {
+            defaultValue: '展开已配置模型列表',
+          })
+      );
+    expect(toggleModelListBtn).toBeDefined();
+    await act(async () => {
+      toggleModelListBtn!.props.onClick();
+    });
+    const haikuOption = renderer.root
+      .findAllByType('button')
+      .find(
+        (btn) =>
+          btn.props.role === 'option' &&
+          extractText(btn).includes('claude-3-5-haiku-latest') &&
+          extractText(btn).includes('haiku')
+      );
+    expect(haikuOption).toBeDefined();
+    await act(async () => {
+      haikuOption!.props.onClick();
+    });
+    const customModelPlaceholder = i18n.t('ai_providers.custom_test_model_placeholder', {
+      defaultValue: '选择已配模型或输入自定义模型 ID',
+    });
+    expect(
+      renderer.root
+        .findAllByType('input')
+        .find((input) => input.props.placeholder === customModelPlaceholder)?.props.value
+    ).toBe('claude-3-5-haiku-latest');
+    // 3. Config: API Key defaults to password type and toggles to text via eye button; footer Disable stays mounted when dirty
+    await act(async () => {
+      findTabByText(
+        renderer.root,
+        i18n.t('ai_providers.drawer_tab_config', { defaultValue: '配置' })
+      )!.props.onClick();
+    });
+    await flush();
+
+    const apiKeyInput = findInputByLabel(
+      renderer.root,
+      i18n.t('ai_providers.api_key_label', { defaultValue: 'API Key' })
+    );
+    expect(apiKeyInput?.props.type).toBe('password');
+    const revealBtn = renderer.root
+      .findAllByType('button')
+      .find(
+        (btn) => btn.props['aria-label'] === i18n.t('common.reveal', { defaultValue: '显示明文' })
+      );
+    expect(revealBtn).toBeDefined();
+    await act(async () => {
+      revealBtn!.props.onClick();
+    });
+    expect(
+      findInputByLabel(
+        renderer.root,
+        i18n.t('ai_providers.api_key_label', { defaultValue: 'API Key' })
+      )?.props.type
+    ).toBe('text');
+
+    await act(async () => {
+      findInputByLabel(renderer.root, i18n.t('ai_providers.prefix_label'))!.props.onChange({
+        target: { value: 'cl-next' },
+      });
+    });
+    const disableBtn = findButtonByText(
+      renderer.root,
+      i18n.t('ai_providers.action_disable', { defaultValue: '停用' })
+    );
+    expect(disableBtn).toBeDefined();
+    expect(disableBtn?.props.disabled).toBe(true);
+  });
+
+  it('switches Models tab into drawer-native discovery sub-view (Plan A) and coordinates single-authority footer', async () => {
+    mocks.fetchClaudeModelsViaApiCall.mockResolvedValueOnce([
+      { name: 'claude-sonnet-4-5', description: 'Flagship Sonnet' },
+      { name: 'claude-opus-4-6', description: 'Flagship Opus' },
+    ]);
+
+    const rows = buildProviderRows({
+      gemini: [],
+      codex: [],
+      claude: [
+        {
+          name: 'Claude Official',
+          apiKey: 'sk-ant-secret-01',
+          baseUrl: 'https://api.anthropic.com',
+          models: [{ name: 'claude-sonnet-4-5', alias: 'sonnet' }],
+        },
+      ],
+      xai: [],
+      vertex: [],
+      openai: [],
+      usageByProvider: emptyUsageByProvider,
+    });
+
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <ProviderWorkspaceDrawer
+          open
+          mode="view-edit"
+          row={rows[0]}
+          initialTab="models"
+          usageByProvider={emptyUsageByProvider}
+          onClose={vi.fn()}
+          onSaved={vi.fn()}
+          onToggleEnabled={vi.fn()}
+          onDelete={vi.fn()}
+        />
+      );
+    });
+    renderers.push(renderer);
+    await flush();
+
+    const fetchBtn = findButtonByText(
+      renderer.root,
+      i18n.t('ai_providers.fetch_upstream_models_btn', { defaultValue: '从上游 /models 获取' })
+    );
+    expect(fetchBtn).toBeDefined();
+    await act(async () => {
+      fetchBtn!.props.onClick();
+    });
+    await flush();
+
+    // Renders inline discovery sub-view inside drawer (no Modal overlay)
+    const subView = renderer.root.findByProps({ 'data-testid': 'drawer-model-discovery-subview' });
+    expect(subView).toBeDefined();
+    expect(extractText(subView)).toContain('GET');
+    expect(extractText(subView)).toContain('https://api.anthropic.com/v1/models');
+    expect(extractText(subView)).toContain('claude-opus-4-6');
+
+    // Select claude-opus-4-6 and apply via coordinated Drawer footer primary CTA
+    const opusCheckbox = subView
+      .findAllByType('input')
+      .find((input) => input.props.type === 'checkbox' && input.props['aria-label'] === 'claude-opus-4-6');
+    expect(opusCheckbox).toBeDefined();
+    await act(async () => {
+      opusCheckbox!.props.onChange({ target: { checked: true } });
+    });
+
+    const applyBtn = findButtonByText(
+      renderer.root,
+      i18n.t('ai_providers.apply_selected_models_btn', {
+        count: 1,
+        defaultValue: '添加所选模型 (1)',
+      })
+    );
+    expect(applyBtn).toBeDefined();
+    await act(async () => {
+      applyBtn!.props.onClick();
+    });
+    await flush();
+
+    // Returns to model mapping list with claude-opus-4-6 added and Save button enabled
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'drawer-model-discovery-subview' })
+    ).toHaveLength(0);
+    expect(
+      renderer.root.findAllByType('input').some((input) => input.props.value === 'claude-opus-4-6')
+    ).toBe(true);
+  });
+
+  it('renders structured Claude 401 auth diagnostic chips, collapsible response body, /models probe mode, and zero duplicate Toast notifications', async () => {
+    mocks.apiCallRequest.mockResolvedValueOnce({
+      statusCode: 401,
+      body: {
+        type: 'error',
+        error: { type: 'authentication_error', message: 'invalid x-api-key' },
+      },
+      bodyText: '{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}',
+    });
+    mocks.fetchClaudeModelsViaApiCall.mockResolvedValueOnce([
+      { name: 'claude-sonnet-4-5', description: 'Sonnet' },
+    ]);
+
+    const rows = buildProviderRows({
+      gemini: [],
+      codex: [],
+      claude: [
+        {
+          name: 'Claude Official',
+          apiKey: 'sk-ant-demo-key',
+          baseUrl: 'https://api.anthropic.com',
+          models: [{ name: 'claude-sonnet-4-5', alias: 'sonnet' }],
+        },
+      ],
+      xai: [],
+      vertex: [],
+      openai: [],
+      usageByProvider: emptyUsageByProvider,
+    });
+
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <ProviderWorkspaceDrawer
+          open
+          mode="view-edit"
+          row={rows[0]}
+          initialTab="connectivity"
+          usageByProvider={emptyUsageByProvider}
+          onClose={vi.fn()}
+          onSaved={vi.fn()}
+          onToggleEnabled={vi.fn()}
+          onDelete={vi.fn()}
+        />
+      );
+    });
+    renderers.push(renderer);
+    await flush();
+
+    mocks.showNotification.mockClear();
+    const sendBtn = findButtonByText(
+      renderer.root,
+      i18n.t('ai_providers.send_test_request_btn', { defaultValue: '立即发送测试请求' })
+    );
+    await act(async () => {
+      sendBtn!.props.onClick();
+    });
+    await flush();
+
+    expect(mocks.showNotification).not.toHaveBeenCalled();
+    const textAfterFail = extractText(renderer.root);
+    expect(textAfterFail).toContain('HTTP 401');
+    expect(textAfterFail).toContain('invalid x-api-key');
+    expect(textAfterFail).not.toContain('[diag:');
+    expect(textAfterFail).toContain(
+      i18n.t('ai_providers.connectivity_diag_header', { header: 'x-api-key' })
+    );
+    expect(textAfterFail).toContain(
+      i18n.t('ai_providers.connectivity_diag_endpoint_type', {
+        type: i18n.t('ai_providers.connectivity_diag_endpoint_anthropic'),
+      })
+    );
+
+    // Expand response body on demand
+    const showBodyBtn = findButtonByText(
+      renderer.root,
+      i18n.t('ai_providers.connectivity_show_body', { defaultValue: '查看响应体' })
+    );
+    expect(showBodyBtn).toBeDefined();
+    await act(async () => {
+      showBodyBtn!.props.onClick();
+    });
+    expect(extractText(renderer.root)).toContain('"authentication_error"');
+
+    // Switch to /models probe mode
+    const modelsModeBtn = findButtonByText(
+      renderer.root,
+      i18n.t('ai_providers.connectivity_mode_models', { defaultValue: '/models 探活' })
+    );
+    expect(modelsModeBtn).toBeDefined();
+    await act(async () => {
+      modelsModeBtn!.props.onClick();
+    });
+    await flush();
+    expect(extractText(renderer.root)).toContain('GET');
+    expect(extractText(renderer.root)).toContain('https://api.anthropic.com/v1/models');
+
+    const sendModelsBtn = findButtonByText(
+      renderer.root,
+      i18n.t('ai_providers.send_test_request_btn', { defaultValue: '立即发送测试请求' })
+    );
+    await act(async () => {
+      sendModelsBtn!.props.onClick();
+    });
+    await flush();
+    expect(mocks.fetchClaudeModelsViaApiCall).toHaveBeenCalledTimes(1);
+    expect(mocks.showNotification).not.toHaveBeenCalled();
+  });
+
+  it('renders concise OpenAI multi-key error summary, failed-only filter, and collapsible response body without duplicate Toasts', async () => {
+    mocks.apiCallRequest
+      .mockResolvedValueOnce({ statusCode: 200, body: { id: 'chatcmpl-1' }, bodyText: '{}' })
+      .mockResolvedValueOnce({
+        statusCode: 401,
+        body: { error: { message: 'User not found.', code: 401 } },
+        bodyText: '{"error":{"message":"User not found.","code":401}}',
+      });
+
+    const rows = buildProviderRows({
+      gemini: [],
+      codex: [],
+      claude: [],
+      xai: [],
+      vertex: [],
+      openai: [
+        {
+          name: 'OpenRouter Primary',
+          baseUrl: 'https://openrouter.ai/api/v1',
+          apiKeyEntries: [
+            markPersistedOpenAIKeyEntry({ apiKey: 'sk-or-valid-key-1' }, 0),
+            markPersistedOpenAIKeyEntry({ apiKey: 'sk-or-broken-key-2' }, 1),
+          ],
+          models: [{ name: 'openai/gpt-4.1', alias: 'gpt-4.1' }],
+        },
+      ],
+      usageByProvider: emptyUsageByProvider,
+    });
+
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <ProviderWorkspaceDrawer
+          open
+          mode="view-edit"
+          row={rows[0]}
+          initialTab="connectivity"
+          usageByProvider={emptyUsageByProvider}
+          onClose={vi.fn()}
+          onSaved={vi.fn()}
+          onToggleEnabled={vi.fn()}
+          onDelete={vi.fn()}
+        />
+      );
+    });
+    renderers.push(renderer);
+    await flush();
+
+    mocks.showNotification.mockClear();
+    const testAllBtn = findButtonByText(
+      renderer.root,
+      i18n.t('ai_providers.openai_test_all_action', { defaultValue: '一键测试全部密钥' })
+    );
+    await act(async () => {
+      testAllBtn!.props.onClick();
+    });
+    await flush();
+
+    expect(mocks.showNotification).not.toHaveBeenCalled();
+    const textAfterBatch = extractText(renderer.root);
+    expect(textAfterBatch).toContain('User not found.');
+    expect(textAfterBatch).not.toContain('Body: {');
+
+    // Filter to failed-only keys
+    const failedFilterBtn = findButtonByText(
+      renderer.root,
+      i18n.t('ai_providers.connectivity_filter_failed_only', { count: 1 })
+    );
+    expect(failedFilterBtn).toBeDefined();
+    await act(async () => {
+      failedFilterBtn!.props.onClick();
+    });
+    expect(extractText(renderer.root)).not.toContain('#1');
+    expect(extractText(renderer.root)).toContain('#2');
   });
 });

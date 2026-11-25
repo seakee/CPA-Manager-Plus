@@ -1,16 +1,19 @@
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import {
+  MetricSummaryGrid,
+  type MetricSummaryCardProps,
+} from '@/components/common/MetricSummaryCard';
 import { Button } from '@/components/ui/Button';
 import {
+  IconActivity,
   IconChartLine,
-  IconCheck,
   IconCopy,
   IconEye,
   IconEyeOff,
   IconKey,
   IconModelCluster,
-  IconSatellite,
-  IconX,
+  IconSlidersHorizontal,
 } from '@/components/ui/icons';
 import { useNotificationStore } from '@/stores';
 import { coolingPolicyFromOverride } from '@/types';
@@ -18,7 +21,11 @@ import { copyToClipboard } from '@/utils/clipboard';
 import { normalizeCredentialWeight } from '@/utils/credentialWeight';
 import { maskApiKey } from '@/utils/format';
 import { ProviderStatusBar } from '../ProviderStatusBar';
-import { PROVIDER_KIND_LABELS } from '../ProviderTable/kindMeta';
+import {
+  formatCompactHistoryUsd,
+  formatCompactTimestamp,
+  formatCompactTokens,
+} from '../ProviderTable/formatters';
 import type { ProviderRow } from '../ProviderTable/rowData';
 import {
   getProviderTotalStats,
@@ -37,22 +44,24 @@ export interface ProviderOverviewTabProps {
   toggleDisabled?: boolean;
   isDirty?: boolean;
   saving?: boolean;
+  routingStrategy?: string;
+  globalDisableCooling?: boolean;
   onSwitchTab: (tab: ProviderDrawerTab) => void;
   onToggleEnabled?: (row: ProviderRow, enabled: boolean) => void;
 }
-
 const MAX_MODEL_PREVIEW_PILLS = 10;
-const stripTrailingColon = (text: string): string => text.replace(/[:：]\s*$/, '');
-
+const stripLabelNoise = (text: string): string =>
+  text.replace(/\s*[（(](?:可选|必填|optional|required)[)）]/gi, '').replace(/[:：]\s*$/, '');
 
 export function ProviderOverviewTab({
   row,
-  form,
   usageByProvider,
   actionsDisabled,
   toggleDisabled,
   isDirty = false,
   saving = false,
+  routingStrategy,
+  globalDisableCooling,
   onSwitchTab,
   onToggleEnabled,
 }: ProviderOverviewTabProps) {
@@ -101,15 +110,206 @@ export function ProviderOverviewTab({
     const policy = coolingPolicyFromOverride(row.disableCooling);
     if (policy === 'enabled') return t('ai_providers.cooling_policy_enabled');
     if (policy === 'disabled') return t('ai_providers.cooling_policy_disabled');
-    return t('ai_providers.cooling_policy_inherit');
-  }, [row.disableCooling, t]);
-
+    const base = t('ai_providers.cooling_policy_inherit');
+    if (globalDisableCooling === true) {
+      return `${base} (${t('ai_providers.cooling_disabled_badge', { defaultValue: '不冷却' })})`;
+    }
+    if (globalDisableCooling === false) {
+      return `${base} (${t('ai_providers.cooling_policy_enabled')})`;
+    }
+    return base;
+  }, [globalDisableCooling, row.disableCooling, t]);
   const rawHeaders = row.raw.headers ?? {};
   const headerEntries = Object.entries(rawHeaders);
   const explicitModels = row.raw.models ?? [];
   const excludedModels =
     row.kind === 'openai' ? [] : stripDisableAllModelsRule(row.raw.excludedModels);
-  const aliasText = form.name.trim() || row.alias || '';
+  const totalCalls = row.stats.success + row.stats.failure;
+  const history = row.history;
+  const hasHistoryMetrics = Boolean(history && history.totalRequests > 0);
+  const rawRate =
+    totalCalls > 0
+      ? hasHistoryMetrics && history && Number.isFinite(history.successRate)
+        ? history.successRate
+        : (row.stats.success / totalCalls) * 100
+      : null;
+  const displayRate = rawRate !== null ? Math.round(rawRate * 10) / 10 : null;
+  const { compact: lastSeenCompact, full: lastSeenFull } = formatCompactTimestamp(row.lastSeenMs);
+  const latestFailure = row.latestFailure;
+  const failureSummaryText = latestFailure?.summary || latestFailure?.errorCode || '';
+  const failureStatusPrefix =
+    latestFailure?.statusCode && !failureSummaryText.includes(String(latestFailure.statusCode))
+      ? `HTTP ${latestFailure.statusCode}`
+      : null;
+  const failureBannerText =
+    latestFailure?.isMostRecent && (failureStatusPrefix || failureSummaryText)
+      ? [failureStatusPrefix, failureSummaryText].filter(Boolean).join(' · ')
+      : null;
+
+  const recentWindowTotal = row.statusData.totalSuccess + row.statusData.totalFailure;
+  const hasActivity = hasHistoryMetrics || totalCalls > 0;
+
+  const historyCards = useMemo((): MetricSummaryCardProps[] => {
+    if (!hasActivity) return [];
+    const rateTone =
+      displayRate === null
+        ? undefined
+        : displayRate >= 95
+          ? 'good'
+          : displayRate >= 85
+            ? 'warn'
+            : 'bad';
+
+    if (hasHistoryMetrics && history) {
+      const cards: MetricSummaryCardProps[] = [
+        {
+          label: t('accounts.value_requests', { defaultValue: '请求数' }),
+          value: formatCompactTokens(totalCalls),
+          valueTitle: totalCalls.toLocaleString(),
+          meta: '',
+          icon: 'calls',
+          accent: 'blue',
+        },
+        {
+          label: t('accounts.detail_success_rate', { defaultValue: '成功率' }),
+          value: displayRate !== null ? `${displayRate}%` : '-',
+          meta: '',
+          icon: 'success',
+          accent: 'green',
+          tone: rateTone,
+        },
+        {
+          label: t('usage_analytics.trend_metric_totalTokens', { defaultValue: '总 Token' }),
+          value: formatCompactTokens(history.totalTokens),
+          valueTitle: history.totalTokens.toLocaleString(),
+          meta: '',
+          icon: 'tokens',
+          accent: 'teal',
+          variant: 'secondary',
+        },
+      ];
+      if (history.totalCost !== null) {
+        cards.push({
+          label: t('accounts.history_cost', { defaultValue: '估算费用' }),
+          value: formatCompactHistoryUsd(history.totalCost),
+          meta: '',
+          icon: 'cost',
+          accent: 'amber',
+        });
+      }
+      if (lastSeenCompact) {
+        cards.push({
+          label: t('accounts.detail_overview_activity_last_active', { defaultValue: '最后活动' }),
+          value: lastSeenCompact,
+          valueTitle: lastSeenFull ?? undefined,
+          meta: '',
+          icon: 'trend',
+          accent: 'blue',
+        });
+      }
+      return cards;
+    }
+
+    return [
+      {
+        label: t('accounts.value_requests', { defaultValue: '请求数' }),
+        value: formatCompactTokens(totalCalls),
+        valueTitle: totalCalls.toLocaleString(),
+        meta: '',
+        icon: 'calls',
+        accent: 'blue',
+      },
+      {
+        label: t('accounts.detail_success_rate', { defaultValue: '成功率' }),
+        value: displayRate !== null ? `${displayRate}%` : '-',
+        meta: '',
+        icon: 'success',
+        accent: 'green',
+        tone: rateTone,
+      },
+      {
+        label: t('accounts.detail_overview_activity_success', { defaultValue: '成功请求' }),
+        value: row.stats.success.toLocaleString(),
+        meta: '',
+        icon: 'success',
+        accent: 'green',
+      },
+      {
+        label: t('accounts.detail_overview_activity_failure', { defaultValue: '失败请求' }),
+        value: row.stats.failure.toLocaleString(),
+        meta: '',
+        icon: 'failure',
+        accent: 'red',
+        tone: row.stats.failure > 0 ? 'bad' : 'good',
+      },
+    ];
+  }, [
+    displayRate,
+    hasActivity,
+    hasHistoryMetrics,
+    history,
+    lastSeenCompact,
+    lastSeenFull,
+    row.stats.failure,
+    row.stats.success,
+    t,
+    totalCalls,
+  ]);
+  const openAIProxyCount =
+    row.kind === 'openai'
+      ? (row.raw.apiKeyEntries ?? []).filter((entry) => Boolean(entry.proxyUrl?.trim())).length
+      : 0;
+  const singleProxyUrl = row.kind !== 'openai' ? row.raw.proxyUrl?.trim() ?? '' : '';
+  const singleRawKey = row.kind !== 'openai' ? row.raw.apiKey?.trim() ?? '' : '';
+  const authIndexValue = row.raw.authIndex?.trim() ?? '';
+
+  const prioritySummary =
+    row.kind !== 'openai' && routingStrategy === 'weighted-round-robin'
+      ? t('ai_providers.priority_weight_value', {
+          defaultValue: '优先级 {{priority}} · 权重 {{weight}}',
+          priority: row.priority ?? 0,
+          weight: formatWeightLabel(row.raw.weight),
+        })
+      : row.kind !== 'openai' && normalizeCredentialWeight(row.raw.weight) !== undefined
+        ? t('ai_providers.overview_priority_weight_inactive', {
+            defaultValue: '优先级 {{priority}}（权重 {{weight}} · 仅加权轮询生效）',
+            priority: row.priority ?? 0,
+            weight: formatWeightLabel(row.raw.weight),
+          })
+        : t('ai_providers.priority_only_value', {
+            defaultValue: '优先级 {{priority}}',
+            priority: row.priority ?? 0,
+          });
+
+  const claudeProtocolSummary = useMemo(() => {
+    if (row.kind !== 'claude') return '';
+    const segments: string[] = [];
+    const fpLabel =
+      row.raw.fingerprintProfile === 'claude-code-cli'
+        ? t('ai_providers.claude_request_fingerprint_claude_code_cli')
+        : t('ai_providers.claude_request_fingerprint_default');
+    segments.push(`${stripLabelNoise(t('ai_providers.claude_request_fingerprint_label'))}: ${fpLabel}`);
+    if (row.raw.rebuildMidSystemMessage) {
+      segments.push(
+        `${stripLabelNoise(t('ai_providers.rebuild_mid_system_message_label'))}: ${t('common.enabled', { defaultValue: '已开启' })}`
+      );
+    }
+    const cloakText = row.raw.cloak
+      ? [
+          row.raw.cloak.mode || 'auto',
+          row.raw.cloak.strictMode
+            ? stripLabelNoise(t('ai_providers.claude_cloak_strict_label'))
+            : null,
+          row.raw.cloak.sensitiveWords?.length
+            ? `${stripLabelNoise(t('ai_providers.claude_cloak_sensitive_words_count'))} ${row.raw.cloak.sensitiveWords.length}`
+            : null,
+        ]
+          .filter(Boolean)
+          .join(' · ')
+      : t('common.disabled', { defaultValue: '未开启' });
+    segments.push(`${t('ai_providers.overview_cloak_label', { defaultValue: '请求伪装' })}: ${cloakText}`);
+    return segments.join('  ·  ');
+  }, [row, t]);
 
   return (
     <div className={styles.drawerTabPanel}>
@@ -138,263 +338,395 @@ export function ProviderOverviewTab({
         </div>
       )}
 
-      {/* 1. 路由与调度摘要卡 */}
-      <section className={styles.sectionCard}>
-        <div className={styles.sectionHeader}>
-          <div className={styles.sectionHeading}>
-            <IconSatellite size={15} />
-            <h4>{t('ai_providers.overview_routing_title', { defaultValue: '路由与调度摘要' })}</h4>
-          </div>
-          <Button variant="ghost" size="xs" onClick={() => onSwitchTab('config')}>
-            {t('ai_providers.overview_edit_config_link', { defaultValue: '编辑配置 →' })}
-          </Button>
-        </div>
-
-        <div className={styles.fieldGrid}>
-          <div className={styles.fieldCell}>
-            <span className={styles.fieldLabel}>
-              {t('ai_providers.name_label', { defaultValue: '名称 / 别名' })}
+      {/* 1. 最近状态（对齐并复用凭证详情概览 Recent Status 布局与语义） */}
+      <section className={styles.overviewRefCard} data-overview-section="recent-status">
+        <div className={styles.overviewRefHeader}>
+          <div className={styles.overviewRefHeading}>
+            <span className={styles.overviewRefIcon} aria-hidden="true">
+              <IconActivity size={18} />
             </span>
-            <div className={styles.fieldValueRow}>
-              <span className={styles.fieldValue}>{aliasText || '—'}</span>
-            </div>
+            <h4>
+              {t('accounts.detail_overview_recent_status_title', { defaultValue: '最近状态' })}
+            </h4>
           </div>
-
-          <div className={styles.fieldCell}>
-            <span className={styles.fieldLabel}>
-              {t('ai_providers.provider_kind_label', { defaultValue: '协议类型' })}
-            </span>
-            <div className={styles.fieldValueRow}>
-              <span className={styles.fieldValue}>{PROVIDER_KIND_LABELS[row.kind]}</span>
-            </div>
-          </div>
-
-          <div className={`${styles.fieldCell} ${styles.fieldCellWide}`}>
-            <span className={styles.fieldLabel}>{t('ai_providers.base_url_label', { defaultValue: 'Base URL' })}</span>
-            <div className={styles.fieldValueRow}>
-              <span className={`${styles.fieldValue} ${styles.fieldValueMono}`}>
-                {row.baseUrl || '—'}
-              </span>
-              {row.baseUrl && (
-                <button
-                  type="button"
-                  className={styles.inlineCopyBtn}
-                  onClick={() => void handleCopy(row.baseUrl, 'Base URL')}
-                  aria-label={t('common.copy', { defaultValue: '复制' })}
-                >
-                  <IconCopy size={13} />
-                </button>
-              )}
-            </div>
-          </div>
-
-          <div className={styles.fieldCell}>
-            <span className={styles.fieldLabel}>{stripTrailingColon(t('ai_providers.prefix_label'))}</span>
-            <div className={styles.fieldValueRow}>
-              <span className={`${styles.fieldValue} ${styles.fieldValueMono}`}>
-                {row.prefix ? `${row.prefix}/<model>` : '—'}
-              </span>
-              {row.prefix && (
-                <button
-                  type="button"
-                  className={styles.inlineCopyBtn}
-                  onClick={() => void handleCopy(row.prefix, stripTrailingColon(t('ai_providers.prefix_label')))}
-                  aria-label={t('common.copy', { defaultValue: '复制' })}
-                >
-                  <IconCopy size={13} />
-                </button>
-              )}
-            </div>
-          </div>
-
-          <div className={styles.fieldCell}>
-            <span className={styles.fieldLabel}>
-              {t('ai_providers.proxy_url_label', { defaultValue: '代理地址' })}
-            </span>
-            <div className={styles.fieldValueRow}>
-              <span className={`${styles.fieldValue} ${styles.fieldValueMono}`}>
-                {row.kind === 'openai'
-                  ? row.raw.apiKeyEntries?.some((entry) => Boolean(entry.proxyUrl?.trim()))
-                    ? t('ai_providers.overview_per_key_proxy_count', {
-                        defaultValue: '{{count}} 个密钥已配置代理',
-                        count: row.raw.apiKeyEntries.filter((entry) => Boolean(entry.proxyUrl?.trim())).length,
-                      })
-                    : '—'
-                  : row.raw.proxyUrl?.trim() || '—'}
-              </span>
-            </div>
-          </div>
-
-          <div className={styles.fieldCell}>
-            <span className={styles.fieldLabel}>
-              {t('ai_providers.auth_index_label', { defaultValue: 'Auth Index' })}
-            </span>
-            <div className={styles.fieldValueRow}>
-              <span className={`${styles.fieldValue} ${styles.fieldValueMono}`}>
-                {row.raw.authIndex?.trim() || '—'}
-              </span>
-              {row.raw.authIndex?.trim() && (
-                <button
-                  type="button"
-                  className={styles.inlineCopyBtn}
-                  onClick={() => void handleCopy(row.raw.authIndex ?? '', 'Auth Index')}
-                  aria-label={t('common.copy', { defaultValue: '复制' })}
-                >
-                  <IconCopy size={13} />
-                </button>
-              )}
-            </div>
-          </div>
-
-          <div className={styles.fieldCell}>
-            <span className={styles.fieldLabel}>
-              {t('ai_providers.scheduling_priority_weight', { defaultValue: '优先级 / 权重' })}
-            </span>
-            <div className={styles.fieldValueRow}>
-              <span className={`${styles.fieldValue} ${styles.fieldValueMono}`}>
-                {row.kind === 'openai'
-                  ? t('ai_providers.priority_only_value', {
-                      defaultValue: '优先级 {{priority}}',
-                      priority: row.priority ?? 0,
-                    })
-                  : t('ai_providers.priority_weight_value', {
-                      defaultValue: '优先级 {{priority}} · 权重 {{weight}}',
-                      priority: row.priority ?? 0,
-                      weight: formatWeightLabel(row.raw.weight),
-                    })}
-              </span>
-            </div>
-          </div>
-
-          <div className={styles.fieldCell}>
-            <span className={styles.fieldLabel}>{stripTrailingColon(t('ai_providers.cooling_policy_label'))}</span>
-            <div className={styles.fieldValueRow}>
-              <span className={styles.fieldValue}>{coolingLabel}</span>
-            </div>
-          </div>
-
-          {row.kind !== 'openai' && (row.kind === 'codex' || row.kind === 'xai') && (
-            <div className={styles.fieldCell}>
-              <span className={styles.fieldLabel}>{stripTrailingColon(t('ai_providers.codex_websockets_label'))}</span>
-              <div className={styles.fieldValueRow}>
-                <span className={styles.fieldValue}>
-                  {row.raw.websockets
-                    ? t('common.enabled', { defaultValue: '已开启' })
-                    : t('common.disabled', { defaultValue: '未开启' })}
-                </span>
-              </div>
-            </div>
-          )}
-
-          {row.kind === 'claude' && (
-            <div className={`${styles.fieldCell} ${styles.fieldCellWide}`}>
-              <span className={styles.fieldLabel}>
-                {t('ai_providers.overview_claude_capabilities', { defaultValue: 'Claude 协议特性' })}
-              </span>
-              <div className={styles.badgeList}>
-                <span className={styles.infoPill}>
-                  {stripTrailingColon(t('ai_providers.claude_request_fingerprint_label'))}:{' '}
-                  {row.raw.fingerprintProfile === 'claude-code-cli'
-                    ? t('ai_providers.claude_request_fingerprint_claude_code_cli')
-                    : t('ai_providers.claude_request_fingerprint_default')}
-                </span>
-                <span className={styles.infoPill}>
-                  {stripTrailingColon(t('ai_providers.rebuild_mid_system_message_label'))}:{' '}
-                  {row.raw.rebuildMidSystemMessage
-                    ? t('common.enabled', { defaultValue: '已开启' })
-                    : t('common.disabled', { defaultValue: '未开启' })}
-                </span>
-                <span className={styles.infoPill}>
-                  {stripTrailingColon(t('ai_providers.claude_cloak_title'))}:{' '}
-                  {row.raw.cloak
-                    ? `${row.raw.cloak.mode || 'auto'} · ${stripTrailingColon(t('ai_providers.claude_cloak_strict_label'))}: ${
-                        row.raw.cloak.strictMode ? t('common.yes', { defaultValue: '是' }) : t('common.no', { defaultValue: '否' })
-                      } · ${stripTrailingColon(t('ai_providers.claude_cloak_sensitive_words_count'))}: ${
-                        row.raw.cloak.sensitiveWords?.length ?? 0
-                      }`
-                    : t('common.disabled', { defaultValue: '未开启' })}
-                </span>
-              </div>
-            </div>
-          )}
-
-          <div className={`${styles.fieldCell} ${styles.fieldCellWide}`}>
-            <span className={styles.fieldLabel}>
-              {t('ai_providers.custom_headers_summary', {
-                defaultValue: '自定义请求头 ({{count}})',
-                count: headerEntries.length,
-              })}
-            </span>
-            {headerEntries.length > 0 ? (
-              <div className={styles.badgeList}>
-                {headerEntries.slice(0, 6).map(([headerKey, headerVal]) => (
-                  <span key={headerKey} className={`${styles.infoPill} ${styles.fieldValueMono}`}>
-                    {headerKey}: {maskApiKey(headerVal) || '****'}
-                  </span>
-                ))}
-                {headerEntries.length > 6 && (
-                  <span className={styles.infoPill}>+{headerEntries.length - 6}</span>
-                )}
-              </div>
-            ) : (
-              <span className={styles.fieldValue}>—</span>
-            )}
-          </div>
-        </div>
-      </section>
-
-      {/* 2. 近期请求时序卡 */}
-      <section className={styles.sectionCard}>
-        <div className={styles.sectionHeader}>
-          <div className={styles.sectionHeading}>
-            <IconChartLine size={15} />
-            <h4>{t('ai_providers.overview_recent_status_title', { defaultValue: '近期请求时序' })}</h4>
-          </div>
-          <div className={styles.usageCounters}>
-            <span className={styles.statSuccess}>
-              <IconCheck size={13} />
-              {row.stats.success}
-            </span>
-            <span className={styles.statFailure}>
-              <IconX size={13} />
-              {row.stats.failure}
-            </span>
-          </div>
+          <span className={styles.overviewScopePill}>
+            {t('accounts.detail_overview_recent_status_scope', {
+              defaultValue: '最近 200 分钟 · 20 个 10 分钟区间',
+            })}
+          </span>
         </div>
 
         {row.usageStatsCoverage === 'unavailable' ? (
-          <p className={styles.coverageNotice}>
+          <div className={styles.overviewEmptyState}>
             {t('ai_providers.overview_usage_unavailable', {
               defaultValue: '当前提供商未配置可用于索引统计的密钥，暂无近期请求时序数据。',
             })}
-          </p>
+          </div>
         ) : (
           <>
-            <ProviderStatusBar statusData={row.statusData} />
-            {row.usageStatsCoverage === 'partial' && (
+            <div className={styles.overviewRecentStatusLayout}>
+              <div className={styles.overviewRecentStatusStats}>
+                <div
+                  className={`${styles.overviewRecentStatusMetric} ${styles.overviewRecentStatusMetricSuccess}`}
+                >
+                  <span>
+                    {t('accounts.detail_overview_recent_status_success', {
+                      defaultValue: '成功请求',
+                    })}
+                  </span>
+                  <strong>{row.statusData.totalSuccess.toLocaleString()}</strong>
+                </div>
+                <div
+                  className={`${styles.overviewRecentStatusMetric} ${styles.overviewRecentStatusMetricFailure}`}
+                >
+                  <span>
+                    {t('accounts.detail_overview_recent_status_failure', {
+                      defaultValue: '失败请求',
+                    })}
+                  </span>
+                  <strong>{row.statusData.totalFailure.toLocaleString()}</strong>
+                </div>
+              </div>
+
+              <div className={styles.overviewRecentStatusTimeline}>
+                <div className={styles.overviewRecentStatusTimelineHeader}>
+                  <span>
+                    {t('accounts.detail_overview_recent_status_timeline', {
+                      defaultValue: '请求状态时间线',
+                    })}
+                  </span>
+                  <span>
+                    {t('accounts.detail_overview_recent_status_timeline_hint', {
+                      defaultValue: '每段 10 分钟',
+                    })}
+                  </span>
+                </div>
+                <div className={styles.overviewStatusBarHost}>
+                  <ProviderStatusBar statusData={row.statusData} />
+                </div>
+              </div>
+            </div>
+
+            {recentWindowTotal === 0 ? (
+              <div className={styles.overviewEmptyState}>
+                {t('accounts.detail_overview_recent_status_empty', {
+                  defaultValue: '最近约 200 分钟没有请求记录。',
+                })}
+              </div>
+            ) : null}
+
+            {failureBannerText ? (
+              <div className={styles.overviewRecentStatusMessage}>
+                <span>
+                  {t('accounts.detail_overview_recent_status_message', {
+                    defaultValue: '当前状态说明',
+                  })}
+                </span>
+                <p>{failureBannerText}</p>
+              </div>
+            ) : null}
+
+            {row.usageStatsCoverage === 'partial' ? (
               <p className={styles.coverageNotice}>
                 {t('ai_providers.overview_usage_partial', {
                   defaultValue: '部分密钥未配置明文凭据，仅展示可追踪密钥的聚合统计。',
                 })}
               </p>
-            )}
+            ) : null}
           </>
         )}
       </section>
 
-      {/* 3. 鉴权密钥明细卡 */}
+      {/* 2. 历史用量（复用凭证详情概览 MetricSummaryGrid compact 汇总卡片） */}
+      <section className={styles.overviewRefCard} data-overview-section="activity">
+        <div className={styles.overviewRefHeader}>
+          <div className={styles.overviewRefHeading}>
+            <span className={styles.overviewRefIcon} aria-hidden="true">
+              <IconChartLine size={18} />
+            </span>
+            <h4>{t('ai_providers.card_history_title', { defaultValue: '历史用量' })}</h4>
+          </div>
+          <span
+            className={`${styles.overviewScopePill} ${
+              !hasHistoryMetrics && hasActivity ? styles.overviewScopePillFallback : ''
+            }`}
+          >
+            {hasHistoryMetrics
+              ? t('ai_providers.overview_history_scope_monitoring', {
+                  defaultValue: '请求监控 · 历史累计',
+                })
+              : t('accounts.detail_overview_activity_scope_recent', {
+                  defaultValue: '近期快照 · 回退数据',
+                })}
+          </span>
+        </div>
+
+        {hasActivity ? (
+          <MetricSummaryGrid
+            cards={historyCards}
+            density="compact"
+            columns={Math.min(historyCards.length, 5)}
+          />
+        ) : (
+          <div className={styles.overviewEmptyState}>
+            {t('ai_providers.overview_history_empty', {
+              defaultValue: '暂无历史用量记录。',
+            })}
+          </div>
+        )}
+      </section>
+
+      {/* 2. 生效路由、调度与凭据（扁平键值列表，消除重复与嵌套灰盒） */}
       <section className={styles.sectionCard}>
         <div className={styles.sectionHeader}>
           <div className={styles.sectionHeading}>
-            <IconKey size={15} />
-            <h4>{t('ai_providers.overview_keys_title', { defaultValue: '鉴权密钥明细' })}</h4>
+            <IconSlidersHorizontal size={15} />
+            <h4>
+              {t('ai_providers.overview_routing_credentials_title', {
+                defaultValue: '生效路由、调度与凭据',
+              })}
+            </h4>
           </div>
-          <Button variant="ghost" size="xs" onClick={() => onSwitchTab('connectivity')}>
-            {t('ai_providers.overview_go_connectivity_link', { defaultValue: '去测活 →' })}
-          </Button>
         </div>
 
-        {row.kind === 'openai' ? (
+        <dl className={styles.overviewDl}>
+          <div className={styles.overviewDlRow}>
+            <dt className={styles.overviewDt}>
+              {t('ai_providers.base_url_label', { defaultValue: 'Base URL' })}
+            </dt>
+            <dd className={styles.overviewDd}>
+              {row.baseUrl ? (
+                <>
+                  <span className={`${styles.fieldValue} ${styles.fieldValueMono}`}>
+                    {row.baseUrl}
+                  </span>
+                  {row.isOfficialEndpoint && (
+                    <span className={styles.officialBadge}>
+                      {t('ai_providers.official_badge', { defaultValue: '官方' })}
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    className={styles.inlineCopyBtn}
+                    onClick={() => void handleCopy(row.baseUrl, 'Base URL')}
+                    aria-label={t('common.copy', { defaultValue: '复制' })}
+                  >
+                    <IconCopy size={13} />
+                  </button>
+                </>
+              ) : (
+                <span className={styles.overviewMutedValue}>
+                  {t('ai_providers.official_default_endpoint', { defaultValue: '官方默认端点' })}
+                </span>
+              )}
+            </dd>
+          </div>
+
+          <div className={styles.overviewDlRow}>
+            <dt className={styles.overviewDt}>
+              {t('ai_providers.endpoint_prefix_label', { defaultValue: '前缀' })}
+            </dt>
+            <dd className={styles.overviewDd}>
+              {row.prefix ? (
+                <>
+                  <span className={`${styles.fieldValue} ${styles.fieldValueMono}`}>
+                    {`${row.prefix}/<model>`}
+                  </span>
+                  <button
+                    type="button"
+                    className={styles.inlineCopyBtn}
+                    onClick={() =>
+                      void handleCopy(
+                        row.prefix,
+                        t('ai_providers.endpoint_prefix_label', { defaultValue: '前缀' })
+                      )
+                    }
+                    aria-label={t('common.copy', { defaultValue: '复制' })}
+                  >
+                    <IconCopy size={13} />
+                  </button>
+                </>
+              ) : (
+                <span className={styles.overviewMutedValue}>
+                  {t('ai_providers.overview_prefix_unrestricted', {
+                    defaultValue: '未限制（匹配无前缀请求）',
+                  })}
+                </span>
+              )}
+            </dd>
+          </div>
+
+          <div className={styles.overviewDlRow}>
+            <dt className={styles.overviewDt}>
+              {t('ai_providers.overview_scheduling_label', { defaultValue: '调度与冷却' })}
+            </dt>
+            <dd className={styles.overviewDd}>
+              <span className={styles.fieldValueMono}>{prioritySummary}</span>
+              <span className={styles.metaSeparator} aria-hidden="true">
+                ·
+              </span>
+              <span>{coolingLabel}</span>
+            </dd>
+          </div>
+
+          {row.kind !== 'openai' && (
+            <div className={styles.overviewDlRow}>
+              <dt className={styles.overviewDt}>
+                {t('ai_providers.config_section_auth_keys', { defaultValue: '鉴权密钥' })}
+              </dt>
+              <dd className={styles.overviewDd}>
+                {singleRawKey ? (
+                  <>
+                    <code className={styles.keyValueCode}>
+                      {revealedSingleKey ? singleRawKey : maskApiKey(singleRawKey)}
+                    </code>
+                    <button
+                      type="button"
+                      className={styles.inlineCopyBtn}
+                      onClick={() =>
+                        setRevealedState((prev) => ({
+                          rowKey: row.key,
+                          openAIKeys: new Set(),
+                          singleKey: prev.rowKey === row.key ? !prev.singleKey : true,
+                        }))
+                      }
+                      aria-label={
+                        revealedSingleKey
+                          ? t('common.hide', { defaultValue: '隐藏' })
+                          : t('common.reveal', { defaultValue: '显示明文' })
+                      }
+                    >
+                      {revealedSingleKey ? <IconEyeOff size={13} /> : <IconEye size={13} />}
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.inlineCopyBtn}
+                      onClick={() => void handleCopy(singleRawKey, 'API Key')}
+                      aria-label={t('common.copy', { defaultValue: '复制' })}
+                    >
+                      <IconCopy size={13} />
+                    </button>
+                  </>
+                ) : (
+                  <span className={styles.overviewMutedValue}>
+                    {t('ai_providers.overview_keyless_notice', {
+                      defaultValue: '无静态密钥（无密钥端点或凭据托管）',
+                    })}
+                  </span>
+                )}
+                {authIndexValue ? (
+                  <span className={styles.authIndexChip} title={`Auth Index: ${authIndexValue}`}>
+                    <span>#{authIndexValue}</span>
+                    <button
+                      type="button"
+                      className={styles.inlineCopyBtn}
+                      onClick={() => void handleCopy(authIndexValue, 'Auth Index')}
+                      aria-label={t('common.copy', { defaultValue: '复制' })}
+                    >
+                      <IconCopy size={12} />
+                    </button>
+                  </span>
+                ) : null}
+              </dd>
+            </div>
+          )}
+
+          {row.kind === 'openai' && authIndexValue ? (
+            <div className={styles.overviewDlRow}>
+              <dt className={styles.overviewDt}>
+                {t('ai_providers.auth_index_label', { defaultValue: 'Auth Index' })}
+              </dt>
+              <dd className={styles.overviewDd}>
+                <span className={styles.authIndexChip}>
+                  <span>#{authIndexValue}</span>
+                  <button
+                    type="button"
+                    className={styles.inlineCopyBtn}
+                    onClick={() => void handleCopy(authIndexValue, 'Auth Index')}
+                    aria-label={t('common.copy', { defaultValue: '复制' })}
+                  >
+                    <IconCopy size={12} />
+                  </button>
+                </span>
+              </dd>
+            </div>
+          ) : null}
+
+          {(row.kind === 'openai' ? openAIProxyCount > 0 : Boolean(singleProxyUrl)) && (
+            <div className={styles.overviewDlRow}>
+              <dt className={styles.overviewDt}>
+                {t('ai_providers.proxy_url_label', { defaultValue: '代理地址' })}
+              </dt>
+              <dd className={styles.overviewDd}>
+                <span className={`${styles.fieldValue} ${styles.fieldValueMono}`}>
+                  {row.kind === 'openai'
+                    ? t('ai_providers.overview_per_key_proxy_count', {
+                        defaultValue: '{{count}} 个密钥已配置代理',
+                        count: openAIProxyCount,
+                      })
+                    : singleProxyUrl}
+                </span>
+              </dd>
+            </div>
+          )}
+
+          {row.kind !== 'openai' && (row.kind === 'codex' || row.kind === 'xai') && row.raw.websockets && (
+            <div className={styles.overviewDlRow}>
+              <dt className={styles.overviewDt}>
+                {stripLabelNoise(t('ai_providers.codex_websockets_label'))}
+              </dt>
+              <dd className={styles.overviewDd}>
+                <span>{t('common.enabled', { defaultValue: '已开启' })}</span>
+              </dd>
+            </div>
+          )}
+
+          {row.kind === 'claude' && (
+            <div className={styles.overviewDlRow}>
+              <dt className={styles.overviewDt}>
+                {t('ai_providers.overview_claude_capabilities', { defaultValue: '协议特性' })}
+              </dt>
+              <dd className={styles.overviewDd}>
+                <span>{claudeProtocolSummary}</span>
+              </dd>
+            </div>
+          )}
+
+          {headerEntries.length > 0 && (
+            <div className={styles.overviewDlRow}>
+              <dt className={styles.overviewDt}>
+                {stripLabelNoise(t('common.custom_headers_label'))}
+              </dt>
+              <dd className={styles.overviewDd}>
+                <div className={styles.badgeList}>
+                  {headerEntries.slice(0, 6).map(([headerKey, headerVal]) => (
+                    <span key={headerKey} className={`${styles.infoPill} ${styles.fieldValueMono}`}>
+                      {headerKey}: {maskApiKey(headerVal) || '****'}
+                    </span>
+                  ))}
+                  {headerEntries.length > 6 && (
+                    <span className={styles.infoPill}>+{headerEntries.length - 6}</span>
+                  )}
+                </div>
+              </dd>
+            </div>
+          )}
+        </dl>
+      </section>
+
+      {/* 3. 多密钥池明细（仅 OpenAI 兼容多密钥渠道展示） */}
+      {row.kind === 'openai' && (
+        <section className={styles.sectionCard}>
+          <div className={styles.sectionHeader}>
+            <div className={styles.sectionHeading}>
+              <IconKey size={15} />
+              <h4>{t('ai_providers.overview_keys_title', { defaultValue: '鉴权密钥明细' })}</h4>
+            </div>
+            <Button variant="ghost" size="xs" onClick={() => onSwitchTab('connectivity')}>
+              {t('ai_providers.overview_go_connectivity_link', { defaultValue: '去测活 →' })}
+            </Button>
+          </div>
+
           <div className={styles.keyList}>
             {(row.raw.apiKeyEntries ?? []).length === 0 ? (
               <div className={styles.emptyHint}>
@@ -478,67 +810,10 @@ export function ProviderOverviewTab({
               })
             )}
           </div>
-        ) : (
-          <div className={styles.keyDetailCard}>
-            <div className={styles.keyDetailLeft}>
-              {row.raw.apiKey?.trim() ? (
-                <>
-                  <code className={styles.keyValueCode}>
-                    {revealedSingleKey ? row.raw.apiKey.trim() : maskApiKey(row.raw.apiKey.trim())}
-                  </code>
-                  <button
-                    type="button"
-                    className={styles.inlineCopyBtn}
-                    onClick={() =>
-                      setRevealedState((prev) => ({
-                        rowKey: row.key,
-                        openAIKeys: new Set(),
-                        singleKey: prev.rowKey === row.key ? !prev.singleKey : true,
-                      }))
-                    }
-                    aria-label={
-                      revealedSingleKey
-                        ? t('common.hide', { defaultValue: '隐藏' })
-                        : t('common.reveal', { defaultValue: '显示明文' })
-                    }
-                  >
-                    {revealedSingleKey ? <IconEyeOff size={13} /> : <IconEye size={13} />}
-                  </button>
-                  <button
-                    type="button"
-                    className={styles.inlineCopyBtn}
-                    onClick={() => void handleCopy(row.raw.apiKey ?? '', 'API Key')}
-                    aria-label={t('common.copy', { defaultValue: '复制' })}
-                  >
-                    <IconCopy size={13} />
-                  </button>
-                </>
-              ) : (
-                <span className={styles.infoPill}>
-                  {t('ai_providers.overview_keyless_notice', {
-                    defaultValue: '当前未配置静态密钥（无密钥端点或凭据托管）',
-                  })}
-                </span>
-              )}
-            </div>
-            <div className={styles.keyDetailRight}>
-              <span className={styles.infoPill}>
-                {t('ai_providers.credential_weight_badge', {
-                  defaultValue: '权重 {{weight}}',
-                  weight: formatWeightLabel(row.raw.weight),
-                })}
-              </span>
-              {row.raw.authIndex?.trim() && (
-                <span className={`${styles.infoPill} ${styles.fieldValueMono}`}>
-                  #{row.raw.authIndex.trim()}
-                </span>
-              )}
-            </div>
-          </div>
-        )}
-      </section>
+        </section>
+      )}
 
-      {/* 4. 模型覆盖摘要卡 */}
+      {/* 4. 模型覆盖摘要卡（统一 alias → upstream 方向，隐藏空排除规则） */}
       <section className={styles.sectionCard}>
         <div className={styles.sectionHeader}>
           <div className={styles.sectionHeading}>
@@ -561,7 +836,7 @@ export function ProviderOverviewTab({
                   defaultValue: '未配置显式模型（默认通配上游模型）',
                 })}
           </span>
-          {row.kind !== 'openai' && (
+          {row.kind !== 'openai' && excludedModels.length > 0 && (
             <span className={styles.infoPill}>
               {t('ai_providers.overview_excluded_models_count', {
                 defaultValue: '排除规则 {{count}} 条',
@@ -573,14 +848,21 @@ export function ProviderOverviewTab({
 
         {explicitModels.length > 0 && (
           <div className={styles.badgeList}>
-            {explicitModels.slice(0, MAX_MODEL_PREVIEW_PILLS).map((model, idx) => (
-              <span key={`${model.name}-${idx}`} className={styles.modelPill}>
-                <span className={styles.modelPillName}>{model.name}</span>
-                {model.alias && model.alias !== model.name && (
-                  <span className={styles.modelPillAlias}>→ {model.alias}</span>
-                )}
-              </span>
-            ))}
+            {explicitModels.slice(0, MAX_MODEL_PREVIEW_PILLS).map((model, idx) => {
+              const hasAlias = Boolean(model.alias && model.alias !== model.name);
+              return (
+                <span key={`${model.name}-${idx}`} className={styles.modelPill}>
+                  {hasAlias ? (
+                    <>
+                      <span className={styles.modelPillPrimary}>{model.alias}</span>
+                      <span className={styles.modelPillTarget}>→ {model.name}</span>
+                    </>
+                  ) : (
+                    <span className={styles.modelPillName}>{model.name}</span>
+                  )}
+                </span>
+              );
+            })}
             {explicitModels.length > MAX_MODEL_PREVIEW_PILLS && (
               <span className={styles.infoPill}>
                 +{explicitModels.length - MAX_MODEL_PREVIEW_PILLS}

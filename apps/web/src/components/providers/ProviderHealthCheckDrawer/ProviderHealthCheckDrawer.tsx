@@ -308,12 +308,25 @@ export function ProviderHealthCheckDrawer({
             </span>
             <span className={styles.scopeDesc}>
               {t('ai_providers.health_check_scope_selected_desc', {
-                defaultValue: '当前仅对已勾选的 {{count}} 个提供商执行健康检查',
+                defaultValue: '当前仅对已勾选的 {{count}} 个提供商执行 /models 健康巡检',
                 count: effectiveRows.length,
               })}
             </span>
           </div>
-        ) : null}
+        ) : (
+          <div className={styles.scopeBanner} role="status">
+            <span className={styles.scopeBadge}>
+              {t('ai_providers.health_check_scope_batch_badge', { defaultValue: '批量巡检' })}
+            </span>
+            <span className={styles.scopeDesc}>
+              {t('ai_providers.health_check_scope_batch_desc', {
+                defaultValue:
+                  '通过 /models 端点快速探测 {{count}} 个渠道连通性，完成后可按结果一键启停',
+                count: effectiveRows.length,
+              })}
+            </span>
+          </div>
+        )}
         <section className={styles.progressSection}>
           <div className={styles.progressHeader}>
             <div>

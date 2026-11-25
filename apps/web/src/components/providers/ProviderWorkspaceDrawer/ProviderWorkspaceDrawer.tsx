@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useEffect,
   useId,
   useImperativeHandle,
   useMemo,
@@ -13,7 +14,7 @@ import { Button } from '@/components/ui/Button';
 import { Drawer } from '@/components/ui/Drawer';
 import { SegmentedTabs, type SegmentedTabItem } from '@/components/ui/SegmentedTabs';
 import { IconCopy } from '@/components/ui/icons';
-import { useNotificationStore } from '@/stores';
+import { useConfigStore, useNotificationStore } from '@/stores';
 import { copyToClipboard } from '@/utils/clipboard';
 import { getProviderKindIcon, PROVIDER_KIND_LABELS } from '../ProviderTable/kindMeta';
 import type { ProviderV8GroupSource } from '@/types';
@@ -61,6 +62,8 @@ export interface ProviderWorkspaceDrawerProps {
   resolvedTheme?: string;
   actionsDisabled?: boolean;
   rowDeletedExternally?: boolean;
+  routingStrategy?: string;
+  globalDisableCooling?: boolean;
   sessionId?: string | number;
   onClose: () => void;
   onSaved: (
@@ -108,6 +111,8 @@ export function ProviderWorkspaceDrawer({
   resolvedTheme,
   actionsDisabled = false,
   rowDeletedExternally = false,
+  routingStrategy,
+  globalDisableCooling,
   sessionId,
   onClose,
   onSaved,
@@ -121,6 +126,9 @@ export function ProviderWorkspaceDrawer({
   const { t } = useTranslation();
   const showNotification = useNotificationStore((state) => state.showNotification);
 
+  const config = useConfigStore((state) => state.config);
+  const effectiveRoutingStrategy = routingStrategy ?? (config ? config.routingStrategy || 'round-robin' : undefined);
+  const effectiveGlobalDisableCooling = globalDisableCooling ?? config?.disableCooling;
   const availableCreateKinds = useMemo(() => {
     if (!supportedKinds || supportedKinds.size === 0) {
       return CANONICAL_PROVIDER_KINDS;
@@ -290,11 +298,28 @@ export function ProviderWorkspaceDrawer({
     runWithMutationLock,
   });
 
-  const { resetForm: resetEditorForm } = editor;
+  const { resetForm: resetEditorForm, setModelDiscoveryOpen } = editor;
+  const isModelsDiscoverySubView =
+    activeTab === 'models' && editor.modelDiscoveryOpen && activeKind !== 'vertex';
+
   const handleResetForm = useCallback(() => {
+    setModelDiscoveryOpen(false);
     resetEditorForm();
     setResetNonce((n) => n + 1);
-  }, [resetEditorForm]);
+  }, [resetEditorForm, setModelDiscoveryOpen]);
+
+  useEffect(() => {
+    if (!open || !isModelsDiscoverySubView || typeof window === 'undefined') return;
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape' && !event.defaultPrevented) {
+        event.preventDefault();
+        event.stopPropagation();
+        setModelDiscoveryOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
+  }, [isModelsDiscoverySubView, open, setModelDiscoveryOpen]);
 
   const effectiveTheme = useMemo<'light' | 'dark'>(() => {
     if (resolvedTheme === 'dark') return 'dark';
@@ -307,12 +332,15 @@ export function ProviderWorkspaceDrawer({
 
   const switchTab = useCallback(
     (nextTab: ProviderDrawerTab) => {
+      if (nextTab !== 'models') {
+        setModelDiscoveryOpen(false);
+      }
       setTabState({ sessionKey, tab: nextTab });
       if (typeof bodyRef.current?.scrollTo === 'function') {
         bodyRef.current.scrollTo({ top: 0 });
       }
     },
-    [sessionKey]
+    [sessionKey, setModelDiscoveryOpen]
   );
 
   const handleTabKeyDown = useCallback(
@@ -454,6 +482,28 @@ export function ProviderWorkspaceDrawer({
                   ? t('ai_providers.status_enabled', { defaultValue: '已启用' })
                   : t('ai_providers.status_disabled', { defaultValue: '已停用' })}
               </span>
+              {row.maskedKey ? (
+                <>
+                  <span className={styles.metaSeparator} aria-hidden="true">
+                    ·
+                  </span>
+                  <code className={styles.headerMetaCode}>{row.maskedKey}</code>
+                </>
+              ) : null}
+              {row.v8GroupKeyMeta ? (
+                <>
+                  <span className={styles.metaSeparator} aria-hidden="true">
+                    ·
+                  </span>
+                  <span className={styles.headerGroupMeta}>
+                    {t('ai_providers.v8_group_key_pill', {
+                      index: row.v8GroupKeyMeta.index,
+                      total: row.v8GroupKeyMeta.total,
+                      defaultValue: `密钥 ${row.v8GroupKeyMeta.index}/${row.v8GroupKeyMeta.total}`,
+                    })}
+                  </span>
+                </>
+              ) : null}
             </>
           )}
           {hostDisplay && (
@@ -482,13 +532,53 @@ export function ProviderWorkspaceDrawer({
     </div>
   );
 
-  const footerNode =
-    mode === 'create' ? (
-      <div className={styles.drawerFooter}>
-        <div className={styles.drawerFooterRight}>
-          <Button
-            variant="secondary"
-            size="sm"
+  const footerNode = isModelsDiscoverySubView ? (
+    <div className={styles.drawerFooter}>
+      <div className={styles.drawerFooterLeft}>
+        <span className={styles.sectionHint}>
+          {editor.modelDiscoverySelected.size > 0
+            ? t('ai_providers.model_discovery_footer_selected_hint', {
+                count: editor.modelDiscoverySelected.size,
+                defaultValue: '已勾选 {{count}} 个模型，确认后追加至映射列表',
+              })
+            : t('ai_providers.model_discovery_footer_idle_hint', {
+                defaultValue: '勾选需加入映射列表的上游模型',
+              })}
+        </span>
+      </div>
+      <div className={styles.drawerFooterRight}>
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => setModelDiscoveryOpen(false)}
+          disabled={editor.saving}
+        >
+          {t('common.cancel')}
+        </Button>
+        <Button
+          variant="primary"
+          size="sm"
+          onClick={editor.applySelectedDiscoveredModels}
+          disabled={
+            actionsDisabled ||
+            editor.saving ||
+            editor.modelDiscoverySelected.size === 0 ||
+            editor.modelDiscoveryFetching
+          }
+        >
+          {t('ai_providers.apply_selected_models_btn', {
+            defaultValue: '添加所选模型 ({{count}})',
+            count: editor.modelDiscoverySelected.size,
+          })}
+        </Button>
+      </div>
+    </div>
+  ) : mode === 'create' ? (
+    <div className={styles.drawerFooter}>
+      <div className={styles.drawerFooterRight}>
+        <Button
+          variant="secondary"
+          size="sm"
             onClick={() => void handleRequestClose()}
             disabled={editor.saving}
           >
@@ -508,12 +598,25 @@ export function ProviderWorkspaceDrawer({
     ) : (
       <div className={styles.drawerFooter}>
         <div className={styles.drawerFooterLeft}>
-          {!editor.isDirty && onToggleEnabled && row && (
+          {onToggleEnabled && row && (
             <Button
               variant="secondary"
               size="sm"
               onClick={() => onToggleEnabled(row, !row.enabled)}
-              disabled={actionsDisabled || toggleDisabled || editor.saving || rowDeletedExternally}
+              disabled={
+                editor.isDirty ||
+                actionsDisabled ||
+                toggleDisabled ||
+                editor.saving ||
+                rowDeletedExternally
+              }
+              title={
+                editor.isDirty
+                  ? t('ai_providers.drawer_toggle_disabled_dirty', {
+                      defaultValue: '存在未保存修改，请先保存或重置配置',
+                    })
+                  : undefined
+              }
             >
               {row.enabled
                 ? t('ai_providers.action_disable', { defaultValue: '停用' })
@@ -522,8 +625,9 @@ export function ProviderWorkspaceDrawer({
           )}
           {onDelete && row && (
             <Button
-              variant="danger"
+              variant="ghost"
               size="sm"
+              className={styles.footerDeleteBtn}
               onClick={() => onDelete(row)}
               disabled={actionsDisabled || deleteDisabled || editor.saving || rowDeletedExternally}
             >
@@ -548,20 +652,41 @@ export function ProviderWorkspaceDrawer({
                 size="sm"
                 onClick={() => void editor.handleSave()}
                 loading={editor.saving}
-                disabled={!editor.isDirty || !editor.canSave || actionsDisabled || rowDeletedExternally}
+                disabled={
+                  !editor.isDirty || !editor.canSave || actionsDisabled || rowDeletedExternally
+                }
               >
                 {t('ai_providers.drawer_save_config', { defaultValue: '保存配置' })}
               </Button>
             </>
-          ) : (
+          ) : activeTab === 'connectivity' ? (
             <Button
-              variant="primary"
+              variant="secondary"
               size="sm"
-              onClick={() => switchTab('config')}
-              disabled={actionsDisabled}
+              onClick={() => void handleRequestClose()}
+              disabled={editor.saving}
             >
-              {t('ai_providers.drawer_edit_config_btn', { defaultValue: '编辑配置' })}
+              {t('common.close', { defaultValue: '关闭' })}
             </Button>
+          ) : (
+            <>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => switchTab('connectivity')}
+                disabled={actionsDisabled}
+              >
+                {t('ai_providers.drawer_tab_connectivity', { defaultValue: '测活诊断' })}
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => switchTab('config')}
+                disabled={actionsDisabled}
+              >
+                {t('ai_providers.drawer_edit_config_btn', { defaultValue: '编辑配置' })}
+              </Button>
+            </>
           )}
         </div>
       </div>
@@ -674,119 +799,121 @@ export function ProviderWorkspaceDrawer({
           })}
         </div>
 
-        {rowDeletedExternally && (
-          <div
-            className={styles.drawerDisabledNotice}
-            role="alert"
-            data-testid="drawer-deleted-externally-notice"
-          >
-            <div className={styles.drawerDisabledText}>
-              <strong>{t('notification.provider_conflict_refresh')}</strong>
-              <p>
-                {t('ai_providers.drawer_deleted_externally_desc', {
-                  defaultValue: '该提供商配置已在外部被移除，当前未保存的草稿已保留；可复制内容后关闭抽屉。',
-                })}
-              </p>
+        <div className={styles.drawerTabViewport}>
+          {rowDeletedExternally && (
+            <div
+              className={styles.drawerDisabledNotice}
+              role="alert"
+              data-testid="drawer-deleted-externally-notice"
+            >
+              <div className={styles.drawerDisabledText}>
+                <strong>{t('notification.provider_conflict_refresh')}</strong>
+                <p>
+                  {t('ai_providers.drawer_deleted_externally_desc', {
+                    defaultValue:
+                      '该提供商配置已在外部被移除，当前未保存的草稿已保留；可复制内容后关闭抽屉。',
+                  })}
+                </p>
+              </div>
             </div>
+          )}
+
+          {editor.error && (
+            <div className={styles.inlineError} role="alert">
+              {editor.error}
+            </div>
+          )}
+
+          <div
+            role="tabpanel"
+            id={`${tabsIdPrefix}-panel-${activeTab}`}
+            aria-labelledby={`${tabsIdPrefix}-tab-${activeTab}`}
+          >
+            {activeTab === 'overview' && mode === 'view-edit' && row && (
+              <ProviderOverviewTab
+                row={row}
+                form={editor.form}
+                usageByProvider={usageByProvider}
+                actionsDisabled={actionsDisabled}
+                toggleDisabled={toggleDisabled || rowDeletedExternally}
+                isDirty={editor.isDirty}
+                saving={editor.saving}
+                routingStrategy={effectiveRoutingStrategy}
+                globalDisableCooling={effectiveGlobalDisableCooling}
+                onSwitchTab={switchTab}
+                onToggleEnabled={onToggleEnabled}
+              />
+            )}
+
+            {activeTab === 'config' && (
+              <ProviderConfigurationTab
+                mode={mode}
+                activeKind={activeKind}
+                form={editor.form}
+                setForm={editor.setForm}
+                actionsDisabled={actionsDisabled}
+                saving={editor.saving}
+                v8AliasSupported={v8AliasSupported}
+                onOpenAIKeyCountChange={handleOpenAIKeyCountChange}
+              />
+            )}
+
+            {activeTab === 'models' && (
+              <ProviderModelsTab
+                key={`${openEpoch}:${currentRowSessionToken}:${mode}:${activeKind}:${resetNonce}`}
+                mode={mode}
+                activeKind={activeKind}
+                form={editor.form}
+                setForm={editor.setForm}
+                saving={editor.saving}
+                actionsDisabled={actionsDisabled}
+                configuredModelCount={editor.configuredModelCount}
+                modelDiscoveryOpen={editor.modelDiscoveryOpen}
+                setModelDiscoveryOpen={editor.setModelDiscoveryOpen}
+                modelDiscoveryEndpoint={editor.modelDiscoveryEndpoint}
+                discoveredModels={editor.discoveredModels}
+                modelsLoaded={editor.modelsLoaded}
+                modelDiscoveryFetching={editor.modelDiscoveryFetching}
+                modelDiscoveryError={editor.modelDiscoveryError}
+                modelDiscoverySearch={editor.modelDiscoverySearch}
+                setModelDiscoverySearch={editor.setModelDiscoverySearch}
+                modelDiscoverySelected={editor.modelDiscoverySelected}
+                discoveredModelsFiltered={editor.discoveredModelsFiltered}
+                configuredModelNames={editor.configuredModelNames}
+                visibleDiscoverableModelNames={editor.visibleDiscoverableModelNames}
+                allVisibleSelected={editor.allVisibleSelected}
+                toggleModelDiscoverySelection={editor.toggleModelDiscoverySelection}
+                handleSelectVisibleModels={editor.handleSelectVisibleModels}
+                handleClearModelDiscoverySelection={editor.handleClearModelDiscoverySelection}
+                fetchModelDiscovery={editor.fetchModelDiscovery}
+                applySelectedDiscoveredModels={editor.applySelectedDiscoveredModels}
+              />
+            )}
+
+            {activeTab === 'connectivity' && (
+              <ProviderConnectivityTab
+                activeKind={activeKind}
+                row={row}
+                form={editor.form}
+                isDirty={editor.isDirty}
+                actionsDisabled={actionsDisabled}
+                saving={editor.saving}
+                isTesting={editor.isTesting}
+                supportsInferenceProbe={editor.supportsInferenceProbe}
+                connectivityProbeMode={editor.connectivityProbeMode}
+                onConnectivityProbeModeChange={editor.setConnectivityProbeMode}
+                connectivityTestModel={editor.connectivityTestModel}
+                onConnectivityTestModelChange={editor.setConnectivityTestModel}
+                modelSelectOptions={editor.modelSelectOptions}
+                singleTestResult={editor.singleTestResult}
+                openAIAllTestResult={editor.openAIAllTestResult}
+                openAIKeyStatuses={editor.openAIKeyStatuses}
+                onRunSingleTest={editor.runSingleConnectivityTest}
+                onTestSingleOpenAIKey={editor.testSingleOpenAIKey}
+                onTestAllOpenAIKeys={editor.testAllOpenAIKeys}
+              />
+            )}
           </div>
-        )}
-
-        {editor.error && (
-          <div className={styles.inlineError} role="alert">
-            {editor.error}
-          </div>
-        )}
-
-        <div
-          role="tabpanel"
-          id={`${tabsIdPrefix}-panel-${activeTab}`}
-          aria-labelledby={`${tabsIdPrefix}-tab-${activeTab}`}
-        >
-          {activeTab === 'overview' && mode === 'view-edit' && row && (
-            <ProviderOverviewTab
-              row={row}
-              form={editor.form}
-              usageByProvider={usageByProvider}
-              actionsDisabled={actionsDisabled}
-              toggleDisabled={toggleDisabled || rowDeletedExternally}
-              isDirty={editor.isDirty}
-              saving={editor.saving}
-              onSwitchTab={switchTab}
-              onToggleEnabled={onToggleEnabled}
-            />
-          )}
-
-          {activeTab === 'config' && (
-            <ProviderConfigurationTab
-              mode={mode}
-              activeKind={activeKind}
-              form={editor.form}
-              setForm={editor.setForm}
-              isDirty={editor.isDirty}
-              canSave={editor.canSave}
-              saving={editor.saving}
-              actionsDisabled={actionsDisabled}
-              v8AliasSupported={v8AliasSupported}
-              onReset={handleResetForm}
-              onSave={() => void editor.handleSave()}
-              onOpenAIKeyCountChange={handleOpenAIKeyCountChange}
-            />
-          )}
-
-          {activeTab === 'models' && (
-            <ProviderModelsTab
-              key={`${openEpoch}:${currentRowSessionToken}:${mode}:${activeKind}:${resetNonce}`}
-              mode={mode}
-              activeKind={activeKind}
-              form={editor.form}
-              setForm={editor.setForm}
-              isDirty={editor.isDirty}
-              canSave={editor.canSave}
-              saving={editor.saving}
-              actionsDisabled={actionsDisabled}
-              configuredModelCount={editor.configuredModelCount}
-              onReset={handleResetForm}
-              onSave={() => void editor.handleSave()}
-              modelDiscoveryOpen={editor.modelDiscoveryOpen}
-              setModelDiscoveryOpen={editor.setModelDiscoveryOpen}
-              modelDiscoveryEndpoint={editor.modelDiscoveryEndpoint}
-              discoveredModels={editor.discoveredModels}
-              modelsLoaded={editor.modelsLoaded}
-              modelDiscoveryFetching={editor.modelDiscoveryFetching}
-              modelDiscoveryError={editor.modelDiscoveryError}
-              modelDiscoverySearch={editor.modelDiscoverySearch}
-              setModelDiscoverySearch={editor.setModelDiscoverySearch}
-              modelDiscoverySelected={editor.modelDiscoverySelected}
-              discoveredModelsFiltered={editor.discoveredModelsFiltered}
-              configuredModelNames={editor.configuredModelNames}
-              visibleDiscoverableModelNames={editor.visibleDiscoverableModelNames}
-              allVisibleSelected={editor.allVisibleSelected}
-              toggleModelDiscoverySelection={editor.toggleModelDiscoverySelection}
-              handleSelectVisibleModels={editor.handleSelectVisibleModels}
-              handleClearModelDiscoverySelection={editor.handleClearModelDiscoverySelection}
-              fetchModelDiscovery={editor.fetchModelDiscovery}
-              applySelectedDiscoveredModels={editor.applySelectedDiscoveredModels}
-            />
-          )}
-
-          {activeTab === 'connectivity' && (
-            <ProviderConnectivityTab
-              activeKind={activeKind}
-              form={editor.form}
-              actionsDisabled={actionsDisabled}
-              saving={editor.saving}
-              isTesting={editor.isTesting}
-              connectivityTestModel={editor.connectivityTestModel}
-              onConnectivityTestModelChange={editor.setConnectivityTestModel}
-              modelSelectOptions={editor.modelSelectOptions}
-              singleTestResult={editor.singleTestResult}
-              openAIAllTestResult={editor.openAIAllTestResult}
-              openAIKeyStatuses={editor.openAIKeyStatuses}
-              onRunSingleTest={editor.runSingleConnectivityTest}
-              onTestSingleOpenAIKey={editor.testSingleOpenAIKey}
-              onTestAllOpenAIKeys={editor.testAllOpenAIKeys}
-            />
-          )}
         </div>
       </div>
     </Drawer>

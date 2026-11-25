@@ -8,6 +8,7 @@ interface ToggleSwitchProps {
   ariaLabel?: string;
   disabled?: boolean;
   labelPosition?: 'left' | 'right';
+  size?: 'sm' | 'md';
 }
 
 export function ToggleSwitch({
@@ -16,7 +17,8 @@ export function ToggleSwitch({
   label,
   ariaLabel,
   disabled = false,
-  labelPosition = 'right'
+  labelPosition = 'right',
+  size = 'md',
 }: ToggleSwitchProps) {
   const handleChange = (event: ChangeEvent<HTMLInputElement>) => {
     onChange(event.target.checked);
@@ -24,12 +26,12 @@ export function ToggleSwitch({
 
   const className = [
     styles.root,
+    size === 'sm' ? styles.sizeSm : '',
     labelPosition === 'left' ? styles.labelLeft : '',
     disabled ? styles.disabled : '',
   ]
     .filter(Boolean)
     .join(' ');
-
   return (
     <label className={className}>
       <input

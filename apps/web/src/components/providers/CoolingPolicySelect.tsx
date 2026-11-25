@@ -1,4 +1,5 @@
 import { Select, type SelectOption } from '@/components/ui/Select';
+import { InfoTooltip } from '@/components/ui/InfoTooltip';
 import { useAuthStore } from '@/stores/useAuthStore';
 import {
   COOLING_OVERRIDE_REFACTOR_COMMIT,
@@ -15,6 +16,7 @@ interface CoolingPolicySelectProps {
   id?: string;
   compact?: boolean;
   legacyProviderSupported?: boolean;
+  tooltipHint?: boolean;
 }
 
 export function CoolingPolicySelect({
@@ -25,6 +27,7 @@ export function CoolingPolicySelect({
   id,
   compact = false,
   legacyProviderSupported = true,
+  tooltipHint = false,
 }: CoolingPolicySelectProps) {
   const { t } = useTranslation();
   const serverVersion = useAuthStore((state) => state.serverVersion);
@@ -55,11 +58,10 @@ export function CoolingPolicySelect({
   const hintId = id ? `${id}-hint` : undefined;
   const compatibilityHintId = id ? `${id}-compatibility` : undefined;
   const describedBy = id
-    ? [compact ? undefined : hintId, compatibilityHint ? compatibilityHintId : undefined]
+    ? [compact || tooltipHint ? undefined : hintId, compatibilityHint ? compatibilityHintId : undefined]
         .filter(Boolean)
-        .join(' ')
+        .join(' ') || undefined
     : undefined;
-
   const select = (
     <Select
       id={id}
@@ -87,11 +89,16 @@ export function CoolingPolicySelect({
 
   return (
     <div className="form-group">
-      <label htmlFor={id}>{t(key('label'))}</label>
+      <label htmlFor={id}>
+        <span>{t(key('label'))}</span>
+        {tooltipHint ? <InfoTooltip content={t(key('hint'))} ariaLabel={t(key('label'))} /> : null}
+      </label>
       {select}
-      <div className="hint" id={hintId}>
-        {t(key('hint'))}
-      </div>
+      {!tooltipHint && (
+        <div className="hint" id={hintId}>
+          {t(key('hint'))}
+        </div>
+      )}
       {compatibilityHint && (
         <div className="hint" id={compatibilityHintId} role="note">
           {compatibilityHint}

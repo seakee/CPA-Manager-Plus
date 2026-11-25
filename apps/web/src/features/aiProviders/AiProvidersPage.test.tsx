@@ -452,6 +452,7 @@ vi.mock('@/components/providers', async () => {
       onInspect,
       onOpenModels,
       onEdit,
+      onHealthCheckRow,
       onToggleEnabled,
       onDelete,
     }: {
@@ -462,6 +463,7 @@ vi.mock('@/components/providers', async () => {
       onInspect: (row: ProviderRow) => void;
       onOpenModels: (row: ProviderRow) => void;
       onEdit: (row: ProviderRow) => void;
+      onHealthCheckRow?: (row: ProviderRow) => void;
       onToggleEnabled: (row: ProviderRow, enabled: boolean) => void;
       onDelete: (row: ProviderRow) => void;
     }) => (
@@ -486,6 +488,13 @@ vi.mock('@/components/providers', async () => {
             </button>
             <button type="button" data-edit={row.key} onClick={() => onEdit(row)}>
               edit
+            </button>
+            <button
+              type="button"
+              data-health-row={row.key}
+              onClick={() => onHealthCheckRow?.(row)}
+            >
+              row-health
             </button>
             <button
               type="button"
@@ -664,6 +673,16 @@ describe('AiProvidersPage P1 workspace & unified drawer', () => {
     expect(renderer.root.findByProps({ 'data-testid': 'provider-workspace-drawer' }).props['data-tab']).toBe(
       'models'
     );
+
+    await act(async () => {
+      renderer.root.findByProps({ 'data-health-row': firstRowKey }).props.onClick();
+    });
+    expect(renderer.root.findByProps({ 'data-testid': 'provider-workspace-drawer' }).props['data-tab']).toBe(
+      'connectivity'
+    );
+    expect(
+      renderer.root.findAll((n) => n.props?.['data-testid'] === 'provider-health-drawer')
+    ).toHaveLength(0);
 
     await act(async () => {
       renderer.root.findByProps({ 'data-toolbar-health': true }).props.onClick();

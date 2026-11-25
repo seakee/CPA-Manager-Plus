@@ -681,10 +681,7 @@ export function AiProvidersPage() {
   const [drawerInitialTab, setDrawerInitialTab] = useState<ProviderDrawerTab>('overview');
   const [drawerCreateKind, setDrawerCreateKind] = useState<ProviderKind>('openai');
   const [healthCheckOpen, setHealthCheckOpen] = useState(false);
-  const [healthCheckScope, setHealthCheckScope] = useState<'filtered' | 'selected' | 'single'>(
-    'filtered'
-  );
-  const [singleHealthCheckRow, setSingleHealthCheckRow] = useState<ProviderRow | null>(null);
+  const [healthCheckScope, setHealthCheckScope] = useState<'filtered' | 'selected'>('filtered');
   const drawerControllerRef = useRef<ProviderWorkspaceDrawerHandle | null>(null);
   const [drawerSessionId, setDrawerSessionId] = useState(0);
   const [drawerRowSnapshot, setDrawerRowSnapshot] = useState<ProviderRow | null>(null);
@@ -2161,14 +2158,10 @@ export function AiProvidersPage() {
       />
     );
 
-  const healthCheckTargetRows = useMemo(() => {
-    if (healthCheckScope === 'single') {
-      if (!singleHealthCheckRow) return [];
-      const matched = rows.find((item) => item.key === singleHealthCheckRow.key);
-      return [matched ?? singleHealthCheckRow];
-    }
-    return healthCheckScope === 'selected' ? selectedRows : visibleRows;
-  }, [healthCheckScope, rows, selectedRows, singleHealthCheckRow, visibleRows]);
+  const healthCheckTargetRows = useMemo(
+    () => (healthCheckScope === 'selected' ? selectedRows : visibleRows),
+    [healthCheckScope, selectedRows, visibleRows]
+  );
 
   const sharedListProps = {
     rows: pagedRows,
@@ -2185,11 +2178,7 @@ export function AiProvidersPage() {
     onInspect: (row: ProviderRow) => void openProviderDrawer(row, 'overview'),
     onOpenModels: (row: ProviderRow) => void openProviderDrawer(row, 'models'),
     onOpenConnectivity: (row: ProviderRow) => void openProviderDrawer(row, 'connectivity'),
-    onHealthCheckRow: (row: ProviderRow) => {
-      setSingleHealthCheckRow(row);
-      setHealthCheckScope('single');
-      setHealthCheckOpen(true);
-    },
+    onHealthCheckRow: (row: ProviderRow) => void openProviderDrawer(row, 'connectivity'),
     onEdit: (row: ProviderRow) => void openProviderDrawer(row, 'config'),
     onDelete: handleRowDelete,
     onToggleEnabled: handleRowToggle,
@@ -2484,6 +2473,8 @@ export function AiProvidersPage() {
         usageByProvider={usageByProvider}
         resolvedTheme={resolvedTheme}
         rowDeletedExternally={isDrawerRowDeletedExternally}
+        routingStrategy={config ? config.routingStrategy || 'round-robin' : undefined}
+        globalDisableCooling={config?.disableCooling}
         sessionId={drawerSessionId}
         onClose={closeDrawer}
         onSaved={handleDrawerSaved}

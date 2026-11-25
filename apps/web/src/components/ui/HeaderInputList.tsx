@@ -12,6 +12,9 @@ interface HeaderInputListProps {
   valuePlaceholder?: string;
   removeButtonTitle?: string;
   removeButtonAriaLabel?: string;
+  allowEmpty?: boolean;
+  hideAddButton?: boolean;
+  emptyText?: string;
 }
 
 export function HeaderInputList({
@@ -23,11 +26,16 @@ export function HeaderInputList({
   valuePlaceholder = 'value',
   removeButtonTitle = 'Remove',
   removeButtonAriaLabel = 'Remove',
+  allowEmpty = false,
+  hideAddButton = false,
+  emptyText,
 }: HeaderInputListProps) {
-  const currentEntries = entries.length ? entries : [{ key: '', value: '' }];
+  const currentEntries = allowEmpty ? entries : entries.length ? entries : [{ key: '', value: '' }];
 
   const updateEntry = (index: number, field: 'key' | 'value', value: string) => {
-    const next = currentEntries.map((entry, idx) => (idx === index ? { ...entry, [field]: value } : entry));
+    const next = currentEntries.map((entry, idx) =>
+      idx === index ? { ...entry, [field]: value } : entry
+    );
     onChange(next);
   };
 
@@ -37,11 +45,14 @@ export function HeaderInputList({
 
   const removeEntry = (index: number) => {
     const next = currentEntries.filter((_, idx) => idx !== index);
-    onChange(next.length ? next : [{ key: '', value: '' }]);
+    onChange(allowEmpty ? next : next.length ? next : [{ key: '', value: '' }]);
   };
 
   return (
     <div className="header-input-list">
+      {allowEmpty && currentEntries.length === 0 && emptyText ? (
+        <div className="hint">{emptyText}</div>
+      ) : null}
       {currentEntries.map((entry, index) => (
         <Fragment key={index}>
           <div className="header-input-row">
@@ -65,7 +76,7 @@ export function HeaderInputList({
               size="xs"
               iconOnly
               onClick={() => removeEntry(index)}
-              disabled={disabled || currentEntries.length <= 1}
+              disabled={disabled || (!allowEmpty && currentEntries.length <= 1)}
               title={removeButtonTitle}
               aria-label={removeButtonAriaLabel}
             >
@@ -74,9 +85,17 @@ export function HeaderInputList({
           </div>
         </Fragment>
       ))}
-      <Button variant="secondary" size="xs" onClick={addEntry} disabled={disabled} className="align-start">
-        {addLabel}
-      </Button>
+      {!hideAddButton && (
+        <Button
+          variant="secondary"
+          size="xs"
+          onClick={addEntry}
+          disabled={disabled}
+          className="align-start"
+        >
+          {addLabel}
+        </Button>
+      )}
     </div>
   );
 }

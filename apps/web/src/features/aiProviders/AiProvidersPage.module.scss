@@ -267,7 +267,7 @@
 }
 
 .statusBlockIdle {
-  background-color: var(--border-subtle);
+  background-color: color-mix(in srgb, var(--border-primary) 62%, transparent);
 }
 
 .statusTooltip {

@@ -3,12 +3,12 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { useTranslation } from 'react-i18next';
 import {
   apiCallApi,
-  getApiCallErrorDetails,
   getApiCallErrorMessage,
   modelsApi,
   providersApi,
   readBackClaudeConfigAfterSave,
   verifyClaudeFingerprintInRawConfig,
+  type ApiCallResult,
 } from '@/services/api';
 import { useConfigStore, useNotificationStore } from '@/stores';
 import {
@@ -27,7 +27,7 @@ import {
   type ProviderV8GroupSource,
 } from '@/types';
 import { normalizeAuthIndex } from '@/utils/authIndex';
-import { buildClaudeRequestHeaders, formatClaudeAuthDiagnostic } from '@/utils/claudeAuth';
+import { buildClaudeRequestHeaders } from '@/utils/claudeAuth';
 import {
   areKeyValueEntriesEqual,
   areModelEntriesEqual,
@@ -104,12 +104,22 @@ export interface ProviderDrawerFormState {
   testModel: string;
 }
 
+export type ProviderConnectivityProbeMode = 'inference' | 'models';
+
+export interface ProviderConnectivityAuthDiagnostic {
+  headerType: 'x-api-key' | 'authorization-bearer' | 'none';
+  credentialSource: 'api-key' | 'auth-index' | 'custom-header' | 'none';
+  endpointType: 'anthropic' | 'custom';
+}
+
 export interface ProviderDrawerConnectivityResult {
   status: 'idle' | 'loading' | 'success' | 'error';
   statusCode?: number;
   elapsedMs?: number;
   message: string;
   endpoint?: string;
+  responseBody?: string;
+  authDiagnostic?: ProviderConnectivityAuthDiagnostic;
 }
 
 export interface ProviderOpenAIKeyTestEntry {
@@ -117,8 +127,8 @@ export interface ProviderOpenAIKeyTestEntry {
   statusCode?: number;
   elapsedMs?: number;
   message: string;
+  responseBody?: string;
 }
-
 export interface UseProviderDrawerEditorOptions {
   open: boolean;
   mode: 'view-edit' | 'create';
@@ -149,6 +159,34 @@ const PROTOCOL_DEFAULT_TEST_MODELS: Record<ProviderKind, string> = {
   gemini: 'gemini-2.5-flash',
   interactions: 'gemini-2.5-flash',
   vertex: 'gemini-2.5-flash',
+};
+
+const extractCleanApiErrorSummary = (result: ApiCallResult): string => {
+  const raw = getApiCallErrorMessage(result);
+  if (result.statusCode > 0) {
+    const stripped = raw.replace(new RegExp(`^${result.statusCode}\\s+`), '').trim();
+    if (stripped) return stripped;
+  }
+  return raw;
+};
+
+const extractFormattedResponseBody = (result: ApiCallResult): string | undefined => {
+  const rawText = result.bodyText.trim();
+  if (!rawText) {
+    if (result.body !== null && typeof result.body === 'object') {
+      try {
+        return JSON.stringify(result.body, null, 2);
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
+  }
+  try {
+    return JSON.stringify(JSON.parse(rawText), null, 2);
+  } catch {
+    return rawText;
+  }
 };
 
 const CONFIG_SECTION_BY_KIND = {
@@ -1216,6 +1254,8 @@ export function useProviderDrawerEditor({
     return PROTOCOL_DEFAULT_TEST_MODELS[activeKind];
   });
   const [testModelManuallyEdited, setTestModelManuallyEdited] = useState(false);
+  const [connectivityProbeMode, setConnectivityProbeModeState] =
+    useState<ProviderConnectivityProbeMode>('inference');
   const [singleTestResult, setSingleTestResult] = useState<ProviderDrawerConnectivityResult>({
     status: 'idle',
     message: '',
@@ -1513,6 +1553,7 @@ export function useProviderDrawerEditor({
         nextForm.testModel.trim() || firstModel || PROTOCOL_DEFAULT_TEST_MODELS[activeKind]
       );
       setTestModelManuallyEdited(false);
+      setConnectivityProbeModeState('inference');
       setSingleTestResult({ status: 'idle', message: '' });
       setOpenAIAllTestResult({ status: 'idle', message: '' });
       setOpenAIKeyStatuses([]);
@@ -1526,17 +1567,21 @@ export function useProviderDrawerEditor({
 
   const modelSelectOptions = useMemo(() => {
     const seen = new Set<string>();
-    return normalizedModels.reduce<Array<{ value: string; label: string }>>((acc, entry) => {
-      const name = entry.name.trim();
-      if (!name || seen.has(name)) return acc;
-      seen.add(name);
-      const alias = entry.alias.trim();
-      acc.push({
-        value: name,
-        label: alias && alias !== name ? `${name} (${alias})` : name,
-      });
-      return acc;
-    }, []);
+    return normalizedModels.reduce<Array<{ value: string; alias?: string; label: string }>>(
+      (acc, entry) => {
+        const name = entry.name.trim();
+        if (!name || seen.has(name)) return acc;
+        seen.add(name);
+        const alias = entry.alias.trim();
+        acc.push({
+          value: name,
+          alias: alias && alias !== name ? alias : undefined,
+          label: alias && alias !== name ? `${name} (${alias})` : name,
+        });
+        return acc;
+      },
+      []
+    );
   }, [normalizedModels]);
 
   useEffect(() => {
@@ -1577,6 +1622,7 @@ export function useProviderDrawerEditor({
     setConnectivityTestModel(
       nextForm.testModel.trim() || firstModel || PROTOCOL_DEFAULT_TEST_MODELS[activeKind]
     );
+    setConnectivityProbeModeState('inference');
     setSingleTestResult({ status: 'idle', message: '' });
     setOpenAIAllTestResult({ status: 'idle', message: '' });
     setOpenAIKeyStatuses([]);
@@ -1755,21 +1801,7 @@ export function useProviderDrawerEditor({
       if (!isCurrentDiscovery()) return;
       const message = getErrorMessage(err);
       if (activeKind === 'claude') {
-        const authResolution = buildClaudeRequestHeaders({
-          url:
-            typeof modelsApi.buildClaudeModelsEndpoint === 'function'
-              ? modelsApi.buildClaudeModelsEndpoint(form.baseUrl ?? '')
-              : '',
-          apiKey: form.apiKey.trim() || undefined,
-          authIndex,
-          customHeaders: headerObject,
-        });
-        const shouldAttachDiag =
-          message.toLowerCase().includes('x-api-key') || message.includes('401');
-        const diag = shouldAttachDiag
-          ? ` ${formatClaudeAuthDiagnostic(authResolution, form.apiKey, authIndex)}`
-          : '';
-        setModelDiscoveryError(`${t('ai_providers.claude_models_fetch_error')}: ${message}${diag}`);
+        setModelDiscoveryError(`${t('ai_providers.claude_models_fetch_error')}: ${message}`);
       } else if (activeKind === 'gemini' || activeKind === 'interactions') {
         setModelDiscoveryError(`${t('ai_providers.gemini_models_fetch_error')}: ${message}`);
       } else if (activeKind === 'codex' || activeKind === 'xai') {
@@ -1975,6 +2007,16 @@ export function useProviderDrawerEditor({
   }, [discoveredModels, mergeDiscoveredModels, modelDiscoverySelected, normalizeDiscoveredName]);
 
   // Connectivity tests (testing live draft values!)
+  const supportsInferenceProbe =
+    activeKind === 'claude' ||
+    activeKind === 'codex' ||
+    activeKind === 'xai' ||
+    activeKind === 'openai';
+  const effectiveProbeMode: ProviderConnectivityProbeMode = supportsInferenceProbe
+    ? connectivityProbeMode
+    : 'models';
+
+  // Connectivity tests (testing live draft values!)
   const runOpenAISingleKeyTest = useCallback(
     async (keyIndex: number, requestIdOverride?: number): Promise<boolean> => {
       const activeRequestId = requestIdOverride ?? ++connectivityRequestIdRef.current;
@@ -1982,7 +2024,10 @@ export function useProviderDrawerEditor({
         !unmountedRef.current && connectivityRequestIdRef.current === activeRequestId;
 
       const baseUrl = form.baseUrl.trim();
-      const endpoint = buildOpenAIChatCompletionsEndpoint(baseUrl);
+      const endpoint =
+        effectiveProbeMode === 'models'
+          ? buildOpenAIModelsEndpoint(baseUrl)
+          : buildOpenAIChatCompletionsEndpoint(baseUrl);
       if (!baseUrl || !endpoint) {
         const msg = t('notification.openai_test_url_required');
         if (isCurrent()) {
@@ -1991,31 +2036,110 @@ export function useProviderDrawerEditor({
             next[keyIndex] = { status: 'error', message: msg };
             return next;
           });
-          showNotification(msg, 'error');
         }
         return false;
       }
 
       const keyEntry = form.apiKeyEntries[keyIndex];
       if (!keyEntry) return false;
-      const modelName = connectivityTestModel.trim() || availableModels[0] || '';
-      if (!modelName) {
-        const msg = t('ai_providers.openai_test_model_required');
-        if (isCurrent()) {
-          showNotification(msg, 'error');
-        }
-        return false;
-      }
 
       const keyAuthIndex = normalizeAuthIndex(keyEntry.authIndex) ?? undefined;
       const customHeaders = buildHeaderObject(form.headers);
       const entryHeaders = keyEntry.headers ?? {};
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
+      const mergedHeaders: Record<string, string> = {
         ...customHeaders,
         ...entryHeaders,
       };
-      if (!hasHeader(headers, 'authorization') && keyEntry.apiKey.trim()) {
+
+      if (effectiveProbeMode === 'models') {
+        if (isCurrent()) {
+          setOpenAIKeyStatuses((prev) => {
+            const next = [...prev];
+            next[keyIndex] = { status: 'loading', message: '' };
+            return next;
+          });
+        }
+        const startedAt = Date.now();
+        try {
+          const hasAuthHeader = hasHeader(mergedHeaders, 'authorization');
+          const models = await modelsApi.fetchModelsViaApiCall(
+            baseUrl,
+            hasAuthHeader ? undefined : keyEntry.apiKey.trim() || undefined,
+            mergedHeaders,
+            keyAuthIndex,
+            keyEntry.proxyUrl?.trim() || undefined,
+            !keyEntry.apiKey.trim()
+          );
+          if (!isCurrent()) return false;
+          const elapsedMs = Date.now() - startedAt;
+          if (models.length === 0) {
+            setOpenAIKeyStatuses((prev) => {
+              const next = [...prev];
+              next[keyIndex] = {
+                status: 'error',
+                statusCode: 200,
+                elapsedMs,
+                message: t('ai_providers.health_check_error_empty_models', {
+                  defaultValue: '未返回模型列表',
+                }),
+              };
+              return next;
+            });
+            return false;
+          }
+          setOpenAIKeyStatuses((prev) => {
+            const next = [...prev];
+            next[keyIndex] = {
+              status: 'success',
+              statusCode: 200,
+              elapsedMs,
+              message: t('ai_providers.connectivity_models_probe_success', {
+                defaultValue: '成功获取 {{count}} 个模型{{preview}}',
+                count: models.length,
+                preview: '',
+              }),
+            };
+            return next;
+          });
+          return true;
+        } catch (err: unknown) {
+          if (!isCurrent()) return false;
+          const elapsedMs = Date.now() - startedAt;
+          const rawMsg = getErrorMessage(err) || t('ai_providers.openai_test_failed');
+          const statusMatch = rawMsg.match(/\b(4\d{2}|5\d{2})\b/);
+          const statusCode = statusMatch ? Number(statusMatch[1]) : undefined;
+          setOpenAIKeyStatuses((prev) => {
+            const next = [...prev];
+            next[keyIndex] = {
+              status: 'error',
+              statusCode,
+              elapsedMs,
+              message: rawMsg,
+            };
+            return next;
+          });
+          return false;
+        }
+      }
+
+      const modelName = connectivityTestModel.trim() || availableModels[0] || '';
+      if (!modelName) {
+        const msg = t('ai_providers.openai_test_model_required');
+        if (isCurrent()) {
+          setOpenAIKeyStatuses((prev) => {
+            const next = [...prev];
+            next[keyIndex] = { status: 'error', message: msg };
+            return next;
+          });
+        }
+        return false;
+      }
+
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        ...mergedHeaders,
+      };
+      if (!hasHeader(headers, 'authorization') && (keyEntry.apiKey.trim() || keyAuthIndex)) {
         headers.Authorization = keyAuthIndex
           ? 'Bearer $TOKEN$'
           : `Bearer ${keyEntry.apiKey.trim()}`;
@@ -2049,14 +2173,16 @@ export function useProviderDrawerEditor({
         if (!isCurrent()) return false;
         const elapsedMs = Date.now() - startedAt;
         if (result.statusCode < 200 || result.statusCode >= 300) {
-          const errorDetail = getApiCallErrorDetails(result);
+          const errorSummary = extractCleanApiErrorSummary(result);
+          const responseBody = extractFormattedResponseBody(result);
           setOpenAIKeyStatuses((prev) => {
             const next = [...prev];
             next[keyIndex] = {
               status: 'error',
               statusCode: result.statusCode,
               elapsedMs,
-              message: errorDetail,
+              message: errorSummary,
+              responseBody,
             };
             return next;
           });
@@ -2099,10 +2225,10 @@ export function useProviderDrawerEditor({
     [
       availableModels,
       connectivityTestModel,
+      effectiveProbeMode,
       form.apiKeyEntries,
       form.baseUrl,
       form.headers,
-      showNotification,
       t,
     ]
   );
@@ -2126,18 +2252,22 @@ export function useProviderDrawerEditor({
   const testAllOpenAIKeys = useCallback(async () => {
     if (isTesting) return;
     const baseUrl = form.baseUrl.trim();
-    if (!baseUrl) {
+    const targetEndpoint =
+      effectiveProbeMode === 'models'
+        ? buildOpenAIModelsEndpoint(baseUrl)
+        : buildOpenAIChatCompletionsEndpoint(baseUrl);
+    if (!baseUrl || !targetEndpoint) {
       const msg = t('notification.openai_test_url_required');
       setOpenAIAllTestResult({ status: 'error', message: msg });
-      showNotification(msg, 'error');
       return;
     }
-    const modelName = connectivityTestModel.trim() || availableModels[0] || '';
-    if (!modelName) {
-      const msg = t('ai_providers.openai_test_model_required');
-      setOpenAIAllTestResult({ status: 'error', message: msg });
-      showNotification(msg, 'error');
-      return;
+    if (effectiveProbeMode === 'inference') {
+      const modelName = connectivityTestModel.trim() || availableModels[0] || '';
+      if (!modelName) {
+        const msg = t('ai_providers.openai_test_model_required');
+        setOpenAIAllTestResult({ status: 'error', message: msg });
+        return;
+      }
     }
 
     const testableIndexes = getOpenAITestableKeyIndexes(form.apiKeyEntries);
@@ -2151,7 +2281,7 @@ export function useProviderDrawerEditor({
     setOpenAIAllTestResult({
       status: 'loading',
       message: t('ai_providers.openai_test_running'),
-      endpoint: buildOpenAIChatCompletionsEndpoint(baseUrl),
+      endpoint: targetEndpoint,
     });
     setOpenAIKeyStatuses([]);
     const startedAt = Date.now();
@@ -2168,14 +2298,14 @@ export function useProviderDrawerEditor({
           status: 'success',
           elapsedMs,
           message: t('ai_providers.openai_test_all_success', { count: successCount }),
-          endpoint: buildOpenAIChatCompletionsEndpoint(baseUrl),
+          endpoint: targetEndpoint,
         });
       } else if (successCount === 0) {
         setOpenAIAllTestResult({
           status: 'error',
           elapsedMs,
           message: t('ai_providers.openai_test_all_failed', { count: failCount }),
-          endpoint: buildOpenAIChatCompletionsEndpoint(baseUrl),
+          endpoint: targetEndpoint,
         });
       } else {
         setOpenAIAllTestResult({
@@ -2185,7 +2315,7 @@ export function useProviderDrawerEditor({
             success: successCount,
             failed: failCount,
           }),
-          endpoint: buildOpenAIChatCompletionsEndpoint(baseUrl),
+          endpoint: targetEndpoint,
         });
       }
     } finally {
@@ -2194,11 +2324,11 @@ export function useProviderDrawerEditor({
   }, [
     availableModels,
     connectivityTestModel,
+    effectiveProbeMode,
     form.apiKeyEntries,
     form.baseUrl,
     isTesting,
     runOpenAISingleKeyTest,
-    showNotification,
     t,
   ]);
 
@@ -2217,19 +2347,17 @@ export function useProviderDrawerEditor({
       (Boolean(v8AliasSupported) || wasAlreadyKeyless) &&
       Boolean(form.baseUrl.trim());
 
-    if (activeKind === 'claude') {
+    if (effectiveProbeMode === 'inference' && activeKind === 'claude') {
       const modelName = connectivityTestModel.trim() || availableModels[0] || '';
       if (!modelName) {
         const message = t('ai_providers.claude_test_model_required');
         setSingleTestResult({ status: 'error', message });
-        showNotification(message, 'error');
         return;
       }
       const endpoint = buildClaudeMessagesEndpoint(form.baseUrl ?? '');
       if (!endpoint) {
         const message = t('ai_providers.claude_test_endpoint_invalid');
         setSingleTestResult({ status: 'error', message });
-        showNotification(message, 'error');
         return;
       }
       const authResolution = buildClaudeRequestHeaders({
@@ -2246,7 +2374,6 @@ export function useProviderDrawerEditor({
       ) {
         const message = t('ai_providers.claude_test_key_required');
         setSingleTestResult({ status: 'error', message, endpoint });
-        showNotification(message, 'error');
         return;
       }
 
@@ -2280,20 +2407,38 @@ export function useProviderDrawerEditor({
         if (!isCurrent()) return;
         const elapsedMs = Date.now() - startedAt;
         if (result.statusCode < 200 || result.statusCode >= 300) {
-          const baseErr = getApiCallErrorMessage(result);
-          const diag =
-            result.statusCode === 401 || baseErr.toLowerCase().includes('x-api-key')
-              ? ` ${formatClaudeAuthDiagnostic(authResolution, apiKey, keyAuthIndex)}`
-              : '';
-          const errMessage = `${baseErr}${diag}`;
+          const errMessage = extractCleanApiErrorSummary(result);
+          const responseBody = extractFormattedResponseBody(result);
+          const includeAuthDiag =
+            result.statusCode === 401 || errMessage.toLowerCase().includes('x-api-key');
+          const hasCustomAuthHeader =
+            hasHeader(customHeaders, 'x-api-key') || hasHeader(customHeaders, 'authorization');
+          const authDiagnostic: ProviderConnectivityAuthDiagnostic | undefined = includeAuthDiag
+            ? {
+                headerType: authResolution.effectiveXApiKey
+                  ? 'x-api-key'
+                  : authResolution.effectiveAuthorization
+                    ? 'authorization-bearer'
+                    : 'none',
+                credentialSource: apiKey
+                  ? 'api-key'
+                  : keyAuthIndex
+                    ? 'auth-index'
+                    : hasCustomAuthHeader
+                      ? 'custom-header'
+                      : 'none',
+                endpointType: authResolution.baseType,
+              }
+            : undefined;
           setSingleTestResult({
             status: 'error',
             statusCode: result.statusCode,
             elapsedMs,
             message: errMessage,
             endpoint,
+            responseBody,
+            authDiagnostic,
           });
-          showNotification(`${t('ai_providers.claude_test_failed')}: ${errMessage}`, 'error');
           return;
         }
         const okMessage = t('ai_providers.claude_test_success');
@@ -2304,7 +2449,6 @@ export function useProviderDrawerEditor({
           message: okMessage,
           endpoint,
         });
-        showNotification(okMessage, 'success');
       } catch (err: unknown) {
         if (!isCurrent()) return;
         const elapsedMs = Date.now() - startedAt;
@@ -2317,27 +2461,24 @@ export function useProviderDrawerEditor({
           ? t('ai_providers.claude_test_timeout', { seconds: TEST_TIMEOUT_MS / 1000 })
           : `${t('ai_providers.claude_test_failed')}: ${message || t('common.unknown_error')}`;
         setSingleTestResult({ status: 'error', elapsedMs, message: resolvedMessage, endpoint });
-        showNotification(resolvedMessage, 'error');
       } finally {
         if (isCurrent()) setIsTesting(false);
       }
       return;
     }
 
-    if (activeKind === 'codex' || activeKind === 'xai') {
+    if (effectiveProbeMode === 'inference' && (activeKind === 'codex' || activeKind === 'xai')) {
       const isXAI = activeKind === 'xai';
       const endpoint = buildCodexResponsesEndpoint(form.baseUrl ?? '');
       if (!endpoint) {
         const message = t('ai_providers.codex_test_endpoint_invalid');
         setSingleTestResult({ status: 'error', message });
-        showNotification(message, 'error');
         return;
       }
       const modelName = connectivityTestModel.trim() || availableModels[0] || '';
       if (!modelName) {
         const message = t('ai_providers.codex_test_model_required');
         setSingleTestResult({ status: 'error', message, endpoint });
-        showNotification(message, 'error');
         return;
       }
       const hasAuthorization = hasHeader(customHeaders, 'authorization');
@@ -2346,7 +2487,6 @@ export function useProviderDrawerEditor({
           isXAI ? 'ai_providers.xai_test_key_required' : 'ai_providers.codex_test_key_required'
         );
         setSingleTestResult({ status: 'error', message, endpoint });
-        showNotification(message, 'error');
         return;
       }
       const headers: Record<string, string> = {
@@ -2387,18 +2527,16 @@ export function useProviderDrawerEditor({
         if (!isCurrent()) return;
         const elapsedMs = Date.now() - startedAt;
         if (result.statusCode < 200 || result.statusCode >= 300) {
-          const errMsg = getApiCallErrorMessage(result);
+          const errMsg = extractCleanApiErrorSummary(result);
+          const responseBody = extractFormattedResponseBody(result);
           setSingleTestResult({
             status: 'error',
             statusCode: result.statusCode,
             elapsedMs,
             message: errMsg,
             endpoint,
+            responseBody,
           });
-          showNotification(
-            `${t(isXAI ? 'ai_providers.xai_test_failed' : 'ai_providers.codex_test_failed')}: ${errMsg}`,
-            'error'
-          );
           return;
         }
         const okMessage = t(
@@ -2411,7 +2549,6 @@ export function useProviderDrawerEditor({
           message: okMessage,
           endpoint,
         });
-        showNotification(okMessage, 'success');
       } catch (err: unknown) {
         if (!isCurrent()) return;
         const elapsedMs = Date.now() - startedAt;
@@ -2420,14 +2557,13 @@ export function useProviderDrawerEditor({
         );
         const message = getErrorMessage(err) || failureText;
         setSingleTestResult({ status: 'error', elapsedMs, message, endpoint });
-        showNotification(`${failureText}: ${message}`, 'error');
       } finally {
         if (isCurrent()) setIsTesting(false);
       }
       return;
     }
 
-    // gemini / interactions / vertex -> upstream models probe via modelsApi
+    // Models-endpoint probe (gemini / interactions / vertex, OR claude / codex / xai in 'models' probe mode)
     const hasAuthHeader =
       hasHeader(customHeaders, 'authorization') ||
       hasHeader(customHeaders, 'x-api-key') ||
@@ -2437,16 +2573,24 @@ export function useProviderDrawerEditor({
         defaultValue: '缺少 API 密钥或 auth-index',
       });
       setSingleTestResult({ status: 'error', message: msg });
-      showNotification(msg, 'error');
       return;
     }
 
     const endpoint =
-      activeKind === 'vertex'
-        ? form.baseUrl.trim()
-        : typeof modelsApi.buildGeminiModelsEndpoint === 'function'
-          ? modelsApi.buildGeminiModelsEndpoint(form.baseUrl ?? '')
-          : form.baseUrl.trim();
+      activeKind === 'claude'
+        ? typeof modelsApi.buildClaudeModelsEndpoint === 'function'
+          ? modelsApi.buildClaudeModelsEndpoint(form.baseUrl ?? '')
+          : `${(form.baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '')}/v1/models`
+        : activeKind === 'codex' || activeKind === 'xai'
+          ? buildOpenAIModelsEndpoint(
+              form.baseUrl.trim() ||
+                (activeKind === 'xai' ? 'https://api.x.ai/v1' : 'https://api.openai.com/v1')
+            )
+          : activeKind === 'vertex'
+            ? form.baseUrl.trim()
+            : typeof modelsApi.buildGeminiModelsEndpoint === 'function'
+              ? modelsApi.buildGeminiModelsEndpoint(form.baseUrl ?? '')
+              : form.baseUrl.trim();
 
     const requestId = ++connectivityRequestIdRef.current;
     const isCurrent = () =>
@@ -2461,7 +2605,24 @@ export function useProviderDrawerEditor({
     const startedAt = Date.now();
     try {
       let models: ModelInfo[] = [];
-      if (activeKind === 'vertex') {
+      if (activeKind === 'claude') {
+        models = await modelsApi.fetchClaudeModelsViaApiCall(
+          form.baseUrl ?? '',
+          apiKey || undefined,
+          customHeaders,
+          keyAuthIndex,
+          form.proxyUrl
+        );
+      } else if (activeKind === 'codex' || activeKind === 'xai') {
+        models = await modelsApi.fetchV1ModelsViaApiCall(
+          form.baseUrl.trim() ||
+            (activeKind === 'xai' ? 'https://api.x.ai/v1' : 'https://api.openai.com/v1'),
+          hasHeader(customHeaders, 'authorization') ? undefined : apiKey || undefined,
+          customHeaders,
+          keyAuthIndex,
+          form.proxyUrl
+        );
+      } else if (activeKind === 'vertex') {
         try {
           models = await modelsApi.fetchV1ModelsViaApiCall(
             form.baseUrl ?? '',
@@ -2542,6 +2703,7 @@ export function useProviderDrawerEditor({
     availableModels,
     baseline.apiKey,
     connectivityTestModel,
+    effectiveProbeMode,
     form.apiKey,
     form.authIndex,
     form.baseUrl,
@@ -2550,7 +2712,6 @@ export function useProviderDrawerEditor({
     isTesting,
     mode,
     row,
-    showNotification,
     t,
     v8AliasSupported,
   ]);
@@ -3436,6 +3597,14 @@ export function useProviderDrawerEditor({
     fetchModelDiscovery,
     applySelectedDiscoveredModels,
     // Connectivity
+    connectivityProbeMode: effectiveProbeMode,
+    supportsInferenceProbe,
+    setConnectivityProbeMode: (nextMode: ProviderConnectivityProbeMode) => {
+      setConnectivityProbeModeState(nextMode);
+      setSingleTestResult({ status: 'idle', message: '' });
+      setOpenAIAllTestResult({ status: 'idle', message: '' });
+      setOpenAIKeyStatuses([]);
+    },
     connectivityTestModel,
     setConnectivityTestModel: (value: string) => {
       setTestModelManuallyEdited(true);
