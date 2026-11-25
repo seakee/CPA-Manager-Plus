@@ -1,12 +1,16 @@
 import { useMemo, useState, type Dispatch, type SetStateAction } from 'react';
 import { useTranslation } from 'react-i18next';
+import {
+  DrawerSectionCard,
+  DrawerSubViewHeader,
+  DrawerTabPanel,
+} from '@/components/common/WorkspaceDrawer';
 import { Button } from '@/components/ui/Button';
 import { SelectionCheckbox } from '@/components/ui/SelectionCheckbox';
 import { InfoTooltip } from '@/components/ui/InfoTooltip';
 import { Input } from '@/components/ui/Input';
 import { ModelInputList } from '@/components/ui/ModelInputList';
 import {
-  IconChevronLeft,
   IconModelCluster,
   IconPlus,
   IconRefreshCw,
@@ -274,37 +278,33 @@ export function ProviderModelsTab({
 
   if (supportsDiscovery && modelDiscoveryOpen) {
     return (
-      <div className={styles.drawerTabPanel} data-testid="drawer-model-discovery-subview">
-        <section className={`${styles.sectionCard} ${styles.discoverySubViewCard}`}>
-          <div className={styles.sectionHeader}>
-            <div className={styles.discoveryHeaderLeft}>
+      <DrawerTabPanel testId="drawer-model-discovery-subview">
+        <DrawerSectionCard className={styles.discoverySubViewCard}>
+          <DrawerSubViewHeader
+            backLabel={t('ai_providers.model_discovery_back_btn', { defaultValue: '返回映射列表' })}
+            onBack={() => setModelDiscoveryOpen(false)}
+            title={
+              <>
+                {discoveryModalTitle}
+                {modelsLoaded && discoveredModels.length > 0 && (
+                  <span className={styles.tabCountBadge} style={{ marginLeft: 8 }}>
+                    {discoveredModelsFiltered.length}/{discoveredModels.length}
+                  </span>
+                )}
+              </>
+            }
+            actions={
               <Button
-                variant="ghost"
+                variant="secondary"
                 size="xs"
-                className={styles.discoveryBackBtn}
-                onClick={() => setModelDiscoveryOpen(false)}
+                onClick={() => void fetchModelDiscovery()}
+                loading={modelDiscoveryFetching}
               >
-                <IconChevronLeft size={14} />
-                {t('ai_providers.model_discovery_back_btn', { defaultValue: '返回映射列表' })}
+                <IconRefreshCw size={13} />
+                {t('common.refresh')}
               </Button>
-              <span className={styles.discoveryHeaderDivider} aria-hidden="true" />
-              <h4>{discoveryModalTitle}</h4>
-              {modelsLoaded && discoveredModels.length > 0 && (
-                <span className={styles.tabCountBadge}>
-                  {discoveredModelsFiltered.length}/{discoveredModels.length}
-                </span>
-              )}
-            </div>
-            <Button
-              variant="secondary"
-              size="xs"
-              onClick={() => void fetchModelDiscovery()}
-              loading={modelDiscoveryFetching}
-            >
-              <IconRefreshCw size={13} />
-              {t('common.refresh')}
-            </Button>
-          </div>
+            }
+          />
 
           <div className={styles.preflightEndpointBar}>
             <span className={styles.httpMethodBadge}>GET</span>
@@ -427,8 +427,8 @@ export function ProviderModelsTab({
               })}
             </div>
           )}
-        </section>
-      </div>
+        </DrawerSectionCard>
+      </DrawerTabPanel>
     );
   }
 

@@ -1,19 +1,30 @@
 import {
   useCallback,
-  useEffect,
   useId,
   useImperativeHandle,
   useMemo,
   useRef,
   useState,
-  type KeyboardEvent,
   type Ref,
 } from 'react';
 import { useTranslation } from 'react-i18next';
+import {
+  DRAWER_WIDTH,
+  DrawerActionFooter,
+  DrawerBodyShell,
+  DrawerCopyableMeta,
+  DrawerDangerButton,
+  DrawerIdentityHeader,
+  DrawerNotice,
+  DrawerStatusPill,
+  DrawerTabBar,
+  DrawerViewport,
+  useDrawerSubViewEscape,
+  type DrawerTabItem,
+} from '@/components/common/WorkspaceDrawer';
 import { Button } from '@/components/ui/Button';
 import { Drawer } from '@/components/ui/Drawer';
 import { SegmentedTabs, type SegmentedTabItem } from '@/components/ui/SegmentedTabs';
-import { IconCopy } from '@/components/ui/icons';
 import { useConfigStore, useNotificationStore } from '@/stores';
 import { copyToClipboard } from '@/utils/clipboard';
 import { getProviderKindIcon, PROVIDER_KIND_LABELS } from '../ProviderTable/kindMeta';
@@ -282,7 +293,6 @@ export function ProviderWorkspaceDrawer({
   );
 
   const tabsIdPrefix = useId();
-  const tabRefs = useRef<Partial<Record<ProviderDrawerTab, HTMLButtonElement | null>>>({});
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const editor = useProviderDrawerEditor({
     open,
@@ -308,18 +318,11 @@ export function ProviderWorkspaceDrawer({
     setResetNonce((n) => n + 1);
   }, [resetEditorForm, setModelDiscoveryOpen]);
 
-  useEffect(() => {
-    if (!open || !isModelsDiscoverySubView || typeof window === 'undefined') return;
-    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape' && !event.defaultPrevented) {
-        event.preventDefault();
-        event.stopPropagation();
-        setModelDiscoveryOpen(false);
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown, true);
-    return () => window.removeEventListener('keydown', handleKeyDown, true);
-  }, [isModelsDiscoverySubView, open, setModelDiscoveryOpen]);
+  useDrawerSubViewEscape(
+    open && isModelsDiscoverySubView,
+    () => setModelDiscoveryOpen(false),
+    editor.saving
+  );
 
   const effectiveTheme = useMemo<'light' | 'dark'>(() => {
     if (resolvedTheme === 'dark') return 'dark';
@@ -343,32 +346,7 @@ export function ProviderWorkspaceDrawer({
     [sessionKey, setModelDiscoveryOpen]
   );
 
-  const handleTabKeyDown = useCallback(
-    (
-      event: KeyboardEvent<HTMLButtonElement>,
-      currentIndex: number,
-      tabs: Array<{ key: ProviderDrawerTab }>
-    ) => {
-      if (tabs.length === 0) return;
-      let nextIndex: number | null = null;
-      if (event.key === 'ArrowRight') {
-        nextIndex = (currentIndex + 1) % tabs.length;
-      } else if (event.key === 'ArrowLeft') {
-        nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
-      } else if (event.key === 'Home') {
-        nextIndex = 0;
-      } else if (event.key === 'End') {
-        nextIndex = tabs.length - 1;
-      }
-      if (nextIndex === null) return;
-      const targetTab = tabs[nextIndex];
-      if (!targetTab) return;
-      event.preventDefault();
-      switchTab(targetTab.key);
-      tabRefs.current[targetTab.key]?.focus();
-    },
-    [switchTab]
-  );
+  // Keyboard tab roving is provided by DrawerTabBar
   const requestCloseOrSwitch = useCallback(async () => {
     const allowed = await editor.confirmDiscardChanges();
     if (allowed) {
@@ -460,81 +438,53 @@ export function ProviderWorkspaceDrawer({
     [availableCreateKinds, effectiveTheme]
   );
   const headerTitleNode = (
-    <div className={styles.drawerTitleIdentity}>
-      <div className={styles.drawerTitleIcon}>
-        <img src={getProviderKindIcon(activeKind, effectiveTheme)} alt="" />
-      </div>
-      <div className={styles.drawerTitleStack}>
-        <strong className={styles.drawerTitlePrimary}>{primaryTitle}</strong>
-        <div className={styles.drawerTitleMeta}>
-          <span>{kindLabel}</span>
-          {mode === 'view-edit' && row && (
-            <>
-              <span className={styles.metaSeparator} aria-hidden="true">
-                ·
-              </span>
-              <span
-                className={`${styles.statusBadge} ${
-                  row.enabled ? styles.statusBadgeSuccess : styles.statusBadgeDisabled
-                }`}
-              >
-                {row.enabled
-                  ? t('ai_providers.status_enabled', { defaultValue: '已启用' })
-                  : t('ai_providers.status_disabled', { defaultValue: '已停用' })}
-              </span>
-              {row.maskedKey ? (
-                <>
-                  <span className={styles.metaSeparator} aria-hidden="true">
-                    ·
-                  </span>
-                  <code className={styles.headerMetaCode}>{row.maskedKey}</code>
-                </>
-              ) : null}
-              {row.v8GroupKeyMeta ? (
-                <>
-                  <span className={styles.metaSeparator} aria-hidden="true">
-                    ·
-                  </span>
-                  <span className={styles.headerGroupMeta}>
-                    {t('ai_providers.v8_group_key_pill', {
-                      index: row.v8GroupKeyMeta.index,
-                      total: row.v8GroupKeyMeta.total,
-                      defaultValue: `密钥 ${row.v8GroupKeyMeta.index}/${row.v8GroupKeyMeta.total}`,
-                    })}
-                  </span>
-                </>
-              ) : null}
-            </>
-          )}
-          {hostDisplay && (
-            <>
-              <span className={styles.metaSeparator} aria-hidden="true">
-                ·
-              </span>
-              <button
-                type="button"
-                className={styles.hostCopyBtn}
-                onClick={() => void handleCopyHost()}
-                title={editor.form.baseUrl.trim() || row?.baseUrl || hostDisplay}
-              >
-                <span>{hostDisplay}</span>
-                <IconCopy size={12} />
-              </button>
-            </>
-          )}
-          {editor.isDirty && (
-            <span className={styles.dirtyBadge}>
-              {t('ai_providers.drawer_unsaved_changes', { defaultValue: '未保存更改' })}
-            </span>
-          )}
-        </div>
-      </div>
-    </div>
+    <DrawerIdentityHeader
+      icon={<img src={getProviderKindIcon(activeKind, effectiveTheme)} alt="" />}
+      title={primaryTitle}
+      metaItems={[
+        <span key="kind">{kindLabel}</span>,
+        mode === 'view-edit' && row ? (
+          <DrawerStatusPill key="status" tone={row.enabled ? 'success' : 'danger'}>
+            {row.enabled
+              ? t('ai_providers.status_enabled', { defaultValue: '已启用' })
+              : t('ai_providers.status_disabled', { defaultValue: '已停用' })}
+          </DrawerStatusPill>
+        ) : null,
+        mode === 'view-edit' && row?.maskedKey ? (
+          <code key="masked-key" className={styles.headerMetaCode}>
+            {row.maskedKey}
+          </code>
+        ) : null,
+        mode === 'view-edit' && row?.v8GroupKeyMeta ? (
+          <span key="v8-group" className={styles.headerGroupMeta}>
+            {t('ai_providers.v8_group_key_pill', {
+              index: row.v8GroupKeyMeta.index,
+              total: row.v8GroupKeyMeta.total,
+              defaultValue: `密钥 ${row.v8GroupKeyMeta.index}/${row.v8GroupKeyMeta.total}`,
+            })}
+          </span>
+        ) : null,
+        hostDisplay ? (
+          <DrawerCopyableMeta
+            key="host"
+            onCopy={handleCopyHost}
+            title={editor.form.baseUrl.trim() || row?.baseUrl || hostDisplay}
+          >
+            {hostDisplay}
+          </DrawerCopyableMeta>
+        ) : null,
+        editor.isDirty ? (
+          <DrawerStatusPill key="dirty" tone="warning">
+            {t('ai_providers.drawer_unsaved_changes', { defaultValue: '未保存更改' })}
+          </DrawerStatusPill>
+        ) : null,
+      ]}
+    />
   );
 
   const footerNode = isModelsDiscoverySubView ? (
-    <div className={styles.drawerFooter}>
-      <div className={styles.drawerFooterLeft}>
+    <DrawerActionFooter
+      left={
         <span className={styles.sectionHint}>
           {editor.modelDiscoverySelected.size > 0
             ? t('ai_providers.model_discovery_footer_selected_hint', {
@@ -545,40 +495,43 @@ export function ProviderWorkspaceDrawer({
                 defaultValue: '勾选需加入映射列表的上游模型',
               })}
         </span>
-      </div>
-      <div className={styles.drawerFooterRight}>
-        <Button
-          variant="secondary"
-          size="sm"
-          onClick={() => setModelDiscoveryOpen(false)}
-          disabled={editor.saving}
-        >
-          {t('common.cancel')}
-        </Button>
-        <Button
-          variant="primary"
-          size="sm"
-          onClick={editor.applySelectedDiscoveredModels}
-          disabled={
-            actionsDisabled ||
-            editor.saving ||
-            editor.modelDiscoverySelected.size === 0 ||
-            editor.modelDiscoveryFetching
-          }
-        >
-          {t('ai_providers.apply_selected_models_btn', {
-            defaultValue: '添加所选模型 ({{count}})',
-            count: editor.modelDiscoverySelected.size,
-          })}
-        </Button>
-      </div>
-    </div>
+      }
+      right={
+        <>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setModelDiscoveryOpen(false)}
+            disabled={editor.saving}
+          >
+            {t('common.cancel')}
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={editor.applySelectedDiscoveredModels}
+            disabled={
+              actionsDisabled ||
+              editor.saving ||
+              editor.modelDiscoverySelected.size === 0 ||
+              editor.modelDiscoveryFetching
+            }
+          >
+            {t('ai_providers.apply_selected_models_btn', {
+              defaultValue: '添加所选模型 ({{count}})',
+              count: editor.modelDiscoverySelected.size,
+            })}
+          </Button>
+        </>
+      }
+    />
   ) : mode === 'create' ? (
-    <div className={styles.drawerFooter}>
-      <div className={styles.drawerFooterRight}>
-        <Button
-          variant="secondary"
-          size="sm"
+    <DrawerActionFooter
+      right={
+        <>
+          <Button
+            variant="secondary"
+            size="sm"
             onClick={() => void handleRequestClose()}
             disabled={editor.saving}
           >
@@ -593,11 +546,13 @@ export function ProviderWorkspaceDrawer({
           >
             {t('ai_providers.drawer_create_submit', { defaultValue: '创建配置' })}
           </Button>
-        </div>
-      </div>
-    ) : (
-      <div className={styles.drawerFooter}>
-        <div className={styles.drawerFooterLeft}>
+        </>
+      }
+    />
+  ) : (
+    <DrawerActionFooter
+      left={
+        <>
           {onToggleEnabled && row && (
             <Button
               variant="secondary"
@@ -624,116 +579,108 @@ export function ProviderWorkspaceDrawer({
             </Button>
           )}
           {onDelete && row && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className={styles.footerDeleteBtn}
+            <DrawerDangerButton
               onClick={() => onDelete(row)}
               disabled={actionsDisabled || deleteDisabled || editor.saving || rowDeletedExternally}
             >
               {t('common.delete')}
-            </Button>
+            </DrawerDangerButton>
           )}
-        </div>
-
-        <div className={styles.drawerFooterRight}>
-          {editor.isDirty || activeTab === 'config' || activeTab === 'models' ? (
-            <>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={handleResetForm}
-                disabled={!editor.isDirty || editor.saving || actionsDisabled}
-              >
-                {t('common.reset', { defaultValue: '重置' })}
-              </Button>
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={() => void editor.handleSave()}
-                loading={editor.saving}
-                disabled={
-                  !editor.isDirty || !editor.canSave || actionsDisabled || rowDeletedExternally
-                }
-              >
-                {t('ai_providers.drawer_save_config', { defaultValue: '保存配置' })}
-              </Button>
-            </>
-          ) : activeTab === 'connectivity' ? (
+        </>
+      }
+      right={
+        editor.isDirty || activeTab === 'config' || activeTab === 'models' ? (
+          <>
             <Button
               variant="secondary"
               size="sm"
-              onClick={() => void handleRequestClose()}
-              disabled={editor.saving}
+              onClick={handleResetForm}
+              disabled={!editor.isDirty || editor.saving || actionsDisabled}
             >
-              {t('common.close', { defaultValue: '关闭' })}
+              {t('common.reset', { defaultValue: '重置' })}
             </Button>
-          ) : (
-            <>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => switchTab('connectivity')}
-                disabled={actionsDisabled}
-              >
-                {t('ai_providers.drawer_tab_connectivity', { defaultValue: '测活诊断' })}
-              </Button>
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={() => switchTab('config')}
-                disabled={actionsDisabled}
-              >
-                {t('ai_providers.drawer_edit_config_btn', { defaultValue: '编辑配置' })}
-              </Button>
-            </>
-          )}
-        </div>
-      </div>
-    );
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => void editor.handleSave()}
+              loading={editor.saving}
+              disabled={
+                !editor.isDirty || !editor.canSave || actionsDisabled || rowDeletedExternally
+              }
+            >
+              {t('ai_providers.drawer_save_config', { defaultValue: '保存配置' })}
+            </Button>
+          </>
+        ) : activeTab === 'connectivity' ? (
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => void handleRequestClose()}
+            disabled={editor.saving}
+          >
+            {t('common.close', { defaultValue: '关闭' })}
+          </Button>
+        ) : (
+          <>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => switchTab('connectivity')}
+              disabled={actionsDisabled}
+            >
+              {t('ai_providers.drawer_tab_connectivity', { defaultValue: '测活诊断' })}
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => switchTab('config')}
+              disabled={actionsDisabled}
+            >
+              {t('ai_providers.drawer_edit_config_btn', { defaultValue: '编辑配置' })}
+            </Button>
+          </>
+        )
+      }
+    />
+  );
 
-  const tabItems: Array<{
-    key: ProviderDrawerTab;
-    label: string;
-    count?: number;
-    dirty?: boolean;
-  }> =
+  const tabItems: DrawerTabItem<ProviderDrawerTab>[] =
     mode === 'view-edit'
       ? [
           {
-            key: 'overview',
+            id: 'overview',
             label: t('ai_providers.drawer_tab_overview', { defaultValue: '概览' }),
           },
           {
-            key: 'config',
+            id: 'config',
             label: t('ai_providers.drawer_tab_config', { defaultValue: '配置' }),
             dirty: editor.isConfigDirty,
           },
           {
-            key: 'models',
+            id: 'models',
             label: t('ai_providers.drawer_tab_models', { defaultValue: '模型' }),
             count: editor.configuredModelCount,
             dirty: editor.isModelsDirty,
           },
           {
-            key: 'connectivity',
+            id: 'connectivity',
             label: t('ai_providers.drawer_tab_connectivity', { defaultValue: '测活诊断' }),
           },
         ]
       : [
           {
-            key: 'config',
+            id: 'config',
             label: t('ai_providers.drawer_tab_create_config', { defaultValue: '基础配置' }),
             dirty: editor.isConfigDirty,
           },
           {
-            key: 'models',
+            id: 'models',
             label: t('ai_providers.drawer_tab_create_models', { defaultValue: '模型配置' }),
             count: editor.configuredModelCount,
             dirty: editor.isModelsDirty,
           },
           {
-            key: 'connectivity',
+            id: 'connectivity',
             label: t('ai_providers.drawer_tab_create_connectivity', { defaultValue: '连通性测试' }),
           },
         ];
@@ -744,14 +691,14 @@ export function ProviderWorkspaceDrawer({
       onClose={onClose}
       onBeforeClose={requestCloseOrSwitch}
       closeDisabled={editor.saving}
-      width="clamp(560px, 50vw, 780px)"
+      width={DRAWER_WIDTH.LG}
       title={headerTitleNode}
       footer={footerNode}
       bodyRef={bodyRef}
     >
-      <div className={styles.drawerBodyShell}>
-        {mode === 'create' && availableCreateKinds.length > 1 && (
-          <div className={styles.createKindBar}>
+      <DrawerBodyShell
+        topSlot={
+          mode === 'create' && availableCreateKinds.length > 1 ? (
             <SegmentedTabs<ProviderKind>
               activeTab={effectiveCreateKind}
               onChange={(nextKind) => void handleSwitchCreateKind(nextKind)}
@@ -761,61 +708,32 @@ export function ProviderWorkspaceDrawer({
                 defaultValue: '选择提供商类型',
               })}
             />
-          </div>
-        )}
-
-        <div
-          className={styles.drawerTabs}
-          role="tablist"
-          aria-label={t('ai_providers.drawer_tabs_label', { defaultValue: '提供商配置标签页' })}
-        >
-          {tabItems.map((tab, index) => {
-            const selected = activeTab === tab.key;
-            const tabId = `${tabsIdPrefix}-tab-${tab.key}`;
-            const panelId = `${tabsIdPrefix}-panel-${tab.key}`;
-            return (
-              <button
-                key={tab.key}
-                ref={(el) => {
-                  tabRefs.current[tab.key] = el;
-                }}
-                id={tabId}
-                type="button"
-                role="tab"
-                aria-selected={selected}
-                aria-controls={panelId}
-                tabIndex={selected ? 0 : -1}
-                className={selected ? styles.drawerTabActive : undefined}
-                onClick={() => switchTab(tab.key)}
-                onKeyDown={(e) => handleTabKeyDown(e, index, tabItems)}
-              >
-                <span>{tab.label}</span>
-                {tab.count !== undefined && (
-                  <span className={styles.tabCountBadge}>{tab.count}</span>
-                )}
-                {tab.dirty && <span className={styles.tabDirtyDot} aria-hidden="true" />}
-              </button>
-            );
-          })}
-        </div>
-
-        <div className={styles.drawerTabViewport}>
+          ) : null
+        }
+        tabs={
+          <DrawerTabBar<ProviderDrawerTab>
+            items={tabItems}
+            activeTab={activeTab}
+            onChange={switchTab}
+            idBase={tabsIdPrefix}
+            scrollContainerRef={bodyRef}
+            ariaLabel={t('ai_providers.drawer_tabs_label', { defaultValue: '提供商配置标签页' })}
+          />
+        }
+      >
+        <DrawerViewport>
           {rowDeletedExternally && (
-            <div
-              className={styles.drawerDisabledNotice}
+            <DrawerNotice
+              tone="danger"
               role="alert"
-              data-testid="drawer-deleted-externally-notice"
+              testId="drawer-deleted-externally-notice"
+              title={t('notification.provider_conflict_refresh')}
             >
-              <div className={styles.drawerDisabledText}>
-                <strong>{t('notification.provider_conflict_refresh')}</strong>
-                <p>
-                  {t('ai_providers.drawer_deleted_externally_desc', {
-                    defaultValue:
-                      '该提供商配置已在外部被移除，当前未保存的草稿已保留；可复制内容后关闭抽屉。',
-                  })}
-                </p>
-              </div>
-            </div>
+              {t('ai_providers.drawer_deleted_externally_desc', {
+                defaultValue:
+                  '该提供商配置已在外部被移除，当前未保存的草稿已保留；可复制内容后关闭抽屉。',
+              })}
+            </DrawerNotice>
           )}
 
           {editor.error && (
@@ -823,7 +741,6 @@ export function ProviderWorkspaceDrawer({
               {editor.error}
             </div>
           )}
-
           <div
             role="tabpanel"
             id={`${tabsIdPrefix}-panel-${activeTab}`}
@@ -914,8 +831,8 @@ export function ProviderWorkspaceDrawer({
               />
             )}
           </div>
-        </div>
-      </div>
+        </DrawerViewport>
+      </DrawerBodyShell>
     </Drawer>
   );
 }

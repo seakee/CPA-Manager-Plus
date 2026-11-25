@@ -1,5 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import {
+  DRAWER_WIDTH,
+  DrawerActionFooter,
+  DrawerBodyShell,
+  DrawerIdentityHeader,
+  DrawerNotice,
+  DrawerStatusPill,
+  DrawerTabPanel,
+  DrawerViewport,
+} from '@/components/common/WorkspaceDrawer';
 import { Button } from '@/components/ui/Button';
 import { Drawer } from '@/components/ui/Drawer';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
@@ -234,44 +244,74 @@ export function ProviderHealthCheckDrawer({
     }
   };
 
+  const scopeBadgeLabel =
+    scopeMode === 'single'
+      ? t('ai_providers.health_check_scope_single_badge', { defaultValue: '单渠道测活' })
+      : scopeMode === 'selected'
+        ? t('ai_providers.health_check_scope_selected_badge', { defaultValue: '已选范围' })
+        : t('ai_providers.health_check_scope_batch_badge', { defaultValue: '批量巡检' });
+
+  const scopeDescText =
+    scopeMode === 'single' && effectiveRows[0]
+      ? t('ai_providers.health_check_scope_single_desc', {
+          defaultValue: `正在检测「${effectiveRows[0].label}」的连通性与可用模型`,
+          name: effectiveRows[0].label,
+        })
+      : scopeMode === 'selected'
+        ? t('ai_providers.health_check_scope_selected_desc', {
+            defaultValue: '当前仅对已勾选的 {{count}} 个提供商执行 /models 健康巡检',
+            count: effectiveRows.length,
+          })
+        : t('ai_providers.health_check_scope_batch_desc', {
+            defaultValue:
+              '通过 /models 端点快速探测 {{count}} 个渠道连通性，完成后可按结果一键启停',
+            count: effectiveRows.length,
+          });
+
   const footer = (
-    <>
-      <Button
-        variant="secondary"
-        size="sm"
-        onClick={() => setRerunIndex((value) => value + 1)}
-        disabled={actionsDisabled || running || applying}
-      >
-        <IconRefreshCw size={14} />
-        {t('ai_providers.health_check_rerun')}
-      </Button>
-      <Button
-        variant="secondary"
-        size="sm"
-        onClick={() => void handleSetAll(true)}
-        disabled={actionsDisabled || running || applying || items.length === 0}
-      >
-        {t('ai_providers.health_check_enable_all')}
-      </Button>
-      <Button
-        variant="secondary"
-        size="sm"
-        onClick={() => void handleSetAll(false)}
-        disabled={actionsDisabled || running || applying || items.length === 0}
-      >
-        {t('ai_providers.health_check_disable_all')}
-      </Button>
-      <Button
-        size="sm"
-        onClick={() => void handleApplyResults()}
-        loading={applying}
-        disabled={
-          actionsDisabled || running || applying || !complete || resultActions.size === 0
-        }
-      >
-        {t('ai_providers.health_check_apply_results')}
-      </Button>
-    </>
+    <DrawerActionFooter
+      left={
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => setRerunIndex((value) => value + 1)}
+          disabled={actionsDisabled || running || applying}
+        >
+          <IconRefreshCw size={14} />
+          {t('ai_providers.health_check_rerun')}
+        </Button>
+      }
+      right={
+        <>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => void handleSetAll(true)}
+            disabled={actionsDisabled || running || applying || items.length === 0}
+          >
+            {t('ai_providers.health_check_enable_all')}
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => void handleSetAll(false)}
+            disabled={actionsDisabled || running || applying || items.length === 0}
+          >
+            {t('ai_providers.health_check_disable_all')}
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => void handleApplyResults()}
+            loading={applying}
+            disabled={
+              actionsDisabled || running || applying || !complete || resultActions.size === 0
+            }
+          >
+            {t('ai_providers.health_check_apply_results')}
+          </Button>
+        </>
+      }
+    />
   );
 
   return (
@@ -279,54 +319,33 @@ export function ProviderHealthCheckDrawer({
       open={open}
       onClose={onClose}
       closeDisabled={running || applying}
-      width={620}
+      width={DRAWER_WIDTH.MD}
       footer={footer}
       title={
-        <>
-          <IconShield size={18} />
-          {t('ai_providers.health_check_title')}
-        </>
+        <DrawerIdentityHeader
+          icon={<IconShield size={18} />}
+          iconBoxed
+          title={t('ai_providers.health_check_title')}
+          metaItems={[
+            <DrawerStatusPill key="scope" tone={running ? 'info' : 'neutral'}>
+              {scopeBadgeLabel}
+            </DrawerStatusPill>,
+            <span key="summary">
+              {t('ai_providers.health_check_progress_status', {
+                completed: summary.completed,
+                total: summary.total,
+              })}
+            </span>,
+          ]}
+        />
       }
     >
-      <div className={styles.root}>
-        {scopeMode === 'single' && effectiveRows[0] ? (
-          <div className={styles.scopeBanner} role="status">
-            <span className={styles.scopeBadge}>
-              {t('ai_providers.health_check_scope_single_badge', { defaultValue: '单渠道测活' })}
-            </span>
-            <span className={styles.scopeDesc}>
-              {t('ai_providers.health_check_scope_single_desc', {
-                defaultValue: `正在检测「${effectiveRows[0].label}」的连通性与可用模型`,
-                name: effectiveRows[0].label,
-              })}
-            </span>
-          </div>
-        ) : scopeMode === 'selected' ? (
-          <div className={styles.scopeBanner} role="status">
-            <span className={styles.scopeBadge}>
-              {t('ai_providers.health_check_scope_selected_badge', { defaultValue: '已选范围' })}
-            </span>
-            <span className={styles.scopeDesc}>
-              {t('ai_providers.health_check_scope_selected_desc', {
-                defaultValue: '当前仅对已勾选的 {{count}} 个提供商执行 /models 健康巡检',
-                count: effectiveRows.length,
-              })}
-            </span>
-          </div>
-        ) : (
-          <div className={styles.scopeBanner} role="status">
-            <span className={styles.scopeBadge}>
-              {t('ai_providers.health_check_scope_batch_badge', { defaultValue: '批量巡检' })}
-            </span>
-            <span className={styles.scopeDesc}>
-              {t('ai_providers.health_check_scope_batch_desc', {
-                defaultValue:
-                  '通过 /models 端点快速探测 {{count}} 个渠道连通性，完成后可按结果一键启停',
-                count: effectiveRows.length,
-              })}
-            </span>
-          </div>
-        )}
+      <DrawerBodyShell>
+        <DrawerViewport>
+          <DrawerTabPanel className={styles.root}>
+            <DrawerNotice tone="info" role="status" title={scopeBadgeLabel}>
+              {scopeDescText}
+            </DrawerNotice>
         <section className={styles.progressSection}>
           <div className={styles.progressHeader}>
             <div>
@@ -490,7 +509,9 @@ export function ProviderHealthCheckDrawer({
             })}
           </div>
         )}
-      </div>
+          </DrawerTabPanel>
+        </DrawerViewport>
+      </DrawerBodyShell>
     </Drawer>
   );
 }

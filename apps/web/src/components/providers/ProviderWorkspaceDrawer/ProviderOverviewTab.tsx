@@ -4,9 +4,17 @@ import {
   MetricSummaryGrid,
   type MetricSummaryCardProps,
 } from '@/components/common/MetricSummaryCard';
+import {
+  DrawerDefinitionList,
+  DrawerEmptyBox,
+  DrawerNotice,
+  DrawerScopePill,
+  DrawerSectionCard,
+  DrawerTabPanel,
+} from '@/components/common/WorkspaceDrawer';
+import { DrawerRecentStatusCard } from '@/components/common/WorkspaceDrawer/DrawerRecentStatusCard';
 import { Button } from '@/components/ui/Button';
 import {
-  IconActivity,
   IconChartLine,
   IconCopy,
   IconEye,
@@ -20,7 +28,6 @@ import { coolingPolicyFromOverride } from '@/types';
 import { copyToClipboard } from '@/utils/clipboard';
 import { normalizeCredentialWeight } from '@/utils/credentialWeight';
 import { maskApiKey } from '@/utils/format';
-import { ProviderStatusBar } from '../ProviderStatusBar';
 import {
   formatCompactHistoryUsd,
   formatCompactTimestamp,
@@ -146,7 +153,6 @@ export function ProviderOverviewTab({
       ? [failureStatusPrefix, failureSummaryText].filter(Boolean).join(' · ')
       : null;
 
-  const recentWindowTotal = row.statusData.totalSuccess + row.statusData.totalFailure;
   const hasActivity = hasHistoryMetrics || totalCalls > 0;
 
   const historyCards = useMemo((): MetricSummaryCardProps[] => {
@@ -312,145 +318,80 @@ export function ProviderOverviewTab({
   }, [row, t]);
 
   return (
-    <div className={styles.drawerTabPanel}>
+    <DrawerTabPanel>
       {!row.enabled && (
-        <div className={styles.drawerDisabledNotice} role="status">
-          <div className={styles.drawerDisabledText}>
-            <strong>
-              {t('ai_providers.drawer_disabled_notice_title', { defaultValue: '当前提供商已停用' })}
-            </strong>
-            <p>
-              {t('ai_providers.drawer_disabled_notice_desc', {
-                defaultValue: '该提供商当前不会参与路由分发；修改模型或配置时将保持停用状态。',
-              })}
-            </p>
-          </div>
-          {onToggleEnabled && (
-            <Button
-              variant="secondary"
-              size="xs"
-              disabled={actionsDisabled || toggleDisabled || isDirty || saving}
-              onClick={() => onToggleEnabled(row, true)}
-            >
-              {t('ai_providers.drawer_quick_enable', { defaultValue: '立即启用' })}
-            </Button>
-          )}
-        </div>
+        <DrawerNotice
+          tone="danger"
+          role="status"
+          title={t('ai_providers.drawer_disabled_notice_title', {
+            defaultValue: '当前提供商已停用',
+          })}
+          action={
+            onToggleEnabled ? (
+              <Button
+                variant="secondary"
+                size="xs"
+                disabled={actionsDisabled || toggleDisabled || isDirty || saving}
+                onClick={() => onToggleEnabled(row, true)}
+              >
+                {t('ai_providers.drawer_quick_enable', { defaultValue: '立即启用' })}
+              </Button>
+            ) : null
+          }
+        >
+          {t('ai_providers.drawer_disabled_notice_desc', {
+            defaultValue: '该提供商当前不会参与路由分发；修改模型或配置时将保持停用状态。',
+          })}
+        </DrawerNotice>
       )}
 
-      {/* 1. 最近状态（对齐并复用凭证详情概览 Recent Status 布局与语义） */}
-      <section className={styles.overviewRefCard} data-overview-section="recent-status">
-        <div className={styles.overviewRefHeader}>
-          <div className={styles.overviewRefHeading}>
-            <span className={styles.overviewRefIcon} aria-hidden="true">
-              <IconActivity size={18} />
-            </span>
-            <h4>
-              {t('accounts.detail_overview_recent_status_title', { defaultValue: '最近状态' })}
-            </h4>
-          </div>
-          <span className={styles.overviewScopePill}>
-            {t('accounts.detail_overview_recent_status_scope', {
-              defaultValue: '最近 200 分钟 · 20 个 10 分钟区间',
-            })}
-          </span>
-        </div>
+      <DrawerRecentStatusCard
+        title={t('accounts.detail_overview_recent_status_title', { defaultValue: '最近状态' })}
+        scopeLabel={t('accounts.detail_overview_recent_status_scope', {
+          defaultValue: '最近 200 分钟 · 20 个 10 分钟区间',
+        })}
+        statusData={row.statusData}
+        successLabel={t('accounts.detail_overview_recent_status_success', {
+          defaultValue: '成功请求',
+        })}
+        failureLabel={t('accounts.detail_overview_recent_status_failure', {
+          defaultValue: '失败请求',
+        })}
+        timelineLabel={t('accounts.detail_overview_recent_status_timeline', {
+          defaultValue: '请求状态时间线',
+        })}
+        timelineHint={t('accounts.detail_overview_recent_status_timeline_hint', {
+          defaultValue: '每段 10 分钟',
+        })}
+        unavailableMessage={
+          row.usageStatsCoverage === 'unavailable'
+            ? t('ai_providers.overview_usage_unavailable', {
+                defaultValue: '当前提供商未配置可用于索引统计的密钥，暂无近期请求时序数据。',
+              })
+            : undefined
+        }
+        emptyMessage={t('accounts.detail_overview_recent_status_empty', {
+          defaultValue: '最近约 200 分钟没有请求记录。',
+        })}
+        failureBannerTitle={t('accounts.detail_overview_recent_status_message', {
+          defaultValue: '当前状态说明',
+        })}
+        failureBannerMessage={failureBannerText || undefined}
+        coverageNotice={
+          row.usageStatsCoverage === 'partial'
+            ? t('ai_providers.overview_usage_partial', {
+                defaultValue: '部分密钥未配置明文凭据，仅展示可追踪密钥的聚合统计。',
+              })
+            : undefined
+        }
+      />
 
-        {row.usageStatsCoverage === 'unavailable' ? (
-          <div className={styles.overviewEmptyState}>
-            {t('ai_providers.overview_usage_unavailable', {
-              defaultValue: '当前提供商未配置可用于索引统计的密钥，暂无近期请求时序数据。',
-            })}
-          </div>
-        ) : (
-          <>
-            <div className={styles.overviewRecentStatusLayout}>
-              <div className={styles.overviewRecentStatusStats}>
-                <div
-                  className={`${styles.overviewRecentStatusMetric} ${styles.overviewRecentStatusMetricSuccess}`}
-                >
-                  <span>
-                    {t('accounts.detail_overview_recent_status_success', {
-                      defaultValue: '成功请求',
-                    })}
-                  </span>
-                  <strong>{row.statusData.totalSuccess.toLocaleString()}</strong>
-                </div>
-                <div
-                  className={`${styles.overviewRecentStatusMetric} ${styles.overviewRecentStatusMetricFailure}`}
-                >
-                  <span>
-                    {t('accounts.detail_overview_recent_status_failure', {
-                      defaultValue: '失败请求',
-                    })}
-                  </span>
-                  <strong>{row.statusData.totalFailure.toLocaleString()}</strong>
-                </div>
-              </div>
-
-              <div className={styles.overviewRecentStatusTimeline}>
-                <div className={styles.overviewRecentStatusTimelineHeader}>
-                  <span>
-                    {t('accounts.detail_overview_recent_status_timeline', {
-                      defaultValue: '请求状态时间线',
-                    })}
-                  </span>
-                  <span>
-                    {t('accounts.detail_overview_recent_status_timeline_hint', {
-                      defaultValue: '每段 10 分钟',
-                    })}
-                  </span>
-                </div>
-                <div className={styles.overviewStatusBarHost}>
-                  <ProviderStatusBar statusData={row.statusData} />
-                </div>
-              </div>
-            </div>
-
-            {recentWindowTotal === 0 ? (
-              <div className={styles.overviewEmptyState}>
-                {t('accounts.detail_overview_recent_status_empty', {
-                  defaultValue: '最近约 200 分钟没有请求记录。',
-                })}
-              </div>
-            ) : null}
-
-            {failureBannerText ? (
-              <div className={styles.overviewRecentStatusMessage}>
-                <span>
-                  {t('accounts.detail_overview_recent_status_message', {
-                    defaultValue: '当前状态说明',
-                  })}
-                </span>
-                <p>{failureBannerText}</p>
-              </div>
-            ) : null}
-
-            {row.usageStatsCoverage === 'partial' ? (
-              <p className={styles.coverageNotice}>
-                {t('ai_providers.overview_usage_partial', {
-                  defaultValue: '部分密钥未配置明文凭据，仅展示可追踪密钥的聚合统计。',
-                })}
-              </p>
-            ) : null}
-          </>
-        )}
-      </section>
-
-      {/* 2. 历史用量（复用凭证详情概览 MetricSummaryGrid compact 汇总卡片） */}
-      <section className={styles.overviewRefCard} data-overview-section="activity">
-        <div className={styles.overviewRefHeader}>
-          <div className={styles.overviewRefHeading}>
-            <span className={styles.overviewRefIcon} aria-hidden="true">
-              <IconChartLine size={18} />
-            </span>
-            <h4>{t('ai_providers.card_history_title', { defaultValue: '历史用量' })}</h4>
-          </div>
-          <span
-            className={`${styles.overviewScopePill} ${
-              !hasHistoryMetrics && hasActivity ? styles.overviewScopePillFallback : ''
-            }`}
-          >
+      <DrawerSectionCard
+        variant="highlight"
+        icon={<IconChartLine size={18} />}
+        title={t('ai_providers.card_history_title', { defaultValue: '历史用量' })}
+        metaActions={
+          <DrawerScopePill fallback={!hasHistoryMetrics && hasActivity}>
             {hasHistoryMetrics
               ? t('ai_providers.overview_history_scope_monitoring', {
                   defaultValue: '请求监控 · 历史累计',
@@ -458,9 +399,10 @@ export function ProviderOverviewTab({
               : t('accounts.detail_overview_activity_scope_recent', {
                   defaultValue: '近期快照 · 回退数据',
                 })}
-          </span>
-        </div>
-
+          </DrawerScopePill>
+        }
+        dataAttributes={{ 'data-overview-section': 'activity' }}
+      >
         {hasActivity ? (
           <MetricSummaryGrid
             cards={historyCards}
@@ -468,28 +410,21 @@ export function ProviderOverviewTab({
             columns={Math.min(historyCards.length, 5)}
           />
         ) : (
-          <div className={styles.overviewEmptyState}>
+          <DrawerEmptyBox>
             {t('ai_providers.overview_history_empty', {
               defaultValue: '暂无历史用量记录。',
             })}
-          </div>
+          </DrawerEmptyBox>
         )}
-      </section>
+      </DrawerSectionCard>
 
-      {/* 2. 生效路由、调度与凭据（扁平键值列表，消除重复与嵌套灰盒） */}
-      <section className={styles.sectionCard}>
-        <div className={styles.sectionHeader}>
-          <div className={styles.sectionHeading}>
-            <IconSlidersHorizontal size={15} />
-            <h4>
-              {t('ai_providers.overview_routing_credentials_title', {
-                defaultValue: '生效路由、调度与凭据',
-              })}
-            </h4>
-          </div>
-        </div>
-
-        <dl className={styles.overviewDl}>
+      <DrawerSectionCard
+        icon={<IconSlidersHorizontal size={15} />}
+        title={t('ai_providers.overview_routing_credentials_title', {
+          defaultValue: '生效路由、调度与凭据',
+        })}
+      >
+        <DrawerDefinitionList>
           <div className={styles.overviewDlRow}>
             <dt className={styles.overviewDt}>
               {t('ai_providers.base_url_label', { defaultValue: 'Base URL' })}
@@ -711,21 +646,19 @@ export function ProviderOverviewTab({
               </dd>
             </div>
           )}
-        </dl>
-      </section>
+        </DrawerDefinitionList>
+      </DrawerSectionCard>
 
-      {/* 3. 多密钥池明细（仅 OpenAI 兼容多密钥渠道展示） */}
       {row.kind === 'openai' && (
-        <section className={styles.sectionCard}>
-          <div className={styles.sectionHeader}>
-            <div className={styles.sectionHeading}>
-              <IconKey size={15} />
-              <h4>{t('ai_providers.overview_keys_title', { defaultValue: '鉴权密钥明细' })}</h4>
-            </div>
+        <DrawerSectionCard
+          icon={<IconKey size={15} />}
+          title={t('ai_providers.overview_keys_title', { defaultValue: '鉴权密钥明细' })}
+          metaActions={
             <Button variant="ghost" size="xs" onClick={() => onSwitchTab('connectivity')}>
               {t('ai_providers.overview_go_connectivity_link', { defaultValue: '去测活 →' })}
             </Button>
-          </div>
+          }
+        >
 
           <div className={styles.keyList}>
             {(row.raw.apiKeyEntries ?? []).length === 0 ? (
@@ -810,20 +743,18 @@ export function ProviderOverviewTab({
               })
             )}
           </div>
-        </section>
+        </DrawerSectionCard>
       )}
 
-      {/* 4. 模型覆盖摘要卡（统一 alias → upstream 方向，隐藏空排除规则） */}
-      <section className={styles.sectionCard}>
-        <div className={styles.sectionHeader}>
-          <div className={styles.sectionHeading}>
-            <IconModelCluster size={15} />
-            <h4>{t('ai_providers.overview_models_title', { defaultValue: '模型覆盖摘要' })}</h4>
-          </div>
+      <DrawerSectionCard
+        icon={<IconModelCluster size={15} />}
+        title={t('ai_providers.overview_models_title', { defaultValue: '模型覆盖摘要' })}
+        metaActions={
           <Button variant="ghost" size="xs" onClick={() => onSwitchTab('models')}>
             {t('ai_providers.overview_manage_models_link', { defaultValue: '管理模型 →' })}
           </Button>
-        </div>
+        }
+      >
 
         <div className={styles.badgeList}>
           <span className={styles.infoPill}>
@@ -885,7 +816,7 @@ export function ProviderOverviewTab({
             )}
           </div>
         )}
-      </section>
-    </div>
+      </DrawerSectionCard>
+    </DrawerTabPanel>
   );
 }
