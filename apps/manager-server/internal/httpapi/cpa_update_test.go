@@ -83,10 +83,21 @@ func (s *cpaUpdateRuntimeStub) ObserveUpdateOperation(_ context.Context, request
 	s.mu.Lock()
 	fn := s.observeFn
 	s.mu.Unlock()
-	if fn == nil {
-		panic("unexpected Runtime update operation observation")
+	if fn != nil {
+		return fn(request)
 	}
-	return fn(request)
+	created := time.Date(2026, 9, 18, 9, 0, 0, 0, time.UTC)
+	completed := created.Add(time.Second)
+	return model.RuntimeUpdateOperationObservation{
+		OperationID:       request.OperationID,
+		OperationType:     request.OperationType,
+		RuntimeIdentity:   request.ExpectedRuntimeIdentity,
+		RuntimeGeneration: request.ExpectedRuntimeGeneration,
+		State:             model.RuntimeOperationSucceeded,
+		CreatedAt:         created,
+		UpdatedAt:         completed,
+		CompletedAt:       &completed,
+	}, nil
 }
 
 func cpaUpdateOperation(request model.RuntimeMutationRequest, operationType model.RuntimeOperationType) model.RuntimeOperationResult {
@@ -119,7 +130,7 @@ func newCPAUpdateServer(t *testing.T, runtimeClient runtimeservice.RuntimeClient
 		SchemaVersion: 1,
 		LastAttemptAt: checkedAt,
 		LastSuccessAt: checkedAt,
-		TargetVersion: "7.3.4",
+		TargetVersion: "8.0.56",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -129,7 +140,8 @@ func newCPAUpdateServer(t *testing.T, runtimeClient runtimeservice.RuntimeClient
 	}
 
 	server := New(cfg, database, collector.NewManager(cfg, database))
-	server.AppContext().CPAUpdateService = cpaupdateservice.New(database, runtimeClient, model.RuntimeModeEmbedded)
+	server.AppContext().CPAUpdateService = cpaupdateservice.New(database, runtimeClient, model.RuntimeModeEmbedded).
+		WithProductCompleteProbe(func(context.Context) (bool, error) { return true, nil })
 	return server
 }
 
@@ -139,11 +151,11 @@ func cpaUpdateReadyStatus() model.RuntimeObservedStatus {
 		Generation:         1,
 		ProtocolVersion:    "v1",
 		State:              model.RuntimeStateReady,
-		CPAObservedVersion: "7.3.3",
+		CPAObservedVersion: "8.0.55",
 		ActiveGatewayArtifact: &model.ActiveGatewayArtifact{
 			Engine:     "cpa",
 			ArtifactID: cpaUpdateTestArtifactID,
-			Version:    "7.3.3",
+			Version:    "8.0.55",
 		},
 		Capabilities: model.RuntimeCapabilities{
 			model.RuntimeCapabilityPrepareUpdate,
@@ -185,7 +197,7 @@ func TestCPAUpdateEndpointsRequirePanelAuthAndDisableCaching(t *testing.T) {
 					prepareFn: func(request model.RuntimePrepareUpdateRequest) (model.RuntimeOperationResult, error) {
 						return cpaUpdateOperation(request.RuntimeMutationRequest, model.RuntimeOperationPrepareUpdate), nil
 					},
-				}, model.RuntimeModeEmbedded)
+				}, model.RuntimeModeEmbedded).WithProductCompleteProbe(func(context.Context) (bool, error) { return true, nil })
 			}
 			if strings.HasSuffix(test.path, "/activate") {
 				server.AppContext().CPAUpdateService = cpaupdateservice.New(server.AppContext().Store, &cpaUpdateRuntimeStub{
@@ -193,7 +205,7 @@ func TestCPAUpdateEndpointsRequirePanelAuthAndDisableCaching(t *testing.T) {
 					activateFn: func(request model.RuntimeActivateUpdateRequest) (model.RuntimeOperationResult, error) {
 						return cpaUpdateOperation(request.RuntimeMutationRequest, model.RuntimeOperationActivateUpdate), nil
 					},
-				}, model.RuntimeModeEmbedded)
+				}, model.RuntimeModeEmbedded).WithProductCompleteProbe(func(context.Context) (bool, error) { return true, nil })
 			}
 			server.Handler().ServeHTTP(response, request)
 			if response.Code != http.StatusOK {
@@ -216,7 +228,7 @@ func TestCPAUpdateEndpointsRequirePanelAuthAndDisableCaching(t *testing.T) {
 }
 
 func cpaUpdateMutationBody() string {
-	return `{"request_id":"web-0192ac","target_version":"7.3.4","expected_active_artifact_id":"` + cpaUpdateTestArtifactID + `"}`
+	return `{"request_id":"web-0192ac","target_version":"8.0.56","expected_active_artifact_id":"` + cpaUpdateTestArtifactID + `"}`
 }
 
 func TestCPAUpdateEndpointReturns503WithoutLeakingRuntimeError(t *testing.T) {
@@ -253,17 +265,17 @@ func TestCPAUpdateMutationStrictBody(t *testing.T) {
 		"array":              "[]",
 		"unknown field":      strings.TrimSuffix(valid, "}") + `,"latest":true}`,
 		"duplicate request":  strings.Replace(valid, `"request_id":"web-0192ac"`, `"request_id":"web-0192ac","request_id":"other"`, 1),
-		"duplicate target":   strings.Replace(valid, `"target_version":"7.3.4"`, `"target_version":"7.3.4","target_version":"7.3.5"`, 1),
+		"duplicate target":   strings.Replace(valid, `"target_version":"8.0.56"`, `"target_version":"8.0.56","target_version":"8.0.57"`, 1),
 		"duplicate artifact": strings.Replace(valid, `"expected_active_artifact_id":"`+cpaUpdateTestArtifactID+`"`, `"expected_active_artifact_id":"`+cpaUpdateTestArtifactID+`","expected_active_artifact_id":"`+cpaUpdateTestArtifactID+`"`, 1),
 		"missing request":    strings.Replace(valid, `"request_id":"web-0192ac",`, "", 1),
-		"missing target":     strings.Replace(valid, `,"target_version":"7.3.4"`, "", 1),
+		"missing target":     strings.Replace(valid, `,"target_version":"8.0.56"`, "", 1),
 		"missing artifact":   strings.Replace(valid, `,"expected_active_artifact_id":"`+cpaUpdateTestArtifactID+`"`, "", 1),
 		"null field":         strings.Replace(valid, `"request_id":"web-0192ac"`, `"request_id":null`, 1),
 		"field array":        strings.Replace(valid, `"request_id":"web-0192ac"`, `"request_id":[]`, 1),
 		"trailing JSON":      valid + `{}`,
 		"multiple values":    valid + ` null`,
 		"invalid request ID": strings.Replace(valid, "web-0192ac", "foo/bar", 1),
-		"invalid target":     strings.Replace(valid, "7.3.4", "7.3.4-rc.1", 1),
+		"invalid target":     strings.Replace(valid, "8.0.56", "8.0.56-rc.1", 1),
 		"invalid artifact":   strings.Replace(valid, cpaUpdateTestArtifactID, "sha256:not-a-digest", 1),
 		"invalid UTF-8":      string(append([]byte(`{"request_id":"`), 0xff)),
 		"oversized":          valid + strings.Repeat(" ", 2049-len(valid)),
@@ -452,18 +464,28 @@ func TestCPAUpdateMutationMapsAdmissionExecutionAndUnavailableErrors(t *testing.
 
 func TestCPAUpdateActivateLostResponseRetryReturnsAlreadyApplied(t *testing.T) {
 	status := cpaUpdateReadyStatus()
-	status.CPAObservedVersion = "7.3.4"
-	status.ActiveGatewayArtifact.Version = "7.3.4"
+	status.CPAObservedVersion = "8.0.56"
+	status.ActiveGatewayArtifact.Version = "8.0.56"
 	status.ActiveGatewayArtifact.ArtifactID = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-	runtimeClient := &cpaUpdateRuntimeStub{status: status}
+	runtimeClient := &cpaUpdateRuntimeStub{
+		status: status,
+		activateFn: func(request model.RuntimeActivateUpdateRequest) (model.RuntimeOperationResult, error) {
+			return cpaUpdateOperation(request.RuntimeMutationRequest, model.RuntimeOperationActivateUpdate), nil
+		},
+	}
 	server := newCPAUpdateServer(t, runtimeClient)
 	response := submitCPAUpdateMutation(t, server, "/usage-service/runtime/updates/activate", cpaUpdateMutationBody())
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"already_applied":true`) ||
 		!strings.Contains(response.Body.String(), `"state":"succeeded"`) {
 		t.Fatalf("response = %d, body=%s", response.Code, response.Body.String())
 	}
-	if runtimeClient.activateCalls.Load() != 0 {
-		t.Fatalf("ActivateUpdate calls = %d", runtimeClient.activateCalls.Load())
+	if runtimeClient.activateCalls.Load() != 1 {
+		t.Fatalf("ActivateUpdate calls after restart lost-response retry = %d, want 1", runtimeClient.activateCalls.Load())
+	}
+	second := submitCPAUpdateMutation(t, server, "/usage-service/runtime/updates/activate", cpaUpdateMutationBody())
+	if second.Code != http.StatusOK || !strings.Contains(second.Body.String(), `"already_applied":true`) ||
+		runtimeClient.activateCalls.Load() != 1 {
+		t.Fatalf("second retry response = %d %s, ActivateUpdate calls = %d", second.Code, second.Body.String(), runtimeClient.activateCalls.Load())
 	}
 }
 

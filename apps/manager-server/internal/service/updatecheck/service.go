@@ -3,12 +3,15 @@ package updatecheck
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -20,17 +23,19 @@ type Store interface {
 	DismissUpdateNotification(context.Context, string) error
 }
 type State struct {
-	SchemaVersion int                    `json:"schema_version"`
-	Preference    string                 `json:"channel_preference"`
-	LastAttempt   time.Time              `json:"last_attempt_at"`
-	LastSuccess   time.Time              `json:"last_success_at"`
-	LastError     string                 `json:"last_error,omitempty"`
-	Index         *Index                 `json:"index,omitempty"`
-	Releases      map[string]ReleaseInfo `json:"releases"`
+	SchemaVersion  int                    `json:"schema_version"`
+	Preference     string                 `json:"channel_preference"`
+	LastAttempt    time.Time              `json:"last_attempt_at"`
+	LastSuccess    time.Time              `json:"last_success_at"`
+	LastError      string                 `json:"last_error,omitempty"`
+	Index          *Index                 `json:"index,omitempty"`
+	Releases       map[string]ReleaseInfo `json:"releases"`
+	ReleaseDigests map[string]string      `json:"release_digests,omitempty"`
 }
 type Status struct {
 	CurrentVersion    string       `json:"current_version"`
 	SourceCommit      string       `json:"source_commit"`
+	DeploymentVariant string       `json:"deployment_variant"`
 	ChannelPreference string       `json:"channel_preference"`
 	Channel           string       `json:"channel"`
 	Automatic         bool         `json:"automatic"`
@@ -51,13 +56,23 @@ type Service struct {
 	state             State
 	client            *http.Client
 	indexURL          string
+	releaseBaseURL    string
 	releaseURL        func(string) string
+	detectDeployment  func() string
 	now               func() time.Time
 }
 
 func New(store Store, current, commit string, automatic bool) *Service {
-	return &Service{store: store, current: current, commit: commit, automatic: automatic, now: time.Now, indexURL: IndexURL,
-		releaseURL: func(tag string) string { return Repository + "/releases/download/" + tag + "/release-info.json" },
+	return &Service{
+		store:          store,
+		current:        current,
+		commit:         commit,
+		automatic:      automatic,
+		state:          State{SchemaVersion: 1, Preference: "auto", Releases: map[string]ReleaseInfo{}, ReleaseDigests: map[string]string{}},
+		now:            time.Now,
+		indexURL:       IndexURL,
+		releaseBaseURL: Repository,
+		detectDeployment: DetectDeploymentVariant,
 		client: &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			h := req.URL.Host
 			if len(via) >= 5 || req.URL.Scheme != "https" || req.URL.User != nil || (h != "github.com" && h != "release-assets.githubusercontent.com" && h != "objects.githubusercontent.com" && h != "raw.githubusercontent.com") {
@@ -74,6 +89,9 @@ func (s *Service) load(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if st.ReleaseDigests == nil {
+		st.ReleaseDigests = map[string]string{}
+	}
 	s.state = st
 	s.loaded = true
 	return nil
@@ -84,13 +102,38 @@ func (s *Service) readState(ctx context.Context) (State, error) {
 	if err != nil {
 		return State{}, err
 	}
-	st := State{SchemaVersion: 1, Preference: "auto", Releases: map[string]ReleaseInfo{}}
+	st := State{SchemaVersion: 1, Preference: "auto", Releases: map[string]ReleaseInfo{}, ReleaseDigests: map[string]string{}}
 	if len(data) > 0 {
 		if err = json.Unmarshal(data, &st); err != nil {
 			return State{}, errors.New("invalid persisted update state")
 		}
 		if st.SchemaVersion != 1 || !validPreference(st.Preference) || st.Releases == nil {
 			return State{}, errors.New("unsupported persisted update state")
+		}
+		clearedLegacyIndex := false
+		if st.Index != nil && st.Index.SchemaVersion == 1 {
+			st.Index = nil
+			st.Releases = map[string]ReleaseInfo{}
+			st.ReleaseDigests = map[string]string{}
+			clearedLegacyIndex = true
+		} else if len(st.Releases) > 0 {
+			allLegacy := true
+			for tag, info := range st.Releases {
+				if info.SchemaVersion == 1 {
+					delete(st.Releases, tag)
+					delete(st.ReleaseDigests, tag)
+				} else {
+					allLegacy = false
+				}
+			}
+			if st.Index == nil && allLegacy {
+				clearedLegacyIndex = true
+			}
+		}
+		if clearedLegacyIndex {
+			st.LastAttempt = time.Time{}
+			st.LastSuccess = time.Time{}
+			st.LastError = ""
 		}
 		if st.Index != nil {
 			if err = st.Index.Validate(); err != nil {
@@ -102,6 +145,18 @@ func (s *Service) readState(ctx context.Context) (State, error) {
 				return State{}, err
 			}
 		}
+		for tag, digest := range st.ReleaseDigests {
+			if _, ok := st.Releases[tag]; !ok {
+				delete(st.ReleaseDigests, tag)
+				continue
+			}
+			if !sha256Pattern.MatchString(digest) {
+				return State{}, errors.New("unsupported persisted update state")
+			}
+		}
+	}
+	if st.ReleaseDigests == nil {
+		st.ReleaseDigests = map[string]string{}
 	}
 	return st, nil
 }
@@ -133,8 +188,19 @@ func (s *Service) channel() string {
 	}
 	return v.Stage
 }
+func (s *Service) deploymentVariant() string {
+	if s.detectDeployment == nil {
+		return DeploymentVariantUnknown
+	}
+	switch v := s.detectDeployment(); v {
+	case DeploymentVariantDockerFull, DeploymentVariantDockerSlim, DeploymentVariantNative, DeploymentVariantUnknown:
+		return v
+	default:
+		return DeploymentVariantUnknown
+	}
+}
 func (s *Service) snapshot() Status {
-	out := Status{CurrentVersion: s.current, SourceCommit: s.commit, ChannelPreference: s.state.Preference, Channel: s.channel(), Automatic: s.automatic, State: "never_checked", LastSuccess: s.state.LastSuccess, LastError: s.state.LastError, Stale: s.state.LastSuccess.IsZero() || s.now().Sub(s.state.LastSuccess) > 7*time.Hour}
+	out := Status{CurrentVersion: s.current, SourceCommit: s.commit, DeploymentVariant: s.deploymentVariant(), ChannelPreference: s.state.Preference, Channel: s.channel(), Automatic: s.automatic, State: "never_checked", LastSuccess: s.state.LastSuccess, LastError: s.state.LastError, Stale: s.state.LastSuccess.IsZero() || s.now().Sub(s.state.LastSuccess) > 7*time.Hour}
 	if s.persistenceFailed {
 		out.LastError = "update state persistence failed"
 	}
@@ -157,7 +223,7 @@ func (s *Service) snapshot() Status {
 		out.State = "ahead_of_channel"
 		return out
 	}
-	info, ok := s.state.Releases[target.Version]
+	info, ok := s.cachedRelease(target)
 	if !ok {
 		return out
 	}
@@ -233,6 +299,10 @@ func (s *Service) persistChannelLocked(ctx context.Context, p string) error {
 	return nil
 }
 func (s *Service) fetch(ctx context.Context, raw string, dst any) error {
+	return s.fetchVerified(ctx, raw, "", dst)
+}
+
+func (s *Service) fetchVerified(ctx context.Context, raw, expectedSHA256 string, dst any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, raw, nil)
 	if err != nil {
 		return err
@@ -252,6 +322,12 @@ func (s *Service) fetch(ctx context.Context, raw string, dst any) error {
 	}
 	if len(data) > 256*1024 {
 		return errors.New("update metadata too large")
+	}
+	if expectedSHA256 != "" {
+		sum := sha256.Sum256(data)
+		if "sha256:"+hex.EncodeToString(sum[:]) != expectedSHA256 {
+			return errors.New("release metadata digest mismatch")
+		}
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	if err = dec.Decode(dst); err != nil {
@@ -297,6 +373,20 @@ func (s *Service) checkLocked(ctx context.Context, force bool) (Status, error) {
 	}
 	return s.snapshot(), nil
 }
+func (s *Service) releaseInfoURL(target *Target) string {
+	if s.releaseURL != nil {
+		return s.releaseURL(target.Version)
+	}
+	base := strings.TrimRight(s.releaseBaseURL, "/")
+	if base == "" {
+		base = Repository
+	}
+	relPath := strings.TrimLeft(target.ReleaseInfoPath, "/")
+	if relPath == "" {
+		relPath = "releases/download/" + target.Version + "/release-info.json"
+	}
+	return base + "/" + relPath
+}
 func (s *Service) discover(ctx context.Context) error {
 	cur, err := ParseVersion(s.current)
 	if err != nil || cur.Stage == "" {
@@ -325,20 +415,39 @@ func (s *Service) discover(ctx context.Context) error {
 	if target != nil {
 		v, _ := ParseVersion(target.Version)
 		if Compare(v, cur) >= 0 {
-			if _, ok := s.state.Releases[target.Version]; !ok {
+			if _, ok := s.cachedRelease(target); !ok {
 				var info ReleaseInfo
-				if err = s.fetch(ctx, s.releaseURL(target.Version), &info); err != nil {
+				if err = s.fetchVerified(ctx, s.releaseInfoURL(target), target.ReleaseInfoSHA256, &info); err != nil {
 					return err
 				}
 				if err = info.Validate(target.Version); err != nil {
 					return err
 				}
+				if s.state.ReleaseDigests == nil {
+					s.state.ReleaseDigests = map[string]string{}
+				}
 				s.state.Releases[target.Version] = info
+				if target.ReleaseInfoSHA256 != "" {
+					s.state.ReleaseDigests[target.Version] = target.ReleaseInfoSHA256
+				}
 			}
 		}
 	}
 	s.state.Index = &idx
 	return nil
+}
+func (s *Service) cachedRelease(target *Target) (ReleaseInfo, bool) {
+	if target == nil {
+		return ReleaseInfo{}, false
+	}
+	info, ok := s.state.Releases[target.Version]
+	if !ok {
+		return ReleaseInfo{}, false
+	}
+	if target.ReleaseInfoSHA256 != "" && s.state.ReleaseDigests[target.Version] != target.ReleaseInfoSHA256 {
+		return ReleaseInfo{}, false
+	}
+	return info, true
 }
 func (s *Service) Claim(ctx context.Context) (*ReleaseInfo, error) {
 	s.mu.Lock()

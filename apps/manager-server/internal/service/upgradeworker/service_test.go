@@ -130,6 +130,11 @@ func newLegacySourceAndCopiedTarget(t *testing.T, withParityGap bool) (sourceRoo
 			}
 		}
 	}
+	if _, err := conn.ExecContext(context.Background(), `pragma user_version = 0`); err != nil {
+		_ = conn.Close()
+		_ = db.Close()
+		t.Fatalf("reset v2 fixture user_version: %v", err)
+	}
 	_ = conn.Close()
 	if err := db.Close(); err != nil {
 		t.Fatalf("close source db: %v", err)
@@ -1813,6 +1818,11 @@ func TestWorkerReconcileTruncated400PendingDaysSucceedsWithAcknowledgeAllMismatc
 				t.Fatalf("drop table %s: %v", name, err)
 			}
 		}
+	}
+	if _, err := conn.ExecContext(ctx, `pragma user_version = 0`); err != nil {
+		_ = conn.Close()
+		_ = srcDB.Close()
+		t.Fatalf("reset v2 fixture user_version: %v", err)
 	}
 	_ = conn.Close()
 	if err := srcDB.Close(); err != nil {

@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
+	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 )
 
 const rollbackRecoveryMethod = "sqlite-rollback-journal"
@@ -108,7 +109,13 @@ func recoverRollbackJournal(ctx context.Context, l Layout) error {
 		if count != 1 {
 			return errors.New("recovered SQLite integrity check returned no unique ok result")
 		}
-		return rows.Close()
+		if closeErr := rows.Close(); closeErr != nil {
+			return closeErr
+		}
+		if compatErr := managersqlite.CheckSchemaCompatibility(db); compatErr != nil {
+			return compatErr
+		}
+		return nil
 	}()
 	err = errors.Join(err, db.Close())
 	if err != nil {
@@ -166,6 +173,9 @@ func validateRollbackJournal(ctx context.Context, l Layout) error {
 	if pageSize == 1 {
 		pageSize = 65536
 	}
+	var committedHeader [100]byte
+	copy(committedHeader[:], dbHeader[:])
+	seenPage1Preimage := false
 	magic := []byte{0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7}
 	var offset int64
 	var initialPages, sectorSize uint32
@@ -225,6 +235,10 @@ func validateRollbackJournal(ctx context.Context, l Layout) error {
 			if checksum != binary.BigEndian.Uint32(frame[4+int(size):]) {
 				return errors.New("rollback journal page checksum mismatch")
 			}
+			if page == 1 && !seenPage1Preimage {
+				copy(committedHeader[:], frame[4:104])
+				seenPage1Preimage = true
+			}
 			if unsynced {
 				current := make([]byte, int(size))
 				if _, err := db.ReadAt(current, int64(page-1)*int64(size)); err != nil {
@@ -237,6 +251,10 @@ func validateRollbackJournal(ctx context.Context, l Layout) error {
 		}
 		end := start + int64(n)*frameSize
 		if end == info.Size() {
+			userVersion := int64(int32(binary.BigEndian.Uint32(committedHeader[60:64])))
+			if userVersion < 0 || userVersion > managersqlite.CurrentSchemaGeneration {
+				return fmt.Errorf("%w: user_version=%d outside supported generation 0..%d", managersqlite.ErrIncompatibleNewerSchema, userVersion, managersqlite.CurrentSchemaGeneration)
+			}
 			return nil
 		}
 		offset = ((end + int64(sector) - 1) / int64(sector)) * int64(sector)

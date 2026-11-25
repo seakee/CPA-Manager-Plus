@@ -23,21 +23,34 @@ import { formatDateTime } from '@/utils/format';
 import { useManagerUpdates } from './ManagerUpdates';
 import { CPAUpdateCard } from './CPAUpdateCard';
 import { useCPAUpdateFlow } from './useCPAUpdateFlow';
-import type { ReleaseInfo, UpdateChannel, UpdateStatus } from './managerUpdateApi';
+import type {
+  DockerImageRole,
+  ReleaseInfo,
+  UpdateChannel,
+  UpdateStatus,
+} from './managerUpdateApi';
 import styles from './ManagerUpdatePage.module.scss';
 
 function ReleaseDetails({
   info,
   action,
+  deploymentVariant,
   upgradeAllowed,
 }: {
   info: ReleaseInfo;
   action: UpdateStatus['upgrade_action'];
+  deploymentVariant: UpdateStatus['deployment_variant'];
   upgradeAllowed: boolean;
 }) {
   const { t, i18n } = useTranslation();
   const [stepsOpen, setStepsOpen] = useState(false);
-  const [deployment, setDeployment] = useState<'docker' | 'native'>('docker');
+  const [deployment, setDeployment] = useState<'docker' | 'native'>(() =>
+    deploymentVariant === 'native' ? 'native' : 'docker'
+  );
+  const [dockerVariant, setDockerVariant] = useState<DockerImageRole>(() =>
+    deploymentVariant === 'docker-slim' ? 'slim' : 'full'
+  );
+  const [dockerRegistry, setDockerRegistry] = useState<'dockerhub' | 'ghcr'>('dockerhub');
   const [dockerMode, setDockerMode] = useState<'compose' | 'run'>('compose');
   const [dockerTarget, setDockerTarget] = useState('cpa-manager-plus');
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'copy_failed'>('idle');
@@ -53,13 +66,36 @@ function ReleaseDetails({
   const direct = action === 'direct' && !info.update.migration_required && !info.update.breaking;
   const releaseUrl = buildDashboardVersionReleaseURL('manager', info.release.version);
   const releaseTag = normalizeDashboardReleaseTag(info.release.version) || info.release.version;
-  const image = info.distribution.docker.image + ':' + info.distribution.docker.version_tag;
+  const dockerImages = info.distribution.docker.images ?? [];
+  const registryRepo =
+    dockerRegistry === 'ghcr'
+      ? 'ghcr.io/seakee/cpa-manager-plus'
+      : 'seakee/cpa-manager-plus';
+  const matchedImage =
+    dockerImages.find((entry) => entry.role === dockerVariant && entry.name === registryRepo) ??
+    dockerImages.find((entry) => entry.role === dockerVariant) ??
+    dockerImages.find((entry) => entry.name === registryRepo) ??
+    dockerImages[0];
+  const baseVersionTag = (info.distribution.docker.version_tag || info.release.version).replace(
+    /^v/,
+    ''
+  );
+  const fallbackTag = dockerVariant === 'full' ? `${baseVersionTag}-full` : baseVersionTag;
+  const image = matchedImage
+    ? matchedImage.digest
+      ? `${matchedImage.name}:${matchedImage.tag}@${matchedImage.digest}`
+      : `${matchedImage.name}:${matchedImage.tag}`
+    : `${registryRepo}:${fallbackTag}`;
   const language = i18n.language.startsWith('zh') ? 'zh' : 'en';
   const releaseNotes = (info.content.notes[language] || info.content.notes.en || '').trim();
   const nativeAssets = info.distribution.native.assets;
   const nativeAssetsKey = nativeAssets.join('\0');
   const [selectedAsset, setSelectedAsset] = useState(() => pickDefaultNativeAsset(nativeAssets));
 
+  useEffect(() => {
+    setDeployment(deploymentVariant === 'native' ? 'native' : 'docker');
+    setDockerVariant(deploymentVariant === 'docker-slim' ? 'slim' : 'full');
+  }, [deploymentVariant]);
   useEffect(() => {
     setSelectedAsset(pickDefaultNativeAsset(nativeAssets));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -90,11 +126,12 @@ function ReleaseDetails({
     scheduleReset(copyTimerRef, () => setCopyState('idle'));
   };
 
-  const safeTarget = sanitizeShellArg(dockerTarget.trim() || 'cpa-manager-plus');
+  const safeTarget = normalizeComposeServiceName(dockerTarget);
+  const safeImage = sanitizeShellArg(image);
   const dockerCommand =
     dockerMode === 'compose'
       ? `docker compose pull ${safeTarget} && docker compose up -d ${safeTarget}`
-      : `docker pull ${image}`;
+      : `docker pull ${safeImage}`;
 
   const copyDockerCommand = async () => {
     const ok = await copyToClipboard(dockerCommand);
@@ -108,12 +145,21 @@ function ReleaseDetails({
   const assetDownloadUrl = activeAsset
     ? `https://github.com/seakee/CPA-Manager-Plus/releases/download/${encodeURIComponent(releaseTag)}/${encodeURIComponent(activeAsset)}`
     : '';
-  const nativeCommand = assetDownloadUrl
+  const extractedDir = activeAsset.endsWith('.tar.gz')
+    ? activeAsset.slice(0, -'.tar.gz'.length)
+    : activeAsset.endsWith('.zip')
+      ? activeAsset.slice(0, -'.zip'.length)
+      : '';
+  const safeDownloadUrl = assetDownloadUrl ? sanitizeShellArg(assetDownloadUrl) : '';
+  const safeAsset = sanitizeShellArg(activeAsset);
+  const safeExtractedDir = sanitizeShellArg(extractedDir);
+  const nativeCommand = safeDownloadUrl
     ? activeAsset.endsWith('.zip')
-      ? `curl -fLO ${assetDownloadUrl}`
-      : `curl -fLO ${assetDownloadUrl} && tar -xzf ${sanitizeShellArg(activeAsset)}`
+      ? `curl -fLO ${safeDownloadUrl}`
+      : extractedDir
+        ? `curl -fLO ${safeDownloadUrl} && tar -xzf ${safeAsset} && sudo ./${safeExtractedDir}/cpa-manager-plusctl upgrade --home /opt/cpa-manager-plus`
+        : `curl -fLO ${safeDownloadUrl} && tar -xzf ${safeAsset}`
     : '';
-
   const copyNativeCommand = async () => {
     if (!nativeCommand) return;
     const ok = await copyToClipboard(nativeCommand);
@@ -218,6 +264,52 @@ function ReleaseDetails({
             </ol>
             {deployment === 'docker' ? (
               <>
+                <div className={styles.dockerControls}>
+                  <div className={styles.commandTargetRow}>
+                    <span className={styles.commandLabel}>
+                      {t('manager_updates.docker_variant_label')}
+                    </span>
+                    <SegmentedTabs
+                      idBase="manager-docker-variant"
+                      variant="joined"
+                      responsiveFullWidth={false}
+                      items={[
+                        { id: 'full', label: t('manager_updates.docker_variant_full') },
+                        { id: 'slim', label: t('manager_updates.docker_variant_slim') },
+                      ]}
+                      activeTab={dockerVariant}
+                      onChange={(value) => {
+                        setDockerVariant(value);
+                        setCopyState('idle');
+                        setCommandCopyState('idle');
+                      }}
+                      ariaLabel={t('manager_updates.docker_variant_label')}
+                      className={styles.commandSubTabs}
+                    />
+                  </div>
+                  <div className={styles.commandTargetRow}>
+                    <span className={styles.commandLabel}>
+                      {t('manager_updates.docker_registry_label')}
+                    </span>
+                    <SegmentedTabs
+                      idBase="manager-docker-registry"
+                      variant="joined"
+                      responsiveFullWidth={false}
+                      items={[
+                        { id: 'dockerhub', label: t('manager_updates.docker_registry_dockerhub') },
+                        { id: 'ghcr', label: t('manager_updates.docker_registry_ghcr') },
+                      ]}
+                      activeTab={dockerRegistry}
+                      onChange={(value) => {
+                        setDockerRegistry(value);
+                        setCopyState('idle');
+                        setCommandCopyState('idle');
+                      }}
+                      ariaLabel={t('manager_updates.docker_registry_label')}
+                      className={styles.commandSubTabs}
+                    />
+                  </div>
+                </div>
                 <div className={styles.imageRow}>
                   <code>{image}</code>
                   <Button type="button" variant="ghost" size="sm" onClick={() => void copyImage()}>
@@ -270,7 +362,8 @@ function ReleaseDetails({
                     {t(
                       dockerMode === 'compose'
                         ? 'manager_updates.docker_compose_hint'
-                        : 'manager_updates.docker_run_hint'
+                        : 'manager_updates.docker_run_hint',
+                      dockerMode === 'compose' ? { image } : undefined
                     )}
                   </p>
                   <div className={styles.commandCodeRow}>
@@ -348,6 +441,9 @@ function ReleaseDetails({
                         <span className={styles.commandLabel}>
                           {t('manager_updates.native_command_label')}
                         </span>
+                        <p className={styles.commandHint}>
+                          {t('manager_updates.native_command_hint')}
+                        </p>
                         <div className={styles.commandCodeRow}>
                           <pre>{nativeCommand}</pre>
                           <Button
@@ -406,7 +502,12 @@ function ReleaseDetails({
 }
 
 function sanitizeShellArg(value: string): string {
-  return /^[A-Za-z0-9._:/-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+  return /^[A-Za-z0-9._:@/-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function normalizeComposeServiceName(raw: string): string {
+  const trimmed = raw.trim();
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(trimmed) ? trimmed : 'cpa-manager-plus';
 }
 
 function pickDefaultNativeAsset(assets: string[]): string {
@@ -583,6 +684,7 @@ export function ManagerUpdatePage() {
                 key={channel + ':' + info.release.version}
                 info={info}
                 action={status?.upgrade_action}
+                deploymentVariant={status?.deployment_variant}
                 upgradeAllowed={upgradeAllowed}
               />
             ) : failed ? (

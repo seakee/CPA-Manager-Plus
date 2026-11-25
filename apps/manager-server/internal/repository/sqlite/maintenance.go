@@ -3,12 +3,16 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo"
 )
 
 var (
@@ -104,6 +108,9 @@ func CompactUsageWithProgress(
 	if err != nil {
 		return CompactResult{}, err
 	}
+	if err := precheckCompactCompatibility(ctx, dbPath); err != nil {
+		return CompactResult{}, err
+	}
 
 	db, err := sql.Open("sqlite", maintenanceDataSourceName(dbPath))
 	if err != nil {
@@ -155,6 +162,9 @@ func CompactUsageWithProgress(
 	reportCompactProgress(progress, CompactStagePreflight)
 
 	if err := validateCPAMPDatabase(ctx, conn); err != nil {
+		return CompactResult{}, err
+	}
+	if _, _, err := checkSchemaCompatibilityOn(ctx, conn); err != nil {
 		return CompactResult{}, err
 	}
 	if err := validateMaintenanceReadiness(ctx, conn); err != nil {
@@ -313,6 +323,170 @@ func maintenanceDataSourceName(path string) string {
 	return dsn.String()
 }
 
+const sqliteHeaderMagic = "SQLite format 3\x00"
+
+func immutableReadOnlyDataSourceName(path string) string {
+	uriPath := filepath.ToSlash(path)
+	if !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	dsn := &url.URL{Scheme: "file", Path: uriPath}
+	query := dsn.Query()
+	query.Set("mode", "ro")
+	query.Set("immutable", "1")
+	query.Add("_pragma", "query_only(1)")
+	dsn.RawQuery = query.Encode()
+	return dsn.String()
+}
+
+func precheckCompactCompatibility(ctx context.Context, dbPath string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	info, err := os.Lstat(dbPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%w: database does not exist: %s", ErrMaintenanceInvalidDatabase, dbPath)
+		}
+		return fmt.Errorf("%w: inspect database: %v", ErrMaintenanceInvalidDatabase, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%w: database path is not a regular file: %s", ErrMaintenanceInvalidDatabase, dbPath)
+	}
+
+	var copySidecars []string
+	for _, suffix := range []string{"-journal", "-wal", "-shm"} {
+		sidePath := dbPath + suffix
+		sideInfo, sideErr := os.Lstat(sidePath)
+		if errors.Is(sideErr, os.ErrNotExist) {
+			continue
+		}
+		if sideErr != nil {
+			return fmt.Errorf("inspect SQLite file %s: %w", filepath.Base(sidePath), sideErr)
+		}
+		if !sideInfo.Mode().IsRegular() {
+			return fmt.Errorf("%w: SQLite companion path is not a regular file: %s", ErrMaintenanceInvalidDatabase, filepath.Base(sidePath))
+		}
+		if (suffix == "-journal" || suffix == "-wal") && sideInfo.Size() > 0 {
+			copySidecars = append(copySidecars, suffix)
+		}
+	}
+
+	if err := checkRawSQLiteHeaderGeneration(dbPath, info.Size()); err != nil {
+		return err
+	}
+
+	if len(copySidecars) == 0 {
+		return verifyPrecheckDatabase(ctx, immutableReadOnlyDataSourceName(dbPath))
+	}
+
+	tmpDir, err := os.MkdirTemp("", "cpamp-compact-precheck-*")
+	if err != nil {
+		return fmt.Errorf("create compact compatibility staging directory: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	tmpCopyPath := filepath.Join(tmpDir, filepath.Base(dbPath))
+	if err := copyMaintenancePrecheckFile(ctx, dbPath, tmpCopyPath); err != nil {
+		return err
+	}
+	for _, suffix := range copySidecars {
+		if err := copyMaintenancePrecheckFile(ctx, dbPath+suffix, tmpCopyPath+suffix); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return err
+		}
+	}
+	return verifyPrecheckDatabase(ctx, maintenanceDataSourceName(tmpCopyPath))
+}
+
+func checkRawSQLiteHeaderGeneration(dbPath string, size int64) error {
+	if size < 100 {
+		return fmt.Errorf("%w: database file is smaller than SQLite header: %s", ErrMaintenanceInvalidDatabase, filepath.Base(dbPath))
+	}
+	file, err := os.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("%w: inspect database header: %v", ErrMaintenanceInvalidDatabase, err)
+	}
+	defer file.Close()
+
+	var header [100]byte
+	if _, err := io.ReadFull(file, header[:]); err != nil {
+		return fmt.Errorf("%w: read database header: %v", ErrMaintenanceInvalidDatabase, err)
+	}
+	if string(header[:16]) != sqliteHeaderMagic {
+		return fmt.Errorf("%w: invalid SQLite header magic", ErrMaintenanceInvalidDatabase)
+	}
+	userVersion := int64(int32(binary.BigEndian.Uint32(header[60:64])))
+	if userVersion < 0 || userVersion > CurrentSchemaGeneration {
+		return fmt.Errorf(
+			"%w: user_version=%d outside supported generation 0..%d (current version %q); use a compatible version or restore a pre-upgrade backup before downgrading",
+			ErrIncompatibleNewerSchema,
+			userVersion,
+			CurrentSchemaGeneration,
+			buildinfo.Version,
+		)
+	}
+	return nil
+}
+
+func copyMaintenancePrecheckFile(ctx context.Context, source, destination string) error {
+	info, err := os.Lstat(source)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%w: SQLite companion path is not a regular file: %s", ErrMaintenanceInvalidDatabase, filepath.Base(source))
+	}
+	input, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	openedInfo, err := input.Stat()
+	if err != nil || !os.SameFile(info, openedInfo) || !openedInfo.Mode().IsRegular() {
+		return fmt.Errorf("%w: SQLite file changed during precheck: %s", ErrMaintenanceInvalidDatabase, filepath.Base(source))
+	}
+	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create SQLite precheck copy: %w", err)
+	}
+	_, copyErr := io.Copy(output, &inspectionContextReader{ctx: ctx, reader: input})
+	closeErr := output.Close()
+	if copyErr != nil || closeErr != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("copy SQLite precheck file %s: %w", filepath.Base(source), errors.Join(copyErr, closeErr))
+	}
+	return nil
+}
+
+func verifyPrecheckDatabase(ctx context.Context, dsn string) error {
+	tmpDB, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return fmt.Errorf("open usage database precheck: %w", err)
+	}
+	tmpDB.SetMaxOpenConns(1)
+	tmpDB.SetMaxIdleConns(1)
+	defer tmpDB.Close()
+
+	tmpConn, err := tmpDB.Conn(ctx)
+	if err != nil {
+		return classifyMaintenanceError("open SQLite precheck connection", err)
+	}
+	defer tmpConn.Close()
+
+	if err := validateCPAMPDatabase(ctx, tmpConn); err != nil {
+		return err
+	}
+	if _, _, err := checkSchemaCompatibilityOn(ctx, tmpConn); err != nil {
+		return err
+	}
+	return nil
+}
+
 func validateCPAMPDatabase(ctx context.Context, conn *sql.Conn) error {
 	required := []string{
 		"settings",
@@ -448,7 +622,7 @@ func mergeMaintenanceFileStats(stats *PageStats, files PageStats) {
 }
 
 func maintenanceFileSize(path string) (int64, error) {
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0, nil
@@ -456,7 +630,7 @@ func maintenanceFileSize(path string) (int64, error) {
 		return 0, fmt.Errorf("inspect SQLite file %s: %w", filepath.Base(path), err)
 	}
 	if !info.Mode().IsRegular() {
-		return 0, fmt.Errorf("SQLite companion path is not a regular file: %s", filepath.Base(path))
+		return 0, fmt.Errorf("%w: SQLite companion path is not a regular file: %s", ErrMaintenanceInvalidDatabase, filepath.Base(path))
 	}
 	return info.Size(), nil
 }

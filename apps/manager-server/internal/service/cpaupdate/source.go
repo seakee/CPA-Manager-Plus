@@ -23,6 +23,20 @@ type stableReleaseSource interface {
 	LatestStable(context.Context) (string, error)
 }
 
+// Keep hot updates within the CPA v8 floor qualified for this product release.
+var (
+	minimumSupportedCPAVersion = stableVersion{parts: [3]string{"8", "0", "55"}}
+	errUnsupportedCPAMajor     = errors.New("CPA hot updates require a v8 release >= 8.0.55")
+)
+
+func parseSupportedUpdateVersion(version string) (stableVersion, error) {
+	parsed, err := parseStableVersion(version)
+	if err == nil && (parsed.parts[0] != "8" || compareStableVersions(parsed, minimumSupportedCPAVersion) < 0) {
+		err = errUnsupportedCPAMajor
+	}
+	return parsed, err
+}
+
 type officialReleaseSource struct {
 	client *http.Client
 }
@@ -95,6 +109,9 @@ func (s *officialReleaseSource) LatestStable(ctx context.Context) (string, error
 	version, err := parseStableReleaseTag(release.TagName)
 	if err != nil {
 		return "", errors.New("official CPA release tag is not canonical stable semver")
+	}
+	if _, err := parseSupportedUpdateVersion(version); err != nil {
+		return "", err
 	}
 	return version, nil
 }

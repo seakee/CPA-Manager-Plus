@@ -392,6 +392,11 @@ func copyReadySource(t *testing.T) string {
 			}
 		}
 	}
+	if _, err := conn.ExecContext(context.Background(), `pragma user_version = 0`); err != nil {
+		_ = conn.Close()
+		_ = db.Close()
+		t.Fatalf("reset v2 fixture user_version: %v", err)
+	}
 	// The pinned release is v1.14.10, whose own startup state includes the
 	// cache-accounting semantics revision (3, raised by v1.14.6) and the
 	// latency-covering index its offline cleanup builds (v1.14.7). Both are
@@ -975,6 +980,11 @@ func copyReadyRunSource(t *testing.T) string {
 				t.Fatalf("drop v2-only fixture table %s: %v", name, err)
 			}
 		}
+	}
+	if _, err := conn.ExecContext(context.Background(), `pragma user_version = 0`); err != nil {
+		_ = conn.Close()
+		_ = db.Close()
+		t.Fatalf("reset v2 fixture user_version: %v", err)
 	}
 	// The pinned release is v1.14.10, whose own startup state includes the
 	// cache-accounting semantics revision (3, raised by v1.14.6) and the

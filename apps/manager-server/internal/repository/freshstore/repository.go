@@ -327,6 +327,7 @@ func ValidatePristine(ctx context.Context, q queryer) error {
 	}
 	seeds := map[string]seed{
 		"settings":                                {3, `(key='usage_account_history_identity_format_version' and value=?) or (key='usage_monitoring_model_format_version' and value=?) or (key='usage_dashboard_hourly_format_version' and value='3')`, []any{usageidentity.AccountHistoryStructureRevision(), usageidentity.ModelFormatVersion}},
+		"upgrade_schema_meta":                     {1, `id=1 and schema_generation=1 and min_compatible_app_version='v2.0.0-beta.1' and length(updated_at)>0`, nil},
 		"gateway_source_binding_revision":         {1, `id=1 and revision=0`, nil},
 		"gateway_usage_identity_projection_state": {1, `state_name='canonical_identity_v1' and schema_version=1 and status='pending' and last_processed_event_id=0 and target_event_id=0 and processed_events=0 and binding_revision=-1 and last_run_started_at_ms is null and updated_at_ms=0 and finished_at_ms is null and last_error is null`, nil},
 		"usage_data_migrations":                   {3, `((name in ('usage_cache_accounting_v1','usage_cache_accounting_v2') and status='completed') or (name='quota_snapshot_lifecycle_v1' and status='pending')) and last_event_id=0 and target_event_id=0 and processed_rows=0 and changed_rows=0 and applied_rows=0 and started_at_ms is null and updated_at_ms=0 and finished_at_ms is null and last_error is null`, nil},

@@ -1,7 +1,9 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -10,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo"
 )
 
 func TestCompactUsageCompactsWithoutChangingLogicalSummary(t *testing.T) {
@@ -538,4 +542,364 @@ func TestCompactUsageWithProgressStagesInOrder(t *testing.T) {
 			t.Fatalf("stage[%d] = %q, want %q; all stages: %#v", i, stages[i], want, stages)
 		}
 	}
+}
+
+func TestCompactUsageEnforcesSchemaCompatibilityFenceWithoutWrites(t *testing.T) {
+	originalVersion := buildinfo.Version
+	t.Cleanup(func() { buildinfo.Version = originalVersion })
+
+	cases := []struct {
+		name       string
+		appVersion string
+		mutate     func(t *testing.T, db *sql.DB)
+	}{
+		{
+			name:       "user_version 2",
+			appVersion: "dev",
+			mutate: func(t *testing.T, db *sql.DB) {
+				if _, err := db.Exec(`PRAGMA user_version = 2`); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:       "higher min_compatible_app_version",
+			appVersion: "v2.0.0-beta.1",
+			mutate: func(t *testing.T, db *sql.DB) {
+				if _, err := db.Exec(`UPDATE upgrade_schema_meta SET min_compatible_app_version = 'v2.0.0-beta.2' WHERE id = 1`); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:       "user_version 1 with dropped upgrade_schema_meta",
+			appVersion: "v2.0.0-beta.1",
+			mutate: func(t *testing.T, db *sql.DB) {
+				if _, err := db.Exec(`DROP TABLE upgrade_schema_meta`); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:       "user_version 0 with schema_generation 1",
+			appVersion: "v2.0.0-beta.1",
+			mutate: func(t *testing.T, db *sql.DB) {
+				if _, err := db.Exec(`PRAGMA user_version = 0`); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			buildinfo.Version = "v2.0.0-beta.2"
+			path := filepath.Join(t.TempDir(), "usage.sqlite")
+			db, err := Open(path)
+			if err != nil {
+				t.Fatalf("open fixture: %v", err)
+			}
+			eventContent := strings.Repeat("z", 16*1024)
+			for index := 1; index <= 24; index++ {
+				if _, err := db.Exec(`insert into usage_events (
+					event_hash, timestamp_ms, timestamp, model, input_tokens, output_tokens,
+					total_tokens, raw_json, created_at_ms
+				) values (?, ?, '1970-01-01T00:00:00Z', 'gpt-test', 10, 5, 15, ?, ?)`,
+					fmt.Sprintf("fence-event-%03d", index),
+					int64(index),
+					eventContent,
+					int64(index),
+				); err != nil {
+					t.Fatalf("insert event %d: %v", index, err)
+				}
+			}
+			if _, err := db.Exec(`delete from usage_events where id <= 16`); err != nil {
+				t.Fatalf("fragment fixture: %v", err)
+			}
+			tc.mutate(t, db)
+			if err := db.Close(); err != nil {
+				t.Fatalf("close fixture: %v", err)
+			}
+
+			beforeDBBytes, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read database bytes before CompactUsage: %v", err)
+			}
+			beforeWALBytes, walBeforeErr := os.ReadFile(path + "-wal")
+			if walBeforeErr != nil && !errors.Is(walBeforeErr, os.ErrNotExist) {
+				t.Fatalf("read WAL bytes before CompactUsage: %v", walBeforeErr)
+			}
+
+			buildinfo.Version = tc.appVersion
+			var stages []CompactStage
+			result, err := CompactUsageWithProgress(context.Background(), path, func(stage CompactStage) {
+				stages = append(stages, stage)
+			})
+			if !errors.Is(err, ErrIncompatibleNewerSchema) {
+				t.Fatalf("CompactUsageWithProgress() err = %v, want ErrIncompatibleNewerSchema", err)
+			}
+			if result != (CompactResult{}) {
+				t.Fatalf("CompactUsageWithProgress() result = %#v, want zero", result)
+			}
+			for _, stage := range stages {
+				if stage == CompactStageBaseline || stage == CompactStageCheckpoint || stage == CompactStageVacuum || stage == CompactStageVerify || stage == CompactStageFinalize {
+					t.Fatalf("CompactUsageWithProgress() reached stage %q despite incompatible schema: %v", stage, stages)
+				}
+			}
+
+			afterDBBytes, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read database bytes after CompactUsage: %v", err)
+			}
+			if !bytes.Equal(beforeDBBytes, afterDBBytes) {
+				t.Fatal("CompactUsage mutated rejected database file bytes")
+			}
+			afterWALBytes, walAfterErr := os.ReadFile(path + "-wal")
+			if walAfterErr != nil && !errors.Is(walAfterErr, os.ErrNotExist) {
+				t.Fatalf("read WAL bytes after CompactUsage: %v", walAfterErr)
+			}
+			if !bytes.Equal(beforeWALBytes, afterWALBytes) {
+				t.Fatal("CompactUsage mutated rejected WAL file bytes")
+			}
+		})
+	}
+}
+
+func TestCompactUsagePreservesHotRollbackJournalAndWALOnIncompatibleSchema(t *testing.T) {
+	originalVersion := buildinfo.Version
+	t.Cleanup(func() { buildinfo.Version = originalVersion })
+
+	createHotRollbackJournalFixture := func(t *testing.T, configure func(t *testing.T, conn *sql.Conn)) string {
+		t.Helper()
+		buildinfo.Version = "v2.0.0-beta.2"
+		srcPath := filepath.Join(t.TempDir(), "source.sqlite")
+		db, err := Open(srcPath)
+		if err != nil {
+			t.Fatalf("open base fixture: %v", err)
+		}
+		for i := 1; i <= 12; i++ {
+			if _, err := db.Exec(`insert into usage_events (
+				event_hash, timestamp_ms, timestamp, model, input_tokens, output_tokens,
+				total_tokens, raw_json, created_at_ms
+			) values (?, ?, '1970-01-01T00:00:00Z', 'gpt-test', 10, 5, 15, ?, ?)`,
+				fmt.Sprintf("base-event-%03d", i),
+				int64(i),
+				strings.Repeat("a", 8192),
+				int64(i),
+			); err != nil {
+				t.Fatalf("seed base event %d: %v", i, err)
+			}
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("close base fixture: %v", err)
+		}
+
+		rawDB, err := sql.Open("sqlite", maintenanceDataSourceName(srcPath))
+		if err != nil {
+			t.Fatalf("reopen rollback fixture: %v", err)
+		}
+		rawDB.SetMaxOpenConns(1)
+		defer rawDB.Close()
+
+		conn, err := rawDB.Conn(context.Background())
+		if err != nil {
+			t.Fatalf("open dedicated conn: %v", err)
+		}
+		defer conn.Close()
+
+		var journalMode string
+		if err := conn.QueryRowContext(context.Background(), `PRAGMA journal_mode = DELETE`).Scan(&journalMode); err != nil || !strings.EqualFold(journalMode, "delete") {
+			t.Fatalf("set journal_mode=DELETE: mode=%q err=%v", journalMode, err)
+		}
+		configure(t, conn)
+
+		if _, err := conn.ExecContext(context.Background(), `PRAGMA cache_size = 1`); err != nil {
+			t.Fatalf("set cache_size=1: %v", err)
+		}
+		if _, err := conn.ExecContext(context.Background(), `PRAGMA cache_spill = ON`); err != nil {
+			t.Fatalf("enable cache_spill: %v", err)
+		}
+		if _, err := conn.ExecContext(context.Background(), `BEGIN IMMEDIATE`); err != nil {
+			t.Fatalf("begin immediate: %v", err)
+		}
+		defer func() {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}()
+
+		// Mutate existing rows and insert new pages until SQLite spills dirty pages
+		// and flushes a non-empty hot rollback journal to disk.
+		if _, err := conn.ExecContext(context.Background(), `UPDATE usage_events SET raw_json = ?`, strings.Repeat("b", 16384)); err != nil {
+			t.Fatalf("dirty existing pages: %v", err)
+		}
+		for i := 1; i <= 32; i++ {
+			if _, err := conn.ExecContext(context.Background(), `insert into usage_events (
+				event_hash, timestamp_ms, timestamp, model, input_tokens, output_tokens,
+				total_tokens, raw_json, created_at_ms
+			) values (?, ?, '1970-01-01T00:00:00Z', 'gpt-test', 10, 5, 15, ?, ?)`,
+				fmt.Sprintf("spilled-event-%03d", i),
+				int64(1000+i),
+				strings.Repeat("c", 16384),
+				int64(1000+i),
+			); err != nil {
+				t.Fatalf("spill uncommitted event %d: %v", i, err)
+			}
+		}
+
+		dbBytes, err := os.ReadFile(srcPath)
+		if err != nil {
+			t.Fatalf("read uncommitted db bytes: %v", err)
+		}
+		journalBytes, err := os.ReadFile(srcPath + "-journal")
+		if err != nil || len(journalBytes) == 0 {
+			t.Fatalf("read live hot rollback journal: len=%d err=%v", len(journalBytes), err)
+		}
+
+		dstPath := filepath.Join(t.TempDir(), "usage.sqlite")
+		if err := os.WriteFile(dstPath, dbBytes, 0o600); err != nil {
+			t.Fatalf("write copied db fixture: %v", err)
+		}
+		if err := os.WriteFile(dstPath+"-journal", journalBytes, 0o600); err != nil {
+			t.Fatalf("write copied hot journal fixture: %v", err)
+		}
+		return dstPath
+	}
+
+	t.Run("higher min_compatible_app_version with live hot rollback journal", func(t *testing.T) {
+		fixturePath := createHotRollbackJournalFixture(t, func(t *testing.T, conn *sql.Conn) {
+			if _, err := conn.ExecContext(context.Background(), `UPDATE upgrade_schema_meta SET min_compatible_app_version = 'v2.0.0-beta.2' WHERE id = 1`); err != nil {
+				t.Fatalf("set higher min_compatible_app_version: %v", err)
+			}
+		})
+
+		beforeDBBytes, err := os.ReadFile(fixturePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		beforeJournalBytes, err := os.ReadFile(fixturePath + "-journal")
+		if err != nil || len(beforeJournalBytes) == 0 {
+			t.Fatalf("expected non-empty hot journal: len=%d err=%v", len(beforeJournalBytes), err)
+		}
+		beforeDBSum := sha256.Sum256(beforeDBBytes)
+		beforeJournalSum := sha256.Sum256(beforeJournalBytes)
+
+		buildinfo.Version = "v2.0.0-beta.1"
+		result, err := CompactUsage(context.Background(), fixturePath)
+		if !errors.Is(err, ErrIncompatibleSchemaVersion) {
+			t.Fatalf("CompactUsage() err = %v, want ErrIncompatibleSchemaVersion", err)
+		}
+		if result != (CompactResult{}) {
+			t.Fatalf("CompactUsage() result = %#v, want zero", result)
+		}
+
+		afterDBBytes, err := os.ReadFile(fixturePath)
+		if err != nil {
+			t.Fatalf("read db after rejected CompactUsage: %v", err)
+		}
+		afterJournalBytes, err := os.ReadFile(fixturePath + "-journal")
+		if err != nil {
+			t.Fatalf("hot journal missing after rejected CompactUsage: %v", err)
+		}
+		if sha256.Sum256(afterDBBytes) != beforeDBSum {
+			t.Fatal("CompactUsage mutated database bytes via hot-journal replay")
+		}
+		if sha256.Sum256(afterJournalBytes) != beforeJournalSum {
+			t.Fatal("CompactUsage mutated hot rollback journal bytes")
+		}
+		for _, unexpected := range []string{"-wal", "-shm"} {
+			if _, statErr := os.Lstat(fixturePath + unexpected); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("unexpected companion %s after rejected CompactUsage: %v", unexpected, statErr)
+			}
+		}
+	})
+
+	t.Run("higher user_version generation with live hot rollback journal", func(t *testing.T) {
+		fixturePath := createHotRollbackJournalFixture(t, func(t *testing.T, conn *sql.Conn) {
+			if _, err := conn.ExecContext(context.Background(), `PRAGMA user_version = 2`); err != nil {
+				t.Fatalf("set higher user_version: %v", err)
+			}
+		})
+
+		beforeDBBytes, err := os.ReadFile(fixturePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		beforeJournalBytes, err := os.ReadFile(fixturePath + "-journal")
+		if err != nil || len(beforeJournalBytes) == 0 {
+			t.Fatalf("expected non-empty hot journal: len=%d err=%v", len(beforeJournalBytes), err)
+		}
+		beforeDBSum := sha256.Sum256(beforeDBBytes)
+		beforeJournalSum := sha256.Sum256(beforeJournalBytes)
+
+		buildinfo.Version = "v2.0.0-beta.1"
+		_, err = CompactUsage(context.Background(), fixturePath)
+		if !errors.Is(err, ErrIncompatibleSchemaVersion) {
+			t.Fatalf("CompactUsage() err = %v, want ErrIncompatibleSchemaVersion", err)
+		}
+
+		afterDBBytes, err := os.ReadFile(fixturePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		afterJournalBytes, err := os.ReadFile(fixturePath + "-journal")
+		if err != nil {
+			t.Fatalf("hot journal missing after rejected CompactUsage: %v", err)
+		}
+		if sha256.Sum256(afterDBBytes) != beforeDBSum || sha256.Sum256(afterJournalBytes) != beforeJournalSum {
+			t.Fatal("CompactUsage mutated higher-generation database or hot rollback journal")
+		}
+	})
+
+	t.Run("higher min_compatible_app_version only in uncheckpointed WAL", func(t *testing.T) {
+		buildinfo.Version = "v2.0.0-beta.1"
+		srcPath := filepath.Join(t.TempDir(), "wal-source.sqlite")
+		db, err := OpenWithOptions(Options{Path: srcPath, MaxOpenConns: 1, MaxIdleConns: 1})
+		if err != nil {
+			t.Fatalf("open WAL fixture: %v", err)
+		}
+		defer db.Close()
+
+		if _, err := db.Exec(`PRAGMA wal_autocheckpoint = 0`); err != nil {
+			t.Fatalf("disable wal_autocheckpoint: %v", err)
+		}
+		if _, err := db.Exec(`UPDATE upgrade_schema_meta SET min_compatible_app_version = 'v2.0.0-beta.2' WHERE id = 1`); err != nil {
+			t.Fatalf("update min_compatible_app_version in WAL: %v", err)
+		}
+		dbBytes, err := os.ReadFile(srcPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		walBytes, err := os.ReadFile(srcPath + "-wal")
+		if err != nil || len(walBytes) == 0 {
+			t.Fatalf("expected non-empty uncheckpointed WAL: len=%d err=%v", len(walBytes), err)
+		}
+
+		dstPath := filepath.Join(t.TempDir(), "usage.sqlite")
+		if err := os.WriteFile(dstPath, dbBytes, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dstPath+"-wal", walBytes, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		beforeDBSum := sha256.Sum256(dbBytes)
+		beforeWALSum := sha256.Sum256(walBytes)
+
+		_, err = CompactUsage(context.Background(), dstPath)
+		if !errors.Is(err, ErrIncompatibleSchemaVersion) {
+			t.Fatalf("CompactUsage() err = %v, want ErrIncompatibleSchemaVersion", err)
+		}
+		afterDBBytes, err := os.ReadFile(dstPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		afterWALBytes, err := os.ReadFile(dstPath + "-wal")
+		if err != nil {
+			t.Fatalf("WAL missing after rejected CompactUsage: %v", err)
+		}
+		if sha256.Sum256(afterDBBytes) != beforeDBSum || sha256.Sum256(afterWALBytes) != beforeWALSum {
+			t.Fatal("CompactUsage mutated uncheckpointed WAL or database bytes")
+		}
+		if _, shmErr := os.Lstat(dstPath + "-shm"); !errors.Is(shmErr, os.ErrNotExist) {
+			t.Fatalf("unexpected -shm file created on rejected WAL fixture: %v", shmErr)
+		}
+	})
 }

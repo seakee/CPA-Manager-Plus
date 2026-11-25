@@ -502,6 +502,9 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 		a.runtimeModeFor(opened.Record.Operation),
 	).WithModeResolver(func() model.RuntimeMode {
 		return a.effectiveRuntimeMode(context.Background())
+	}).WithProductCompleteProbe(func(ctx context.Context) (bool, error) {
+		op, err := a.current(ctx)
+		return op.ProductComplete, err
 	})
 	// Attach the same durable mutation services as the normal Embedded app
 	// before publishing its routes. An incomplete graph must never fall back to

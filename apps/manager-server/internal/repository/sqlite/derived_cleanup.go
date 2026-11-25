@@ -714,6 +714,9 @@ func CleanupDerivedOffline(ctx context.Context, db *sql.DB) (OfflineCleanupResul
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
+	if err := CheckSchemaCompatibility(db); err != nil {
+		return OfflineCleanupResult{}, err
+	}
 	if err := ensureDerivedCleanupJobSchema(db); err != nil {
 		return result, err
 	}

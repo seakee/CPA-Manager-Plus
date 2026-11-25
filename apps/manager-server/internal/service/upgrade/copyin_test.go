@@ -102,6 +102,11 @@ func newLegacyVolume(t *testing.T) legacyVolume {
 		_ = db.Close()
 		t.Fatalf("drop v2-only coverage table: %v", err)
 	}
+	if _, err := conn.ExecContext(context.Background(), `pragma user_version = 0`); err != nil {
+		_ = conn.Close()
+		_ = db.Close()
+		t.Fatalf("reset v2 fixture user_version: %v", err)
+	}
 	if err := conn.Close(); err != nil {
 		_ = db.Close()
 		t.Fatalf("close fixture connection: %v", err)

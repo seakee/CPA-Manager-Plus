@@ -175,6 +175,9 @@ func (u *upgradeCanonicalServer) initCanonicalResources(
 			u.runtimeModeFor(u.targetMode),
 		).WithModeResolver(func() model.RuntimeMode {
 			return u.effectiveRuntimeMode(context.Background())
+		}).WithProductCompleteProbe(func(ctx context.Context) (bool, error) {
+			op, err := u.loadCurrentOp(ctx)
+			return op.Stage == model.UpgradeStageComplete, err
 		})
 	}
 	u.configService = &upgradeConfigService{owner: u}

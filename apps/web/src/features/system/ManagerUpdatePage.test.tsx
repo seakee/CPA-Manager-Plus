@@ -6,6 +6,10 @@ import { ManagerUpdatePage } from './ManagerUpdatePage';
 import type { ReleaseInfo, UpdateStatus } from './managerUpdateApi';
 import type { CPAUpdateFlow } from './useCPAUpdateFlow';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
+import enLocale from '@/i18n/locales/en.json';
+import zhCNLocale from '@/i18n/locales/zh-CN.json';
+import zhTWLocale from '@/i18n/locales/zh-TW.json';
+import ruLocale from '@/i18n/locales/ru.json';
 
 const mocks = vi.hoisted(() => ({
   updates: {
@@ -26,8 +30,11 @@ vi.mock('@/hooks/useHeaderRefresh', () => ({ useHeaderRefresh: vi.fn() }));
 vi.mock('@/utils/clipboard', () => ({ copyToClipboard: mocks.copy }));
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string, values?: Record<string, unknown>) =>
-      values?.version ? key + ':' + values.version : key,
+    t: (key: string, values?: Record<string, unknown>) => {
+      if (values?.version) return key + ':' + values.version;
+      if (values?.image) return key + ':' + values.image;
+      return key;
+    },
     i18n: { language: 'en' },
   }),
 }));
@@ -35,33 +42,80 @@ vi.mock('react-i18next', () => ({
 
 let renderer: ReactTestRenderer | undefined;
 const headingFocusMock = vi.fn();
-const release = (version = 'v1.12.11'): ReleaseInfo => ({
-  schema_version: 1,
-  release: { version, stage: 'stable', source_commit: 'a'.repeat(40) },
-  content: { summary: { en: 'A concise release summary.', zh: '更新摘要。' }, notes: {} },
-  update: {
-    breaking: false,
-    migration_required: false,
-    minimum_direct_upgrade_version: null,
-    upgrade_guide_url:
-      'https://github.com/seakee/CPA-Manager-Plus/blob/' + version + '/docs/update-check.md',
-  },
-  distribution: {
-    docker: { image: 'seakee/cpa-manager-plus', version_tag: version },
-    native: { assets: ['cpa-manager-plus_' + version + '_linux_amd64.tar.gz'] },
-  },
-  compatibility: { minimum_cpa_version: null },
-});
+const SLIM_DIGEST = 'sha256:' + '1'.repeat(64);
+const FULL_DIGEST = 'sha256:' + '2'.repeat(64);
+const release = (version = 'v2.0.0-beta.2'): ReleaseInfo => {
+  const versionTag = version.replace(/^v/, '');
+  const stage = version.includes('-beta.')
+    ? 'beta'
+    : version.includes('-rc.')
+      ? 'rc'
+      : 'stable';
+  return {
+    schema_version: 2,
+    release: { version, stage, source_commit: 'a'.repeat(40) },
+    content: { summary: { en: 'A concise release summary.', zh: '更新摘要。' }, notes: {} },
+    update: {
+      breaking: false,
+      migration_required: false,
+      minimum_direct_upgrade_version: null,
+      upgrade_guide_url:
+        'https://github.com/seakee/CPA-Manager-Plus/blob/' +
+        version +
+        '/docs/release-notes/' +
+        version +
+        '-en.md',
+    },
+    distribution: {
+      docker: {
+        version_tag: versionTag,
+        images: [
+          {
+            role: 'slim',
+            name: 'seakee/cpa-manager-plus',
+            tag: versionTag,
+            digest: SLIM_DIGEST,
+            platforms: ['linux/amd64'],
+          },
+          {
+            role: 'full',
+            name: 'seakee/cpa-manager-plus',
+            tag: versionTag + '-full',
+            digest: FULL_DIGEST,
+            platforms: ['linux/amd64'],
+          },
+          {
+            role: 'slim',
+            name: 'ghcr.io/seakee/cpa-manager-plus',
+            tag: versionTag,
+            digest: SLIM_DIGEST,
+            platforms: ['linux/amd64'],
+          },
+          {
+            role: 'full',
+            name: 'ghcr.io/seakee/cpa-manager-plus',
+            tag: versionTag + '-full',
+            digest: FULL_DIGEST,
+            platforms: ['linux/amd64'],
+          },
+        ],
+      },
+      native: { assets: ['cpa-manager-plus-native-v2_' + version + '_linux_amd64.tar.gz'] },
+    },
+    compatibility: { minimum_cpa_version: null },
+  };
+};
 beforeEach(() => {
   mocks.updates.status = {
-    current_version: 'v1.12.10',
+    current_version: 'v2.0.0-beta.1',
     source_commit: 'b'.repeat(40),
+    deployment_variant: 'docker-full',
     state: 'update_available',
-    channel: 'stable',
+    channel: 'beta',
     channel_preference: 'auto',
     automatic: true,
     stale: false,
-    last_success_at: '2026-09-08T08:00:00Z',
+    last_success_at: '2026-11-25T08:00:00Z',
     upgrade_action: 'direct',
     target: release(),
   };
@@ -170,13 +224,16 @@ describe('ManagerUpdatePage', () => {
     expect(steps().props.hidden).toBe(true);
     expect(renderer!.root.findByType('details').props.open).toBeUndefined();
     expect(text(renderer!.root.findByProps({ id: 'manager-release-status' }))).toContain(
-      'v1.12.11'
+      'v2.0.0-beta.2'
     );
     await act(async () => {
       button('manager_updates.show_steps').props.onClick();
     });
     expect(steps().props.hidden).toBe(false);
-    expect(text(renderer!.root.findByType('code'))).toBe('seakee/cpa-manager-plus:v1.12.11');
+    expect(text(renderer!.root.findByType('code'))).toBe(
+      `seakee/cpa-manager-plus:2.0.0-beta.2-full@${FULL_DIGEST}`
+    );
+    expect(text(renderer!.root)).not.toContain('cpa-manager-plus:v2.0.0-beta.2');
     await act(async () => {
       renderer!.root.findByProps({ id: 'manager-deployment-native' }).props.onClick({});
     });
@@ -185,7 +242,7 @@ describe('ManagerUpdatePage', () => {
       (node) => node.type === 'a' && text(node).includes('manager_updates.native_download')
     );
     expect(download.props.href).toBe(
-      'https://github.com/seakee/CPA-Manager-Plus/releases/tag/v1.12.11'
+      'https://github.com/seakee/CPA-Manager-Plus/releases/tag/v2.0.0-beta.2'
     );
     expect(renderer!.root.findByProps({ role: 'tabpanel' }).props['aria-labelledby']).toBe(
       'manager-deployment-native'
@@ -193,7 +250,7 @@ describe('ManagerUpdatePage', () => {
   });
 
   it.each([true, false])(
-    'copies the exact image and reports clipboard success=%s',
+    'copies the exact pinned image and reports clipboard success=%s',
     async (success) => {
       mocks.copy.mockResolvedValue(success);
       await renderPage();
@@ -203,7 +260,9 @@ describe('ManagerUpdatePage', () => {
       await act(async () => {
         button('manager_updates.copy_image').props.onClick();
       });
-      expect(mocks.copy).toHaveBeenCalledWith('seakee/cpa-manager-plus:v1.12.11');
+      expect(mocks.copy).toHaveBeenCalledWith(
+        `seakee/cpa-manager-plus:2.0.0-beta.2-full@${FULL_DIGEST}`
+      );
       expect(text(renderer!.root.findByProps({ role: 'status' }))).toBe(
         success ? 'manager_updates.copied' : 'manager_updates.copy_failed'
       );
@@ -279,10 +338,12 @@ describe('ManagerUpdatePage', () => {
       button('manager_updates.show_steps').props.onClick();
     });
     expect(steps().props.hidden).toBe(false);
-    mocks.updates.status = { ...mocks.updates.status!, target: release('v1.12.12') };
+    mocks.updates.status = { ...mocks.updates.status!, target: release('v2.0.0-beta.3') };
     await renderPage();
     expect(steps().props.hidden).toBe(true);
-    expect(text(renderer!.root.findByType('code'))).toBe('seakee/cpa-manager-plus:v1.12.12');
+    expect(text(renderer!.root.findByType('code'))).toBe(
+      `seakee/cpa-manager-plus:2.0.0-beta.3-full@${FULL_DIGEST}`
+    );
   });
 
   it('offers a manual check without claiming a successful check for an unpopulated channel', async () => {
@@ -304,11 +365,11 @@ describe('ManagerUpdatePage', () => {
       state: 'update_available',
       stale: true,
       upgrade_action: 'direct',
-      target: release('v1.12.11'),
+      target: release('v2.0.0-beta.2'),
     };
     await renderPage();
     const content = text(renderer!.root);
-    expect(content).toContain('v1.12.11');
+    expect(content).toContain('v2.0.0-beta.2');
     expect(content).toContain('A concise release summary.');
     expect(content).toContain('manager_updates.stale');
     expect(content).toContain('manager_updates.release_notes');
@@ -318,7 +379,7 @@ describe('ManagerUpdatePage', () => {
   });
 
   it('withholds migration CTA and execution guidance for failed migration release', async () => {
-    const target = release('v1.12.11');
+    const target = release('v2.0.0-beta.2');
     target.update.migration_required = true;
     mocks.updates.status = {
       ...mocks.updates.status!,
@@ -329,7 +390,7 @@ describe('ManagerUpdatePage', () => {
     };
     await renderPage();
     const content = text(renderer!.root);
-    expect(content).toContain('v1.12.11');
+    expect(content).toContain('v2.0.0-beta.2');
     expect(content).toContain('A concise release summary.');
     expect(content).toContain('manager_updates.failed');
     expect(content).toContain('manager_updates.release_notes');
@@ -352,7 +413,7 @@ describe('ManagerUpdatePage', () => {
     expect(content).not.toContain('manager_updates.migration_guide');
     expect(content).not.toContain('manager_updates.release_notes');
     expect(button('manager_updates.check_now').props.disabled).toBe(false);
-    expect(content).toContain('v1.12.10');
+    expect(content).toContain('v2.0.0-beta.1');
   });
 
   it('avoids claiming stale cache when a check fails before any cached release exists', async () => {
@@ -429,43 +490,88 @@ describe('ManagerUpdatePage', () => {
       await act(async () => {
         renderer!.root.findByProps({ id: 'manager-docker-mode-run' }).props.onClick({});
       });
-      expect(text(renderer!.root)).toContain('docker pull seakee/cpa-manager-plus:v1.12.11');
+      expect(text(renderer!.root)).toContain(
+        `docker pull seakee/cpa-manager-plus:2.0.0-beta.2-full@${FULL_DIGEST}`
+      );
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('renders native asset selector, direct download URL, terminal command, and release notes', async () => {
-    const target = release('v1.12.11');
+  it('switches Docker variants (full vs slim) and registries (Docker Hub vs GHCR)', async () => {
+    mocks.updates.status = {
+      ...mocks.updates.status!,
+      deployment_variant: 'docker-slim',
+    };
+    await renderPage();
+    await act(async () => {
+      button('manager_updates.show_steps').props.onClick();
+    });
+    // docker-slim defaults to slim on Docker Hub.
+    expect(text(renderer!.root.findByType('code'))).toBe(
+      `seakee/cpa-manager-plus:2.0.0-beta.2@${SLIM_DIGEST}`
+    );
+    // Switch to GHCR slim.
+    await act(async () => {
+      renderer!.root.findByProps({ id: 'manager-docker-registry-ghcr' }).props.onClick({});
+    });
+    expect(text(renderer!.root.findByType('code'))).toBe(
+      `ghcr.io/seakee/cpa-manager-plus:2.0.0-beta.2@${SLIM_DIGEST}`
+    );
+    // Switch to full on GHCR and check docker pull command.
+    await act(async () => {
+      renderer!.root.findByProps({ id: 'manager-docker-variant-full' }).props.onClick({});
+      renderer!.root.findByProps({ id: 'manager-docker-mode-run' }).props.onClick({});
+    });
+    expect(text(renderer!.root.findByType('code'))).toBe(
+      `ghcr.io/seakee/cpa-manager-plus:2.0.0-beta.2-full@${FULL_DIGEST}`
+    );
+    expect(text(renderer!.root)).toContain(
+      `docker pull ghcr.io/seakee/cpa-manager-plus:2.0.0-beta.2-full@${FULL_DIGEST}`
+    );
+    expect(text(renderer!.root)).not.toContain('cpa-manager-plus:v2.0.0-beta.2');
+  });
+
+  it('defaults to native tab and renders v2 systemd bin/share upgrade steps when deployment_variant is native', async () => {
+    const target = release('v2.0.0-beta.2');
     target.content.notes = { en: 'Fixes gateway routing.' };
     target.distribution.native.assets = [
-      'cpa-manager-plus_v1.12.11_linux_amd64.tar.gz',
-      'cpa-manager-plus_v1.12.11_darwin_arm64.tar.gz',
+      'cpa-manager-plus-native-v2_v2.0.0-beta.2_linux_amd64.tar.gz',
+      'cpa-manager-plus-native-v2_v2.0.0-beta.2_linux_arm64.tar.gz',
     ];
-    mocks.updates.status = { ...mocks.updates.status!, target };
+    mocks.updates.status = {
+      ...mocks.updates.status!,
+      deployment_variant: 'native',
+      target,
+    };
     await renderPage();
     expect(text(renderer!.root)).toContain('manager_updates.notes_toggle');
     expect(text(renderer!.root)).toContain('Fixes gateway routing.');
     await act(async () => {
       button('manager_updates.show_steps').props.onClick();
     });
-    await act(async () => {
-      renderer!.root.findByProps({ id: 'manager-deployment-native' }).props.onClick({});
-    });
+    expect(renderer!.root.findByProps({ role: 'tabpanel' }).props['aria-labelledby']).toBe(
+      'manager-deployment-native'
+    );
     const assetSelect = renderer!.root.findByProps({ id: 'manager-native-asset' });
     await act(async () => {
-      assetSelect.props.onChange('cpa-manager-plus_v1.12.11_darwin_arm64.tar.gz');
+      assetSelect.props.onChange('cpa-manager-plus-native-v2_v2.0.0-beta.2_linux_arm64.tar.gz');
     });
     const directLink = renderer!.root.find(
       (node) =>
         node.type === 'a' &&
         typeof node.props.href === 'string' &&
-        node.props.href.includes('releases/download/v1.12.11/cpa-manager-plus_v1.12.11_darwin_arm64.tar.gz')
+        node.props.href.includes(
+          'releases/download/v2.0.0-beta.2/cpa-manager-plus-native-v2_v2.0.0-beta.2_linux_arm64.tar.gz'
+        )
     );
     expect(directLink).toBeDefined();
-    expect(text(renderer!.root)).toContain(
-      'curl -fLO https://github.com/seakee/CPA-Manager-Plus/releases/download/v1.12.11/cpa-manager-plus_v1.12.11_darwin_arm64.tar.gz && tar -xzf cpa-manager-plus_v1.12.11_darwin_arm64.tar.gz'
+    const content = text(renderer!.root);
+    expect(content).toContain(
+      'curl -fLO https://github.com/seakee/CPA-Manager-Plus/releases/download/v2.0.0-beta.2/cpa-manager-plus-native-v2_v2.0.0-beta.2_linux_arm64.tar.gz && tar -xzf cpa-manager-plus-native-v2_v2.0.0-beta.2_linux_arm64.tar.gz && sudo ./cpa-manager-plus-native-v2_v2.0.0-beta.2_linux_arm64/cpa-manager-plusctl upgrade --home /opt/cpa-manager-plus'
     );
+    expect(content).not.toContain('systemctl start');
+    expect(content).not.toContain('install-cpamp.sh');
   });
 
   it('shows badge_ahead pill instead of badge_pending when ahead_of_channel', async () => {
@@ -478,5 +584,95 @@ describe('ManagerUpdatePage', () => {
     const content = text(renderer!.root);
     expect(content).toContain('manager_updates.badge_ahead');
     expect(content).not.toContain('manager_updates.badge_pending');
+  });
+
+  it('passes pinned image to docker_compose_hint and quotes special characters via sanitizeShellArg', async () => {
+    const target = release('v2.0.0-beta.2');
+    target.distribution.docker.images = [
+      {
+        role: 'full',
+        name: "seakee/cpa-manager-plus$(id)'test",
+        tag: '2.0.0-beta.2-full;echo',
+        digest: FULL_DIGEST,
+        platforms: ['linux/amd64'],
+      },
+    ];
+    target.distribution.native.assets = ["cpa-manager-plus'(bad)_linux_amd64.tar.gz"];
+    mocks.updates.status = {
+      ...mocks.updates.status!,
+      deployment_variant: 'docker-full',
+      target,
+    };
+    await renderPage();
+    await act(async () => {
+      button('manager_updates.show_steps').props.onClick();
+    });
+
+    const expectedImage = `seakee/cpa-manager-plus$(id)'test:2.0.0-beta.2-full;echo@${FULL_DIGEST}`;
+    expect(text(renderer!.root)).toContain(`manager_updates.docker_compose_hint:${expectedImage}`);
+
+    await act(async () => {
+      renderer!.root.findByProps({ id: 'manager-docker-mode-run' }).props.onClick({});
+    });
+    expect(text(renderer!.root)).toContain(
+      `docker pull 'seakee/cpa-manager-plus$(id)'\\''test:2.0.0-beta.2-full;echo@${FULL_DIGEST}'`
+    );
+
+    await act(async () => {
+      renderer!.root.findByProps({ id: 'manager-deployment-native' }).props.onClick();
+    });
+    const nativeText = text(renderer!.root);
+    expect(nativeText).toContain(
+      "curl -fLO 'https://github.com/seakee/CPA-Manager-Plus/releases/download/v2.0.0-beta.2/cpa-manager-plus'\\''(bad)_linux_amd64.tar.gz'"
+    );
+    expect(nativeText).toContain(
+      "tar -xzf 'cpa-manager-plus'\\''(bad)_linux_amd64.tar.gz'"
+    );
+    expect(nativeText).toContain(
+      "sudo ./'cpa-manager-plus'\\''(bad)_linux_amd64'/cpa-manager-plusctl upgrade --home /opt/cpa-manager-plus"
+    );
+    expect(nativeText).not.toContain('systemctl start');
+  });
+
+  it('falls back safely when dockerTarget starts with a hyphen or contains invalid compose service characters', async () => {
+    await renderPage();
+    await act(async () => {
+      button('manager_updates.show_steps').props.onClick();
+    });
+    const targetInput = renderer!.root.findByProps({ id: 'manager-docker-target' });
+
+    for (const badTarget of ['-f', '-f evil.yml', '--help', '  --profile foo  ', '   ', 'bad;id']) {
+      await act(async () => {
+        targetInput.props.onChange({ target: { value: badTarget } });
+      });
+      const content = text(renderer!.root);
+      expect(content).toContain(
+        'docker compose pull cpa-manager-plus && docker compose up -d cpa-manager-plus'
+      );
+      expect(content).not.toContain('docker compose pull -');
+      expect(content).not.toContain('docker compose up -d -');
+    }
+
+    await act(async () => {
+      targetInput.props.onChange({ target: { value: '  cpamp_prod-2.service  ' } });
+    });
+    expect(text(renderer!.root)).toContain(
+      'docker compose pull cpamp_prod-2.service && docker compose up -d cpamp_prod-2.service'
+    );
+  });
+
+  it('includes docker-compose.v2-embedded.yml and {{image}} guidance in docker_compose_hint across all locales', () => {
+    const locales = [
+      ['en.json', enLocale],
+      ['zh-CN.json', zhCNLocale],
+      ['zh-TW.json', zhTWLocale],
+      ['ru.json', ruLocale],
+    ] as const;
+    for (const [name, locale] of locales) {
+      const hint = locale.manager_updates.docker_compose_hint;
+      expect(hint, `${name} docker_compose_hint`).toContain('docker-compose.yml');
+      expect(hint, `${name} docker_compose_hint`).toContain('docker-compose.v2-embedded.yml');
+      expect(hint, `${name} docker_compose_hint`).toContain('{{image}}');
+    }
   });
 });

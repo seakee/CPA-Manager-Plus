@@ -438,7 +438,8 @@ func runServerWithOptions(options legacypreflight.Options) {
 			},
 		)
 	}
-	serverApp.AppContext().CPAUpdateService = cpaupdateservice.New(db, runtimeClient, runtimeMode)
+	serverApp.AppContext().CPAUpdateService = cpaupdateservice.New(db, runtimeClient, runtimeMode).
+		WithProductCompleteProbe(newServerProductCompleteProbe(serverApp))
 	recoveryCtx, cancelRecovery := context.WithTimeout(context.Background(), 10*time.Second)
 	if err := serverApp.AppContext().CodexInspectionService.Recover(recoveryCtx); err != nil {
 		log.Printf("recover codex inspection runs: %v", err)
@@ -1097,5 +1098,18 @@ func runUsageResponseMetadataBackfill(ctx context.Context, db *store.Store) erro
 			return ctx.Err()
 		case <-time.After(100 * time.Millisecond):
 		}
+	}
+}
+
+func newServerProductCompleteProbe(serverApp *httpapi.Server) func(context.Context) (bool, error) {
+	return func(probeCtx context.Context) (bool, error) {
+		if serverApp == nil || serverApp.AppContext() == nil || serverApp.AppContext().SetupService == nil {
+			return false, errors.New("setup service unavailable")
+		}
+		info, err := serverApp.AppContext().SetupService.Info(probeCtx)
+		if err != nil {
+			return false, err
+		}
+		return info.AdminReady && info.ProjectInitialized && !info.SetupRequired, nil
 	}
 }
