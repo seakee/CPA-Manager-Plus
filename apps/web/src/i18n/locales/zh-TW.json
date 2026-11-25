@@ -1508,6 +1508,8 @@
     "model_already_added": "已加入",
     "models_action": "模型設定",
     "models_count_pill": "{{count}} 模型",
+    "models_count_pill_one": "{{count}} 模型",
+    "models_count_pill_other": "{{count}} 模型",
     "models_mapping_hint": "留空或僅填少量映射時，其餘上游模型將依預設規則透傳或受下方排除規則約束。",
     "models_mapping_title": "模型映射清單",
     "models_preview_more": "另有 {{count}} 個模型",
