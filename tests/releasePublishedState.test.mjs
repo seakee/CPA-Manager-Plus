@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { generateReleaseInfo } from '../bin/release/generate-release-info.mjs';
+import { v2DockerRoleTag } from '../bin/release/update-contract.mjs';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   buildExpectedReleaseAssets,
@@ -319,13 +320,10 @@ describe('published release verification', () => {
 const v2Tag = 'v2.0.0-beta.1';
 const v2SourceCommit = '8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc';
 const v2ComposeContent = [
+  'name: cpa-manager-plus',
   'services:',
-  '  cpamp-ingress:',
-  '    image: seakee/cpamp-ingress:v2.0.0-beta.1',
-  '  cpamp-manager:',
-  '    image: seakee/cpa-manager-plus:v2.0.0-beta.1',
-  '  cpamp-runtime:',
-  '    image: seakee/cpamp-runtime:v2.0.0-beta.1',
+  '  cpa-manager-plus:',
+  `    image: seakee/cpa-manager-plus:2.0.0-beta.1-full@sha256:${'6'.repeat(64)}`,
   '',
 ].join('\n');
 const v2ComposeDigest = `sha256:${createHash('sha256').update(v2ComposeContent).digest('hex')}`;
@@ -347,24 +345,28 @@ const v2PairingRecord = () => ({
   compose: {
     filename: 'docker-compose.v2-embedded.yml',
     sha256: v2ComposeDigest,
-    size: v2ComposeContent.length,
+    size: Buffer.byteLength(v2ComposeContent, 'utf8'),
   },
-  images: Object.fromEntries(
-    Object.entries({
-      manager: 'cpa-manager-plus',
-      ingress: 'cpamp-ingress',
-      runtime: 'cpamp-runtime',
-    }).map(([role, repositoryName], index) => [
-      role,
-      {
-        repository: `seakee/${repositoryName}`,
-        tag: v2Tag,
-        manifest_digest: `sha256:${String(index + 5).repeat(64)}`,
-        image_config_digest: `sha256:${String(index + 6).repeat(64)}`,
-        release_provenance_sha256: `sha256:${String(index + 7).repeat(64)}`,
-      },
-    ])
-  ),
+  images: {
+    slim: {
+      repository: 'seakee/cpa-manager-plus',
+      tag: v2DockerRoleTag(v2Tag, 'slim'),
+      image_ref: `seakee/cpa-manager-plus:2.0.0-beta.1@sha256:${'5'.repeat(64)}`,
+      manifest_digest: `sha256:${'5'.repeat(64)}`,
+      image_config_digest: `sha256:${'7'.repeat(64)}`,
+      binary_sha256: `sha256:${'8'.repeat(64)}`,
+      release_provenance_sha256: `sha256:${'9'.repeat(64)}`,
+    },
+    full: {
+      repository: 'seakee/cpa-manager-plus',
+      tag: v2DockerRoleTag(v2Tag, 'full'),
+      image_ref: `seakee/cpa-manager-plus:2.0.0-beta.1-full@sha256:${'6'.repeat(64)}`,
+      manifest_digest: `sha256:${'6'.repeat(64)}`,
+      image_config_digest: `sha256:${'a'.repeat(64)}`,
+      binary_sha256: `sha256:${'8'.repeat(64)}`,
+      release_provenance_sha256: `sha256:${'b'.repeat(64)}`,
+    },
+  },
 });
 const v2Notes = () =>
   '<!-- cpamp-update\n' +
@@ -678,14 +680,15 @@ describe('v2 beta published release verification', () => {
 
     const imageDir = makeV2ReleaseFixture();
     const renamedImage = v2PairingRecord();
-    renamedImage.images.manager.manifest_digest = `sha256:${'a'.repeat(64)}`;
+    renamedImage.images.slim.manifest_digest = `sha256:${'c'.repeat(64)}`;
+    renamedImage.images.slim.image_ref = `seakee/cpa-manager-plus:2.0.0-beta.1@${renamedImage.images.slim.manifest_digest}`;
     writeFileSync(
       path.join(imageDir, 'embedded-release-pairing.json'),
       JSON.stringify(renamedImage)
     );
     expect(() =>
       buildExpectedReleaseAssets(imageDir, v2Tag, { dryRun: true, allowV2Beta: true })
-    ).toThrow(/manager digest does not match release info/);
+    ).toThrow(/slim digest does not match release info/);
   });
 
   it('ignores release-notes.md like 1.x but rejects unexpected subdirectories', () => {

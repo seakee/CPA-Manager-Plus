@@ -57,12 +57,26 @@ export const v2MinimumDirectUpgradeVersion = 'v1.14.10';
 export const v2MinimumCPAVersion = 'v8.0.55';
 export const v2Platforms = ['linux/amd64'];
 export const v2SupportedModes = ['docker', 'native', 'panel-only'];
-export const v2ImageRepositories = {
-  manager: 'cpa-manager-plus',
-  ingress: 'cpamp-ingress',
-  runtime: 'cpamp-runtime',
-};
+export const v2UpdateIndexFilename = 'update-index-v2.json';
+export const v2ImageRepositoryName = 'cpa-manager-plus';
+export const v2ImageRoles = Object.freeze(['slim', 'full']);
 export const v2ImageRegistries = ['seakee', 'ghcr.io/seakee'];
+export function v2DockerVersionTag(tag) {
+  const v = parseVersion(tag);
+  if (v.core[0] !== '2' || !/^v/.test(tag) || tag.includes('+'))
+    throw new Error(`Invalid v2 release tag: ${tag}`);
+  return tag.slice(1);
+}
+export function v2DockerRoleTag(tag, role) {
+  const versionTag = v2DockerVersionTag(tag);
+  if (role === 'slim') return versionTag;
+  if (role === 'full') return `${versionTag}-full`;
+  throw new Error(`Invalid v2 image role: ${role}`);
+}
+export function v2ReleaseInfoPath(tag) {
+  v2DockerVersionTag(tag);
+  return `releases/download/${tag}/release-info.json`;
+}
 // #1129 deliberately renames the v2 Native package so it can never collide with
 // a 1.x schema-1 asset; the 1.x `cpa-manager-plus_v*` namespace is forbidden.
 export const v2NativeArchiveName = (tag) => `cpa-manager-plus-native-v2_${tag}_linux_amd64.tar.gz`;
@@ -91,12 +105,7 @@ export const assertBooleanOption = (options, name, fallback = false) => {
   return value;
 };
 
-/**
- * Gate M3 at the exported boundary, not only in the CLI wrappers: any v2 entry
- * point with an effect (disk reads included) must see BOTH a real dry-run and an
- * explicit beta opt-in, and must reject before doing anything observable.
- * 1.x behaviour is untouched.
- */
+// The release workflow validators still require a dry-run for v2 rehearsal.
 export function assertV2Rehearsal(raw, options = {}) {
   const allowV2Beta = assertBooleanOption(options, 'allowV2Beta');
   const dryRun = assertBooleanOption(options, 'dryRun');
@@ -122,7 +131,7 @@ export function assertSupportedVersion(raw, options = {}) {
   throw new Error(
     `Unqualified v2 Embedded release: v${v.core[0]}.x release contract is fail-closed (Gate M3) for ${raw}` +
       (v.core[0] === '2' && v.stage === 'beta'
-        ? '; only DRY_RUN with an explicit beta opt-in is enabled'
+        ? '; explicit v2 beta opt-in is required'
         : '; only v2.x.y-beta.N is enabled')
   );
 }
@@ -176,10 +185,50 @@ export function assertV2AssetSet(names, tag) {
  * images and the Native archive, so the pairing record must bind each image's
  * release-provenance digest rather than publishing separate notice assets.
  */
+export function assertV2UpgradeGuideUrl(raw) {
+  if (typeof raw !== 'string' || !raw || raw.trim() !== raw || /[\\#?\r\n\t ]/.test(raw))
+    throw new Error('Invalid v2 upgrade guide');
+  if (/%2e|%2f/i.test(raw)) throw new Error('Invalid v2 upgrade guide');
+  let guide;
+  try {
+    guide = new URL(raw);
+  } catch {
+    throw new Error('Invalid v2 upgrade guide');
+  }
+  if (
+    guide.protocol !== 'https:' ||
+    guide.username ||
+    guide.password ||
+    guide.search ||
+    guide.hash
+  )
+    throw new Error('Invalid v2 upgrade guide');
+  const rawPath = raw.slice(guide.origin.length);
+  if (!rawPath.startsWith('/') || rawPath.split('/').some((seg) => seg === '.' || seg === '..'))
+    throw new Error('Invalid v2 upgrade guide');
+  const cleanPath = guide.pathname.replace(/\/+/g, '/').replace(/\/$/, '') || '/';
+  if (guide.origin === 'https://github.com') {
+    if (
+      !cleanPath.startsWith('/seakee/CPA-Manager-Plus/') ||
+      cleanPath.length <= '/seakee/CPA-Manager-Plus/'.length
+    )
+      throw new Error('Invalid v2 upgrade guide');
+    return raw;
+  }
+  if (guide.origin === 'https://cpamp-docs.seakee.dev') {
+    if (!cleanPath.startsWith('/') || cleanPath === '/')
+      throw new Error('Invalid v2 upgrade guide');
+    return raw;
+  }
+  throw new Error('Invalid v2 upgrade guide');
+}
+
 export function validateV2Pairing(pairing, { tag, sourceCommit }) {
   if (!pairing || typeof pairing !== 'object' || pairing.schema_version !== 1)
     throw new Error('Invalid v2 pairing record');
-  if (pairing.version !== tag) throw new Error('v2 pairing version mismatch');
+  const expectedVersionTag = v2DockerVersionTag(tag);
+  if (pairing.version !== tag && pairing.version !== expectedVersionTag)
+    throw new Error('v2 pairing version mismatch');
   if (
     !sourceCommitPattern.test(pairing.source_commit || '') ||
     pairing.source_commit !== sourceCommit
@@ -195,26 +244,37 @@ export function validateV2Pairing(pairing, { tag, sourceCommit }) {
   if (pairing.compose?.filename !== v2EmbeddedComposeFilename)
     throw new Error('v2 pairing compose filename mismatch');
   assertSha256(pairing.compose?.sha256, 'v2 pairing compose digest');
-  if (!pairing.images || typeof pairing.images !== 'object')
+  if (
+    pairing.compose?.size !== undefined &&
+    (!Number.isSafeInteger(pairing.compose.size) || pairing.compose.size <= 0)
+  )
+    throw new Error('Invalid v2 pairing compose size');
+  if (!pairing.images || typeof pairing.images !== 'object' || Array.isArray(pairing.images))
     throw new Error('v2 pairing is missing image records');
-  for (const [role, repositoryName] of Object.entries(v2ImageRepositories)) {
+  const allowedRepositories = v2ImageRegistries.map(
+    (registry) => `${registry}/${v2ImageRepositoryName}`
+  );
+  for (const role of v2ImageRoles) {
     const image = pairing.images[role];
     if (!image || typeof image !== 'object')
       throw new Error(`v2 pairing is missing the ${role} image`);
     const repositoryValue = String(image.repository ?? '');
-    const allowedRepositories = v2ImageRegistries.map(
-      (registry) => `${registry}/${repositoryName}`
-    );
     if (!allowedRepositories.includes(repositoryValue))
       throw new Error(`v2 pairing has an unexpected ${role} repository`);
-    if (image.tag !== tag) throw new Error(`v2 pairing ${role} tag mismatch`);
+    const expectedRoleTag = v2DockerRoleTag(tag, role);
+    if (image.tag !== expectedRoleTag)
+      throw new Error(`v2 pairing ${role} tag mismatch`);
     assertSha256(image.manifest_digest, `v2 pairing ${role} manifest digest`);
+    if (image.image_ref !== `${repositoryValue}:${expectedRoleTag}@${image.manifest_digest}`)
+      throw new Error(`v2 pairing ${role} image_ref mismatch`);
     assertSha256(image.image_config_digest, `v2 pairing ${role} image config digest`);
+    if (image.binary_sha256 !== undefined)
+      assertSha256(image.binary_sha256, `v2 pairing ${role} binary digest`);
     assertSha256(image.release_provenance_sha256, `v2 pairing ${role} release provenance digest`);
   }
-  const roleDigests = Object.keys(v2ImageRepositories).map(
-    (role) => pairing.images[role].manifest_digest
-  );
+  if (Object.keys(pairing.images).some((role) => !v2ImageRoles.includes(role)))
+    throw new Error('v2 pairing has unexpected image roles');
+  const roleDigests = v2ImageRoles.map((role) => pairing.images[role].manifest_digest);
   if (new Set(roleDigests).size !== roleDigests.length)
     throw new Error('v2 role manifest digests must be distinct');
   return pairing;
@@ -242,20 +302,22 @@ export function validateV2Info(info, tag) {
     )
       throw new Error('Invalid v2 release content');
   }
-  if (typeof info.update?.breaking !== 'boolean') throw new Error('Explicit update flags required');
-  if (info.update.migration_required !== true) throw new Error('v2 release must require migration');
-  if (info.update.minimum_direct_upgrade_version !== v2MinimumDirectUpgradeVersion)
-    throw new Error(
-      `v2 release must record minimum_direct_upgrade_version ${v2MinimumDirectUpgradeVersion}`
-    );
-  const guide = new URL(info.update.upgrade_guide_url);
   if (
-    guide.origin !== 'https://github.com' ||
-    guide.username ||
-    guide.password ||
-    !guide.pathname.startsWith('/seakee/CPA-Manager-Plus/')
+    typeof info.update?.breaking !== 'boolean' ||
+    typeof info.update?.migration_required !== 'boolean'
   )
-    throw new Error('Invalid v2 upgrade guide');
+    throw new Error('Explicit update flags required');
+  if (
+    !('minimum_direct_upgrade_version' in (info.update || {})) ||
+    info.update.minimum_direct_upgrade_version === undefined
+  )
+    throw new Error('v2 release must declare minimum_direct_upgrade_version');
+  if (info.update.minimum_direct_upgrade_version !== null) {
+    if (typeof info.update.minimum_direct_upgrade_version !== 'string')
+      throw new Error('Invalid v2 minimum_direct_upgrade_version');
+    parseVersion(info.update.minimum_direct_upgrade_version);
+  }
+  assertV2UpgradeGuideUrl(info.update.upgrade_guide_url);
   if (info.compatibility?.minimum_cpa_version !== v2MinimumCPAVersion)
     throw new Error(`v2 release must require CPA ${v2MinimumCPAVersion}`);
   if (JSON.stringify(info.supported_modes) !== JSON.stringify(v2SupportedModes))
@@ -266,29 +328,36 @@ export function validateV2Info(info, tag) {
   )
     throw new Error('Unsupported v2 platform set');
 
-  if (info.distribution?.docker?.version_tag !== tag)
+  const expectedVersionTag = v2DockerVersionTag(tag);
+  if (info.distribution?.docker?.version_tag !== expectedVersionTag)
     throw new Error('Invalid v2 docker distribution');
   const images = info.distribution?.docker?.images;
-  if (!Array.isArray(images) || images.length !== 6)
-    throw new Error('Invalid v2 image set: three roles for Docker Hub and GHCR are required');
+  const expectedImageCount = v2ImageRoles.length * v2ImageRegistries.length;
+  if (!Array.isArray(images) || images.length !== expectedImageCount)
+    throw new Error('Invalid v2 image set: slim and full roles for Docker Hub and GHCR are required');
+  const expectedNames = v2ImageRegistries.map(
+    (registry) => `${registry}/${v2ImageRepositoryName}`
+  );
   const seen = new Set();
   const roleDigests = new Map();
   for (const image of images) {
-    const repositoryName = v2ImageRepositories[image?.role];
-    if (!repositoryName) throw new Error('Invalid v2 image role');
-    const expectedNames = v2ImageRegistries.map((registry) => `${registry}/${repositoryName}`);
+    if (!v2ImageRoles.includes(image?.role)) throw new Error('Invalid v2 image role');
     if (!expectedNames.includes(image.name))
       throw new Error(`Invalid v2 image reference for the ${image.role} role`);
-    if (image.tag !== tag) throw new Error('Invalid v2 image tag');
+    if (image.tag !== v2DockerRoleTag(tag, image.role))
+      throw new Error(`Invalid v2 image tag for the ${image.role} role`);
     assertSha256(image.digest, 'v2 image digest');
     if (JSON.stringify(image.platforms) !== JSON.stringify(v2Platforms))
       throw new Error('Invalid v2 image platforms');
-    if (seen.has(image.name)) throw new Error('Duplicate v2 image reference');
-    seen.add(image.name);
+    const entryKey = `${image.role}@${image.name}`;
+    if (seen.has(entryKey)) throw new Error('Duplicate v2 image reference');
+    seen.add(entryKey);
     const digests = roleDigests.get(image.role) ?? new Set();
     digests.add(image.digest);
     roleDigests.set(image.role, digests);
   }
+  if (roleDigests.size !== v2ImageRoles.length)
+    throw new Error('v2 image set must include both slim and full roles');
   for (const [role, digests] of roleDigests)
     if (digests.size !== 1) throw new Error(`v2 registry digest mismatch: ${role}`);
   const distinctRoleDigests = new Set([...roleDigests.values()].map((digests) => [...digests][0]));
@@ -320,7 +389,7 @@ export function validateV2Info(info, tag) {
  * the pairing record, and every image digest must agree with `release-info.json`.
  * Callers pass what they actually have on disk (or in the published asset list).
  */
-export function assertV2AssetBindings(info, { composeSha256, pairing }) {
+export function assertV2AssetBindings(info, { composeSha256, composeSize, pairing }) {
   if (typeof composeSha256 !== 'string' || !sha256Pattern.test(composeSha256))
     throw new Error('Invalid v2 compose asset digest');
   if (composeSha256 !== info.distribution.compose.sha256)
@@ -329,13 +398,19 @@ export function assertV2AssetBindings(info, { composeSha256, pairing }) {
     tag: info.release.version,
     sourceCommit: info.release.source_commit,
   });
+  if (
+    composeSize !== undefined &&
+    validated.compose.size !== undefined &&
+    composeSize !== validated.compose.size
+  )
+    throw new Error('v2 compose asset size does not match pairing record');
   if (validated.compose.sha256 !== info.pairing.compose_sha256)
     throw new Error('v2 pairing compose digest does not match release info');
   if (validated.fullweb.manifest_sha256 !== info.pairing.fullweb_manifest_sha256)
     throw new Error('v2 pairing Full Web digest does not match release info');
   if (validated.api_contract.sha256 !== info.pairing.api_contract_sha256)
     throw new Error('v2 pairing API contract digest does not match release info');
-  for (const role of Object.keys(v2ImageRepositories)) {
+  for (const role of v2ImageRoles) {
     const digests = new Set(
       info.distribution.docker.images
         .filter((image) => image.role === role)
@@ -398,12 +473,12 @@ export function validateInfo(info, tag, options = {}) {
 }
 
 /**
- * Validate a producer update index. The top-level file stays schema_version 1
- * so 1.x consumers keep parsing it; a v2 Beta target is only legal on the beta
- * channel, must carry `schema_version: 2`, and needs the explicit opt-in.
+ * Validate the 1.x update index (`update-index.json`, `schema_version: 1`).
+ * Only `major == 1` targets are allowed here so 1.x consumers (including 1.x
+ * beta users) never encounter v2 targets or schema_version 2 payloads.
  */
 export function validateIndex(index, options = {}) {
-  const allowV2Beta = assertBooleanOption(options, 'allowV2Beta');
+  assertBooleanOption(options, 'allowV2Beta');
   if (
     !index ||
     typeof index !== 'object' ||
@@ -418,29 +493,90 @@ export function validateIndex(index, options = {}) {
     if (!(channel in index.channels)) throw new Error('Missing update index channel');
     const target = index.channels[channel];
     if (target === null) continue;
-    const v = parseVersion(target?.version);
+    if (!target || typeof target !== 'object' || Array.isArray(target))
+      throw new Error('Invalid update index target');
+    const v = parseVersion(target.version);
     if (
       !/^v/.test(target.version) ||
       target.version.includes('+') ||
       !stageAllowed(channel, v.stage)
     )
       throw new Error('Invalid update index target');
-    if (v.core[0] === '2') {
-      if (channel !== 'beta') throw new Error('v2 release may only target the beta channel');
-      // Reject `v2.0.0` and `v2.0.0-rc.1` on the beta channel: the v2 Beta
-      // channel target is exactly `v2.x.y-beta.N`.
-      assertSupportedVersion(target.version, { allowV2Beta: true });
-      if (v.stage !== 'beta') throw new Error('v2 beta channel target must be a beta prerelease');
-      if (target.schema_version !== 2)
-        throw new Error('v2 beta index target requires schema_version 2');
-      if (!allowV2Beta)
-        throw new Error(
-          'Unqualified v2 Embedded release: v2 beta index target requires an explicit dry-run opt-in'
-        );
-    } else if (target.schema_version !== undefined) {
+    if (v.core[0] !== '1')
+      throw new Error('update-index.json only accepts 1.x versions; use update-index-v2.json for v2');
+    if (target.schema_version !== undefined || Object.keys(target).some((k) => k !== 'version'))
       throw new Error('Invalid update index target schema');
-    }
   }
+  if (Object.keys(index.channels).some((channel) => !['stable', 'rc', 'beta'].includes(channel)))
+    throw new Error('Unexpected update index channel');
+  return index;
+}
+
+/**
+ * Validate the v2 update index (`update-index-v2.json`, `schema_version: 2`).
+ */
+export function validateV2Index(index, options = {}) {
+  const allowV2Beta = assertBooleanOption(options, 'allowV2Beta');
+  const requireReleaseInfoSha256 = assertBooleanOption(options, 'requireReleaseInfoSha256');
+  if (
+    !index ||
+    typeof index !== 'object' ||
+    Array.isArray(index) ||
+    index.schema_version !== 2 ||
+    !Number.isSafeInteger(index.revision) ||
+    index.revision < 1 ||
+    typeof index.generated_at !== 'string' ||
+    !index.generated_at.trim() ||
+    Number.isNaN(Date.parse(index.generated_at)) ||
+    typeof index.channels !== 'object' ||
+    index.channels === null ||
+    Array.isArray(index.channels)
+  )
+    throw new Error('Invalid v2 update index');
+  const allowedTargetKeys = new Set([
+    'version',
+    'schema_version',
+    'release_info_path',
+    'release_info_sha256',
+  ]);
+  for (const channel of ['stable', 'rc', 'beta']) {
+    if (!(channel in index.channels)) throw new Error('Missing v2 update index channel');
+    const target = index.channels[channel];
+    if (target === null) continue;
+    if (!target || typeof target !== 'object' || Array.isArray(target))
+      throw new Error('Invalid v2 update index target');
+    for (const key of Object.keys(target))
+      if (!allowedTargetKeys.has(key)) throw new Error('Invalid v2 update index target schema');
+    const v = parseVersion(target.version);
+    if (
+      v.core[0] !== '2' ||
+      !/^v/.test(target.version) ||
+      target.version.includes('+') ||
+      !stageAllowed(channel, v.stage)
+    )
+      throw new Error('Invalid v2 update index target');
+    if (channel !== 'beta') throw new Error('v2 release may only target the beta channel');
+    assertSupportedVersion(target.version, { allowV2Beta: true });
+    if (v.stage !== 'beta') throw new Error('v2 beta channel target must be a beta prerelease');
+    if (target.schema_version !== 2)
+      throw new Error('v2 beta index target requires schema_version 2');
+    if (target.release_info_path !== v2ReleaseInfoPath(target.version))
+      throw new Error('Invalid v2 index target release_info_path');
+    if (requireReleaseInfoSha256 || (target.release_info_sha256 !== undefined && target.release_info_sha256 !== '')) {
+      assertSha256(target.release_info_sha256, 'v2 index target release_info_sha256');
+    } else if (
+      target.release_info_sha256 !== undefined &&
+      typeof target.release_info_sha256 !== 'string'
+    ) {
+      throw new Error('Invalid v2 index target release_info_sha256');
+    }
+    if (!allowV2Beta)
+      throw new Error(
+        'Unqualified v2 Embedded release: v2 beta index target requires an explicit dry-run opt-in'
+      );
+  }
+  if (Object.keys(index.channels).some((channel) => !['stable', 'rc', 'beta'].includes(channel)))
+    throw new Error('Unexpected v2 update index channel');
   return index;
 }
 
@@ -449,16 +585,43 @@ export function resolveChannels(infos, withdrawn = [], options = {}) {
   for (const info of infos) {
     const tag = info.release.version;
     validateInfo(info, tag, options);
+    if (parseVersion(tag).core[0] !== '1') continue;
     if (withdrawn.includes(tag)) continue;
     for (const ch of Object.keys(channels))
       if (
         stageAllowed(ch, info.release.stage) &&
         (!channels[ch] || compareVersions(tag, channels[ch].version) > 0)
       )
-        channels[ch] =
-          parseVersion(tag).core[0] === '2'
-            ? { version: tag, schema_version: 2 }
-            : { version: tag };
+        channels[ch] = { version: tag };
+  }
+  return channels;
+}
+
+export function resolveV2Channels(infos, withdrawn = [], options = {}) {
+  assertBooleanOption(options, 'allowV2Beta');
+  const digests = options.releaseInfoDigests;
+  const lookupDigest = (tag) =>
+    digests instanceof Map ? digests.get(tag) : digests?.[tag];
+  const channels = { stable: null, rc: null, beta: null };
+  for (const info of infos) {
+    const tag = info.release.version;
+    validateInfo(info, tag, options);
+    if (parseVersion(tag).core[0] !== '2') continue;
+    if (withdrawn.includes(tag)) continue;
+    const sha256 = lookupDigest(tag);
+    if (sha256 !== undefined && sha256 !== '')
+      assertSha256(sha256, 'v2 release_info_sha256');
+    for (const ch of Object.keys(channels))
+      if (
+        stageAllowed(ch, info.release.stage) &&
+        (!channels[ch] || compareVersions(tag, channels[ch].version) > 0)
+      )
+        channels[ch] = {
+          version: tag,
+          schema_version: 2,
+          release_info_path: v2ReleaseInfoPath(tag),
+          ...(sha256 ? { release_info_sha256: sha256 } : {}),
+        };
   }
   return channels;
 }

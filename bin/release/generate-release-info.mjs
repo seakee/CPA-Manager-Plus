@@ -7,16 +7,19 @@ import {
   nativeAssets,
   validateInfo,
   assertSupportedVersion,
-  assertV2Rehearsal,
+  assertBooleanOption,
+  assertV2UpgradeGuideUrl,
   validateV2Pairing,
   v2EmbeddedComposeFilename,
   v2PairingFilename,
-  v2MinimumDirectUpgradeVersion,
   v2MinimumCPAVersion,
   v2SupportedModes,
   v2Platforms,
   v2ImageRegistries,
-  v2ImageRepositories,
+  v2ImageRepositoryName,
+  v2ImageRoles,
+  v2DockerVersionTag,
+  v2DockerRoleTag,
   v2NativeArchiveName,
 } from './update-contract.mjs';
 
@@ -44,18 +47,22 @@ const validateV2NotesMetadata = (metadata) => {
     if (typeof summary !== 'string' || !summary.trim() || Buffer.byteLength(summary, 'utf8') > 4096)
       throw new Error('Invalid v2 release content');
   }
-  const guide = new URL(metadata.update?.upgrade_guide_url);
-  if (guide.origin !== 'https://github.com' || guide.username || guide.password ||
-      !guide.pathname.startsWith('/seakee/CPA-Manager-Plus/'))
-    throw new Error('Invalid v2 upgrade guide');
-  if (typeof metadata.update?.breaking !== 'boolean')
+  assertV2UpgradeGuideUrl(metadata.update?.upgrade_guide_url);
+  if (
+    typeof metadata.update?.breaking !== 'boolean' ||
+    typeof metadata.update?.migration_required !== 'boolean'
+  )
     throw new Error('Explicit update flags required');
-  if (metadata.update.migration_required !== true)
-    throw new Error('v2 beta release notes must declare migration_required true');
-  if (metadata.update.minimum_direct_upgrade_version !== v2MinimumDirectUpgradeVersion)
-    throw new Error(
-      `v2 beta release notes must declare minimum_direct_upgrade_version ${v2MinimumDirectUpgradeVersion}`
-    );
+  if (
+    !('minimum_direct_upgrade_version' in (metadata.update || {})) ||
+    metadata.update.minimum_direct_upgrade_version === undefined
+  )
+    throw new Error('v2 beta release notes must declare minimum_direct_upgrade_version');
+  if (metadata.update.minimum_direct_upgrade_version !== null) {
+    if (typeof metadata.update.minimum_direct_upgrade_version !== 'string')
+      throw new Error('Invalid v2 minimum_direct_upgrade_version');
+    parseVersion(metadata.update.minimum_direct_upgrade_version);
+  }
   if (metadata.compatibility?.minimum_cpa_version !== v2MinimumCPAVersion)
     throw new Error(
       `v2 beta release notes must declare minimum_cpa_version ${v2MinimumCPAVersion}`
@@ -65,7 +72,7 @@ const validateV2NotesMetadata = (metadata) => {
 // Validate reviewed note metadata before OCI evidence/pairing exists. This is
 // deliberately a notes check, not a generated release-info or publication.
 export function validateReleaseMetadata(tag, chineseNotes, options = {}) {
-  assertV2Rehearsal(tag, options);
+  assertBooleanOption(options, 'dryRun');
   const version = assertSupportedVersion(tag, options);
   const metadata = parseUpdateMetadata(chineseNotes);
   if (version.core[0] === '2') validateV2NotesMetadata(metadata);
@@ -74,11 +81,12 @@ export function validateReleaseMetadata(tag, chineseNotes, options = {}) {
 
 const buildV2ReleaseInfo = (tag, sha, metadata, pairingInput) => {
   const pairing = validateV2Pairing(pairingInput, { tag, sourceCommit: sha });
+  const versionTag = v2DockerVersionTag(tag);
   const images = v2ImageRegistries.flatMap((registry) =>
-    Object.entries(v2ImageRepositories).map(([role, repositoryName]) => ({
+    v2ImageRoles.map((role) => ({
       role,
-      name: `${registry}/${repositoryName}`,
-      tag,
+      name: `${registry}/${v2ImageRepositoryName}`,
+      tag: v2DockerRoleTag(tag, role),
       digest: pairing.images[role].manifest_digest,
       platforms: [...v2Platforms],
     }))
@@ -90,12 +98,12 @@ const buildV2ReleaseInfo = (tag, sha, metadata, pairingInput) => {
       content: contentFor(tag, metadata),
       update: {
         breaking: metadata.update.breaking,
-        migration_required: true,
-        minimum_direct_upgrade_version: v2MinimumDirectUpgradeVersion,
+        migration_required: metadata.update.migration_required,
+        minimum_direct_upgrade_version: metadata.update.minimum_direct_upgrade_version,
         upgrade_guide_url: metadata.update.upgrade_guide_url,
       },
       distribution: {
-        docker: { version_tag: tag, images },
+        docker: { version_tag: versionTag, images },
         native: { assets: [v2NativeArchiveName(tag)] },
         compose: { filename: v2EmbeddedComposeFilename, sha256: pairing.compose.sha256 },
       },
@@ -116,12 +124,8 @@ const buildV2ReleaseInfo = (tag, sha, metadata, pairingInput) => {
 };
 
 export function generateReleaseInfo(tag, sha, chineseNotes, options = {}) {
-  // Gate M3 at the exported boundary: no v2 record may be produced without a
-  // real dry-run and an explicit beta opt-in, before notes are even parsed.
-  assertV2Rehearsal(tag, options);
-  const v = assertSupportedVersion(tag, options);
   const metadata = validateReleaseMetadata(tag, chineseNotes, options);
-  if (v.core[0] === '2') return buildV2ReleaseInfo(tag, sha, metadata, options.pairing);
+  if (parseVersion(tag).core[0] === '2') return buildV2ReleaseInfo(tag, sha, metadata, options.pairing);
   return validateInfo(
     {
       schema_version: 1,
@@ -159,15 +163,9 @@ const runCli = () => {
   const { options, positional } = parseCliArguments(process.argv.slice(2));
   const [tag, out, sourceCommit] = positional;
   if (!tag) throw new Error('Missing release tag');
-  const isV2 = parseVersion(tag).core[0] === '2';
-  const dryRunV2OptIn = isV2 && options.allowV2Beta === true && options.dryRun === true;
-  if (isV2 && !dryRunV2OptIn)
-    throw new Error(
-      `v2 release contract is fail-closed (Gate M3); DRY_RUN and --allow-v2-beta are both required: ${tag}`
-    );
-  // A stable v2 tag never passes, even with the opt-in, before any file is read.
-  assertSupportedVersion(tag, { allowV2Beta: dryRunV2OptIn });
-  const infoOptions = isV2 ? { dryRun: true, allowV2Beta: true } : {};
+  // Reject unsupported versions and missing opt-in before reading any files.
+  const isV2 = assertSupportedVersion(tag, options).core[0] === '2';
+  const infoOptions = { dryRun: options.dryRun, allowV2Beta: options.allowV2Beta };
   if (isV2) {
     if (!options.pairingPath)
       throw new Error('v2 beta release info requires --pairing embedded-release-pairing.json');
