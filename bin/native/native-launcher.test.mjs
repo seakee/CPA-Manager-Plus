@@ -9,6 +9,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   statSync,
@@ -388,7 +389,8 @@ const createMockNativeHome = (baseDir) => {
       '  // `-config <gateway>/config.yaml`, and Close never stops it.',
       '  if (process.env.MOCK_SUPERVISOR_SPAWN_CPA === "1") {',
       '    const configPath = path.join(process.cwd(), "config.yaml");',
-      '    const child = spawn(process.env.CPAMP_CPA_EXECUTABLE, ["-config", configPath], { stdio: "ignore" });',
+      '    const cpaExec = process.env.MOCK_CPA_SPAWN_EXECUTABLE || process.env.CPAMP_CPA_EXECUTABLE;',
+      '    const child = spawn(cpaExec, ["-config", configPath], { stdio: "ignore" });',
       '    recordEvent("cpa-spawn:" + child.pid);',
       '    if (process.env.MOCK_CPA_PID_FILE) {',
       '      writeFileSync(process.env.MOCK_CPA_PID_FILE, String(child.pid));',
@@ -441,12 +443,18 @@ const createMockNativeHome = (baseDir) => {
       '  servers.push(ctrlSrv);',
       '}',
       '',
+      'let shuttingDown = false;',
       'const shutdown = (sig) => {',
+      '  if (shuttingDown) return;',
+      '  shuttingDown = true;',
       '  recordEvent(`sig:${sig}`);',
-      '  Promise.all(servers.map((s) => new Promise((r) => s.close(() => r())))).finally(() => {',
-      '    recordEvent("exit");',
-      '    process.exit(0);',
-      '  });',
+      '  const drainMs = role === "ingress" ? Number(process.env.MOCK_INGRESS_DRAIN_MS || 0) : 0;',
+      '  setTimeout(() => {',
+      '    Promise.all(servers.map((s) => new Promise((r) => s.close(() => r())))).finally(() => {',
+      '      recordEvent("exit");',
+      '      process.exit(0);',
+      '    });',
+      '  }, drainMs);',
       '};',
       'process.on("SIGTERM", () => shutdown("SIGTERM"));',
       'process.on("SIGINT", () => shutdown("SIGINT"));',
@@ -1565,10 +1573,14 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
     assert.doesNotMatch(unitContent, /^Group=/m);
     assert.doesNotMatch(unitContent, /ExecReload=/);
     assert.match(unitContent, /Environment="CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK=1"/);
+    assert.match(unitContent, /^Environment="CPAMP_DRAIN_TIMEOUT=90s"$/m);
+    assert.match(unitContent, /^TimeoutStopSec=150$/m);
     const staticServiceContent = readFileSync(
       path.join(repoRoot, 'bin/native/cpa-manager-plus.service'),
       'utf8'
     );
+    assert.match(staticServiceContent, /^Environment="CPAMP_DRAIN_TIMEOUT=90s"$/m);
+    assert.match(staticServiceContent, /^TimeoutStopSec=150$/m);
     assert.match(staticServiceContent, /Environment="CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK=1"/);
     assert.match(unitContent, /CPAMP_RUNTIME_CPA_UID=\d+/);
     assert.match(unitContent, /CPAMP_RUNTIME_CPA_GID=\d+/);
@@ -3017,6 +3029,2444 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
       assert.equal(ingressDump.env.CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK, undefined);
     } finally {
       spawnSync('bash', [ctl, 'stop'], { env, encoding: 'utf8' });
+    }
+  });
+
+  it('clamps overflowing/invalid CPAMP_DRAIN_TIMEOUT to 90s and unconditionally exports CPAMP_INGRESS_SHUTDOWN_TIMEOUT', async () => {
+    const invalidCases = [
+      '9999999999',
+      '99999999999999999999',
+      '3000000h',
+      '-5s',
+      '0s',
+      '0.5ns',
+      '3601s',
+      '1h1ns',
+      'invalid',
+    ];
+    for (const badValue of invalidCases) {
+      const baseDir = makeTempDir('cpamp-native-drain-bad-');
+      const { homeDir, runDir } = createMockNativeHome(baseDir);
+      const envDumpDir = path.join(baseDir, 'env-dumps');
+      mkdirSync(envDumpDir, { recursive: true });
+
+      const rawEnv = await buildPortEnv(homeDir, {
+        MOCK_ENV_DUMP_DIR: envDumpDir,
+        CPAMP_DRAIN_TIMEOUT: badValue,
+        CPAMP_INGRESS_SHUTDOWN_TIMEOUT: '300s',
+      });
+      const { _ports: _ports, ...env } = rawEnv;
+      const proc = spawn('bash', [path.join(homeDir, 'bin/cpa-manager-plus-launcher')], {
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      activeProcesses.push(proc);
+      let stderr = '';
+      proc.stderr.on('data', (chunk) => {
+        stderr += chunk.toString();
+      });
+      try {
+        assert.equal(await waitForFile(path.join(runDir, 'launcher.ready')), true);
+        const ingressDump = JSON.parse(
+          readFileSync(path.join(envDumpDir, 'ingress-env.json'), 'utf8')
+        );
+        assert.equal(
+          ingressDump.env.CPAMP_INGRESS_SHUTDOWN_TIMEOUT,
+          '90s',
+          `bad CPAMP_DRAIN_TIMEOUT=${badValue} must fall back to 90s`
+        );
+        assert.match(stderr, /Invalid CPAMP_DRAIN_TIMEOUT/);
+      } finally {
+        proc.kill('SIGTERM');
+        await waitForExit(proc);
+      }
+    }
+
+    const validCases = [
+      ['200ms', '200ms'],
+      ['1m30s', '1m30s'],
+      ['500µs', '500us'],
+      ['90', '90s'],
+    ];
+    for (const [input, expected] of validCases) {
+      const baseDir = makeTempDir('cpamp-native-drain-ok-');
+      const { homeDir, runDir } = createMockNativeHome(baseDir);
+      const envDumpDir = path.join(baseDir, 'env-dumps');
+      mkdirSync(envDumpDir, { recursive: true });
+
+      const rawEnv = await buildPortEnv(homeDir, {
+        MOCK_ENV_DUMP_DIR: envDumpDir,
+        CPAMP_DRAIN_TIMEOUT: input,
+        CPAMP_INGRESS_SHUTDOWN_TIMEOUT: '300s',
+      });
+      const { _ports: _ports, ...env } = rawEnv;
+      const proc = spawn('bash', [path.join(homeDir, 'bin/cpa-manager-plus-launcher')], {
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      activeProcesses.push(proc);
+      try {
+        assert.equal(await waitForFile(path.join(runDir, 'launcher.ready')), true);
+        const ingressDump = JSON.parse(
+          readFileSync(path.join(envDumpDir, 'ingress-env.json'), 'utf8')
+        );
+        assert.equal(
+          ingressDump.env.CPAMP_INGRESS_SHUTDOWN_TIMEOUT,
+          expected,
+          `valid CPAMP_DRAIN_TIMEOUT=${input} must override stale CPAMP_INGRESS_SHUTDOWN_TIMEOUT`
+        );
+      } finally {
+        proc.kill('SIGTERM');
+        await waitForExit(proc);
+      }
+    }
+  });
+
+  it('keeps serial stop worst-case budgets bounded within TimeoutStopSec=150', () => {
+    const launcherContent = readFileSync(launcherScript, 'utf8');
+    assert.match(launcherContent, /ingress_budget_sec=\$\(\(drain_timeout_sec \+ 5\)\)/);
+    assert.match(launcherContent, /manager_stop_timeout_sec=\$\(\(\s*stop_timeout_sec < 10 \? stop_timeout_sec : 10\s*\)\)/);
+    assert.match(launcherContent, /runtime_stop_timeout_sec=\$\(\(\s*stop_timeout_sec < 10 \? stop_timeout_sec : 10\s*\)\)/);
+    assert.match(launcherContent, /cpa_stop_timeout_sec=\$\(\(\s*stop_timeout_sec < 5 \? stop_timeout_sec : 5\s*\)\)/);
+    assert.match(
+      launcherContent,
+      /stop_child_process "ingress" "\$\{ingress_pid\}" "\$\{ingress_pid_file\}" "\$\{ingress_deadline\}" "\$\{ingress_budget_sec\}" 3/
+    );
+    assert.match(
+      launcherContent,
+      /stop_child_process "manager" "\$\{manager_pid\}" "\$\{manager_pid_file\}" "\$\{manager_deadline\}" "\$\{manager_stop_timeout_sec\}" 2/
+    );
+    assert.match(
+      launcherContent,
+      /stop_child_process "runtime-supervisor" "\$\{runtime_pid\}" "\$\{runtime_pid_file\}" "\$\{runtime_deadline\}" "\$\{runtime_stop_timeout_sec\}" 2/
+    );
+
+    const ctlContent = readFileSync(ctlScript, 'utf8');
+    assert.match(ctlContent, /stop_timeout=\$\(\(drain_sec \+ 45\)\)/);
+  });
+
+  it('supports atomic root-safe cpa-manager-plusctl upgrade, enforces safety checks, and rolls back cleanly on swap failure', async () => {
+    const createBundleDir = (parentDir, name, versionTag) => {
+      const { homeDir: bundleDir } = createMockNativeHome(path.join(parentDir, name));
+      mkdirSync(path.join(bundleDir, 'share/cpamp'), { recursive: true });
+      mkdirSync(path.join(bundleDir, 'licenses'), { recursive: true });
+      mkdirSync(path.join(bundleDir, 'docs'), { recursive: true });
+      writeFileSync(
+        path.join(bundleDir, 'share/cpamp/provenance.json'),
+        JSON.stringify({ version: versionTag }) + '\n'
+      );
+      writeFileSync(
+        path.join(bundleDir, 'share/cpamp/runtime/seed-lineage.json'),
+        JSON.stringify({ seed: versionTag }) + '\n'
+      );
+      writeFileSync(path.join(bundleDir, 'README.md'), `release ${versionTag}\n`);
+      writeFileSync(path.join(bundleDir, 'LICENSE'), 'MIT\n');
+      writeFileSync(path.join(bundleDir, 'THIRD_PARTY_NOTICES.txt'), `notices ${versionTag}\n`);
+      writeFileSync(path.join(bundleDir, 'licenses/app.txt'), `license ${versionTag}\n`);
+      writeFileSync(path.join(bundleDir, 'docs/notes.md'), `docs ${versionTag}\n`);
+      return bundleDir;
+    };
+
+    // 1. Refuses non-root invocation without test override
+    if (typeof process.getuid === 'function' && process.getuid() !== 0) {
+      const baseDir = makeTempDir('cpamp-upgrade-nonroot-');
+      const { homeDir: targetHome } = createMockNativeHome(path.join(baseDir, 'target'));
+      const bundleDir = createBundleDir(baseDir, 'bundle', 'v2.0.0-beta.2');
+      const nonRootRes = spawnSync(
+        'bash',
+        [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', targetHome, '--no-systemctl'],
+        { encoding: 'utf8' }
+      );
+      assert.notEqual(nonRootRes.status, 0);
+      assert.match(nonRootRes.stderr, /sudo/);
+    }
+
+    // 2. Refuses running upgrade from inside target_home
+    {
+      const baseDir = makeTempDir('cpamp-upgrade-self-');
+      const targetHome = createBundleDir(baseDir, 'target', 'v2.0.0-beta.1');
+      const selfRes = spawnSync(
+        'bash',
+        [path.join(targetHome, 'cpa-manager-plusctl'), 'upgrade', '--home', targetHome, '--no-systemctl'],
+        {
+          env: { ...process.env, CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1' },
+          encoding: 'utf8',
+        }
+      );
+      assert.notEqual(selfRes.status, 0);
+      assert.match(selfRes.stderr, /inside target installation/);
+    }
+
+    // 3. Refuses symlinks inside bundle bin/ or share/
+    {
+      const baseDir = makeTempDir('cpamp-upgrade-symlink-');
+      const { homeDir: targetHome } = createMockNativeHome(path.join(baseDir, 'target'));
+      const bundleDir = createBundleDir(baseDir, 'bundle', 'v2.0.0-beta.2');
+      symlinkSync('/etc/passwd', path.join(bundleDir, 'share/cpamp/evil-link'));
+      const symRes = spawnSync(
+        'bash',
+        [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', targetHome, '--no-systemctl'],
+        {
+          env: { ...process.env, CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1' },
+          encoding: 'utf8',
+        }
+      );
+      assert.notEqual(symRes.status, 0);
+      assert.match(symRes.stderr, /refusing symlink/);
+    }
+
+    // 4. Performs atomic upgrade with systemd mock, preserves data + .env, strips go+w
+    {
+      const baseDir = makeTempDir('cpamp-upgrade-ok-');
+      const targetHome = createBundleDir(baseDir, 'target', 'v2.0.0-beta.1');
+      const bundleDir = createBundleDir(baseDir, 'bundle', 'v2.0.0-beta.2');
+      const systemdDir = path.join(baseDir, 'systemd');
+      const systemctlLog = path.join(baseDir, 'systemctl.log');
+      const mockSystemctl = path.join(baseDir, 'mock-systemctl');
+
+      // Simulate permissive group/world write bits in extracted tarball
+      chmodSync(path.join(bundleDir, 'bin/cpa-manager-plus'), 0o777);
+      chmodSync(path.join(bundleDir, 'cpa-manager-plusctl'), 0o777);
+      chmodSync(path.join(bundleDir, 'share/cpamp/provenance.json'), 0o666);
+
+      // Populate persistent user data & env file in targetHome
+      writeFileSync(path.join(targetHome, 'data/usage.sqlite'), 'sqlite-data-keep');
+      writeFileSync(path.join(targetHome, 'data/data.key'), 'secret-key-keep');
+      writeFileSync(path.join(targetHome, 'cpa-manager-plus.env'), 'CPAMP_CUSTOM_ENV=keep\n');
+
+      const systemdStateFile = path.join(baseDir, 'systemd-state');
+      const unitPidFile = path.join(baseDir, 'unit.pid');
+      writeFileSync(systemdStateFile, 'active\n');
+      writeFileSync(
+        mockSystemctl,
+        [
+          '#!/usr/bin/env bash',
+          `printf '%s\\n' "$*" >> "${systemctlLog}"`,
+          `state_file="${systemdStateFile}"`,
+          `pid_file="${unitPidFile}"`,
+          `launcher_bin="${targetHome}/bin/cpa-manager-plus-launcher"`,
+          `log_out="${targetHome}/logs/cpa-manager-plus.log"`,
+          'case "${1:-}" in',
+          '  is-active)',
+          '    [ "$(cat "${state_file}" 2>/dev/null || true)" = "active" ] && exit 0',
+          '    exit 3',
+          '    ;;',
+          '  show)',
+          '    if [ "$(cat "${state_file}" 2>/dev/null || true)" = "active" ]; then',
+          '      printf "loaded\\nactive\\nrunning\\n"',
+          '    else',
+          '      printf "loaded\\ninactive\\ndead\\n"',
+          '    fi',
+          '    exit 0',
+          '    ;;',
+          '  stop)',
+          '    if [ -f "${pid_file}" ]; then',
+          '      up="$(cat "${pid_file}" 2>/dev/null || true)"',
+          '      if [ -n "${up}" ] && kill -0 "${up}" >/dev/null 2>&1; then',
+          '        kill -TERM "${up}" >/dev/null 2>&1 || true',
+          '        for _ in $(seq 1 30); do',
+          '          kill -0 "${up}" >/dev/null 2>&1 || break',
+          '          sleep 0.1',
+          '        done',
+          '      fi',
+          '      rm -f "${pid_file}"',
+          '    fi',
+          '    echo "inactive" > "${state_file}"',
+          '    exit 0',
+          '    ;;',
+          '  start)',
+          '    mkdir -p "$(dirname "${log_out}")"',
+          '    "${launcher_bin}" </dev/null >>"${log_out}" 2>&1 &',
+          '    echo "$!" > "${pid_file}"',
+          '    echo "active" > "${state_file}"',
+          '    exit 0',
+          '    ;;',
+          'esac',
+          '',
+        ].join('\n'),
+        { mode: 0o755 }
+      );
+      chmodSync(mockSystemctl, 0o755);
+
+      const rawEnv = await buildPortEnv(targetHome, {
+        CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1',
+        CPA_MANAGER_PLUS_SYSTEMCTL_BIN: mockSystemctl,
+      });
+      const { _ports: _ports, ...env } = rawEnv;
+
+      try {
+        const upgradeOut = execFileSync(
+          'bash',
+          [
+            path.join(bundleDir, 'cpa-manager-plusctl'),
+            'upgrade',
+            '--home',
+            targetHome,
+            '--unit-dir',
+            systemdDir,
+          ],
+          { env, encoding: 'utf8' }
+        );
+        assert.match(upgradeOut, /Installed systemd unit:/);
+
+        // New files installed cleanly
+        assert.equal(
+          JSON.parse(readFileSync(path.join(targetHome, 'share/cpamp/provenance.json'), 'utf8')).version,
+          'v2.0.0-beta.2'
+        );
+        assert.equal(
+          JSON.parse(readFileSync(path.join(targetHome, 'share/cpamp/runtime/seed-lineage.json'), 'utf8'))
+            .seed,
+          'v2.0.0-beta.2'
+        );
+        assert.equal(readFileSync(path.join(targetHome, 'THIRD_PARTY_NOTICES.txt'), 'utf8'), 'notices v2.0.0-beta.2\n');
+        assert.equal(
+          readFileSync(path.join(targetHome, 'cpa-manager-plus-launcher'), 'utf8'),
+          readFileSync(launcherScript, 'utf8')
+        );
+        assert.equal(
+          readFileSync(path.join(targetHome, 'cpa-manager-plusctl'), 'utf8'),
+          readFileSync(ctlScript, 'utf8')
+        );
+
+        // Group/world write bits stripped
+        assert.equal(statSync(path.join(targetHome, 'bin/cpa-manager-plus')).mode & 0o022, 0);
+        assert.equal(statSync(path.join(targetHome, 'cpa-manager-plusctl')).mode & 0o022, 0);
+        assert.equal(statSync(path.join(targetHome, 'share/cpamp/provenance.json')).mode & 0o022, 0);
+
+        // Persistent state preserved
+        assert.equal(readFileSync(path.join(targetHome, 'data/usage.sqlite'), 'utf8'), 'sqlite-data-keep');
+        assert.equal(readFileSync(path.join(targetHome, 'data/data.key'), 'utf8'), 'secret-key-keep');
+        assert.equal(
+          readFileSync(path.join(targetHome, 'cpa-manager-plus.env'), 'utf8'),
+          'CPAMP_CUSTOM_ENV=keep\n'
+        );
+
+        // Systemd unit updated & lifecycle calls executed in order with readiness polling
+        const unitContent = readFileSync(path.join(systemdDir, 'cpa-manager-plus.service'), 'utf8');
+        assert.match(unitContent, /^TimeoutStopSec=150$/m);
+        assert.match(unitContent, /^Environment="CPAMP_DRAIN_TIMEOUT=90s"$/m);
+        assert.match(unitContent, /^Environment="CPAMP_SERVICE_STOP_TIMEOUT_SEC=150"$/m);
+        assert.equal(existsSync(path.join(targetHome, 'run/launcher.ready')), true);
+        const sysLines = readFileSync(systemctlLog, 'utf8').trim().split('\n');
+        const expectedPrefix = [
+          'show -p LoadState,ActiveState,SubState --value cpa-manager-plus.service',
+          'is-active --quiet cpa-manager-plus.service',
+          'stop cpa-manager-plus.service',
+          'show -p LoadState,ActiveState,SubState --value cpa-manager-plus.service',
+          'is-active --quiet cpa-manager-plus.service',
+          'daemon-reload',
+          'enable cpa-manager-plus.service',
+          'start cpa-manager-plus.service',
+        ];
+        assert.deepEqual(sysLines.slice(0, expectedPrefix.length), expectedPrefix);
+        const pollLines = sysLines.slice(expectedPrefix.length);
+        assert.ok(pollLines.length >= 4 && pollLines.length % 2 === 0);
+        for (let i = 0; i < pollLines.length; i += 2) {
+          assert.equal(pollLines[i], 'is-active --quiet cpa-manager-plus.service');
+          assert.equal(pollLines[i + 1], 'show -p LoadState,ActiveState,SubState --value cpa-manager-plus.service');
+        }
+      } finally {
+        spawnSync('bash', [path.join(targetHome, 'cpa-manager-plusctl'), 'stop'], {
+          env,
+          encoding: 'utf8',
+        });
+        if (existsSync(unitPidFile)) {
+          const up = Number(readFileSync(unitPidFile, 'utf8').trim());
+          if (up > 0) {
+            try { process.kill(up, 'SIGKILL'); } catch {}
+          }
+        }
+      }
+    }
+
+    // 5. Rolls back cleanly when mv fails mid-swap
+    {
+      const baseDir = makeTempDir('cpamp-upgrade-rollback-');
+      const targetHome = createBundleDir(baseDir, 'target', 'v2.0.0-beta.1');
+      const bundleDir = createBundleDir(baseDir, 'bundle', 'v2.0.0-beta.2');
+      const stubBinDir = path.join(baseDir, 'stub-bin');
+      mkdirSync(stubBinDir, { recursive: true });
+
+      writeFileSync(path.join(targetHome, 'data/usage.sqlite'), 'keep-on-rollback');
+      writeFileSync(path.join(targetHome, 'cpa-manager-plus.env'), 'ROLLBACK_ENV=1\n');
+      writeFileSync(path.join(targetHome, 'bin/custom-marker'), 'old-bin-marker\n');
+
+      const realMv = execFileSync('which', ['mv'], { encoding: 'utf8' }).trim();
+      const mvStub = path.join(stubBinDir, 'mv');
+      writeFileSync(
+        mvStub,
+        [
+          '#!/usr/bin/env bash',
+          'case "${1:-}" in',
+          '  */.upgrade-stage.*/share)',
+          '    echo "simulated mv failure on share" >&2',
+          '    exit 1',
+          '    ;;',
+          'esac',
+          `exec "${realMv}" "$@"`,
+          '',
+        ].join('\n'),
+        { mode: 0o755 }
+      );
+      chmodSync(mvStub, 0o755);
+
+      const rawEnv = await buildPortEnv(targetHome, {
+        CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1',
+        PATH: `${stubBinDir}:${process.env.PATH || ''}`,
+      });
+      const { _ports: _ports, ...env } = rawEnv;
+
+      const failRes = spawnSync(
+        'bash',
+        [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', targetHome, '--no-systemctl'],
+        { env, encoding: 'utf8' }
+      );
+      assert.notEqual(failRes.status, 0);
+      assert.match(failRes.stderr, /rolling back/);
+
+      // Original v2.0.0-beta.1 artifacts + user data are intact
+      assert.equal(
+        JSON.parse(readFileSync(path.join(targetHome, 'share/cpamp/provenance.json'), 'utf8')).version,
+        'v2.0.0-beta.1'
+      );
+      assert.equal(readFileSync(path.join(targetHome, 'bin/custom-marker'), 'utf8'), 'old-bin-marker\n');
+      assert.equal(readFileSync(path.join(targetHome, 'data/usage.sqlite'), 'utf8'), 'keep-on-rollback');
+      assert.equal(readFileSync(path.join(targetHome, 'cpa-manager-plus.env'), 'utf8'), 'ROLLBACK_ENV=1\n');
+    }
+
+    // 6. Stops ctl-managed running daemon before swap and restarts it afterward when --no-systemctl is used
+    {
+      const baseDir = makeTempDir('cpamp-upgrade-ctl-live-');
+      const targetHome = createBundleDir(baseDir, 'target', 'v2.0.0-beta.1');
+      const bundleDir = createBundleDir(baseDir, 'bundle', 'v2.0.0-beta.2');
+      const systemdDir = path.join(baseDir, 'systemd');
+      const rawEnv = await buildPortEnv(targetHome, {
+        CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1',
+        CPA_MANAGER_PLUS_SKIP_SYSTEMCTL: '1',
+      });
+      const { _ports: ports, ...env } = rawEnv;
+      // Remove CPA_MANAGER_PLUS_HOME from caller env so --home proves it works standalone
+      const upgradeEnv = { ...env };
+      delete upgradeEnv.CPA_MANAGER_PLUS_HOME;
+
+      execFileSync('bash', [path.join(targetHome, 'cpa-manager-plusctl'), 'start'], {
+        env,
+        encoding: 'utf8',
+      });
+      try {
+        execFileSync(
+          'bash',
+          [
+            path.join(bundleDir, 'cpa-manager-plusctl'),
+            'upgrade',
+            '--home',
+            targetHome,
+            '--unit-dir',
+            systemdDir,
+            '--no-systemctl',
+          ],
+          { env: upgradeEnv, encoding: 'utf8' }
+        );
+        const statusOut = execFileSync('bash', [path.join(targetHome, 'cpa-manager-plusctl'), 'status'], {
+          env,
+          encoding: 'utf8',
+        });
+        assert.match(statusOut, /cpa-manager-plus is running with PID \d+/);
+        const healthRes = await fetch(`http://127.0.0.1:${ports.ingressPort}/health`);
+        assert.equal(healthRes.status, 200);
+        assert.equal(
+          JSON.parse(readFileSync(path.join(targetHome, 'share/cpamp/provenance.json'), 'utf8')).version,
+          'v2.0.0-beta.2'
+        );
+      } finally {
+        spawnSync('bash', [path.join(targetHome, 'cpa-manager-plusctl'), 'stop'], {
+          env,
+          encoding: 'utf8',
+        });
+      }
+    }
+
+    // 7. Refuses arbitrary unrelated dirs, symlinks as target_home, and concurrent upgrade locks (clearing dead stale locks)
+    {
+      const baseDir = makeTempDir('cpamp-upgrade-target-guards-');
+      const unrelatedDir = path.join(baseDir, 'unrelated');
+      mkdirSync(unrelatedDir, { recursive: true, mode: 0o755 });
+      const bundleDir = createBundleDir(baseDir, 'bundle', 'v2.0.0-beta.2');
+      const targetHome = createBundleDir(baseDir, 'target', 'v2.0.0-beta.1');
+      const symlinkHome = path.join(baseDir, 'symlink-home');
+      symlinkSync(targetHome, symlinkHome);
+
+      const guardEnv = {
+        ...process.env,
+        CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1',
+      };
+
+      const unrelatedRes = spawnSync(
+        'bash',
+        [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', unrelatedDir, '--no-systemctl'],
+        { env: guardEnv, encoding: 'utf8' }
+      );
+      assert.notEqual(unrelatedRes.status, 0);
+      assert.match(unrelatedRes.stderr, /existing CPAMP Native installation/);
+
+      const rootRes = spawnSync(
+        'bash',
+        [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', '/', '--no-systemctl'],
+        { env: guardEnv, encoding: 'utf8' }
+      );
+      assert.notEqual(rootRes.status, 0);
+
+      const symlinkHomeRes = spawnSync(
+        'bash',
+        [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', symlinkHome, '--no-systemctl'],
+        { env: guardEnv, encoding: 'utf8' }
+      );
+      assert.notEqual(symlinkHomeRes.status, 0);
+      assert.match(symlinkHomeRes.stderr, /symlink/);
+
+      // Live PID in .upgrade.lock/pid fails closed
+      const lockDir = path.join(targetHome, '.upgrade.lock');
+      mkdirSync(lockDir, { mode: 0o700 });
+      writeFileSync(path.join(lockDir, 'pid'), `${process.pid}\n`);
+      const liveLockRes = spawnSync(
+        'bash',
+        [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', targetHome, '--no-systemctl', '--no-restart'],
+        { env: guardEnv, encoding: 'utf8' }
+      );
+      assert.notEqual(liveLockRes.status, 0);
+      assert.match(liveLockRes.stderr, /another upgrade is active/);
+      assert.equal(existsSync(lockDir), true);
+
+      // Stale dead PID lock is cleared safely and upgrade proceeds
+      const deadPid = spawnSync('bash', ['-c', 'echo $$'], { encoding: 'utf8' }).stdout.trim();
+      writeFileSync(path.join(lockDir, 'pid'), `${deadPid}\n`);
+      const systemdDir = path.join(baseDir, 'systemd');
+      const rawEnv = await buildPortEnv(targetHome, { CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1' });
+      const { _ports: _ports, ...staleEnv } = rawEnv;
+      const staleRes = spawnSync(
+        'bash',
+        [
+          path.join(bundleDir, 'cpa-manager-plusctl'),
+          'upgrade',
+          '--home',
+          targetHome,
+          '--unit-dir',
+          systemdDir,
+          '--no-systemctl',
+          '--no-restart',
+        ],
+        { env: staleEnv, encoding: 'utf8' }
+      );
+      assert.equal(staleRes.status, 0, staleRes.stderr);
+      assert.match(staleRes.stderr, /Clearing stale upgrade lock/);
+      assert.equal(existsSync(lockDir), false);
+
+      // Refuses symlinked unit path
+      const symlinkUnitDir = path.join(baseDir, 'symlink-units');
+      mkdirSync(symlinkUnitDir, { recursive: true });
+      symlinkSync('/etc/passwd', path.join(symlinkUnitDir, 'cpa-manager-plus.service'));
+      const symUnitRes = spawnSync(
+        'bash',
+        [
+          path.join(bundleDir, 'cpa-manager-plusctl'),
+          'upgrade',
+          '--home',
+          targetHome,
+          '--unit-dir',
+          symlinkUnitDir,
+          '--no-systemctl',
+          '--no-restart',
+        ],
+        { env: staleEnv, encoding: 'utf8' }
+      );
+      assert.notEqual(symUnitRes.status, 0);
+      assert.match(symUnitRes.stderr, /Refusing symlinked systemd unit path/);
+
+      // Refuses conflict PID in cpa-manager-plus.pid without killing foreign process
+      const foreignProc = spawn('bash', ['-c', 'sleep 10'], { stdio: 'ignore' });
+      try {
+        writeFileSync(path.join(targetHome, 'run/cpa-manager-plus.pid'), `${foreignProc.pid}\n`, { mode: 0o600 });
+        const conflictRes = spawnSync(
+          'bash',
+          [
+            path.join(bundleDir, 'cpa-manager-plusctl'),
+            'upgrade',
+            '--home',
+            targetHome,
+            '--unit-dir',
+            systemdDir,
+            '--no-systemctl',
+            '--no-restart',
+          ],
+          { env: staleEnv, encoding: 'utf8' }
+        );
+        assert.notEqual(conflictRes.status, 0);
+        assert.match(conflictRes.stderr, /could not be strongly verified/);
+        assert.doesNotThrow(() => process.kill(foreignProc.pid, 0));
+      } finally {
+        foreignProc.kill('SIGKILL');
+        await waitForExit(foreignProc);
+      }
+    }
+    // 8. Detects, stops, verifies quiescence, upgrades, and restarts a degraded ctl instance (status exits 1) without starting systemd
+    {
+      const baseDir = makeTempDir('cpamp-upgrade-degraded-ctl-');
+      const targetHome = createBundleDir(baseDir, 'target', 'v2.0.0-beta.1');
+      const bundleDir = createBundleDir(baseDir, 'bundle', 'v2.0.0-beta.2');
+      const systemdDir = path.join(baseDir, 'systemd');
+      const systemctlLog = path.join(baseDir, 'systemctl.log');
+      const mockSystemctl = path.join(baseDir, 'mock-systemctl');
+      writeFileSync(
+        mockSystemctl,
+        [
+          '#!/usr/bin/env bash',
+          `printf '%s\\n' "$*" >> "${systemctlLog}"`,
+          'case "${1:-}" in',
+          '  is-active) exit 3 ;;',
+          '  show) printf "loaded\\ninactive\\ndead\\n"; exit 0 ;;',
+          '  *) exit 0 ;;',
+          'esac',
+          '',
+        ].join('\n'),
+        { mode: 0o755 }
+      );
+      chmodSync(mockSystemctl, 0o755);
+
+      const rawEnv = await buildPortEnv(targetHome, {
+        CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1',
+        CPA_MANAGER_PLUS_SYSTEMCTL_BIN: mockSystemctl,
+        CPAMP_MAX_RESTARTS: '3',
+        CPAMP_STARTUP_TIMEOUT_SEC: '15',
+      });
+      const { _ports: ports, ...env } = rawEnv;
+      const upgradeEnv = { ...env };
+      delete upgradeEnv.CPA_MANAGER_PLUS_HOME;
+
+      execFileSync('bash', [path.join(targetHome, 'cpa-manager-plusctl'), 'start'], {
+        env,
+        encoding: 'utf8',
+      });
+      try {
+        // Force ingress restart to stall without readiness so launcher stays alive while ctl status exits 1.
+        const ingressPid = Number(readFileSync(path.join(targetHome, 'run/ingress.pid'), 'utf8').match(/^pid=(\d+)/m)[1]);
+        writeFileSync(
+          path.join(targetHome, 'bin/cpa-manager-plus-ingress'),
+          '#!/usr/bin/env bash\ntrap "exit 0" TERM INT\nsleep 20 &\nwait $!\n',
+          { mode: 0o755 }
+        );
+        process.kill(ingressPid, 'SIGKILL');
+
+        let degradedSeen = false;
+        for (let i = 0; i < 40; i++) {
+          const statusRes = spawnSync('bash', [path.join(targetHome, 'cpa-manager-plusctl'), 'status'], {
+            env,
+            encoding: 'utf8',
+          });
+          if (statusRes.status !== 0 && /degraded/.test(statusRes.stderr) && /ingress: stopped/.test(statusRes.stdout)) {
+            degradedSeen = true;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        assert.equal(degradedSeen, true, 'expected degraded ctl instance where launcher is alive and status exits 1');
+
+        execFileSync(
+          'bash',
+          [
+            path.join(bundleDir, 'cpa-manager-plusctl'),
+            'upgrade',
+            '--home',
+            targetHome,
+            '--unit-dir',
+            systemdDir,
+          ],
+          { env: upgradeEnv, encoding: 'utf8' }
+        );
+
+        const postStatus = execFileSync('bash', [path.join(targetHome, 'cpa-manager-plusctl'), 'status'], {
+          env,
+          encoding: 'utf8',
+        });
+        assert.match(postStatus, /cpa-manager-plus is running with PID \d+/);
+        const healthRes = await fetch(`http://127.0.0.1:${ports.ingressPort}/health`);
+        assert.equal(healthRes.status, 200);
+        assert.equal(
+          JSON.parse(readFileSync(path.join(targetHome, 'share/cpamp/provenance.json'), 'utf8')).version,
+          'v2.0.0-beta.2'
+        );
+        const sysCalls = readFileSync(systemctlLog, 'utf8');
+        assert.doesNotMatch(sysCalls, /^start /m);
+      } finally {
+        spawnSync('bash', [path.join(targetHome, 'cpa-manager-plusctl'), 'stop'], {
+          env,
+          encoding: 'utf8',
+        });
+      }
+    }
+
+    // 9. Hard quiescence aborts BEFORE swapping any files when systemd stays transitioning after stop
+    {
+      const baseDir = makeTempDir('cpamp-upgrade-quiesce-abort-');
+      const targetHome = createBundleDir(baseDir, 'target', 'v2.0.0-beta.1');
+      const bundleDir = createBundleDir(baseDir, 'bundle', 'v2.0.0-beta.2');
+      const systemdDir = path.join(baseDir, 'systemd');
+      const mockSystemctl = path.join(baseDir, 'mock-systemctl');
+      writeFileSync(
+        mockSystemctl,
+        [
+          '#!/usr/bin/env bash',
+          'case "${1:-}" in',
+          '  is-active) exit 3 ;;',
+          '  show) printf "loaded\\ndeactivating\\nstop-sigterm\\n"; exit 0 ;;',
+          '  stop) exit 0 ;;',
+          '  *) exit 0 ;;',
+          'esac',
+          '',
+        ].join('\n'),
+        { mode: 0o755 }
+      );
+      chmodSync(mockSystemctl, 0o755);
+
+      const rawEnv = await buildPortEnv(targetHome, {
+        CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1',
+        CPA_MANAGER_PLUS_SYSTEMCTL_BIN: mockSystemctl,
+      });
+      const { _ports: _ports, ...env } = rawEnv;
+      const res = spawnSync(
+        'bash',
+        [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', targetHome, '--unit-dir', systemdDir],
+        { env, encoding: 'utf8' }
+      );
+      assert.notEqual(res.status, 0);
+      assert.match(res.stderr, /still active or transitioning after stop/);
+      assert.equal(
+        JSON.parse(readFileSync(path.join(targetHome, 'share/cpamp/provenance.json'), 'utf8')).version,
+        'v2.0.0-beta.1'
+      );
+    }
+
+    // 10. Preserves customized systemd unit overrides across upgrade without caller env vars
+    {
+      const baseDir = makeTempDir('cpamp-upgrade-preserve-unit-');
+      const targetHome = createBundleDir(baseDir, 'target', 'v2.0.0-beta.1');
+      const bundleDir = createBundleDir(baseDir, 'bundle', 'v2.0.0-beta.2');
+      const systemdDir = path.join(baseDir, 'systemd');
+      mkdirSync(systemdDir, { recursive: true, mode: 0o755 });
+      const extDataDir = path.join(baseDir, 'ext-data');
+      const extDbDir = path.join(baseDir, 'ext-db');
+      const extKeysDir = path.join(baseDir, 'ext-keys');
+      const extRunDir = path.join(baseDir, 'ext-run');
+      const extLogDir = path.join(baseDir, 'ext-logs');
+      for (const dir of [extDataDir, extDbDir, extKeysDir, extRunDir, extLogDir]) {
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
+      }
+      const customDbPath = path.join(extDbDir, 'custom-usage.sqlite');
+      const customKeyPath = path.join(extKeysDir, 'custom.key');
+      const customTokenFile = path.join(extRunDir, 'custom-runtime-token');
+      writeFileSync(customTokenFile, 'deadbeef', { mode: 0o600 });
+
+      const unitPath = path.join(systemdDir, 'cpa-manager-plus.service');
+      writeFileSync(
+        unitPath,
+        [
+          '[Unit]',
+          'Description=Custom CPAMP Unit',
+          '',
+          '[Service]',
+          `WorkingDirectory=${targetHome}`,
+          `Environment="CPA_MANAGER_PLUS_HOME=${targetHome}"`,
+          'Environment="HTTP_ADDR=127.0.0.1:18317"',
+          `Environment="USAGE_DATA_DIR=${extDataDir}"`,
+          `Environment="USAGE_DB_PATH=${customDbPath}"`,
+          `Environment="CPA_MANAGER_DATA_KEY_PATH=${customKeyPath}"`,
+          `Environment="CPA_MANAGER_PLUS_RUN_DIR=${extRunDir}"`,
+          `Environment="CPA_MANAGER_PLUS_LOG_DIR=${extLogDir}"`,
+          `Environment="CPAMP_RUNTIME_TOKEN_FILE=${customTokenFile}"`,
+          `Environment="CPAMP_CPA_EXECUTABLE=${targetHome}/bin/cli-proxy-api"`,
+          'Environment="CPAMP_RUNTIME_ADDR=127.0.0.1:18391"',
+          'Environment="CPAMP_MANAGER_ADDR=127.0.0.1:18392"',
+          'Environment="CPAMP_INGRESS_CONTROL_ADDR=127.0.0.1:18393"',
+          'Environment="CPAMP_RUNTIME_CPA_ADDR=127.0.0.1:18394"',
+          'Environment="CPAMP_DRAIN_TIMEOUT=120s"',
+          'Environment="CPAMP_RUNTIME_CPA_UID=10002"',
+          'Environment="CPAMP_RUNTIME_CPA_GID=10002"',
+          `ExecStart=${targetHome}/cpa-manager-plus-launcher`,
+          'TimeoutStopSec=180',
+          `ReadWritePaths=${extDataDir} ${extRunDir} ${extLogDir}`,
+          '',
+          '[Install]',
+          'WantedBy=multi-user.target',
+          '',
+        ].join('\n'),
+        { mode: 0o644 }
+      );
+
+      const cleanUpgradeEnv = {
+        PATH: process.env.PATH || '',
+        HOME: process.env.HOME || '',
+        CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1',
+      };
+      const res = spawnSync(
+        'bash',
+        [
+          path.join(bundleDir, 'cpa-manager-plusctl'),
+          'upgrade',
+          '--home',
+          targetHome,
+          '--unit-dir',
+          systemdDir,
+          '--no-systemctl',
+          '--no-restart',
+        ],
+        { env: cleanUpgradeEnv, encoding: 'utf8' }
+      );
+      assert.equal(res.status, 0, res.stderr);
+
+      const updatedUnit = readFileSync(unitPath, 'utf8');
+      assert.match(updatedUnit, /^Environment="HTTP_ADDR=127\.0\.0\.1:18317"$/m);
+      assert.match(updatedUnit, new RegExp(`^Environment="USAGE_DATA_DIR=${extDataDir}"$`, 'm'));
+      assert.match(updatedUnit, new RegExp(`^Environment="USAGE_DB_PATH=${customDbPath}"$`, 'm'));
+      assert.match(updatedUnit, new RegExp(`^Environment="CPA_MANAGER_DATA_KEY_PATH=${customKeyPath}"$`, 'm'));
+      assert.match(updatedUnit, new RegExp(`^Environment="CPA_MANAGER_PLUS_RUN_DIR=${extRunDir}"$`, 'm'));
+      assert.match(updatedUnit, new RegExp(`^Environment="CPA_MANAGER_PLUS_LOG_DIR=${extLogDir}"$`, 'm'));
+      assert.match(updatedUnit, new RegExp(`^Environment="CPAMP_RUNTIME_TOKEN_FILE=${customTokenFile}"$`, 'm'));
+      assert.match(updatedUnit, /^Environment="CPAMP_RUNTIME_ADDR=127\.0\.0\.1:18391"$/m);
+      assert.match(updatedUnit, /^Environment="CPAMP_MANAGER_ADDR=127\.0\.0\.1:18392"$/m);
+      assert.match(updatedUnit, /^Environment="CPAMP_INGRESS_CONTROL_ADDR=127\.0\.0\.1:18393"$/m);
+      assert.match(updatedUnit, /^Environment="CPAMP_RUNTIME_CPA_ADDR=127\.0\.0\.1:18394"$/m);
+      assert.match(updatedUnit, /^Environment="CPAMP_DRAIN_TIMEOUT=120s"$/m);
+      assert.match(updatedUnit, /^Environment="CPAMP_RUNTIME_CPA_UID=10002"$/m);
+      assert.match(updatedUnit, /^Environment="CPAMP_RUNTIME_CPA_GID=10002"$/m);
+      assert.match(updatedUnit, /^Environment="CPAMP_SERVICE_STOP_TIMEOUT_SEC=180"$/m);
+      assert.match(updatedUnit, /^TimeoutStopSec=180$/m);
+      assert.match(updatedUnit, new RegExp(`^ExecStart=${targetHome}/cpa-manager-plus-launcher$`, 'm'));
+      assert.match(updatedUnit, new RegExp(`^ReadWritePaths=${extDataDir} ${extRunDir} ${extLogDir}`, 'm'));
+
+      // Invalid CPAMP_DRAIN_TIMEOUT is rejected at install time
+      const invalidInstall = spawnSync(
+        'bash',
+        [path.join(targetHome, 'cpa-manager-plusctl'), 'install', '--unit-dir', systemdDir, '--no-systemctl'],
+        { env: { ...cleanUpgradeEnv, CPAMP_DRAIN_TIMEOUT: '0s' }, encoding: 'utf8' }
+      );
+      assert.notEqual(invalidInstall.status, 0);
+      assert.match(invalidInstall.stderr, /Invalid CPAMP_DRAIN_TIMEOUT/);
+    }
+
+    // 11. Rolls back BOTH target_home and systemd unit on daemon-reload failure, and preserves backup_dir on rollback mv failure
+    {
+      // 11a. daemon-reload failure after unit write restores previous unit and target_home
+      const baseDir = makeTempDir('cpamp-upgrade-unit-rollback-');
+      const targetHome = createBundleDir(baseDir, 'target', 'v2.0.0-beta.1');
+      const bundleDir = createBundleDir(baseDir, 'bundle', 'v2.0.0-beta.2');
+      const systemdDir = path.join(baseDir, 'systemd');
+      mkdirSync(systemdDir, { recursive: true, mode: 0o755 });
+      const unitPath = path.join(systemdDir, 'cpa-manager-plus.service');
+      const originalUnit = [
+        '[Unit]',
+        'Description=Original',
+        '',
+        '[Service]',
+        `WorkingDirectory=${targetHome}`,
+        'Environment="HTTP_ADDR=127.0.0.1:18317"',
+        `ExecStart=${targetHome}/bin/cpa-manager-plus-launcher`,
+        '',
+      ].join('\n');
+      writeFileSync(unitPath, originalUnit, { mode: 0o644 });
+
+      const mockSystemctl = path.join(baseDir, 'mock-systemctl');
+      writeFileSync(
+        mockSystemctl,
+        [
+          '#!/usr/bin/env bash',
+          'case "${1:-}" in',
+          '  is-active) exit 3 ;;',
+          '  show) printf "loaded\\ninactive\\ndead\\n"; exit 0 ;;',
+          '  daemon-reload) echo "simulated daemon-reload failure" >&2; exit 1 ;;',
+          '  *) exit 0 ;;',
+          'esac',
+          '',
+        ].join('\n'),
+        { mode: 0o755 }
+      );
+      chmodSync(mockSystemctl, 0o755);
+
+      const rawEnv = await buildPortEnv(targetHome, {
+        CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1',
+        CPA_MANAGER_PLUS_SYSTEMCTL_BIN: mockSystemctl,
+      });
+      const { _ports: _ports, ...env } = rawEnv;
+      const res = spawnSync(
+        'bash',
+        [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', targetHome, '--unit-dir', systemdDir],
+        { env, encoding: 'utf8' }
+      );
+      assert.notEqual(res.status, 0);
+      assert.equal(readFileSync(unitPath, 'utf8'), originalUnit);
+      assert.equal(
+        JSON.parse(readFileSync(path.join(targetHome, 'share/cpamp/provenance.json'), 'utf8')).version,
+        'v2.0.0-beta.1'
+      );
+    }
+
+    {
+      // 11b. Simulated rollback mv failure preserves backup_dir on disk and exits non-zero
+      const baseDir = makeTempDir('cpamp-upgrade-rollback-preserve-');
+      const targetHome = createBundleDir(baseDir, 'target', 'v2.0.0-beta.1');
+      const bundleDir = createBundleDir(baseDir, 'bundle', 'v2.0.0-beta.2');
+      const stubBinDir = path.join(baseDir, 'stub-bin');
+      mkdirSync(stubBinDir, { recursive: true });
+
+      const realMv = execFileSync('which', ['mv'], { encoding: 'utf8' }).trim();
+      const mvStub = path.join(stubBinDir, 'mv');
+      writeFileSync(
+        mvStub,
+        [
+          '#!/usr/bin/env bash',
+          'case "${1:-}" in',
+          '  */.upgrade-stage.*/share)',
+          '    echo "simulated forward mv failure on share" >&2',
+          '    exit 1',
+          '    ;;',
+          '  */.upgrade-backup.*/bin)',
+          '    echo "simulated rollback mv failure on bin" >&2',
+          '    exit 1',
+          '    ;;',
+          'esac',
+          `exec "${realMv}" "$@"`,
+          '',
+        ].join('\n'),
+        { mode: 0o755 }
+      );
+      chmodSync(mvStub, 0o755);
+
+      const rawEnv = await buildPortEnv(targetHome, {
+        CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1',
+        PATH: `${stubBinDir}:${process.env.PATH || ''}`,
+      });
+      const { _ports: _ports, ...env } = rawEnv;
+      const res = spawnSync(
+        'bash',
+        [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', targetHome, '--no-systemctl'],
+        { env, encoding: 'utf8' }
+      );
+      assert.notEqual(res.status, 0);
+      assert.match(res.stderr, /CRITICAL: Rollback encountered errors; backup preserved at /);
+      const backupDirs = readdirSync(targetHome).filter((name) => name.startsWith('.upgrade-backup.'));
+      assert.equal(backupDirs.length, 1);
+      assert.equal(existsSync(path.join(targetHome, backupDirs[0], 'bin')), true);
+      assert.equal(existsSync(path.join(targetHome, '.upgrade.lock/swapping')), true);
+      const lockedStartRes = spawnSync(
+        'bash',
+        [path.join(targetHome, 'cpa-manager-plusctl'), 'start'],
+        { env, encoding: 'utf8' }
+      );
+      assert.notEqual(lockedStartRes.status, 0);
+      assert.match(lockedStartRes.stderr, /in-place upgrade is currently in progress/);
+    }
+  });
+
+  it('clamps CPAMP_DRAIN_TIMEOUT=3m to 90s when CPAMP_SERVICE_STOP_TIMEOUT_SEC=150 in launcher', async () => {
+    const baseDir = makeTempDir('cpamp-native-service-budget-clamp-');
+    const { homeDir, runDir } = createMockNativeHome(baseDir);
+    const envDumpDir = path.join(baseDir, 'env-dumps');
+    mkdirSync(envDumpDir, { recursive: true });
+
+    const rawEnv = await buildPortEnv(homeDir, {
+      MOCK_ENV_DUMP_DIR: envDumpDir,
+      CPAMP_DRAIN_TIMEOUT: '3m',
+      CPAMP_SERVICE_STOP_TIMEOUT_SEC: '150',
+    });
+    const { _ports: _ports, ...env } = rawEnv;
+    const proc = spawn('bash', [path.join(homeDir, 'bin/cpa-manager-plus-launcher')], {
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    activeProcesses.push(proc);
+    let stderr = '';
+    proc.stderr.on('data', (chunk) => {
+      stderr += chunk.toString('utf8');
+    });
+    try {
+      assert.equal(await waitForFile(path.join(runDir, 'launcher.ready')), true);
+      const ingressDump = JSON.parse(readFileSync(path.join(envDumpDir, 'ingress-env.json'), 'utf8'));
+      assert.equal(ingressDump.env.CPAMP_INGRESS_SHUTDOWN_TIMEOUT, '90s');
+      assert.match(stderr, /CPAMP_DRAIN_TIMEOUT \(3m\) exceeds outer service stop budget; clamping to 90s/);
+    } finally {
+      proc.kill('SIGTERM');
+      await waitForExit(proc);
+    }
+  });
+
+  it('reaps staged hot-updated CPA children on stop and detects them during upgrade quiescence without touching lookalikes', async () => {
+    const baseDir = makeTempDir('cpamp-staged-cpa-');
+    const { homeDir, runDir, dataDir, cpaBin } = createMockNativeHome(baseDir);
+    const stagedDir = path.join(dataDir, 'runtime/supervisor/artifacts/cpa/8.0.56');
+    mkdirSync(stagedDir, { recursive: true, mode: 0o755 });
+    const stagedCpaBin = path.join(stagedDir, 'cli-proxy-api');
+    copyFileSync(cpaBin, stagedCpaBin);
+    chmodSync(stagedCpaBin, 0o755);
+
+    const traversalBadDir = path.join(dataDir, 'runtime/supervisor/artifacts/cpa/a..b');
+    mkdirSync(traversalBadDir, { recursive: true, mode: 0o755 });
+    const traversalCpaBin = path.join(traversalBadDir, 'cli-proxy-api');
+    copyFileSync(cpaBin, traversalCpaBin);
+    chmodSync(traversalCpaBin, 0o755);
+
+    const nestedBadDir = path.join(stagedDir, 'sub');
+    mkdirSync(nestedBadDir, { recursive: true, mode: 0o755 });
+    const nestedCpaBin = path.join(nestedBadDir, 'cli-proxy-api');
+    copyFileSync(cpaBin, nestedCpaBin);
+    chmodSync(nestedCpaBin, 0o755);
+
+    const cpaPidFile = path.join(baseDir, 'staged-cpa.pid');
+    const rawEnv = await buildPortEnv(homeDir, {
+      MOCK_SUPERVISOR_SPAWN_CPA: '1',
+      MOCK_CPA_SPAWN_EXECUTABLE: stagedCpaBin,
+      MOCK_CPA_PID_FILE: cpaPidFile,
+    });
+    const { _ports: ports, ...env } = rawEnv;
+
+    execFileSync('bash', [path.join(homeDir, 'cpa-manager-plusctl'), 'start'], { env, encoding: 'utf8' });
+    try {
+      assert.equal(await waitForFile(cpaPidFile), true);
+      const stagedPid = Number(readFileSync(cpaPidFile, 'utf8').trim());
+      assert.ok(stagedPid > 0);
+      assert.doesNotThrow(() => process.kill(stagedPid, 0));
+
+      // Launcher monitor loop pins the staged hot-updated CPA child in provenance
+      const provFile = path.join(runDir, 'cpa-instance.provenance');
+      let pinned = false;
+      for (let i = 0; i < 40; i++) {
+        if (existsSync(provFile) && new RegExp(`^${stagedPid}\\|`, 'm').test(readFileSync(provFile, 'utf8'))) {
+          pinned = true;
+          break;
+        }
+        await sleep(100);
+      }
+      assert.equal(pinned, true, 'expected staged hot-updated CPA child to be pinned in cpa-instance.provenance');
+
+      // Even if launcher and supervisor die abruptly, ctl stop must reap the orphaned staged CPA child
+      const launcherPid = Number(readFileSync(path.join(runDir, 'cpa-manager-plus.pid'), 'utf8').match(/^pid=(\d+)/m)[1]);
+      const supervisorPid = Number(readFileSync(path.join(runDir, 'runtime-supervisor.pid'), 'utf8').match(/^pid=(\d+)/m)[1]);
+      process.kill(launcherPid, 'SIGKILL');
+      process.kill(supervisorPid, 'SIGKILL');
+      await sleep(150);
+
+      const stopOut = spawnSync('bash', [path.join(homeDir, 'cpa-manager-plusctl'), 'stop'], { env, encoding: 'utf8' });
+      assert.equal(stopOut.status, 0, stopOut.stderr);
+      let stagedExited = false;
+      for (let i = 0; i < 30; i++) {
+        try {
+          process.kill(stagedPid, 0);
+          await sleep(100);
+        } catch {
+          stagedExited = true;
+          break;
+        }
+      }
+      assert.equal(stagedExited, true, 'expected orphaned staged CPA child to be reaped on ctl stop');
+
+      // Lookalikes under traversal-like or nested segments must NOT be attributed or signalled
+      const [badPort1, badPort2] = await allocateLoopbackPorts(2);
+      const badCfg1 = path.join(baseDir, 'bad1-config.yaml');
+      const badCfg2 = path.join(baseDir, 'bad2-config.yaml');
+      writeFileSync(badCfg1, `host: "127.0.0.1"\nport: ${badPort1}\n`);
+      writeFileSync(badCfg2, `host: "127.0.0.1"\nport: ${badPort2}\n`);
+      const badChild1 = spawn(traversalCpaBin, ['-config', badCfg1], { stdio: 'ignore' });
+      const badChild2 = spawn(nestedCpaBin, ['-config', badCfg2], { stdio: 'ignore' });
+      activeProcesses.push(badChild1, badChild2);
+      try {
+        await sleep(300);
+        assert.doesNotThrow(() => process.kill(badChild1.pid, 0));
+        assert.doesNotThrow(() => process.kill(badChild2.pid, 0));
+        const stopLookalike = spawnSync('bash', [path.join(homeDir, 'cpa-manager-plusctl'), 'stop'], {
+          env,
+          encoding: 'utf8',
+        });
+        assert.equal(stopLookalike.status, 0);
+        assert.doesNotThrow(() => process.kill(badChild1.pid, 0));
+        assert.doesNotThrow(() => process.kill(badChild2.pid, 0));
+      } finally {
+        if (badChild1.exitCode === null) badChild1.kill('SIGKILL');
+        if (badChild2.exitCode === null) badChild2.kill('SIGKILL');
+        await Promise.all([
+          badChild1.exitCode === null ? waitForExit(badChild1) : Promise.resolve(),
+          badChild2.exitCode === null ? waitForExit(badChild2) : Promise.resolve(),
+        ]);
+      }
+
+      // Upgrade quiescence must detect a running staged hot-updated CPA child and fail closed if it ignores stop
+      const unkillableDir = path.join(dataDir, 'runtime/supervisor/artifacts/cpa/8.0.57');
+      mkdirSync(unkillableDir, { recursive: true, mode: 0o755 });
+      const unkillableCpa = path.join(unkillableDir, 'cli-proxy-api');
+      writeFileSync(
+        unkillableCpa,
+        '#!/usr/bin/env bash\ntrap "" TERM\nsleep 20 &\nwait $!\n',
+        { mode: 0o755 }
+      );
+      const cpaPid2 = path.join(baseDir, 'staged-cpa2.pid');
+      const env2 = {
+        ...env,
+        MOCK_CPA_SPAWN_EXECUTABLE: unkillableCpa,
+        MOCK_CPA_PID_FILE: cpaPid2,
+      };
+      execFileSync('bash', [path.join(homeDir, 'cpa-manager-plusctl'), 'start'], { env: env2, encoding: 'utf8' });
+      assert.equal(await waitForFile(cpaPid2), true);
+      const pinnedPid2 = Number(readFileSync(cpaPid2, 'utf8').trim());
+
+      // Wait for provenance pin, then spawn an external target-home-like upgrade bundle that checks quiescence
+      let pinned2 = false;
+      for (let i = 0; i < 40; i++) {
+        if (existsSync(provFile) && new RegExp(`^${pinnedPid2}\\|`, 'm').test(readFileSync(provFile, 'utf8'))) {
+          pinned2 = true;
+          break;
+        }
+        await sleep(100);
+      }
+      assert.equal(pinned2, true);
+
+      // Kill launcher & supervisor while leaving pinned staged CPA child alive (ignoring SIGTERM).
+      // Replace target's ctl with a no-op stop stub so quiescence check hits the live staged CPA child!
+      const launcherPid2 = Number(readFileSync(path.join(runDir, 'cpa-manager-plus.pid'), 'utf8').match(/^pid=(\d+)/m)[1]);
+      const supervisorPid2 = Number(readFileSync(path.join(runDir, 'runtime-supervisor.pid'), 'utf8').match(/^pid=(\d+)/m)[1]);
+      const mgrPid2 = Number(readFileSync(path.join(runDir, 'manager.pid'), 'utf8').match(/^pid=(\d+)/m)[1]);
+      const ingPid2 = Number(readFileSync(path.join(runDir, 'ingress.pid'), 'utf8').match(/^pid=(\d+)/m)[1]);
+      for (const p of [launcherPid2, supervisorPid2, mgrPid2, ingPid2]) {
+        try { process.kill(p, 'SIGKILL'); } catch {}
+      }
+      for (const pf of ['cpa-manager-plus.pid', 'runtime-supervisor.pid', 'manager.pid', 'ingress.pid']) {
+        rmSync(path.join(runDir, pf), { force: true });
+      }
+      // Create a bundle and run upgrade where target's ctl stop leaves the staged CPA child running
+      const bundleDir = path.join(baseDir, 'bundle');
+      mkdirSync(path.join(bundleDir, 'bin'), { recursive: true, mode: 0o755 });
+      mkdirSync(path.join(bundleDir, 'share/cpamp/runtime'), { recursive: true, mode: 0o755 });
+      for (const binName of ['cpa-manager-plus', 'cpa-manager-plus-ingress', 'cpa-manager-plus-runtime-supervisor', 'cli-proxy-api']) {
+        copyFileSync(path.join(homeDir, 'bin', binName), path.join(bundleDir, 'bin', binName));
+        chmodSync(path.join(bundleDir, 'bin', binName), 0o755);
+      }
+      copyFileSync(launcherScript, path.join(bundleDir, 'bin/cpa-manager-plus-launcher'));
+      copyFileSync(launcherScript, path.join(bundleDir, 'cpa-manager-plus-launcher'));
+      copyFileSync(ctlScript, path.join(bundleDir, 'cpa-manager-plusctl'));
+      chmodSync(path.join(bundleDir, 'bin/cpa-manager-plus-launcher'), 0o755);
+      chmodSync(path.join(bundleDir, 'cpa-manager-plus-launcher'), 0o755);
+      chmodSync(path.join(bundleDir, 'cpa-manager-plusctl'), 0o755);
+      copyFileSync(systemdUnitTemplate, path.join(bundleDir, 'cpa-manager-plus.service'));
+      writeFileSync(path.join(bundleDir, 'share/cpamp/provenance.json'), JSON.stringify({ version: 'v2.0.0-beta.2' }));
+      writeFileSync(path.join(bundleDir, 'share/cpamp/runtime/seed-lineage.json'), JSON.stringify({ seed: 'v2.0.0-beta.2' }));
+      writeFileSync(path.join(homeDir, 'share/cpamp/provenance.json'), JSON.stringify({ version: 'v2.0.0-beta.1' }));
+      writeFileSync(path.join(homeDir, 'share/cpamp/runtime/seed-lineage.json'), JSON.stringify({ seed: 'v2.0.0-beta.1' }));
+      writeFileSync(path.join(homeDir, 'cpa-manager-plusctl'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+
+      try {
+        const qFailRes = spawnSync(
+          'bash',
+          [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', homeDir, '--no-systemctl', '--no-restart'],
+          { env: { ...env2, CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1' }, encoding: 'utf8' }
+        );
+        assert.notEqual(qFailRes.status, 0);
+        assert.match(qFailRes.stderr, /attributable CPA child process\(es\) still running/);
+        assert.equal(JSON.parse(readFileSync(path.join(homeDir, 'share/cpamp/provenance.json'), 'utf8')).version, 'v2.0.0-beta.1');
+      } finally {
+        try { process.kill(pinnedPid2, 'SIGKILL'); } catch {}
+      }
+    } finally {
+      void ports;
+      spawnSync('bash', [path.join(homeDir, 'cpa-manager-plusctl'), 'stop'], { env, encoding: 'utf8' });
+    }
+  });
+
+  it('rejects 1.x native layouts, foreign units, unsafe directives, failed systemd queries, and concurrent lock races; preserves EnvironmentFile/ReadWritePaths/drop-ins and rolls back on post-start failure', async () => {
+    const createBundleDir = (baseDir, name, versionLabel) => {
+      const dir = path.join(baseDir, name);
+      const mock = createMockNativeHome(path.join(baseDir, `${name}-mock`));
+      mkdirSync(path.join(dir, 'bin'), { recursive: true, mode: 0o755 });
+      mkdirSync(path.join(dir, 'share/cpamp/runtime'), { recursive: true, mode: 0o755 });
+      mkdirSync(path.join(dir, 'data'), { recursive: true, mode: 0o700 });
+      mkdirSync(path.join(dir, 'run'), { recursive: true, mode: 0o700 });
+      mkdirSync(path.join(dir, 'logs'), { recursive: true, mode: 0o700 });
+      for (const binName of ['cpa-manager-plus', 'cpa-manager-plus-ingress', 'cpa-manager-plus-runtime-supervisor', 'cli-proxy-api']) {
+        copyFileSync(path.join(mock.binDir, binName), path.join(dir, 'bin', binName));
+        chmodSync(path.join(dir, 'bin', binName), 0o755);
+      }
+      copyFileSync(launcherScript, path.join(dir, 'bin/cpa-manager-plus-launcher'));
+      copyFileSync(launcherScript, path.join(dir, 'cpa-manager-plus-launcher'));
+      copyFileSync(ctlScript, path.join(dir, 'cpa-manager-plusctl'));
+      chmodSync(path.join(dir, 'bin/cpa-manager-plus-launcher'), 0o755);
+      chmodSync(path.join(dir, 'cpa-manager-plus-launcher'), 0o755);
+      chmodSync(path.join(dir, 'cpa-manager-plusctl'), 0o755);
+      copyFileSync(systemdUnitTemplate, path.join(dir, 'cpa-manager-plus.service'));
+      writeFileSync(path.join(dir, 'share/cpamp/provenance.json'), JSON.stringify({ version: versionLabel }));
+      writeFileSync(path.join(dir, 'share/cpamp/runtime/seed-lineage.json'), JSON.stringify({ seed: versionLabel }));
+      return dir;
+    };
+
+    // A. Rejects 1.x Native layouts before stopping or touching files
+    {
+      const baseDir = makeTempDir('cpamp-reject-v1-');
+      const bundleDir = createBundleDir(baseDir, 'bundle', 'v2.0.0-beta.2');
+      const v1Home = path.join(baseDir, 'v1-home');
+      mkdirSync(v1Home, { recursive: true, mode: 0o755 });
+      writeFileSync(path.join(v1Home, 'cpa-manager-plusctl'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+      writeFileSync(path.join(v1Home, 'cpa-manager-plus'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+      writeFileSync(path.join(v1Home, 'run.sh'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+      const systemdDir = path.join(baseDir, 'systemd');
+      mkdirSync(systemdDir, { recursive: true });
+      const systemctlLog = path.join(baseDir, 'systemctl.log');
+      const mockSystemctl = path.join(baseDir, 'mock-systemctl');
+      writeFileSync(
+        mockSystemctl,
+        `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> "${systemctlLog}"\nexit 0\n`,
+        { mode: 0o755 }
+      );
+      writeFileSync(
+        path.join(systemdDir, 'cpa-manager-plus.service'),
+        `[Unit]\nDescription=v1\n[Service]\nUser=cpamp\nWorkingDirectory=${v1Home}\nExecStart=${v1Home}/run.sh\n`
+      );
+
+      const v1Res = spawnSync(
+        'bash',
+        [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', v1Home, '--unit-dir', systemdDir],
+        {
+          env: {
+            ...process.env,
+            CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1',
+            CPA_MANAGER_PLUS_SYSTEMCTL_BIN: mockSystemctl,
+          },
+          encoding: 'utf8',
+        }
+      );
+      assert.notEqual(v1Res.status, 0);
+      assert.match(v1Res.stderr, /appears to be a 1\.x Native installation; run the 1\.x -> v2 migration workflow instead/);
+      assert.equal(existsSync(systemctlLog), false);
+
+      // Also reject 1.x directory that has cpa-manager-plusctl + cpa-manager-plus without run.sh
+      rmSync(path.join(v1Home, 'run.sh'), { force: true });
+      const v1NoRunRes = spawnSync(
+        'bash',
+        [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', v1Home, '--no-systemctl'],
+        { env: { ...process.env, CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1' }, encoding: 'utf8' }
+      );
+      assert.notEqual(v1NoRunRes.status, 0);
+      assert.match(v1NoRunRes.stderr, /appears to be a 1\.x Native installation/);
+
+      // Rejects partial v2 layout missing bin/cpa-manager-plus-runtime-supervisor (even if cpa-manager-plusctl exists)
+      const partialHome = createBundleDir(baseDir, 'partial-v2', 'v2.0.0-beta.1');
+      rmSync(path.join(partialHome, 'bin/cpa-manager-plus-runtime-supervisor'), { force: true });
+      const partialRes = spawnSync(
+        'bash',
+        [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', partialHome, '--no-systemctl'],
+        { env: { ...process.env, CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1' }, encoding: 'utf8' }
+      );
+      assert.notEqual(partialRes.status, 0);
+      assert.match(partialRes.stderr, /existing CPAMP Native installation/);
+    }
+
+    // B. Rejects foreign WorkingDirectory, foreign ExecStart, non-root User, and quoted ReadWritePaths BEFORE stopping
+    {
+      const baseDir = makeTempDir('cpamp-foreign-unit-');
+      const targetHome = createBundleDir(baseDir, 'target', 'v2.0.0-beta.1');
+      const bundleDir = createBundleDir(baseDir, 'bundle', 'v2.0.0-beta.2');
+      const systemdDir = path.join(baseDir, 'systemd');
+      mkdirSync(systemdDir, { recursive: true });
+      const systemctlLog = path.join(baseDir, 'systemctl.log');
+      const mockSystemctl = path.join(baseDir, 'mock-systemctl');
+      writeFileSync(
+        mockSystemctl,
+        `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> "${systemctlLog}"\nexit 0\n`,
+        { mode: 0o755 }
+      );
+      const unitPath = path.join(systemdDir, 'cpa-manager-plus.service');
+      const unitCases = [
+        {
+          content: `[Service]\nWorkingDirectory=/srv/cpamp-other\nExecStart=${targetHome}/bin/cpa-manager-plus-launcher\n`,
+          err: /WorkingDirectory .* does not match target installation/,
+        },
+        {
+          content: `[Service]\nWorkingDirectory=${targetHome}\nExecStart=/srv/cpamp-other/bin/cpa-manager-plus-launcher\n`,
+          err: /ExecStart .* does not belong to target installation/,
+        },
+        {
+          content: `[Service]\nUser=cpamp\nWorkingDirectory=${targetHome}\nExecStart=${targetHome}/bin/cpa-manager-plus-launcher\n`,
+          err: /User=cpamp; v2 native launcher must run as root/,
+        },
+        {
+          content: `[Service]\nWorkingDirectory=${targetHome}\nExecStart=${targetHome}/bin/cpa-manager-plus-launcher\nReadWritePaths="/tmp/quoted space"\n`,
+          err: /ReadWritePaths .* unsupported quoting/,
+        },
+      ];
+      for (const uc of unitCases) {
+        writeFileSync(unitPath, uc.content);
+        const res = spawnSync(
+          'bash',
+          [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', targetHome, '--unit-dir', systemdDir],
+          {
+            env: {
+              ...process.env,
+              CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1',
+              CPA_MANAGER_PLUS_SYSTEMCTL_BIN: mockSystemctl,
+            },
+            encoding: 'utf8',
+          }
+        );
+        assert.notEqual(res.status, 0);
+        assert.match(res.stderr, uc.err);
+        assert.equal(existsSync(systemctlLog), false);
+      }
+    }
+
+    // C. Preserves custom EnvironmentFile=, custom ReadWritePaths=, drop-ins, and honors EnvironmentFile= > Environment=
+    {
+      const baseDir = makeTempDir('cpamp-preserve-envfile-');
+      const targetHome = createBundleDir(baseDir, 'target', 'v2.0.0-beta.1');
+      const bundleDir = createBundleDir(baseDir, 'bundle', 'v2.0.0-beta.2');
+      const systemdDir = path.join(baseDir, 'systemd');
+      mkdirSync(systemdDir, { recursive: true });
+      const extDbDir = path.join(baseDir, 'ext-db');
+      const extKeysDir = path.join(baseDir, 'ext-keys');
+      const customRwDir = path.join(baseDir, 'custom-rw');
+      for (const d of [extDbDir, extKeysDir, customRwDir]) {
+        mkdirSync(d, { recursive: true, mode: 0o700 });
+      }
+      const customDb = path.join(extDbDir, 'prod-usage.sqlite');
+      const customKey = path.join(extKeysDir, 'prod-data.key');
+      const customEnvFile = path.join(baseDir, 'prod.env');
+      writeFileSync(
+        customEnvFile,
+        [
+          '# Production overrides',
+          `export USAGE_DB_PATH="${customDb}"`,
+          `CPA_MANAGER_DATA_KEY_PATH='${customKey}'`,
+          'CPAMP_DRAIN_TIMEOUT=75s # overrides unit Environment=',
+          '',
+        ].join('\n'),
+        { mode: 0o600 }
+      );
+      const unitPath = path.join(systemdDir, 'cpa-manager-plus.service');
+      writeFileSync(
+        unitPath,
+        [
+          '[Unit]',
+          'Description=Prod CPAMP',
+          '',
+          '[Service]',
+          `WorkingDirectory=${targetHome}`,
+          `ExecStart=${targetHome}/bin/cpa-manager-plus-launcher`,
+          'Environment="CPAMP_DRAIN_TIMEOUT=120s"',
+          `EnvironmentFile=-${customEnvFile}`,
+          `ReadWritePaths=${targetHome}/data ${targetHome}/run ${targetHome}/logs ${customRwDir}`,
+          '',
+        ].join('\n')
+      );
+      const dropinDir = `${unitPath}.d`;
+      mkdirSync(dropinDir, { recursive: true });
+      const dropinPath = path.join(dropinDir, '10-extra.conf');
+      writeFileSync(dropinPath, '[Service]\nEnvironment="HTTP_ADDR=127.0.0.1:19400"\n');
+
+      const cleanEnv = {
+        PATH: process.env.PATH || '',
+        HOME: process.env.HOME || '',
+        CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1',
+      };
+      const res = spawnSync(
+        'bash',
+        [
+          path.join(bundleDir, 'cpa-manager-plusctl'),
+          'upgrade',
+          '--home',
+          targetHome,
+          '--unit-dir',
+          systemdDir,
+          '--no-systemctl',
+          '--no-restart',
+        ],
+        { env: cleanEnv, encoding: 'utf8' }
+      );
+      assert.equal(res.status, 0, res.stderr);
+      const updatedUnit = readFileSync(unitPath, 'utf8');
+      assert.match(updatedUnit, new RegExp(`^EnvironmentFile=-${customEnvFile}$`, 'm'));
+      assert.match(updatedUnit, new RegExp(`^Environment="USAGE_DB_PATH=${customDb}"$`, 'm'));
+      assert.match(updatedUnit, new RegExp(`^Environment="CPA_MANAGER_DATA_KEY_PATH=${customKey}"$`, 'm'));
+      assert.match(updatedUnit, /^Environment="CPAMP_DRAIN_TIMEOUT=75s"$/m);
+      assert.match(updatedUnit, /^TimeoutStopSec=150$/m);
+      assert.match(updatedUnit, /^Environment="HTTP_ADDR=127\.0\.0\.1:19400"$/m);
+      assert.match(updatedUnit, new RegExp(`^ReadWritePaths=.*${customRwDir}`, 'm'));
+      assert.match(updatedUnit, new RegExp(`^ReadWritePaths=.*${extDbDir}`, 'm'));
+      assert.match(updatedUnit, new RegExp(`^ReadWritePaths=.*${extKeysDir}`, 'm'));
+      assert.equal(readFileSync(dropinPath, 'utf8'), '[Service]\nEnvironment="HTTP_ADDR=127.0.0.1:19400"\n');
+    }
+
+    // D. Fail-closed systemctl show error & unknown ActiveState, plus cross-command upgrade lock
+    {
+      const baseDir = makeTempDir('cpamp-systemd-lock-');
+      const targetHome = createBundleDir(baseDir, 'target', 'v2.0.0-beta.1');
+      const bundleDir = createBundleDir(baseDir, 'bundle', 'v2.0.0-beta.2');
+      const systemdDir = path.join(baseDir, 'systemd');
+      mkdirSync(systemdDir, { recursive: true });
+
+      const failShowCtl = path.join(baseDir, 'mock-systemctl-fail');
+      writeFileSync(
+        failShowCtl,
+        '#!/usr/bin/env bash\nif [ "${1:-}" = "show" ]; then echo "Failed to connect to bus" >&2; exit 1; fi\nexit 0\n',
+        { mode: 0o755 }
+      );
+      const failShowRes = spawnSync(
+        'bash',
+        [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', targetHome, '--unit-dir', systemdDir],
+        {
+          env: {
+            ...process.env,
+            CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1',
+            CPA_MANAGER_PLUS_SYSTEMCTL_BIN: failShowCtl,
+          },
+          encoding: 'utf8',
+        }
+      );
+      assert.notEqual(failShowRes.status, 0);
+      assert.match(failShowRes.stderr, /Failed to query systemd state/);
+
+      const maintCtl = path.join(baseDir, 'mock-systemctl-maint');
+      writeFileSync(
+        maintCtl,
+        [
+          '#!/usr/bin/env bash',
+          'case "${1:-}" in',
+          '  show) printf "loaded\\nmaintenance\\nrunning\\n"; exit 0 ;;',
+          '  is-active) exit 3 ;;',
+          '  *) exit 0 ;;',
+          'esac',
+          '',
+        ].join('\n'),
+        { mode: 0o755 }
+      );
+      const maintRes = spawnSync(
+        'bash',
+        [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', targetHome, '--unit-dir', systemdDir],
+        {
+          env: {
+            ...process.env,
+            CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1',
+            CPA_MANAGER_PLUS_SYSTEMCTL_BIN: maintCtl,
+          },
+          encoding: 'utf8',
+        }
+      );
+      assert.notEqual(maintRes.status, 0);
+      assert.match(maintRes.stderr, /still active or transitioning after stop/);
+
+      // ActiveState=activating, SubState=auto-restart MUST be treated as BUSY and fail quiescence
+      const autoRestartCtl = path.join(baseDir, 'mock-systemctl-autorestart');
+      writeFileSync(
+        autoRestartCtl,
+        [
+          '#!/usr/bin/env bash',
+          'case "${1:-}" in',
+          '  show) printf "loaded\\nactivating\\nauto-restart\\n"; exit 0 ;;',
+          '  is-active) exit 3 ;;',
+          '  *) exit 0 ;;',
+          'esac',
+          '',
+        ].join('\n'),
+        { mode: 0o755 }
+      );
+      const autoRestartRes = spawnSync(
+        'bash',
+        [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', targetHome, '--unit-dir', systemdDir],
+        {
+          env: {
+            ...process.env,
+            CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1',
+            CPA_MANAGER_PLUS_SYSTEMCTL_BIN: autoRestartCtl,
+          },
+          encoding: 'utf8',
+        }
+      );
+      assert.notEqual(autoRestartRes.status, 0);
+      assert.match(autoRestartRes.stderr, /still active or transitioning after stop/);
+
+      // Cross-command upgrade lock blocks ctl start, ctl restart (without stopping!), ctl install, and launcher
+      const lockDir = path.join(targetHome, '.upgrade.lock');
+      mkdirSync(lockDir, { mode: 0o700 });
+      writeFileSync(path.join(lockDir, 'pid'), `${process.pid}\n`);
+      writeFileSync(path.join(lockDir, 'token'), 'secret-token-1\n');
+      writeFileSync(path.join(lockDir, 'swapping'), `${process.pid}\n`);
+
+      const rawEnv = await buildPortEnv(targetHome);
+      const { _ports: _ports, ...env } = rawEnv;
+      for (const cmd of [
+        ['start'],
+        ['restart'],
+        ['install', '--home', targetHome, '--unit-dir', systemdDir, '--no-systemctl'],
+      ]) {
+        const lockRes = spawnSync('bash', [path.join(targetHome, 'cpa-manager-plusctl'), ...cmd], {
+          env,
+          encoding: 'utf8',
+        });
+        assert.notEqual(lockRes.status, 0);
+        assert.match(lockRes.stderr, /an in-place upgrade is currently in progress/);
+      }
+
+      const launcherRes = spawnSync('bash', [path.join(targetHome, 'bin/cpa-manager-plus-launcher')], {
+        env,
+        encoding: 'utf8',
+      });
+      assert.notEqual(launcherRes.status, 0);
+      assert.match(launcherRes.stderr, /Refusing to start launcher while upgrade file swap is in progress/);
+      rmSync(lockDir, { recursive: true, force: true });
+    }
+
+    // E. Post-upgrade start failure rolls back target_home + unit + restarts restored instance; daemon-reload rollback failure preserves backup_dir
+    {
+      // E1: systemd post-start failure rolls back and restarts previous active systemd unit
+      const baseDir = makeTempDir('cpamp-post-start-systemd-rollback-');
+      const targetHome = createBundleDir(baseDir, 'target', 'v2.0.0-beta.1');
+      const bundleDir = createBundleDir(baseDir, 'bundle', 'v2.0.0-beta.2');
+      const systemdDir = path.join(baseDir, 'systemd');
+      mkdirSync(systemdDir, { recursive: true });
+      const unitPath = path.join(systemdDir, 'cpa-manager-plus.service');
+      const origUnit = [
+        '[Unit]',
+        'Description=Original Active',
+        '',
+        '[Service]',
+        `WorkingDirectory=${targetHome}`,
+        `ExecStart=${targetHome}/bin/cpa-manager-plus-launcher`,
+        'Environment="HTTP_ADDR=127.0.0.1:18317"',
+        '',
+      ].join('\n');
+      writeFileSync(unitPath, origUnit);
+
+      const stateFile = path.join(baseDir, 'state');
+      const startCountFile = path.join(baseDir, 'start-count');
+      const unitPidFile = path.join(baseDir, 'unit.pid');
+      writeFileSync(stateFile, 'active\n');
+      writeFileSync(startCountFile, '0\n');
+      const mockSystemctl = path.join(baseDir, 'mock-systemctl');
+      writeFileSync(
+        mockSystemctl,
+        [
+          '#!/usr/bin/env bash',
+          `state_file="${stateFile}"`,
+          `count_file="${startCountFile}"`,
+          `pid_file="${unitPidFile}"`,
+          `launcher_bin="${targetHome}/bin/cpa-manager-plus-launcher"`,
+          `log_out="${targetHome}/logs/cpa-manager-plus.log"`,
+          'case "${1:-}" in',
+          '  is-active) [ "$(cat "${state_file}")" = "active" ] && exit 0; exit 3 ;;',
+          '  show)',
+          '    if [ "$(cat "${state_file}")" = "active" ]; then printf "loaded\\nactive\\nrunning\\n"; else printf "loaded\\ninactive\\ndead\\n"; fi',
+          '    exit 0 ;;',
+          '  stop)',
+          '    if [ -f "${pid_file}" ]; then',
+          '      up="$(cat "${pid_file}" 2>/dev/null || true)"',
+          '      if [ -n "${up}" ] && kill -0 "${up}" >/dev/null 2>&1; then',
+          '        kill -TERM "${up}" >/dev/null 2>&1 || true',
+          '        for _ in $(seq 1 30); do kill -0 "${up}" >/dev/null 2>&1 || break; sleep 0.1; done',
+          '      fi',
+          '      rm -f "${pid_file}"',
+          '    fi',
+          '    echo "inactive" > "${state_file}"; exit 0 ;;',
+          '  start)',
+          '    n=$(( $(cat "${count_file}") + 1 ))',
+          '    echo "${n}" > "${count_file}"',
+          '    if [ "${n}" -eq 1 ]; then echo "inactive" > "${state_file}"; exit 1; fi',
+          '    mkdir -p "$(dirname "${log_out}")"',
+          '    "${launcher_bin}" </dev/null >>"${log_out}" 2>&1 &',
+          '    echo "$!" > "${pid_file}"',
+          '    echo "active" > "${state_file}"; exit 0 ;;',
+          '  *) exit 0 ;;',
+          'esac',
+          '',
+        ].join('\n'),
+        { mode: 0o755 }
+      );
+      const rawEnv = await buildPortEnv(targetHome, {
+        CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1',
+        CPA_MANAGER_PLUS_SYSTEMCTL_BIN: mockSystemctl,
+      });
+      const { _ports: _ports, ...env } = rawEnv;
+      try {
+        const failRes = spawnSync(
+          'bash',
+          [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', targetHome, '--unit-dir', systemdDir],
+          { env, encoding: 'utf8' }
+        );
+        assert.notEqual(failRes.status, 0);
+        assert.match(failRes.stderr, /post-upgrade start\/readiness check; rolling back/);
+        assert.doesNotMatch(failRes.stderr, /failed to restart previously active instance/);
+        assert.equal(readFileSync(unitPath, 'utf8'), origUnit);
+        assert.equal(JSON.parse(readFileSync(path.join(targetHome, 'share/cpamp/provenance.json'), 'utf8')).version, 'v2.0.0-beta.1');
+        assert.equal(readFileSync(stateFile, 'utf8').trim(), 'active');
+        assert.equal(existsSync(path.join(targetHome, 'run/launcher.ready')), true);
+        assert.equal(readdirSync(targetHome).filter((n) => n.startsWith('.upgrade-backup.')).length, 0);
+      } finally {
+        spawnSync('bash', [path.join(targetHome, 'cpa-manager-plusctl'), 'stop'], {
+          env,
+          encoding: 'utf8',
+        });
+        if (existsSync(unitPidFile)) {
+          const up = Number(readFileSync(unitPidFile, 'utf8').trim());
+          if (up > 0) {
+            try { process.kill(up, 'SIGKILL'); } catch {}
+          }
+        }
+      }
+    }
+
+    {
+      // E2: ctl-managed post-start failure rolls back and restarts previous healthy v2.0.0-beta.1 instance
+      const baseDir = makeTempDir('cpamp-post-start-ctl-rollback-');
+      const targetHome = createBundleDir(baseDir, 'target', 'v2.0.0-beta.1');
+      const bundleDir = createBundleDir(baseDir, 'bundle', 'v2.0.0-beta.2');
+      // Make new bundle fail to start by having ingress exit 1 immediately
+      writeFileSync(path.join(bundleDir, 'bin/cpa-manager-plus-ingress'), '#!/usr/bin/env bash\nexit 1\n', { mode: 0o755 });
+      const systemdDir = path.join(baseDir, 'systemd');
+      const rawEnv = await buildPortEnv(targetHome, {
+        CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1',
+        CPA_MANAGER_PLUS_SKIP_SYSTEMCTL: '1',
+        CPAMP_STARTUP_TIMEOUT_SEC: '4',
+      });
+      const { _ports: ports, ...env } = rawEnv;
+      const upgradeEnv = { ...env };
+      delete upgradeEnv.CPA_MANAGER_PLUS_HOME;
+
+      execFileSync('bash', [path.join(targetHome, 'cpa-manager-plusctl'), 'start'], { env, encoding: 'utf8' });
+      try {
+        const failRes = spawnSync(
+          'bash',
+          [
+            path.join(bundleDir, 'cpa-manager-plusctl'),
+            'upgrade',
+            '--home',
+            targetHome,
+            '--unit-dir',
+            systemdDir,
+            '--no-systemctl',
+          ],
+          { env: upgradeEnv, encoding: 'utf8' }
+        );
+        assert.notEqual(failRes.status, 0);
+        assert.match(failRes.stderr, /post-upgrade start\/readiness check; rolling back/);
+        assert.equal(JSON.parse(readFileSync(path.join(targetHome, 'share/cpamp/provenance.json'), 'utf8')).version, 'v2.0.0-beta.1');
+        const healthRes = await fetch(`http://127.0.0.1:${ports.ingressPort}/health`);
+        assert.equal(healthRes.status, 200);
+      } finally {
+        spawnSync('bash', [path.join(targetHome, 'cpa-manager-plusctl'), 'stop'], { env, encoding: 'utf8' });
+      }
+    }
+
+    {
+      // E3: rollback daemon-reload failure preserves backup_dir on disk and reports CRITICAL
+      const baseDir = makeTempDir('cpamp-rollback-daemon-reload-fail-');
+      const targetHome = createBundleDir(baseDir, 'target', 'v2.0.0-beta.1');
+      const bundleDir = createBundleDir(baseDir, 'bundle', 'v2.0.0-beta.2');
+      const systemdDir = path.join(baseDir, 'systemd');
+      mkdirSync(systemdDir, { recursive: true });
+      const unitPath = path.join(systemdDir, 'cpa-manager-plus.service');
+      const origUnit = `[Service]\nWorkingDirectory=${targetHome}\nExecStart=${targetHome}/bin/cpa-manager-plus-launcher\n`;
+      writeFileSync(unitPath, origUnit);
+      const reloadCountFile = path.join(baseDir, 'reload-count');
+      writeFileSync(reloadCountFile, '0\n');
+      const mockSystemctl = path.join(baseDir, 'mock-systemctl');
+      writeFileSync(
+        mockSystemctl,
+        [
+          '#!/usr/bin/env bash',
+          `rcf="${reloadCountFile}"`,
+          'case "${1:-}" in',
+          '  is-active) exit 3 ;;',
+          '  show) printf "loaded\\ninactive\\ndead\\n"; exit 0 ;;',
+          '  daemon-reload)',
+          '    n=$(( $(cat "${rcf}") + 1 )); echo "${n}" > "${rcf}"',
+          '    [ "${n}" -eq 1 ] && exit 0',
+          '    exit 1 ;;',
+          '  start) exit 1 ;;',
+          '  *) exit 0 ;;',
+          'esac',
+          '',
+        ].join('\n'),
+        { mode: 0o755 }
+      );
+      const rawEnv = await buildPortEnv(targetHome, {
+        CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1',
+        CPA_MANAGER_PLUS_SYSTEMCTL_BIN: mockSystemctl,
+      });
+      const { _ports: _ports, ...env } = rawEnv;
+      const failRes = spawnSync(
+        'bash',
+        [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', targetHome, '--unit-dir', systemdDir],
+        { env, encoding: 'utf8' }
+      );
+      assert.notEqual(failRes.status, 0);
+      assert.match(failRes.stderr, /CRITICAL: Rollback encountered errors; backup preserved at /);
+      const backups = readdirSync(targetHome).filter((n) => n.startsWith('.upgrade-backup.'));
+      assert.equal(backups.length, 1);
+      assert.equal(readFileSync(unitPath, 'utf8'), origUnit);
+    }
+  });
+
+  it('clamps CPAMP_STOP_TIMEOUT_SEC to active instance drain budget + 45s so Ingress drains cleanly without premature SIGKILL', async () => {
+    const baseDir = makeTempDir('cpamp-stop-drain-floor-');
+    const { homeDir, runDir } = createMockNativeHome(baseDir);
+    const eventLog = path.join(baseDir, 'events.log');
+    const rawEnv = await buildPortEnv(homeDir, {
+      MOCK_EVENT_LOG: eventLog,
+      MOCK_INGRESS_DRAIN_MS: '1500',
+      CPAMP_DRAIN_TIMEOUT: '2s',
+    });
+    const { _ports: _ports, ...env } = rawEnv;
+
+    execFileSync('bash', [path.join(homeDir, 'cpa-manager-plusctl'), 'start'], { env, encoding: 'utf8' });
+    try {
+      const drainPath = path.join(runDir, 'launcher.drain');
+      assert.equal(existsSync(drainPath), true);
+      assert.equal(readFileSync(drainPath, 'utf8').trim(), '2');
+      assert.equal(statSync(drainPath).mode & 0o777, 0o600);
+      assert.match(readFileSync(path.join(runDir, 'launcher.ready'), 'utf8'), /^drain_timeout_sec=2$/m);
+
+      // Run ctl stop with short CPAMP_STOP_TIMEOUT_SEC=1 and WITHOUT CPAMP_DRAIN_TIMEOUT in caller env
+      const stopEnv = { ...env, CPAMP_STOP_TIMEOUT_SEC: '1' };
+      delete stopEnv.CPAMP_DRAIN_TIMEOUT;
+      const stopRes = spawnSync('bash', [path.join(homeDir, 'cpa-manager-plusctl'), 'stop'], {
+        env: stopEnv,
+        encoding: 'utf8',
+      });
+      assert.equal(stopRes.status, 0, stopRes.stderr);
+      assert.match(
+        stopRes.stderr,
+        /Clamping CPAMP_STOP_TIMEOUT_SEC \(1s -> 47s\) to honor active 2s Ingress drain budget/
+      );
+      assert.equal(existsSync(drainPath), false);
+
+      const events = readFileSync(eventLog, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      const ingExitIdx = events.findIndex((e) => e.role === 'ingress' && e.event === 'exit');
+      const supTermIdx = events.findIndex((e) => e.role === 'runtime-supervisor' && e.event === 'sig:SIGTERM');
+      assert.notEqual(ingExitIdx, -1, 'expected ingress to exit cleanly');
+      assert.ok(ingExitIdx < supTermIdx, 'expected ingress to finish draining before supervisor shutdown');
+    } finally {
+      spawnSync('bash', [path.join(homeDir, 'cpa-manager-plusctl'), 'stop'], { env, encoding: 'utf8' });
+    }
+  });
+
+  it('polls Type=simple systemd post-start readiness until launcher.ready + 3 child PIDs and rolls back on delayed startup failure or timeout', async () => {
+    const createBundleDir = (baseDir, name, versionLabel) => {
+      const dir = path.join(baseDir, name);
+      const mock = createMockNativeHome(path.join(baseDir, `${name}-mock`));
+      mkdirSync(path.join(dir, 'bin'), { recursive: true, mode: 0o755 });
+      mkdirSync(path.join(dir, 'share/cpamp/runtime'), { recursive: true, mode: 0o755 });
+      mkdirSync(path.join(dir, 'data'), { recursive: true, mode: 0o700 });
+      mkdirSync(path.join(dir, 'run'), { recursive: true, mode: 0o700 });
+      mkdirSync(path.join(dir, 'logs'), { recursive: true, mode: 0o700 });
+      for (const binName of ['cpa-manager-plus', 'cpa-manager-plus-ingress', 'cpa-manager-plus-runtime-supervisor', 'cli-proxy-api']) {
+        copyFileSync(path.join(mock.binDir, binName), path.join(dir, 'bin', binName));
+        chmodSync(path.join(dir, 'bin', binName), 0o755);
+      }
+      copyFileSync(path.join(mock.binDir, 'mock-service.mjs'), path.join(dir, 'bin/mock-service.mjs'));
+      chmodSync(path.join(dir, 'bin/mock-service.mjs'), 0o644);
+      copyFileSync(launcherScript, path.join(dir, 'bin/cpa-manager-plus-launcher'));
+      copyFileSync(launcherScript, path.join(dir, 'cpa-manager-plus-launcher'));
+      copyFileSync(ctlScript, path.join(dir, 'cpa-manager-plusctl'));
+      chmodSync(path.join(dir, 'bin/cpa-manager-plus-launcher'), 0o755);
+      chmodSync(path.join(dir, 'cpa-manager-plus-launcher'), 0o755);
+      chmodSync(path.join(dir, 'cpa-manager-plusctl'), 0o755);
+      copyFileSync(systemdUnitTemplate, path.join(dir, 'cpa-manager-plus.service'));
+      writeFileSync(path.join(dir, 'share/cpamp/provenance.json'), JSON.stringify({ version: versionLabel }));
+      writeFileSync(path.join(dir, 'share/cpamp/runtime/seed-lineage.json'), JSON.stringify({ seed: versionLabel }));
+      return dir;
+    };
+
+    // 1. Type=simple systemctl start exits 0 & reports active/running, then Manager crashes after 300ms
+    {
+      const baseDir = makeTempDir('cpamp-systemd-delayed-crash-');
+      const targetHome = createBundleDir(baseDir, 'target', 'v2.0.0-beta.1');
+      const bundleDir = createBundleDir(baseDir, 'bundle', 'v2.0.0-beta.2');
+      const systemdDir = path.join(baseDir, 'systemd');
+
+      // Make upgraded Manager binary exit 1 after 300ms before launcher.ready is written
+      writeFileSync(
+        path.join(bundleDir, 'bin/cpa-manager-plus'),
+        '#!/usr/bin/env bash\nsleep 0.3\nexit 1\n',
+        { mode: 0o755 }
+      );
+      chmodSync(path.join(bundleDir, 'bin/cpa-manager-plus'), 0o755);
+
+      const stateFile = path.join(baseDir, 'systemd-state');
+      const unitPidFile = path.join(baseDir, 'unit.pid');
+      const rawEnv = await buildPortEnv(targetHome, {
+        CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1',
+        CPAMP_STARTUP_TIMEOUT_SEC: '15',
+      });
+      const { _ports: ports, ...env } = rawEnv;
+
+      const mockSystemctl = path.join(baseDir, 'mock-systemctl');
+      writeFileSync(
+        mockSystemctl,
+        [
+          '#!/usr/bin/env bash',
+          `state_file="${stateFile}"`,
+          `pid_file="${unitPidFile}"`,
+          `launcher_bin="${targetHome}/bin/cpa-manager-plus-launcher"`,
+          `log_out="${targetHome}/logs/cpa-manager-plus.log"`,
+          'refresh_state() {',
+          '  if [ "$(cat "${state_file}" 2>/dev/null || true)" = "active" ] && [ -f "${pid_file}" ]; then',
+          '    up="$(cat "${pid_file}" 2>/dev/null || true)"',
+          '    if [ -z "${up}" ] || ! kill -0 "${up}" >/dev/null 2>&1; then',
+          '      echo "activating-autorestart" > "${state_file}"',
+          '    fi',
+          '  fi',
+          '}',
+          'case "${1:-}" in',
+          '  is-active)',
+          '    refresh_state',
+          '    [ "$(cat "${state_file}" 2>/dev/null || true)" = "active" ] && exit 0',
+          '    exit 3',
+          '    ;;',
+          '  show)',
+          '    refresh_state',
+          '    case "$(cat "${state_file}" 2>/dev/null || true)" in',
+          '      active) printf "loaded\\nactive\\nrunning\\n" ;;',
+          '      activating-autorestart) printf "loaded\\nactivating\\nauto-restart\\n" ;;',
+          '      *) printf "loaded\\ninactive\\ndead\\n" ;;',
+          '    esac',
+          '    exit 0',
+          '    ;;',
+          '  stop)',
+          '    if [ -f "${pid_file}" ]; then',
+          '      up="$(cat "${pid_file}" 2>/dev/null || true)"',
+          '      if [ -n "${up}" ] && kill -0 "${up}" >/dev/null 2>&1; then',
+          '        kill -TERM "${up}" >/dev/null 2>&1 || true',
+          '        for _ in $(seq 1 30); do kill -0 "${up}" >/dev/null 2>&1 || break; sleep 0.1; done',
+          '      fi',
+          '      rm -f "${pid_file}"',
+          '    fi',
+          '    echo "inactive" > "${state_file}"',
+          '    exit 0',
+          '    ;;',
+          '  start)',
+          '    mkdir -p "$(dirname "${log_out}")"',
+          '    "${launcher_bin}" </dev/null >>"${log_out}" 2>&1 &',
+          '    echo "$!" > "${pid_file}"',
+          '    echo "active" > "${state_file}"',
+          '    exit 0',
+          '    ;;',
+          '  *) exit 0 ;;',
+          'esac',
+          '',
+        ].join('\n'),
+        { mode: 0o755 }
+      );
+      chmodSync(mockSystemctl, 0o755);
+
+      const fullEnv = { ...env, CPA_MANAGER_PLUS_SYSTEMCTL_BIN: mockSystemctl };
+      execFileSync('bash', [path.join(targetHome, 'cpa-manager-plusctl'), 'install', '--home', targetHome, '--unit-dir', systemdDir], {
+        env: fullEnv,
+        encoding: 'utf8',
+      });
+      const unitPath = path.join(systemdDir, 'cpa-manager-plus.service');
+      const initialUnit = readFileSync(unitPath, 'utf8');
+      // Start v1 active via mockSystemctl
+      execFileSync('bash', [mockSystemctl, 'start', 'cpa-manager-plus.service'], { env: fullEnv });
+      assert.equal(await waitForFile(path.join(targetHome, 'run/launcher.ready')), true);
+
+      const upgradeEnv = { ...fullEnv };
+      delete upgradeEnv.CPA_MANAGER_PLUS_HOME;
+
+      try {
+        const startedAt = Date.now();
+        const res = spawnSync(
+          'bash',
+          [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', targetHome, '--unit-dir', systemdDir],
+          { env: upgradeEnv, encoding: 'utf8' }
+        );
+        const elapsedMs = Date.now() - startedAt;
+        assert.notEqual(res.status, 0);
+        assert.ok(elapsedMs < 13000, `expected immediate abort on auto-restart transition instead of 15s timeout (took ${elapsedMs}ms)`);
+        assert.match(res.stderr, /post-upgrade start\/readiness check; rolling back/);
+        assert.doesNotMatch(res.stderr, /failed to restart previously active instance/);
+        assert.equal(readFileSync(unitPath, 'utf8'), initialUnit);
+        assert.equal(
+          JSON.parse(readFileSync(path.join(targetHome, 'share/cpamp/provenance.json'), 'utf8')).version,
+          'v2.0.0-beta.1'
+        );
+        assert.equal(readdirSync(targetHome).filter((n) => n.startsWith('.upgrade-backup.')).length, 0);
+        assert.equal(existsSync(path.join(targetHome, 'run/launcher.ready')), true);
+        const statusOut = execFileSync('bash', [path.join(targetHome, 'cpa-manager-plusctl'), 'status'], {
+          env: fullEnv,
+          encoding: 'utf8',
+        });
+        assert.match(statusOut, /cpa-manager-plus is running with PID \d+/);
+        const healthRes = await fetch(`http://127.0.0.1:${ports.ingressPort}/health`, {
+          headers: { connection: 'close' },
+        });
+        assert.equal(healthRes.status, 200);
+        const healthBody = await healthRes.json();
+        assert.equal(healthBody.ok, true);
+      } finally {
+        spawnSync('bash', [path.join(targetHome, 'cpa-manager-plusctl'), 'stop'], {
+          env: fullEnv,
+          encoding: 'utf8',
+        });
+        if (existsSync(unitPidFile)) {
+          const up = Number(readFileSync(unitPidFile, 'utf8').trim());
+          if (up > 0) {
+            try { process.kill(up, 'SIGKILL'); } catch {}
+          }
+        }
+      }
+    }
+
+    // 2. Stale launcher.ready is removed before systemctl start & timeout rolls back if readiness never arrives
+    {
+      const baseDir = makeTempDir('cpamp-systemd-stale-ready-timeout-');
+      const targetHome = createBundleDir(baseDir, 'target', 'v2.0.0-beta.1');
+      const bundleDir = createBundleDir(baseDir, 'bundle', 'v2.0.0-beta.2');
+      const systemdDir = path.join(baseDir, 'systemd');
+      const stateFile = path.join(baseDir, 'state');
+      const unitPidFile = path.join(baseDir, 'unit.pid');
+      writeFileSync(stateFile, 'inactive\n');
+
+      // Upgraded ingress hangs without listening so launcher.ready is never written
+      writeFileSync(
+        path.join(bundleDir, 'bin/cpa-manager-plus-ingress'),
+        '#!/usr/bin/env bash\ntrap "exit 0" TERM INT\nsleep 20 &\nwait $!\n',
+        { mode: 0o755 }
+      );
+      chmodSync(path.join(bundleDir, 'bin/cpa-manager-plus-ingress'), 0o755);
+
+      // Pre-seed a stale launcher.ready that would fool a naive existence check
+      writeFileSync(path.join(targetHome, 'run/launcher.ready'), 'stale=1\n');
+      const mockSystemctl = path.join(baseDir, 'mock-systemctl');
+      writeFileSync(
+        mockSystemctl,
+        [
+          '#!/usr/bin/env bash',
+          `state_file="${stateFile}"`,
+          `pid_file="${unitPidFile}"`,
+          `launcher_bin="${targetHome}/bin/cpa-manager-plus-launcher"`,
+          `log_out="${targetHome}/logs/cpa-manager-plus.log"`,
+          'case "${1:-}" in',
+          '  is-active) [ "$(cat "${state_file}")" = "active" ] && exit 0; exit 3 ;;',
+          '  show)',
+          '    if [ "$(cat "${state_file}")" = "active" ]; then printf "loaded\\nactive\\nrunning\\n"; else printf "loaded\\ninactive\\ndead\\n"; fi',
+          '    exit 0 ;;',
+          '  stop)',
+          '    if [ -f "${pid_file}" ]; then',
+          '      up="$(cat "${pid_file}" 2>/dev/null || true)"',
+          '      if [ -n "${up}" ] && kill -0 "${up}" >/dev/null 2>&1; then',
+          '        kill -TERM "${up}" >/dev/null 2>&1 || true',
+          '        for _ in $(seq 1 30); do kill -0 "${up}" >/dev/null 2>&1 || break; sleep 0.1; done',
+          '      fi',
+          '      rm -f "${pid_file}"',
+          '    fi',
+          '    echo "inactive" > "${state_file}"; exit 0 ;;',
+          '  start)',
+          '    mkdir -p "$(dirname "${log_out}")"',
+          '    "${launcher_bin}" </dev/null >>"${log_out}" 2>&1 &',
+          '    echo "$!" > "${pid_file}"',
+          '    echo "active" > "${state_file}"; exit 0 ;;',
+          '  *) exit 0 ;;',
+          'esac',
+          '',
+        ].join('\n'),
+        { mode: 0o755 }
+      );
+      chmodSync(mockSystemctl, 0o755);
+
+      const rawEnv = await buildPortEnv(targetHome, {
+        CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1',
+        CPA_MANAGER_PLUS_SYSTEMCTL_BIN: mockSystemctl,
+        CPAMP_STARTUP_TIMEOUT_SEC: '2',
+      });
+      const { _ports: _ports, ...env } = rawEnv;
+      try {
+        const res = spawnSync(
+          'bash',
+          [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', targetHome, '--unit-dir', systemdDir],
+          { env, encoding: 'utf8' }
+        );
+        assert.notEqual(res.status, 0);
+        assert.match(res.stderr, /post-upgrade start\/readiness check; rolling back/);
+        assert.equal(
+          JSON.parse(readFileSync(path.join(targetHome, 'share/cpamp/provenance.json'), 'utf8')).version,
+          'v2.0.0-beta.1'
+        );
+      } finally {
+        spawnSync('bash', [path.join(targetHome, 'cpa-manager-plusctl'), 'stop'], { env, encoding: 'utf8' });
+        if (existsSync(unitPidFile)) {
+          const up = Number(readFileSync(unitPidFile, 'utf8').trim());
+          if (up > 0) {
+            try { process.kill(up, 'SIGKILL'); } catch {}
+          }
+        }
+      }
+    }
+  });
+
+  it('honors systemd.exec(5) precedence (EnvironmentFile= overrides Environment= and empty directives reset) across install and upgrade', async () => {
+    const createBundleDir = (baseDir, name, versionLabel) => {
+      const dir = path.join(baseDir, name);
+      const mock = createMockNativeHome(path.join(baseDir, `${name}-mock`));
+      mkdirSync(path.join(dir, 'bin'), { recursive: true, mode: 0o755 });
+      mkdirSync(path.join(dir, 'share/cpamp/runtime'), { recursive: true, mode: 0o755 });
+      mkdirSync(path.join(dir, 'data'), { recursive: true, mode: 0o700 });
+      mkdirSync(path.join(dir, 'run'), { recursive: true, mode: 0o700 });
+      mkdirSync(path.join(dir, 'logs'), { recursive: true, mode: 0o700 });
+      for (const binName of ['cpa-manager-plus', 'cpa-manager-plus-ingress', 'cpa-manager-plus-runtime-supervisor', 'cli-proxy-api']) {
+        copyFileSync(path.join(mock.binDir, binName), path.join(dir, 'bin', binName));
+        chmodSync(path.join(dir, 'bin', binName), 0o755);
+      }
+      copyFileSync(launcherScript, path.join(dir, 'bin/cpa-manager-plus-launcher'));
+      copyFileSync(launcherScript, path.join(dir, 'cpa-manager-plus-launcher'));
+      copyFileSync(ctlScript, path.join(dir, 'cpa-manager-plusctl'));
+      chmodSync(path.join(dir, 'bin/cpa-manager-plus-launcher'), 0o755);
+      chmodSync(path.join(dir, 'cpa-manager-plus-launcher'), 0o755);
+      chmodSync(path.join(dir, 'cpa-manager-plusctl'), 0o755);
+      copyFileSync(systemdUnitTemplate, path.join(dir, 'cpa-manager-plus.service'));
+      writeFileSync(path.join(dir, 'share/cpamp/provenance.json'), JSON.stringify({ version: versionLabel }));
+      writeFileSync(path.join(dir, 'share/cpamp/runtime/seed-lineage.json'), JSON.stringify({ seed: versionLabel }));
+      return dir;
+    };
+
+    const baseDir = makeTempDir('cpamp-envfile-precedence-e2e-');
+    const targetHome = createBundleDir(baseDir, 'target', 'v2.0.0-beta.1');
+    const bundleDir = createBundleDir(baseDir, 'bundle', 'v2.0.0-beta.2');
+    const systemdDir = path.join(baseDir, 'systemd');
+    const rawEnv = await buildPortEnv(targetHome);
+    const { _ports: _ports, ...installEnv } = rawEnv;
+
+    // 1. Run real install to produce full 18-key default unit + EnvironmentFile=-<targetHome>/cpa-manager-plus.env
+    execFileSync(
+      'bash',
+      [path.join(targetHome, 'cpa-manager-plusctl'), 'install', '--home', targetHome, '--unit-dir', systemdDir, '--no-systemctl'],
+      { env: installEnv, encoding: 'utf8' }
+    );
+    const unitPath = path.join(systemdDir, 'cpa-manager-plus.service');
+    const initialUnit = readFileSync(unitPath, 'utf8');
+    assert.match(initialUnit, /^Environment="CPAMP_DRAIN_TIMEOUT=90s"$/m);
+    assert.match(initialUnit, new RegExp(`^EnvironmentFile=-${targetHome}/cpa-manager-plus\\.env$`, 'm'));
+
+    // 2. Write custom overrides into cpa-manager-plus.env
+    const extDataDir = path.join(baseDir, 'ext-data');
+    const extRunDir = path.join(baseDir, 'ext-run');
+    mkdirSync(path.join(extDataDir, 'runtime/gateway'), { recursive: true, mode: 0o700 });
+    mkdirSync(extRunDir, { recursive: true, mode: 0o700 });
+    chmodSync(extDataDir, 0o700);
+    const [customCpaPort] = await allocateLoopbackPorts(1);
+    const customCpaAddr = `127.0.0.1:${customCpaPort}`;
+
+    writeFileSync(
+      path.join(targetHome, 'cpa-manager-plus.env'),
+      [
+        `USAGE_DATA_DIR=${extDataDir}`,
+        `CPA_MANAGER_PLUS_RUN_DIR=${extRunDir}`,
+        `CPAMP_RUNTIME_CPA_ADDR=${customCpaAddr}`,
+        'CPAMP_DRAIN_TIMEOUT=180s',
+        '',
+      ].join('\n'),
+      { mode: 0o600 }
+    );
+
+    const cleanEnv = {
+      PATH: process.env.PATH || '',
+      HOME: process.env.HOME || '',
+      CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1',
+    };
+
+    // 3a. Prove upgrade checks quiescence on .env-configured CPA_MANAGER_PLUS_RUN_DIR (not base unit's targetHome/run)
+    const foreignProc = spawn('bash', ['-c', 'sleep 20'], { stdio: 'ignore' });
+    try {
+      writeFileSync(path.join(extRunDir, 'cpa-manager-plus.pid'), `${foreignProc.pid}\n`, { mode: 0o600 });
+      const runDirConflict = spawnSync(
+        'bash',
+        [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', targetHome, '--unit-dir', systemdDir, '--no-systemctl', '--no-restart'],
+        { env: cleanEnv, encoding: 'utf8' }
+      );
+      assert.notEqual(runDirConflict.status, 0);
+      assert.match(runDirConflict.stderr, new RegExp(`${extRunDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/cpa-manager-plus\\.pid points to a running process`));
+    } finally {
+      rmSync(path.join(extRunDir, 'cpa-manager-plus.pid'), { force: true });
+      foreignProc.kill('SIGKILL');
+      await waitForExit(foreignProc);
+    }
+
+    // 3b. Prove upgrade checks quiescence on .env-configured CPAMP_RUNTIME_CPA_ADDR + USAGE_DATA_DIR (even with no cpa.address file)
+    const unkillableCpa = path.join(targetHome, 'bin/cli-proxy-api');
+    const savedCpaScript = readFileSync(unkillableCpa, 'utf8');
+    const savedTargetCtl = readFileSync(path.join(targetHome, 'cpa-manager-plusctl'), 'utf8');
+    const savedEnvContent = readFileSync(path.join(targetHome, 'cpa-manager-plus.env'), 'utf8');
+    writeFileSync(
+      unkillableCpa,
+      [
+        '#!/usr/bin/env node',
+        'const http = require("node:http");',
+        'process.on("SIGTERM", () => {});',
+        `const srv = http.createServer((req, res) => res.end("cpa"));`,
+        `srv.listen(${customCpaPort}, "127.0.0.1");`,
+        'setInterval(() => {}, 60000);',
+        '',
+      ].join('\n'),
+      { mode: 0o755 }
+    );
+    const cfgPath = path.join(extDataDir, 'runtime/gateway/config.yaml');
+    writeFileSync(cfgPath, `host: "127.0.0.1"\nport: ${customCpaPort}\n`, { mode: 0o600 });
+    const spawnOpts = { stdio: 'ignore' };
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+      spawnOpts.uid = 10001;
+      spawnOpts.gid = 10001;
+    } else if (typeof process.getuid === 'function' && process.getuid() > 0) {
+      writeFileSync(
+        path.join(targetHome, 'cpa-manager-plus.env'),
+        `${savedEnvContent}CPAMP_RUNTIME_CPA_UID=${process.getuid()}\nCPAMP_RUNTIME_CPA_GID=${process.getgid()}\n`,
+        { mode: 0o600 }
+      );
+    }
+    // Simulate target ctl stop leaving the CPA child running so upgrade's own hard quiescence check catches it
+    writeFileSync(path.join(targetHome, 'cpa-manager-plusctl'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+    const cpaChild = spawn(unkillableCpa, ['-config', cfgPath], spawnOpts);
+    activeProcesses.push(cpaChild);
+    try {
+      assert.equal(await waitForPortAccepting(customCpaPort), true);
+      const startRes = spawnSync('bash', ['-c', `ps -ww -p ${cpaChild.pid} -o lstart=`], { encoding: 'utf8' });
+      const startMarker = startRes.stdout.trim().replace(/\s+/g, ' ');
+      writeFileSync(
+        path.join(extRunDir, 'cpa-instance.provenance'),
+        `instance|${path.join(extDataDir, 'runtime')}\n${cpaChild.pid}|${startMarker}\n`,
+        { mode: 0o600 }
+      );
+      const cpaQuiesceRes = spawnSync(
+        'bash',
+        [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', targetHome, '--unit-dir', systemdDir, '--no-systemctl', '--no-restart'],
+        { env: cleanEnv, encoding: 'utf8' }
+      );
+      assert.notEqual(cpaQuiesceRes.status, 0);
+      assert.match(cpaQuiesceRes.stderr, /attributable CPA child process\(es\) still running/);
+    } finally {
+      cpaChild.kill('SIGKILL');
+      await waitForExit(cpaChild);
+      rmSync(path.join(extRunDir, 'cpa-instance.provenance'), { force: true });
+      writeFileSync(unkillableCpa, savedCpaScript, { mode: 0o755 });
+      writeFileSync(path.join(targetHome, 'cpa-manager-plusctl'), savedTargetCtl, { mode: 0o755 });
+      writeFileSync(path.join(targetHome, 'cpa-manager-plus.env'), savedEnvContent, { mode: 0o600 });
+    }
+
+    // 4. Perform upgrade with clean env and verify regenerated unit reflects .env overrides
+    const upgradeRes = spawnSync(
+      'bash',
+      [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', targetHome, '--unit-dir', systemdDir, '--no-systemctl', '--no-restart'],
+      { env: cleanEnv, encoding: 'utf8' }
+    );
+    assert.equal(upgradeRes.status, 0, upgradeRes.stderr);
+    const updatedUnit = readFileSync(unitPath, 'utf8');
+    assert.match(updatedUnit, new RegExp(`^Environment="USAGE_DATA_DIR=${extDataDir}"$`, 'm'));
+    assert.match(updatedUnit, new RegExp(`^Environment="CPA_MANAGER_PLUS_RUN_DIR=${extRunDir}"$`, 'm'));
+    assert.match(updatedUnit, new RegExp(`^Environment="CPAMP_RUNTIME_CPA_ADDR=${customCpaAddr}"$`, 'm'));
+    assert.match(updatedUnit, /^Environment="CPAMP_DRAIN_TIMEOUT=180s"$/m);
+    assert.match(updatedUnit, /^Environment="CPAMP_SERVICE_STOP_TIMEOUT_SEC=240"$/m);
+    assert.match(updatedUnit, /^TimeoutStopSec=240$/m);
+    assert.match(updatedUnit, new RegExp(`^ReadWritePaths=.*${extDataDir}`, 'm'));
+    assert.match(updatedUnit, new RegExp(`^ReadWritePaths=.*${extRunDir}`, 'm'));
+
+    // 5. Drop-in empty Environment= / EnvironmentFile= / ReadWritePaths= reset earlier values per systemd.exec(5)
+    const dropinDir = `${unitPath}.d`;
+    mkdirSync(dropinDir, { recursive: true });
+    const dropinEnvFile = path.join(baseDir, 'dropin-reset.env');
+    writeFileSync(dropinEnvFile, 'CPAMP_DRAIN_TIMEOUT=110s\n', { mode: 0o600 });
+    writeFileSync(
+      path.join(dropinDir, '20-reset.conf'),
+      [
+        '[Service]',
+        'Environment=',
+        'Environment="CPAMP_DRAIN_TIMEOUT=220s"',
+        'EnvironmentFile=',
+        `EnvironmentFile=-${dropinEnvFile}`,
+        'ReadWritePaths=',
+        `ReadWritePaths=${extDataDir}`,
+        '',
+      ].join('\n')
+    );
+    const resetRes = spawnSync(
+      'bash',
+      [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', targetHome, '--unit-dir', systemdDir, '--no-systemctl', '--no-restart'],
+      { env: cleanEnv, encoding: 'utf8' }
+    );
+    assert.equal(resetRes.status, 0, resetRes.stderr);
+    const resetUnit = readFileSync(unitPath, 'utf8');
+    // Empty EnvironmentFile= in drop-in cleared base unit's preserved EnvironmentFile=, so default cpa-manager-plus.env is emitted;
+    // dropinEnvFile overrides drop-in Environment="CPAMP_DRAIN_TIMEOUT=220s" -> 110s (stop timeout 170).
+    assert.match(resetUnit, /^Environment="CPAMP_DRAIN_TIMEOUT=110s"$/m);
+    assert.match(resetUnit, /^TimeoutStopSec=170$/m);
+    assert.match(resetUnit, /^Environment="CPAMP_SERVICE_STOP_TIMEOUT_SEC=170"$/m);
+    // Empty Environment= cleared base unit's custom USAGE_DATA_DIR/CPA_MANAGER_PLUS_RUN_DIR before dropinEnvFile (which didn't set them)
+    assert.match(resetUnit, new RegExp(`^Environment="USAGE_DATA_DIR=${targetHome}/data"$`, 'm'));
+    assert.match(resetUnit, new RegExp(`^ReadWritePaths=${targetHome}/data ${targetHome}/run ${targetHome}/logs ${extDataDir}$`, 'm'));
+  });
+
+  it('falls back expected_cpa_uid to 10001 on Linux root when cpamp-cpa account is absent', () => {
+    const baseDir = makeTempDir('cpamp-expected-uid-');
+    const stubDir = path.join(baseDir, 'stub-bin');
+    mkdirSync(stubDir, { recursive: true });
+    writeFileSync(
+      path.join(stubDir, 'uname'),
+      '#!/usr/bin/env bash\nif [ "${1:-}" = "-s" ]; then echo "Linux"; exit 0; fi\nexec /usr/bin/uname "$@"\n',
+      { mode: 0o755 }
+    );
+    writeFileSync(
+      path.join(stubDir, 'id'),
+      [
+        '#!/usr/bin/env bash',
+        'if [ "${1:-}" = "-u" ] && [ "$#" -eq 1 ]; then echo "${MOCK_ID_U:-0}"; exit 0; fi',
+        'if [ "${1:-}" = "-u" ] && [ "${2:-}" = "cpamp-cpa" ]; then',
+        '  if [ -n "${MOCK_CPA_USER_UID:-}" ]; then echo "${MOCK_CPA_USER_UID}"; exit 0; fi',
+        '  exit 1',
+        'fi',
+        'exit 1',
+        '',
+      ].join('\n'),
+      { mode: 0o755 }
+    );
+
+    const ctlLibPath = path.join(baseDir, 'ctl-lib.sh');
+    const ctlBody = readFileSync(ctlScript, 'utf8').replace(/\ncommand="\$\{1:-status\}[\s\S]*$/, '\n');
+    writeFileSync(ctlLibPath, ctlBody, { mode: 0o644 });
+
+    const runCheck = (extraEnv) => {
+      const res = spawnSync(
+        'bash',
+        [
+          '-c',
+          'source "$1" && expected_cpa_uid',
+          '_',
+          ctlLibPath,
+        ],
+        {
+          env: {
+            PATH: `${stubDir}:${process.env.PATH || ''}`,
+            ...extraEnv,
+          },
+          encoding: 'utf8',
+        }
+      );
+      assert.equal(res.status, 0, res.stderr);
+      return res.stdout.trim();
+    };
+
+    assert.equal(runCheck({ MOCK_ID_U: '0' }), '10001');
+    assert.equal(runCheck({ MOCK_ID_U: '0', MOCK_CPA_USER_UID: '10042' }), '10042');
+    assert.equal(runCheck({ MOCK_ID_U: '0', CPAMP_RUNTIME_CPA_UID: '10099' }), '10099');
+    assert.equal(runCheck({ MOCK_ID_U: '501' }), '501');
+  });
+
+  it('preserves optional ReadWritePaths=-/path without globbing, fails closed on malformed swapping lock metadata, and handles swap signals', async () => {
+    const createBundleDir = (baseDir, name, versionLabel) => {
+      const dir = path.join(baseDir, name);
+      const mock = createMockNativeHome(path.join(baseDir, `${name}-mock`));
+      mkdirSync(path.join(dir, 'bin'), { recursive: true, mode: 0o755 });
+      mkdirSync(path.join(dir, 'share/cpamp/runtime'), { recursive: true, mode: 0o755 });
+      mkdirSync(path.join(dir, 'data'), { recursive: true, mode: 0o700 });
+      mkdirSync(path.join(dir, 'run'), { recursive: true, mode: 0o700 });
+      mkdirSync(path.join(dir, 'logs'), { recursive: true, mode: 0o700 });
+      for (const binName of ['cpa-manager-plus', 'cpa-manager-plus-ingress', 'cpa-manager-plus-runtime-supervisor', 'cli-proxy-api']) {
+        copyFileSync(path.join(mock.binDir, binName), path.join(dir, 'bin', binName));
+        chmodSync(path.join(dir, 'bin', binName), 0o755);
+      }
+      copyFileSync(launcherScript, path.join(dir, 'bin/cpa-manager-plus-launcher'));
+      copyFileSync(launcherScript, path.join(dir, 'cpa-manager-plus-launcher'));
+      copyFileSync(ctlScript, path.join(dir, 'cpa-manager-plusctl'));
+      chmodSync(path.join(dir, 'bin/cpa-manager-plus-launcher'), 0o755);
+      chmodSync(path.join(dir, 'cpa-manager-plus-launcher'), 0o755);
+      chmodSync(path.join(dir, 'cpa-manager-plusctl'), 0o755);
+      copyFileSync(systemdUnitTemplate, path.join(dir, 'cpa-manager-plus.service'));
+      writeFileSync(path.join(dir, 'share/cpamp/provenance.json'), JSON.stringify({ version: versionLabel }));
+      writeFileSync(path.join(dir, 'share/cpamp/runtime/seed-lineage.json'), JSON.stringify({ seed: versionLabel }));
+      return dir;
+    };
+
+    // 1. Carbon Low-1: optional ReadWritePaths=-/path preserved verbatim without glob expansion
+    {
+      const baseDir = makeTempDir('cpamp-rw-optional-');
+      const targetHome = createBundleDir(baseDir, 'target', 'v2.0.0-beta.1');
+      const bundleDir = createBundleDir(baseDir, 'bundle', 'v2.0.0-beta.2');
+      const systemdDir = path.join(baseDir, 'systemd');
+      mkdirSync(systemdDir, { recursive: true });
+      const unitPath = path.join(systemdDir, 'cpa-manager-plus.service');
+      writeFileSync(
+        unitPath,
+        [
+          '[Service]',
+          `WorkingDirectory=${targetHome}`,
+          `ExecStart=${targetHome}/bin/cpa-manager-plus-launcher`,
+          `ReadWritePaths=${targetHome}/data ${targetHome}/run ${targetHome}/logs -/var/opt/cpamp-optional -/var/opt/glob*dir`,
+          '',
+        ].join('\n')
+      );
+      const cleanEnv = {
+        PATH: process.env.PATH || '',
+        HOME: process.env.HOME || '',
+        CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1',
+      };
+      const okRes = spawnSync(
+        'bash',
+        [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', targetHome, '--unit-dir', systemdDir, '--no-systemctl', '--no-restart'],
+        { env: cleanEnv, encoding: 'utf8' }
+      );
+      assert.equal(okRes.status, 0, okRes.stderr);
+      const updated = readFileSync(unitPath, 'utf8');
+      assert.match(updated, /^ReadWritePaths=.*-\/var\/opt\/cpamp-optional -\/var\/opt\/glob\*dir/m);
+
+      // Rejects double-dash or non-absolute path after '-'
+      for (const badEntry of ['--/var/opt/bad', '-relative/path']) {
+        writeFileSync(
+          unitPath,
+          [
+            '[Service]',
+            `WorkingDirectory=${targetHome}`,
+            `ExecStart=${targetHome}/bin/cpa-manager-plus-launcher`,
+            `ReadWritePaths=${targetHome}/data ${badEntry}`,
+            '',
+          ].join('\n')
+        );
+        const badRes = spawnSync(
+          'bash',
+          [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', targetHome, '--unit-dir', systemdDir, '--no-systemctl', '--no-restart'],
+          { env: cleanEnv, encoding: 'utf8' }
+        );
+        assert.notEqual(badRes.status, 0);
+        assert.match(badRes.stderr, /must be an absolute path/);
+      }
+    }
+
+    // 2. Carbon Low-2: check_upgrade_swap_lock fails closed on missing/empty/invalid/symlinked lock metadata
+    {
+      const baseDir = makeTempDir('cpamp-swap-lock-hardening-');
+      const { homeDir, binDir } = createMockNativeHome(baseDir);
+      const rawEnv = await buildPortEnv(homeDir, { MOCK_FAIL_ROLE: 'runtime-supervisor' });
+      const { _ports: _ports, ...env } = rawEnv;
+      const lockDir = path.join(homeDir, '.upgrade.lock');
+      const swappingPath = path.join(lockDir, 'swapping');
+      const pidPath = path.join(lockDir, 'pid');
+
+      const resetLockDir = () => {
+        rmSync(lockDir, { recursive: true, force: true });
+        mkdirSync(lockDir, { mode: 0o700 });
+      };
+
+      const expectLockRefusal = () => {
+        const res = spawnSync('bash', [path.join(binDir, 'cpa-manager-plus-launcher')], {
+          env,
+          encoding: 'utf8',
+        });
+        assert.notEqual(res.status, 0);
+        assert.match(res.stderr, /Refusing to start launcher while upgrade file swap is in progress/);
+      };
+
+      // Missing pid file
+      resetLockDir();
+      writeFileSync(swappingPath, '1\n');
+      expectLockRefusal();
+
+      // Empty pid file
+      resetLockDir();
+      writeFileSync(swappingPath, '1\n');
+      writeFileSync(pidPath, '   \n');
+      expectLockRefusal();
+
+      // Non-numeric / zero pid
+      for (const badPid of ['abc', '0', '-5']) {
+        resetLockDir();
+        writeFileSync(swappingPath, '1\n');
+        writeFileSync(pidPath, `${badPid}\n`);
+        expectLockRefusal();
+      }
+
+      // Symlinked pid file or symlinked swapping file or directory swapping
+      resetLockDir();
+      writeFileSync(swappingPath, '1\n');
+      const outsideFile = path.join(baseDir, 'outside-pid');
+      writeFileSync(outsideFile, '999999\n');
+      symlinkSync(outsideFile, pidPath);
+      expectLockRefusal();
+
+      resetLockDir();
+      symlinkSync(outsideFile, swappingPath);
+      writeFileSync(pidPath, '999999\n');
+      expectLockRefusal();
+
+      resetLockDir();
+      mkdirSync(swappingPath, { mode: 0o700 });
+      writeFileSync(pidPath, '999999\n');
+      expectLockRefusal();
+
+      // Valid dead positive integer PID ignores swapping_flag and proceeds past check_upgrade_swap_lock
+      const deadPid = spawnSync('bash', ['-c', 'echo $$'], { encoding: 'utf8' }).stdout.trim();
+      resetLockDir();
+      writeFileSync(swappingPath, `${deadPid}\n`);
+      writeFileSync(pidPath, `${deadPid}\n`);
+      const deadRes = spawnSync('bash', [path.join(binDir, 'cpa-manager-plus-launcher')], {
+        env,
+        encoding: 'utf8',
+      });
+      assert.doesNotMatch(deadRes.stderr, /Refusing to start launcher while upgrade file swap is in progress/);
+    }
+
+    // 3. Opus L2: SIGTERM mid-swap triggers clean rollback of target_home and unit
+    {
+      const baseDir = makeTempDir('cpamp-swap-sigterm-rollback-');
+      const targetHome = createBundleDir(baseDir, 'target', 'v2.0.0-beta.1');
+      const bundleDir = createBundleDir(baseDir, 'bundle', 'v2.0.0-beta.2');
+      const systemdDir = path.join(baseDir, 'systemd');
+      mkdirSync(systemdDir, { recursive: true });
+      const unitPath = path.join(systemdDir, 'cpa-manager-plus.service');
+      const origUnit = `[Service]\nWorkingDirectory=${targetHome}\nExecStart=${targetHome}/bin/cpa-manager-plus-launcher\n`;
+      writeFileSync(unitPath, origUnit);
+      writeFileSync(path.join(targetHome, 'data/usage.sqlite'), 'sigterm-keep');
+
+      const stubBinDir = path.join(baseDir, 'stub-bin');
+      mkdirSync(stubBinDir, { recursive: true });
+      const realMv = execFileSync('which', ['mv'], { encoding: 'utf8' }).trim();
+      const mvStub = path.join(stubBinDir, 'mv');
+      writeFileSync(
+        mvStub,
+        [
+          '#!/usr/bin/env bash',
+          'case "${1:-}" in',
+          '  */.upgrade-stage.*/share)',
+          `    "${realMv}" "$@"`,
+          '    kill -TERM "$PPID" >/dev/null 2>&1 || true',
+          '    sleep 0.2',
+          '    exit 0',
+          '    ;;',
+          'esac',
+          `exec "${realMv}" "$@"`,
+          '',
+        ].join('\n'),
+        { mode: 0o755 }
+      );
+      chmodSync(mvStub, 0o755);
+
+      const rawEnv = await buildPortEnv(targetHome, {
+        CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1',
+        PATH: `${stubBinDir}:${process.env.PATH || ''}`,
+      });
+      const { _ports: _ports, ...env } = rawEnv;
+      const res = spawnSync(
+        'bash',
+        [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', targetHome, '--unit-dir', systemdDir, '--no-systemctl'],
+        { env, encoding: 'utf8' }
+      );
+      assert.notEqual(res.status, 0);
+      assert.match(res.stderr, /Upgrade swap interrupted by SIGTERM; rolling back/);
+      assert.equal(
+        JSON.parse(readFileSync(path.join(targetHome, 'share/cpamp/provenance.json'), 'utf8')).version,
+        'v2.0.0-beta.1'
+      );
+      assert.equal(readFileSync(path.join(targetHome, 'data/usage.sqlite'), 'utf8'), 'sigterm-keep');
+      assert.equal(readFileSync(unitPath, 'utf8'), origUnit);
+      assert.equal(readdirSync(targetHome).filter((n) => n.startsWith('.upgrade-backup.')).length, 0);
+      assert.equal(existsSync(path.join(targetHome, '.upgrade.lock')), false);
     }
   });
 });

@@ -71,8 +71,21 @@ ingress_bin="${CPA_MANAGER_PLUS_INGRESS_BIN:-"${bin_dir}/cpa-manager-plus-ingres
 cpa_bin="${CPAMP_CPA_EXECUTABLE:-"${bin_dir}/cli-proxy-api"}"
 
 startup_timeout_sec="${CPAMP_STARTUP_TIMEOUT_SEC:-30}"
-stop_timeout_sec="${CPAMP_STOP_TIMEOUT_SEC:-10}"
+raw_stop_timeout_sec="${CPAMP_STOP_TIMEOUT_SEC:-}"
+stop_timeout_sec=10
+if [ -n "${raw_stop_timeout_sec}" ]; then
+  if [[ "${raw_stop_timeout_sec}" =~ ^[0123456789]+$ ]] && [ "${#raw_stop_timeout_sec}" -le 4 ] && [ "$((10#${raw_stop_timeout_sec}))" -ge 1 ]; then
+    stop_timeout_sec="$((10#${raw_stop_timeout_sec}))"
+  else
+    printf '[cpamp-launcher] Invalid CPAMP_STOP_TIMEOUT_SEC (%s); using bounded stage defaults\n' "${raw_stop_timeout_sec}" >&2
+  fi
+fi
+manager_stop_timeout_sec=$(( stop_timeout_sec < 10 ? stop_timeout_sec : 10 ))
+runtime_stop_timeout_sec=$(( stop_timeout_sec < 10 ? stop_timeout_sec : 10 ))
+cpa_stop_timeout_sec=$(( stop_timeout_sec < 5 ? stop_timeout_sec : 5 ))
 max_restarts="${CPAMP_MAX_RESTARTS:-3}"
+drain_timeout_sec=90
+ingress_shutdown_timeout="90s"
 
 usage() {
   cat <<EOF
@@ -144,6 +157,208 @@ log_msg() {
 log_err() {
   printf '[cpamp-launcher] %s\n' "$*" >&2
 }
+
+check_upgrade_swap_lock() {
+  local lock_dir="${home_dir}/.upgrade.lock"
+  local swapping_flag="${lock_dir}/swapping"
+  local lock_pid_file="${lock_dir}/pid"
+  local lock_pid=""
+
+  if [ -e "${swapping_flag}" ] || [ -L "${swapping_flag}" ]; then
+    if [ -L "${lock_dir}" ] || [ ! -d "${lock_dir}" ] ||
+      [ -L "${swapping_flag}" ] || [ ! -f "${swapping_flag}" ] ||
+      [ -L "${lock_pid_file}" ] || [ ! -f "${lock_pid_file}" ]; then
+      log_err "Refusing to start launcher while upgrade file swap is in progress"
+      exit 1
+    fi
+    lock_pid="$(sed -n '1p' "${lock_pid_file}" 2>/dev/null | tr -d '[:space:]' || true)"
+    if [ -z "${lock_pid}" ] || ! [[ "${lock_pid}" =~ ^[1-9][0-9]*$ ]]; then
+      log_err "Refusing to start launcher while upgrade file swap is in progress"
+      exit 1
+    fi
+    if kill -0 "${lock_pid}" >/dev/null 2>&1 || ps -p "${lock_pid}" -o pid= >/dev/null 2>&1; then
+      log_err "Refusing to start launcher while upgrade file swap is in progress"
+      exit 1
+    fi
+  fi
+}
+
+check_upgrade_swap_lock
+
+apply_service_stop_budget_clamp() {
+  local drain_source_label="$1"
+  local raw_budget="${CPAMP_SERVICE_STOP_TIMEOUT_SEC:-}"
+  local trimmed_budget budget_sec max_allowed_drain_sec
+
+  trimmed_budget="${raw_budget#"${raw_budget%%[![:space:]]*}"}"
+  trimmed_budget="${trimmed_budget%"${trimmed_budget##*[![:space:]]}"}"
+  if [ -z "${trimmed_budget}" ]; then
+    return 0
+  fi
+
+  if ! [[ "${trimmed_budget}" =~ ^[0123456789]+$ ]] || [ "${#trimmed_budget}" -gt 5 ]; then
+    log_err "Invalid CPAMP_SERVICE_STOP_TIMEOUT_SEC (${trimmed_budget}); ignoring outer service stop budget"
+    return 0
+  fi
+
+  budget_sec="$((10#${trimmed_budget}))"
+  if [ "${budget_sec}" -lt 61 ]; then
+    log_err "Ignoring CPAMP_SERVICE_STOP_TIMEOUT_SEC (${budget_sec}s < 61s); minimum 61s required for shutdown margin"
+    return 0
+  fi
+
+  max_allowed_drain_sec=$((budget_sec - 60))
+  if [ "${drain_timeout_sec}" -gt "${max_allowed_drain_sec}" ]; then
+    log_err "CPAMP_DRAIN_TIMEOUT (${drain_source_label:-${drain_timeout_sec}s}) exceeds outer service stop budget; clamping to ${max_allowed_drain_sec}s"
+    drain_timeout_sec="${max_allowed_drain_sec}"
+    ingress_shutdown_timeout="${max_allowed_drain_sec}s"
+  fi
+}
+
+resolve_drain_timeout() {
+  local raw="${1:-}"
+  local trimmed canonical rest num_part unit int_part frac_part
+  local unit_ns mult pow10 max_int_digits int_ns frac_ns
+  local frac_padded frac_head sub_digits
+  local total_ns=0
+  local max_ns=3600000000000
+  local saved_lc_all="${LC_ALL-}"
+  local had_lc_all=0
+  if [ "${LC_ALL+x}" = "x" ]; then
+    had_lc_all=1
+  fi
+
+  trimmed="${raw#"${raw%%[![:space:]]*}"}"
+  trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+  if [ -z "${trimmed}" ]; then
+    drain_timeout_sec=90
+    ingress_shutdown_timeout="90s"
+    apply_service_stop_budget_clamp "90s"
+    return 0
+  fi
+
+  if [ "${#trimmed}" -gt 32 ]; then
+    log_err "Invalid CPAMP_DRAIN_TIMEOUT (${trimmed}); falling back to 90s"
+    drain_timeout_sec=90
+    ingress_shutdown_timeout="90s"
+    apply_service_stop_budget_clamp "90s"
+    return 0
+  fi
+
+  if [[ "${trimmed}" =~ ^[0123456789]+$ ]]; then
+    int_part="${trimmed#"${trimmed%%[!0]*}"}"
+    if [ -z "${int_part}" ] || [ "${#int_part}" -gt 4 ] ||
+      [ "$((10#${int_part}))" -lt 1 ] || [ "$((10#${int_part}))" -gt 3600 ]; then
+      log_err "Invalid CPAMP_DRAIN_TIMEOUT (${trimmed}); falling back to 90s"
+      drain_timeout_sec=90
+      ingress_shutdown_timeout="90s"
+      apply_service_stop_budget_clamp "90s"
+      return 0
+    fi
+    drain_timeout_sec="$((10#${int_part}))"
+    ingress_shutdown_timeout="${drain_timeout_sec}s"
+    apply_service_stop_budget_clamp "${trimmed}"
+    return 0
+  fi
+
+  canonical="${trimmed}"
+  if [ "${canonical:0:1}" = "+" ]; then
+    canonical="${canonical:1}"
+  fi
+  canonical="${canonical//$'\xc2\xb5'/u}"
+  canonical="${canonical//$'\xce\xbc'/u}"
+
+  if [ -z "${canonical}" ] || [ "${#canonical}" -gt 32 ]; then
+    log_err "Invalid CPAMP_DRAIN_TIMEOUT (${trimmed}); falling back to 90s"
+    drain_timeout_sec=90
+    ingress_shutdown_timeout="90s"
+    apply_service_stop_budget_clamp "90s"
+    return 0
+  fi
+
+  LC_ALL=C
+  rest="${canonical}"
+  while [ -n "${rest}" ]; do
+    if [[ "${rest}" =~ ^([0123456789]+(\.[0123456789]*)?|\.[0123456789]+)(ns|us|ms|h|m|s)(.*)$ ]]; then
+      num_part="${BASH_REMATCH[1]}"
+      unit="${BASH_REMATCH[3]}"
+      rest="${BASH_REMATCH[4]}"
+    else
+      total_ns=-1
+      break
+    fi
+
+    case "${unit}" in
+      ns) unit_ns=1;             mult=1;  pow10=0;  max_int_digits=13 ;;
+      us) unit_ns=1000;          mult=1;  pow10=3;  max_int_digits=10 ;;
+      ms) unit_ns=1000000;       mult=1;  pow10=6;  max_int_digits=7  ;;
+      s)  unit_ns=1000000000;    mult=1;  pow10=9;  max_int_digits=4  ;;
+      m)  unit_ns=60000000000;   mult=6;  pow10=10; max_int_digits=2  ;;
+      h)  unit_ns=3600000000000; mult=36; pow10=11; max_int_digits=1  ;;
+      *)  total_ns=-1; break ;;
+    esac
+
+    if [[ "${num_part}" == *.* ]]; then
+      int_part="${num_part%%.*}"
+      frac_part="${num_part#*.}"
+    else
+      int_part="${num_part}"
+      frac_part=""
+    fi
+
+    int_part="${int_part#"${int_part%%[!0]*}"}"
+    int_ns=0
+    if [ -n "${int_part}" ]; then
+      if [ "${#int_part}" -gt "${max_int_digits}" ]; then
+        total_ns=-1
+        break
+      fi
+      int_ns=$((10#${int_part} * unit_ns))
+    fi
+
+    frac_ns=0
+    if [ -n "${frac_part}" ] && [ "${pow10}" -gt 0 ]; then
+      frac_padded="${frac_part}00000000000000"
+      frac_head="${frac_padded:0:${pow10}}"
+      frac_ns=$((10#${frac_head} * mult))
+      sub_digits="${frac_padded:${pow10}:3}"
+      frac_ns=$((frac_ns + (10#${sub_digits} * mult) / 1000))
+    fi
+
+    total_ns=$((total_ns + int_ns + frac_ns))
+    if [ "${total_ns}" -gt "${max_ns}" ]; then
+      total_ns=-1
+      break
+    fi
+  done
+
+  if [ "${had_lc_all}" -eq 1 ]; then
+    export LC_ALL="${saved_lc_all}"
+  else
+    unset LC_ALL
+  fi
+
+  if [ "${total_ns}" -le 0 ] || [ "${total_ns}" -gt "${max_ns}" ]; then
+    log_err "Invalid CPAMP_DRAIN_TIMEOUT (${trimmed}); falling back to 90s"
+    drain_timeout_sec=90
+    ingress_shutdown_timeout="90s"
+    apply_service_stop_budget_clamp "90s"
+    return 0
+  fi
+
+  drain_timeout_sec=$(((total_ns + 999999999) / 1000000000))
+  if [ "${drain_timeout_sec}" -lt 1 ] || [ "${drain_timeout_sec}" -gt 3600 ]; then
+    log_err "Invalid CPAMP_DRAIN_TIMEOUT (${trimmed}); falling back to 90s"
+    drain_timeout_sec=90
+    ingress_shutdown_timeout="90s"
+    apply_service_stop_budget_clamp "90s"
+    return 0
+  fi
+  ingress_shutdown_timeout="${canonical}"
+  apply_service_stop_budget_clamp "${trimmed}"
+}
+
+resolve_drain_timeout "${CPAMP_DRAIN_TIMEOUT:-90s}"
 
 path_mode() {
   local path="$1"
@@ -671,6 +886,36 @@ $(ps -o pid= -o ppid= -A 2>/dev/null | awk -v parent="${parent}" '$2 == parent {
 #   3. its runtime configuration is this installation's - either the
 #      `-config <runtime_root>/.../config.yaml` the Supervisor passes, or the
 #      ${runtime_root} working directory the bootstrap start inherits.
+is_instance_cpa_executable_path() {
+  local candidate_path="$1"
+  local primary_cpa_bin="$2"
+  local sup_dir="$3"
+  local stage_prefix rel_path seg
+
+  [ -n "${candidate_path}" ] || return 1
+  if [ -n "${primary_cpa_bin}" ] && [ "${candidate_path}" = "${primary_cpa_bin}" ]; then
+    return 0
+  fi
+
+  [ -n "${sup_dir}" ] || return 1
+  while [ "${sup_dir}" != "/" ] && [ "${sup_dir%/}" != "${sup_dir}" ]; do
+    sup_dir="${sup_dir%/}"
+  done
+  stage_prefix="${sup_dir}/artifacts/cpa/"
+  case "${candidate_path}" in
+    "${stage_prefix}"*/cli-proxy-api)
+      rel_path="${candidate_path#"${stage_prefix}"}"
+      seg="${rel_path%/cli-proxy-api}"
+      [ -n "${seg}" ] || return 1
+      case "${seg}" in
+        */* | . | .. | *..*) return 1 ;;
+      esac
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 cpa_process_matches_instance() {
   local pid="$1"
   local owner exe cwd token previous
@@ -693,13 +938,13 @@ cpa_process_matches_instance() {
   fi
 
   exe="$(process_executable_path "${pid}" || true)"
-  if [ -n "${exe}" ] && [ "${exe}" = "${cpa_bin}" ]; then
+  if [ -n "${exe}" ] && is_instance_cpa_executable_path "${exe}" "${cpa_bin}" "${supervisor_dir}"; then
     entry_ok=1
   fi
 
   previous=""
   while IFS= read -r token; do
-    if [ "${entry_ok}" -eq 0 ] && [ "${token}" = "${cpa_bin}" ]; then
+    if [ "${entry_ok}" -eq 0 ] && is_instance_cpa_executable_path "${token}" "${cpa_bin}" "${supervisor_dir}"; then
       entry_ok=1
     fi
     case "${token}" in
@@ -837,18 +1082,23 @@ cpa_process_is_instance_owned() {
 }
 
 collect_orphan_cpa_pids() {
-  local pids
+  local pids stage_prefix=""
 
+  if [ -n "${supervisor_dir:-}" ]; then
+    stage_prefix="${supervisor_dir%/}/artifacts/cpa/"
+  fi
   pids="$(listening_pids_for_port "${cpa_port}")"
   # The entry point travels through the environment: passing it as an awk
   # operand would make the collector's own command line a substring match and
   # every shutdown would report itself.
   pids="${pids}
 $(
-    ps -eo pid=,args= 2>/dev/null |
-      CPAMP_CPA_ENTRY_POINT="${cpa_bin}" awk '
-        index($0, ENVIRON["CPAMP_CPA_ENTRY_POINT"]) == 0 { next }
-        { print $1 }
+    ps -ww -eo pid=,args= 2>/dev/null |
+      CPAMP_CPA_ENTRY_POINT="${cpa_bin}" CPAMP_CPA_STAGE_PREFIX="${stage_prefix}" awk '
+        (ENVIRON["CPAMP_CPA_ENTRY_POINT"] != "" && index($0, ENVIRON["CPAMP_CPA_ENTRY_POINT"]) > 0) ||
+        (ENVIRON["CPAMP_CPA_STAGE_PREFIX"] != "" && index($0, ENVIRON["CPAMP_CPA_STAGE_PREFIX"]) > 0) {
+          print $1
+        }
       '
   )"
 
@@ -890,6 +1140,7 @@ stop_orphaned_cpa_processes() {
     sleep 0.1
   done
 
+  local killed=0 reap_ticks=0
   for pid in ${eligible_pids}; do
     if is_pid_running "${pid}"; then
       # Re-validate the exact same identity on the exact same PID: a PID reused
@@ -900,8 +1151,24 @@ stop_orphaned_cpa_processes() {
       fi
       log_err "Orphaned CPA child (PID ${pid}) did not exit within the shutdown budget; sending SIGKILL"
       kill -KILL "${pid}" >/dev/null 2>&1 || true
+      killed=1
     fi
   done
+
+  if [ "${killed}" -eq 1 ]; then
+    while [ "${reap_ticks}" -lt 20 ]; do
+      remaining=0
+      for pid in ${eligible_pids}; do
+        if is_pid_running "${pid}"; then
+          remaining=1
+          break
+        fi
+      done
+      [ "${remaining}" -eq 0 ] && break
+      sleep 0.1
+      reap_ticks=$((reap_ticks + 1))
+    done
+  fi
 }
 
 cpa_port_is_free() {
@@ -923,7 +1190,7 @@ prepare_cpa_listener_for_supervisor() {
   local context="$1"
   local deadline
 
-  deadline=$(( $(date +%s) + stop_timeout_sec ))
+  deadline=$(( $(date +%s) + cpa_stop_timeout_sec ))
   stop_orphaned_cpa_processes "${deadline}"
 
   if ! cpa_port_is_free; then
@@ -1526,6 +1793,7 @@ runtime_pid_file="${run_dir}/runtime-supervisor.pid"
 manager_pid_file="${run_dir}/manager.pid"
 ingress_pid_file="${run_dir}/ingress.pid"
 ready_file="${run_dir}/launcher.ready"
+drain_file="${run_dir}/launcher.drain"
 # Root-owned pin of (pid, start time) for every CPA child this launcher observed.
 cpa_provenance_file="${run_dir}/cpa-instance.provenance"
 
@@ -1606,6 +1874,9 @@ stop_child_process() {
   local pid="$2"
   local child_pid_file="$3"
   local deadline="$4"
+  local budget_sec="${5:-${stop_timeout_sec}}"
+  local kill_wait_sec="${6:-2}"
+  local max_kill_ticks=$((kill_wait_sec * 10))
   local waited=0
 
   if [ -n "${pid}" ] && is_pid_running "${pid}"; then
@@ -1618,14 +1889,14 @@ stop_child_process() {
       sleep 0.1
     done
     if is_pid_running "${pid}"; then
-      log_err "${name} (PID ${pid}) did not exit within the ${stop_timeout_sec}s shutdown budget; sending SIGKILL"
+      log_err "${name} (PID ${pid}) did not exit within the ${budget_sec}s shutdown budget; sending SIGKILL"
       kill -KILL "${pid}" >/dev/null 2>&1 || true
     fi
     # `wait` blocks for as long as the child is still alive (an unkillable
     # D-state process would otherwise hang shutdown forever), so it is only
     # called once the process is gone, and the reap is additionally bounded.
     waited=0
-    while is_pid_running "${pid}" && [ "${waited}" -lt 50 ]; do
+    while is_pid_running "${pid}" && [ "${waited}" -lt "${max_kill_ticks}" ]; do
       sleep 0.1
       waited=$((waited + 1))
     done
@@ -1639,24 +1910,30 @@ stop_child_process() {
 }
 
 shutdown_all_children() {
-  # One shutdown budget covers all three children so systemd's TimeoutStopSec
-  # can never expire in the middle of the sequence.
-  local deadline
-  deadline=$(( $(date +%s) + stop_timeout_sec ))
+  # Reverse dependency order matching container cpamp-launcher:
+  # 1. Drain Ingress across CPAMP_DRAIN_TIMEOUT + 5s while Manager and Runtime
+  #    Supervisor remain up to complete in-flight requests.
+  # 2. Stop Manager Server within its own shutdown budget.
+  # 3. Stop Runtime Supervisor and reap any attributable CPA children.
+  local ingress_budget_sec ingress_deadline manager_deadline runtime_deadline cpa_deadline
+  ingress_budget_sec=$((drain_timeout_sec + 5))
 
-  rm -f "${ready_file}"
+  rm -f "${ready_file}" "${drain_file}"
   # Pin the CPA children while their Supervisor is still alive; after it is
   # stopped they are reparented and only the recorded identity remains.
   refresh_cpa_instance_provenance
-  # Reverse dependency order: Ingress -> Manager Server -> Runtime Supervisor
-  stop_child_process "ingress" "${ingress_pid}" "${ingress_pid_file}" "${deadline}"
+  ingress_deadline=$(( $(date +%s) + ingress_budget_sec ))
+  stop_child_process "ingress" "${ingress_pid}" "${ingress_pid_file}" "${ingress_deadline}" "${ingress_budget_sec}" 3
   ingress_pid=""
-  stop_child_process "manager" "${manager_pid}" "${manager_pid_file}" "${deadline}"
+  manager_deadline=$(( $(date +%s) + manager_stop_timeout_sec ))
+  stop_child_process "manager" "${manager_pid}" "${manager_pid_file}" "${manager_deadline}" "${manager_stop_timeout_sec}" 2
   manager_pid=""
-  stop_child_process "runtime-supervisor" "${runtime_pid}" "${runtime_pid_file}" "${deadline}"
+  runtime_deadline=$(( $(date +%s) + runtime_stop_timeout_sec ))
+  stop_child_process "runtime-supervisor" "${runtime_pid}" "${runtime_pid_file}" "${runtime_deadline}" "${runtime_stop_timeout_sec}" 2
   runtime_pid=""
-  stop_orphaned_cpa_processes "${deadline}"
-  rm -f "${pid_file}"
+  cpa_deadline=$(( $(date +%s) + cpa_stop_timeout_sec ))
+  stop_orphaned_cpa_processes "${cpa_deadline}"
+  rm -f "${pid_file}" "${drain_file}"
 }
 
 handle_shutdown_signal() {
@@ -1821,6 +2098,7 @@ spawn_ingress() {
     export CPAMP_MANAGER_URL="${manager_url}"
     export CPAMP_GATEWAY_URL="${gateway_url}"
     export CPAMP_INGRESS_CONTROL_ADDR="${ingress_control_addr}"
+    export CPAMP_INGRESS_SHUTDOWN_TIMEOUT="${ingress_shutdown_timeout}"
     exec "${ingress_bin}"
   ) >>"${log_file}" 2>&1 &
   ingress_pid="$!"
@@ -1846,14 +2124,26 @@ write_ready_state() {
     printf 'ingress_control_addr=%s\n' "${ingress_control_addr}"
     printf 'cpa_addr=%s\n' "${cpa_addr}"
     printf 'token_file=%s\n' "${token_file}"
+    printf 'drain_timeout_sec=%s\n' "${drain_timeout_sec}"
   } >"${tmp_ready}"
   chmod 0600 "${tmp_ready}"
   mv -f "${tmp_ready}" "${ready_file}"
   chmod 0600 "${ready_file}"
 }
 
-rm -f "${ready_file}" "${runtime_pid_file}" "${manager_pid_file}" "${ingress_pid_file}"
+write_drain_budget_file() {
+  local tmp_drain="${drain_file}.tmp.$$"
+  reject_unsafe_runtime_file "${drain_file}"
+  prepare_private_file "${tmp_drain}"
+  printf '%s\n' "${drain_timeout_sec}" >"${tmp_drain}"
+  chmod 0600 "${tmp_drain}"
+  mv -f "${tmp_drain}" "${drain_file}"
+  chmod 0600 "${drain_file}"
+}
+
+rm -f "${ready_file}" "${drain_file}" "${runtime_pid_file}" "${manager_pid_file}" "${ingress_pid_file}"
 write_pid_record_to "${pid_file}" "$$" || true
+write_drain_budget_file
 
 # A previous incarnation may have left its own CPA child behind. Only an
 # attributable child is drained; anything else on the port fails closed.
