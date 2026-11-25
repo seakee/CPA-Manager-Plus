@@ -5130,8 +5130,17 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
     activeProcesses.push(cpaChild);
     try {
       assert.equal(await waitForPortAccepting(customCpaPort), true);
-      const startRes = spawnSync('bash', ['-c', `ps -ww -p ${cpaChild.pid} -o lstart=`], { encoding: 'utf8' });
-      const startMarker = startRes.stdout.trim().replace(/\s+/g, ' ');
+      const startRes = spawnSync(
+        'bash',
+        [
+          '-c',
+          'if [ -r "/proc/$1/stat" ]; then awk \'{print $22}\' "/proc/$1/stat"; else ps -ww -p "$1" -o lstart= | awk \'{$1=$1;print}\'; fi',
+          '_',
+          String(cpaChild.pid),
+        ],
+        { encoding: 'utf8' }
+      );
+      const startMarker = startRes.stdout.trim();
       writeFileSync(
         path.join(extRunDir, 'cpa-instance.provenance'),
         `instance|${path.join(extDataDir, 'runtime')}\n${cpaChild.pid}|${startMarker}\n`,
