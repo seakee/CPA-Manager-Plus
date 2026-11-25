@@ -83,16 +83,32 @@ type Bucket struct {
 	Failure     int64
 	TotalTokens int64
 }
+// RecentRequest is one bounded recent call for list-row status timelines.
+type RecentRequest struct {
+	TimestampMS int64  `json:"timestampMs"`
+	Failed      bool   `json:"failed"`
+	StatusCode  int    `json:"statusCode,omitempty"`
+	Model       string `json:"model,omitempty"`
+}
+
+// ModelCount summarizes usage calls by model within a window.
+type ModelCount struct {
+	Model string `json:"model"`
+	Calls int64  `json:"calls"`
+}
 
 // Window is the aggregated evidence for one key inside a half-open time range.
 type Window struct {
-	Totals Totals
+	Totals           Totals
+	EstimatedCostUSD *float64
+	TopModels        []ModelCount
+	ModelCount       int
+	RecentRequests   []RecentRequest
 	// UnmappedEvents counts events of this key's source hash that the
 	// projection could not attribute (unknown, ambiguous or stale). They are
 	// positive proof that the window is incomplete.
 	UnmappedEvents int64
 }
-
 // KeyRange bounds one Canonical Key's provable window floor [FromMS, toMS).
 type KeyRange struct {
 	APIKeyID identity.APIKeyID

@@ -4821,8 +4821,7 @@ func (u *upgradeCanonicalServer) serveBridgedLegacyResource(w http.ResponseWrite
 	}
 	sub := strings.TrimPrefix(resource, "cpamp/")
 	if sub == "" ||
-		sub == "setup" || strings.HasPrefix(sub, "setup/") ||
-		sub == "v8/management/config/api-keys" || strings.HasPrefix(sub, "v8/management/config/api-keys/") {
+		sub == "setup" || strings.HasPrefix(sub, "setup/") {
 		http.NotFound(w, r)
 		return
 	}

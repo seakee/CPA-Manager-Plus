@@ -11,6 +11,19 @@ import {
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { PageControlBar } from '@/components/common/PageControlBar';
+import {
+  DRAWER_WIDTH,
+  DrawerActionFooter,
+  DrawerBodyShell,
+  DrawerEmptyBox,
+  DrawerIdentityHeader,
+  DrawerSectionCard,
+  DrawerStatusPill,
+  DrawerTabPanel,
+  DrawerViewport,
+  workspaceDrawerStyles,
+} from '@/components/common/WorkspaceDrawer';
+import { WorkspaceListPanel } from '@/components/common/WorkspaceListPanel';
 import { Button } from '@/components/ui/Button';
 import { Drawer } from '@/components/ui/Drawer';
 import { DropdownMenu, type DropdownMenuItem } from '@/components/ui/DropdownMenu';
@@ -28,6 +41,7 @@ import {
   IconRefreshCw,
   IconSearch,
   IconSettings,
+  IconSlidersHorizontal,
   IconTrash2,
 } from '@/components/ui/icons';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
@@ -46,7 +60,7 @@ import {
   resolvePluginAssetURL,
 } from './pluginResources';
 import { waitForPluginState } from './pluginPolling';
-import { buildPluginDisplay, type PluginStatusTone } from './pluginDisplay';
+import { buildPluginDisplay, formatPluginVersion, type PluginStatusTone } from './pluginDisplay';
 import { PluginStorePage } from './PluginStorePage';
 import {
   buildPluginConfigPatch,
@@ -197,9 +211,11 @@ function InstalledPluginsView({
   const [error, setError] = useState('');
   const [editingPlugin, setEditingPlugin] = useState<PluginListEntry | null>(null);
   const [draft, setDraft] = useState<PluginConfigDraft | null>(null);
+  const [initialDraft, setInitialDraft] = useState<PluginConfigDraft | null>(null);
   const [mutatingID, setMutatingID] = useState('');
   const [openingConfigID, setOpeningConfigID] = useState('');
   const configRequestSeq = useRef(0);
+  const pendingDiscardPromiseRef = useRef<Promise<boolean> | null>(null);
 
   const connected = connectionStatus === 'connected';
   const canOperate = connected && supportsPlugin && Boolean(data);
@@ -235,8 +251,10 @@ function InstalledPluginsView({
     // busy marker now and bump the token so their late `finally` cannot clear a
     // newer operation's busy state.
     mutationTokenRef.current += 1;
+    pendingDiscardPromiseRef.current = null;
     setData(null);
     setEditingPlugin(null);
+    setInitialDraft(null);
     setDraft(null);
     setOpeningConfigID('');
     setMutatingID('');
@@ -373,17 +391,21 @@ function InstalledPluginsView({
     configRequestSeq.current = requestSeq;
     setOpeningConfigID(plugin.id);
     setEditingPlugin(plugin);
+    setInitialDraft(null);
     setDraft(null);
 
     try {
       const currentConfig = await pluginsApi.getConfig(plugin.id);
       if (configRequestSeq.current !== requestSeq) return;
 
-      setDraft(createPluginConfigDraft(plugin.configFields, currentConfig, plugin.enabled));
+      const nextDraft = createPluginConfigDraft(plugin.configFields, currentConfig, plugin.enabled);
+      setInitialDraft(nextDraft);
+      setDraft(nextDraft);
     } catch (err: unknown) {
       if (configRequestSeq.current !== requestSeq) return;
 
       setEditingPlugin(null);
+      setInitialDraft(null);
       setDraft(null);
       showNotification(
         hasStatus(err, 404)
@@ -401,14 +423,30 @@ function InstalledPluginsView({
     }
   };
 
-  const closeConfigDrawer = () => {
+  const closeConfigDrawer = useCallback(() => {
     if (mutatingID || openingConfigID) return;
+    pendingDiscardPromiseRef.current = null;
     setEditingPlugin(null);
+    setInitialDraft(null);
     setDraft(null);
-  };
+  }, [mutatingID, openingConfigID]);
 
   const updateDraft = (updater: (current: PluginConfigDraft) => PluginConfigDraft) => {
     setDraft((current) => (current ? updater(current) : current));
+  };
+
+  const syncTouchedKey = (
+    touched: ReadonlySet<string>,
+    key: string,
+    dirty: boolean
+  ): Set<string> => {
+    const next = new Set(touched);
+    if (dirty) {
+      next.add(key);
+    } else {
+      next.delete(key);
+    }
+    return next;
   };
 
   const handleTogglePlugin = async (plugin: PluginListEntry, enabled: boolean) => {
@@ -456,6 +494,7 @@ function InstalledPluginsView({
           clearConfigCache();
           if (editingPlugin?.id === plugin.id) {
             setEditingPlugin(null);
+            setInitialDraft(null);
             setDraft(null);
           }
           await loadPluginsAfterMutation(false);
@@ -518,6 +557,7 @@ function InstalledPluginsView({
           clearConfigCache();
           if (editingPlugin?.id === plugin.id) {
             setEditingPlugin(null);
+            setInitialDraft(null);
             setDraft(null);
           }
           if (deleteResult.restartRequired) {
@@ -590,6 +630,7 @@ function InstalledPluginsView({
       if (!canContinueOperation()) return;
       notifyPluginResourcesChanged();
       setEditingPlugin(null);
+      setInitialDraft(null);
       setDraft(null);
       showNotification(t('plugin_management.save_success'), 'success');
     } catch (err: unknown) {
@@ -612,7 +653,11 @@ function InstalledPluginsView({
       updateDraft((current) => ({
         ...current,
         values: { ...current.values, [fieldName]: value },
-        touched: new Set(current.touched).add(fieldName),
+        touched: syncTouchedKey(
+          current.touched,
+          fieldName,
+          initialDraft ? value !== initialDraft.values[fieldName] : true
+        ),
         errors: { ...current.errors, [fieldName]: '' },
       }));
     };
@@ -621,7 +666,11 @@ function InstalledPluginsView({
     updateDraft((current) => ({
       ...current,
       values: { ...current.values, [fieldName]: value },
-      touched: new Set(current.touched).add(fieldName),
+      touched: syncTouchedKey(
+        current.touched,
+        fieldName,
+        initialDraft ? value !== initialDraft.values[fieldName] : true
+      ),
       errors: { ...current.errors, [fieldName]: '' },
     }));
   };
@@ -631,7 +680,11 @@ function InstalledPluginsView({
     updateDraft((current) => ({
       ...current,
       priority: value,
-      touched: new Set(current.touched).add('priority'),
+      touched: syncTouchedKey(
+        current.touched,
+        'priority',
+        initialDraft ? value !== initialDraft.priority : true
+      ),
       errors: { ...current.errors, priority: '' },
     }));
   };
@@ -653,6 +706,7 @@ function InstalledPluginsView({
             ) : null}
           </div>
           <ToggleSwitch
+            size="sm"
             checked={value === true}
             onChange={(nextValue) => handleFieldBooleanChange(field.name, nextValue)}
             ariaLabel={field.name}
@@ -673,7 +727,11 @@ function InstalledPluginsView({
               updateDraft((current) => ({
                 ...current,
                 values: { ...current.values, [field.name]: nextValue },
-                touched: new Set(current.touched).add(field.name),
+                touched: syncTouchedKey(
+                  current.touched,
+                  field.name,
+                  initialDraft ? nextValue !== initialDraft.values[field.name] : true
+                ),
                 errors: { ...current.errors, [field.name]: '' },
               }))
             }
@@ -737,6 +795,66 @@ function InstalledPluginsView({
 
   const savingConfig = Boolean(editingPlugin && mutatingID === editingPlugin.id);
 
+  const isConfigDirty = useMemo(() => {
+    if (!draft || !initialDraft) return false;
+    return (
+      draft.enabled !== initialDraft.enabled ||
+      draft.priority !== initialDraft.priority ||
+      JSON.stringify(draft.values) !== JSON.stringify(initialDraft.values)
+    );
+  }, [draft, initialDraft]);
+
+  const confirmDiscardConfigChanges = useCallback((): Promise<boolean> => {
+    if (savingConfig || mutatingID || openingConfigID) {
+      return Promise.resolve(false);
+    }
+    if (!isConfigDirty) {
+      return Promise.resolve(true);
+    }
+    if (pendingDiscardPromiseRef.current) {
+      return pendingDiscardPromiseRef.current;
+    }
+
+    let settled = false;
+    const confirmationPromise = new Promise<boolean>((resolve) => {
+      const finish = (confirmed: boolean) => {
+        if (settled) return;
+        settled = true;
+        pendingDiscardPromiseRef.current = null;
+        resolve(confirmed);
+      };
+
+      showConfirmation({
+        title: t('common.unsaved_changes_title'),
+        message: t('common.unsaved_changes_message'),
+        confirmText: t('common.leave'),
+        cancelText: t('common.stay'),
+        variant: 'danger',
+        onConfirm: () => finish(true),
+        onCancel: () => finish(false),
+      });
+    });
+
+    if (!settled) {
+      pendingDiscardPromiseRef.current = confirmationPromise;
+    }
+    return confirmationPromise;
+  }, [isConfigDirty, mutatingID, openingConfigID, savingConfig, showConfirmation, t]);
+
+  const handleRequestCloseConfigDrawer = useCallback(async () => {
+    const allowed = await confirmDiscardConfigChanges();
+    if (allowed) {
+      closeConfigDrawer();
+    }
+  }, [closeConfigDrawer, confirmDiscardConfigChanges]);
+
+  const editingPluginLogo = editingPlugin
+    ? resolvePluginAsset(editingPlugin.logo || editingPlugin.metadata?.logo || '')
+    : '';
+  const editingPluginVersion = editingPlugin
+    ? formatPluginVersion(editingPlugin.metadata?.version ?? '')
+    : '';
+
   return (
     <div className={styles.page}>
       {error ? <div className={styles.errorBox}>{error}</div> : null}
@@ -771,30 +889,6 @@ function InstalledPluginsView({
               aria-label={t('plugin_management.search_label')}
               rightElement={<IconSearch size={16} />}
             />
-            {data ? (
-              <div className={styles.toolbarMeta}>
-                <span className={styles.toolbarMetaStat}>
-                  <span>{t('plugin_management.installed_count')}</span>
-                  <strong>{pluginStats.installed}</strong>
-                </span>
-                <span className={styles.toolbarMetaDivider} aria-hidden="true">
-                  ·
-                </span>
-                <span className={styles.toolbarMetaStat} data-tone="active">
-                  <span>{t('plugin_management.effective_count')}</span>
-                  <strong>{pluginStats.effective}</strong>
-                </span>
-                <span className={styles.toolbarMetaDivider} aria-hidden="true">
-                  ·
-                </span>
-                <span
-                  className={styles.toolbarMetaPath}
-                  title={`${t('plugin_management.plugins_dir')}: ${data.pluginsDir || 'plugins'}`}
-                >
-                  <code>{data.pluginsDir || 'plugins'}</code>
-                </span>
-              </div>
-            ) : null}
           </div>
         }
       />
@@ -808,38 +902,49 @@ function InstalledPluginsView({
           </Button>
         </div>
       ) : null}
-      {loading && !data ? (
-        <div className={styles.list} aria-busy="true">
-          {Array.from({ length: 4 }, (_, index) => (
-            <div key={index} className={styles.skeletonRow} />
-          ))}
-        </div>
-      ) : error && !data ? null : visiblePlugins.length === 0 ? (
-        <section className={styles.emptySurface}>
-          <EmptyState
-            variant="canvas"
-            title={t('plugin_management.no_plugins')}
-            description={t('plugin_management.no_plugins_desc')}
-            action={
-              <div className={styles.emptyActions}>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={loadPlugins}
-                  disabled={!connected || !supportsPlugin}
-                >
-                  <IconRefreshCw size={15} />
-                  {t('plugin_management.refresh')}
-                </Button>
-                <Button variant="primary" size="sm" onClick={onOpenStore}>
-                  <IconPlus size={15} />
-                  {t('plugin_management.install_plugin')}
-                </Button>
-              </div>
-            }
-          />
-        </section>
-      ) : (
+      {error && !data ? null : (
+        <WorkspaceListPanel
+          showHeader={Boolean(data)}
+          summary={
+            data
+              ? `${t('plugin_management.installed_count')} ${pluginStats.installed} · ${t('plugin_management.effective_count')} ${pluginStats.effective}`
+              : undefined
+          }
+          hint={data ? data.pluginsDir || 'plugins' : undefined}
+          loading={loading && !data}
+          loadingFallback={
+            <div className={styles.list} aria-busy="true">
+              {Array.from({ length: 4 }, (_, index) => (
+                <div key={index} className={styles.skeletonRow} />
+              ))}
+            </div>
+          }
+          empty={visiblePlugins.length === 0}
+          emptyFallback={
+            <EmptyState
+              variant="canvas"
+              title={t('plugin_management.no_plugins')}
+              description={t('plugin_management.no_plugins_desc')}
+              action={
+                <div className={styles.emptyActions}>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={loadPlugins}
+                    disabled={!connected || !supportsPlugin}
+                  >
+                    <IconRefreshCw size={15} />
+                    {t('plugin_management.refresh')}
+                  </Button>
+                  <Button variant="primary" size="sm" onClick={onOpenStore}>
+                    <IconPlus size={15} />
+                    {t('plugin_management.install_plugin')}
+                  </Button>
+                </div>
+              }
+            />
+          }
+        >
         <div
           className={styles.list}
           role="table"
@@ -1012,69 +1117,130 @@ function InstalledPluginsView({
             );
           })}
         </div>
+        </WorkspaceListPanel>
       )}
 
       <Drawer
         open={Boolean(editingPlugin && draft)}
         onClose={closeConfigDrawer}
-        width={560}
+        onBeforeClose={confirmDiscardConfigChanges}
+        closeDisabled={savingConfig}
+        width={DRAWER_WIDTH.SM}
         title={
-          editingPlugin
-            ? t('plugin_management.config_title', { name: getPluginTitle(editingPlugin) })
-            : t('plugin_management.edit_config')
+          editingPlugin ? (
+            <DrawerIdentityHeader
+              icon={<PluginLogo key={editingPluginLogo} src={editingPluginLogo} />}
+              iconBoxed
+              title={getPluginTitle(editingPlugin)}
+              metaItems={[
+                editingPluginVersion || null,
+                <DrawerStatusPill
+                  key="status"
+                  tone={editingPlugin.enabled ? 'success' : 'neutral'}
+                  dot
+                >
+                  {editingPlugin.enabled
+                    ? t('common.enabled', { defaultValue: '已启用' })
+                    : t('common.disabled', { defaultValue: '已停用' })}
+                </DrawerStatusPill>,
+                <code key="id" className={workspaceDrawerStyles.headerMetaCode}>
+                  {editingPlugin.id}
+                </code>,
+                isConfigDirty ? (
+                  <DrawerStatusPill key="dirty" tone="warning">
+                    {t('ai_providers.drawer_unsaved_changes', { defaultValue: '未保存更改' })}
+                  </DrawerStatusPill>
+                ) : null,
+              ]}
+            />
+          ) : (
+            <DrawerIdentityHeader
+              icon={<IconPlugin size={18} />}
+              iconBoxed
+              title={t('plugin_management.edit_config')}
+            />
+          )
         }
         footer={
-          <div className={styles.drawerFooter}>
-            <Button variant="secondary" onClick={closeConfigDrawer} disabled={savingConfig}>
-              {t('common.cancel')}
-            </Button>
-            <Button onClick={handleSaveConfig} loading={savingConfig} disabled={!canOperate}>
-              {t('common.save')}
-            </Button>
-          </div>
+          <DrawerActionFooter
+            right={
+              <>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => void handleRequestCloseConfigDrawer()}
+                  disabled={savingConfig}
+                >
+                  {t('common.cancel')}
+                </Button>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  loading={savingConfig}
+                  disabled={!canOperate || !isConfigDirty}
+                  onClick={() => void handleSaveConfig()}
+                >
+                  {t('common.save')}
+                </Button>
+              </>
+            }
+          />
         }
       >
         {draft && editingPlugin ? (
-          <div className={styles.form}>
-            <section className={styles.formSection}>
-              <h3>{t('plugin_management.base_settings')}</h3>
-              <div className={styles.fieldRow}>
-                <div className={styles.fieldText}>
-                  <div className={styles.fieldLabel}>{t('plugin_management.enabled')}</div>
-                  <div className={styles.fieldDescription}>
-                    {t('plugin_management.enabled_hint')}
+          <DrawerBodyShell>
+            <DrawerViewport>
+              <DrawerTabPanel>
+                <DrawerSectionCard
+                  icon={<IconSettings size={15} />}
+                  title={t('plugin_management.base_settings', { defaultValue: '基础设置' })}
+                >
+                  <div className={styles.fieldRow}>
+                    <div className={styles.fieldText}>
+                      <div className={styles.fieldLabel}>{t('plugin_management.enabled')}</div>
+                      <div className={styles.fieldDescription}>
+                        {t('plugin_management.enabled_hint')}
+                      </div>
+                    </div>
+                    <ToggleSwitch
+                      size="sm"
+                      checked={draft.enabled}
+                      onChange={(enabled) =>
+                        updateDraft((current) => ({
+                          ...current,
+                          enabled,
+                          touched: syncTouchedKey(
+                            current.touched,
+                            'enabled',
+                            initialDraft ? enabled !== initialDraft.enabled : true
+                          ),
+                        }))
+                      }
+                      ariaLabel={t('plugin_management.enabled')}
+                    />
                   </div>
-                </div>
-                <ToggleSwitch
-                  checked={draft.enabled}
-                  onChange={(enabled) =>
-                    updateDraft((current) => ({
-                      ...current,
-                      enabled,
-                      touched: new Set(current.touched).add('enabled'),
-                    }))
-                  }
-                  ariaLabel={t('plugin_management.enabled')}
-                />
-              </div>
-              <Input
-                label={t('plugin_management.priority')}
-                value={draft.priority}
-                onChange={handlePriorityChange}
-                inputMode="numeric"
-                error={draft.errors.priority || undefined}
-              />
-            </section>
+                  <Input
+                    label={t('plugin_management.priority')}
+                    value={draft.priority}
+                    onChange={handlePriorityChange}
+                    inputMode="numeric"
+                    error={draft.errors.priority || undefined}
+                  />
+                </DrawerSectionCard>
 
-            <section className={styles.formSection}>
-              <h3>{t('plugin_management.config_fields')}</h3>
-              {editingPlugin.configFields.length > 0 ? (
-                editingPlugin.configFields.map((field) => renderFieldEditor(field))
-              ) : (
-                <div className={styles.emptyConfig}>{t('plugin_management.no_config_fields')}</div>
-              )}
-            </section>
-          </div>
+                <DrawerSectionCard
+                  icon={<IconSlidersHorizontal size={15} />}
+                  title={t('plugin_management.config_fields', { defaultValue: '配置项' })}
+                >
+                  {editingPlugin.configFields.length > 0 ? (
+                    editingPlugin.configFields.map((field) => renderFieldEditor(field))
+                  ) : (
+                    <DrawerEmptyBox>{t('plugin_management.no_config_fields')}</DrawerEmptyBox>
+                  )}
+                </DrawerSectionCard>
+              </DrawerTabPanel>
+            </DrawerViewport>
+          </DrawerBodyShell>
         ) : null}
       </Drawer>
     </div>

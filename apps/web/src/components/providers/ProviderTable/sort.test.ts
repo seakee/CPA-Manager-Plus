@@ -185,4 +185,117 @@ describe('filterAndSortProviderRows', () => {
     });
     expect(ascending.map((row) => row.label)).toEqual(['alpha', 'zeta']);
   });
+
+  it('sorts by configured model count ascending and descending while keeping disabled rows last', () => {
+    const rows = buildProviderRows({
+      ...emptyInput,
+      codex: [
+        {
+          name: 'two-models',
+          apiKey: 'k-two',
+          models: [{ name: 'm1' }, { name: 'm2' }],
+        },
+        {
+          name: 'wildcard',
+          apiKey: 'k-wild',
+        },
+        {
+          name: 'disabled-many',
+          apiKey: 'k-disabled',
+          excludedModels: ['*'],
+          models: [{ name: 'm1' }, { name: 'm2' }, { name: 'm3' }, { name: 'm4' }],
+        },
+        {
+          name: 'three-models',
+          apiKey: 'k-three',
+          models: [{ name: 'm1' }, { name: 'm2' }, { name: 'm3' }],
+        },
+      ],
+    });
+
+    expect(
+      filterAndSortProviderRows(rows, { sortOption: 'models', sortDirection: 'desc' }).map(
+        (row) => row.label
+      )
+    ).toEqual(['three-models', 'two-models', 'wildcard', 'disabled-many']);
+
+    expect(
+      filterAndSortProviderRows(rows, { sortOption: 'models', sortDirection: 'asc' }).map(
+        (row) => row.label
+      )
+    ).toEqual(['wildcard', 'two-models', 'three-models', 'disabled-many']);
+  });
+
+  it('filters by statusFilter and healthFilter options', () => {
+    const rows = buildProviderRows({
+      ...emptyInput,
+      codex: [
+        { name: 'healthy-active', apiKey: 'k1' },
+        { name: 'failing-active', apiKey: 'k2' },
+        { name: 'idle-disabled', apiKey: 'k3', excludedModels: ['*'] },
+      ],
+    });
+    rows[0].stats = { success: 10, failure: 0 };
+    rows[1].stats = { success: 4, failure: 1 };
+    rows[1].recentFailure = 1;
+
+    expect(
+      filterAndSortProviderRows(rows, { statusFilter: 'disabled' }).map((row) => row.label)
+    ).toEqual(['idle-disabled']);
+
+    expect(
+      filterAndSortProviderRows(rows, { healthFilter: 'has_failure' }).map((row) => row.label)
+    ).toEqual(['failing-active']);
+
+    expect(
+      filterAndSortProviderRows(rows, { healthFilter: 'active' }).map((row) => row.label)
+    ).toEqual(['healthy-active', 'failing-active']);
+
+    expect(
+      filterAndSortProviderRows(rows, { healthFilter: 'idle' }).map((row) => row.label)
+    ).toEqual(['idle-disabled']);
+  });
+
+  it('ignores historical failures in has_failure filter once recent window is clean, and matches model aliases', () => {
+    const rows = buildProviderRows({
+      ...emptyInput,
+      claude: [
+        {
+          name: 'recovered-channel',
+          apiKey: 'k-rec',
+          models: [{ name: 'claude-sonnet-4-5', alias: 'sonnet' }],
+        },
+        {
+          name: 'still-failing',
+          apiKey: 'k-fail',
+          models: [{ name: 'claude-opus-4-6', alias: 'opus' }],
+        },
+        {
+          name: 'legacy-failure-no-window',
+          apiKey: 'k-legacy',
+        },
+      ],
+    });
+    rows[0].stats = { success: 49, failure: 1 };
+    rows[0].recentSuccess = 10;
+    rows[0].recentFailure = 0;
+
+    rows[1].stats = { success: 8, failure: 2 };
+    rows[1].recentSuccess = 8;
+    rows[1].recentFailure = 2;
+
+    rows[2].stats = { success: 0, failure: 1 };
+    rows[2].recentSuccess = 0;
+    rows[2].recentFailure = 0;
+
+    expect(
+      filterAndSortProviderRows(rows, { healthFilter: 'has_failure' }).map((row) => row.label)
+    ).toEqual(['still-failing', 'legacy-failure-no-window']);
+
+    expect(
+      filterAndSortProviderRows(rows, { selectedModels: new Set(['sonnet']) }).map(
+        (row) => row.label
+      )
+    ).toEqual(['recovered-channel']);
+  });
 });

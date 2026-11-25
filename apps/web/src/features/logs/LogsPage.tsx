@@ -3,7 +3,8 @@ import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { PageControlBar } from '@/components/common/PageControlBar';
-import { PaginationFooter } from '@/components/common/PaginationFooter';
+import { LocalizedPaginationFooter } from '@/components/common/LocalizedPaginationFooter';
+import { WorkspaceListPanel } from '@/components/common/WorkspaceListPanel';
 import { SegmentedTabs, type SegmentedTabItem } from '@/components/ui/SegmentedTabs';
 import { Button } from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
@@ -25,6 +26,7 @@ import {
   IconTrash2,
   IconX,
 } from '@/components/ui/icons';
+import { useClientPagination } from '@/hooks/list';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { useLocalStorage } from '@/hooks/useLocalStorage';
 import { useAuthStore, useConfigStore, useNotificationStore } from '@/stores';
@@ -167,8 +169,6 @@ function LogsPageContent({ authorityClient }: LogsPageProps) {
   );
   const [errorLogs, setErrorLogs] = useState<ErrorLogItem[]>([]);
   const [errorSearchQuery, setErrorSearchQuery] = useState('');
-  const [errorPage, setErrorPage] = useState(1);
-  const [errorPageSize, setErrorPageSize] = useState<number>(ERROR_LOG_DEFAULT_PAGE_SIZE);
   const [loadingErrors, setLoadingErrors] = useState(false);
   const [errorLogsLoaded, setErrorLogsLoaded] = useState(false);
   const [requestLogId, setRequestLogId] = useState<string | null>(null);
@@ -935,18 +935,19 @@ function LogsPageContent({ authorityClient }: LogsPageProps) {
     return errorLogs.filter((item) => item.name.toLowerCase().includes(query));
   }, [errorLogs, errorSearchQuery]);
 
-  const totalErrorPages = Math.max(1, Math.ceil(filteredErrorLogs.length / errorPageSize));
-  const currentErrorPage = Math.min(errorPage, totalErrorPages);
-  const paginatedErrorLogs = useMemo(() => {
-    const start = (currentErrorPage - 1) * errorPageSize;
-    return filteredErrorLogs.slice(start, start + errorPageSize);
-  }, [currentErrorPage, errorPageSize, filteredErrorLogs]);
-  const errorPaginationStart =
-    filteredErrorLogs.length === 0 ? 0 : (currentErrorPage - 1) * errorPageSize + 1;
-  const errorPaginationEnd = Math.min(
-    filteredErrorLogs.length,
-    currentErrorPage * errorPageSize
-  );
+  const {
+    page: currentErrorPage,
+    setPage: setErrorPage,
+    pageSize: errorPageSize,
+    setPageSize: setErrorPageSize,
+    totalPages: totalErrorPages,
+    startItem: errorPaginationStart,
+    endItem: errorPaginationEnd,
+    pageItems: paginatedErrorLogs,
+  } = useClientPagination(filteredErrorLogs, {
+    initialPageSize: ERROR_LOG_DEFAULT_PAGE_SIZE,
+    resetDeps: [errorSearchQuery],
+  });
 
   const clearAllLogFilters = () => {
     setSearchQuery('');
@@ -1446,11 +1447,28 @@ function LogsPageContent({ authorityClient }: LogsPageProps) {
         )}
 
         {activeTab === 'errors' && (
-          <section className={styles.errorCard}>
-            <div className={styles.dataPanelHeader}>
-              <p className={styles.panelDescription}>{t('logs.error_logs_description')}</p>
-            </div>
-
+          <WorkspaceListPanel
+            className={styles.errorCard}
+            bodyClassName={styles.errorPanel}
+            summary={t('logs.error_logs_modal_title')}
+            hint={t('logs.error_logs_description')}
+            footer={
+              errorLogsLoaded && filteredErrorLogs.length > 0 ? (
+                <LocalizedPaginationFooter
+                  variant="flush"
+                  currentPage={currentErrorPage}
+                  totalPages={totalErrorPages}
+                  totalCount={filteredErrorLogs.length}
+                  startItem={errorPaginationStart}
+                  endItem={errorPaginationEnd}
+                  pageSize={errorPageSize}
+                  pageSizeOptions={ERROR_LOG_PAGE_SIZE_OPTIONS}
+                  onPageChange={setErrorPage}
+                  onPageSizeChange={setErrorPageSize}
+                />
+              ) : null
+            }
+          >
             {/* The banner explains an empty listing, so a stale empty result must not keep it
                 visible while a refresh is in flight or after that refresh failed. */}
             {requestLogEnabled &&
@@ -1471,7 +1489,6 @@ function LogsPageContent({ authorityClient }: LogsPageProps) {
               </div>
             ) : null}
 
-            <div className={styles.errorPanel}>
               {loadingErrors && !errorLogsLoaded ? (
                 <div className={styles.loadingSurface}>{t('common.loading')}</div>
               ) : errorLogsError && !errorLogsLoaded ? null : filteredErrorLogs.length === 0 ? (
@@ -1580,41 +1597,9 @@ function LogsPageContent({ authorityClient }: LogsPageProps) {
                       </tbody>
                     </table>
                   </div>
-                  <PaginationFooter
-                    variant="flush"
-                    currentPage={currentErrorPage}
-                    totalPages={totalErrorPages}
-                    infoText={t('monitoring.pagination_info', {
-                      current: currentErrorPage,
-                      total: totalErrorPages,
-                      start: errorPaginationStart,
-                      end: errorPaginationEnd,
-                      count: filteredErrorLogs.length,
-                    })}
-                    pageSize={errorPageSize}
-                    pageSizeOptions={ERROR_LOG_PAGE_SIZE_OPTIONS}
-                    pageSizeLabel={t('monitoring.page_size_label')}
-                    pageSizeTitle={t('monitoring.page_size_label')}
-                    pageSizeAriaLabel={t('monitoring.page_size_label')}
-                    formatPageSizeOption={(size) =>
-                      t('monitoring.page_size_option', { count: size })
-                    }
-                    onPageChange={setErrorPage}
-                    onPageSizeChange={(nextSize) => {
-                      setErrorPageSize(nextSize);
-                      setErrorPage(1);
-                    }}
-                    prevLabel={t('monitoring.pagination_prev')}
-                    nextLabel={t('monitoring.pagination_next')}
-                    showPageJump
-                    jumpPrefixLabel={t('monitoring.pagination_jump_prefix')}
-                    jumpSuffixLabel={t('monitoring.pagination_jump_suffix')}
-                    jumpInputAriaLabel={t('monitoring.pagination_jump_label')}
-                  />
                 </>
               )}
-            </div>
-          </section>
+          </WorkspaceListPanel>
         )}
 
         {activeTab === 'settings' && (

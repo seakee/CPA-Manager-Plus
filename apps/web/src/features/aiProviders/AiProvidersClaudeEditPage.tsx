@@ -8,12 +8,15 @@ import { Select } from '@/components/ui/Select';
 import { HeaderInputList } from '@/components/ui/HeaderInputList';
 import { ModelInputList } from '@/components/ui/ModelInputList';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
+import { hasOpenDrawer, hasOpenModal } from '@/components/ui/overlayEscapeStack';
 import { CoolingPolicySelect } from '@/components/providers/CoolingPolicySelect';
 import { useEdgeSwipeBack } from '@/hooks/useEdgeSwipeBack';
 import { SecondaryScreenShell } from '@/components/common/SecondaryScreenShell';
+import { usePageTransitionLayer } from '@/components/common/PageTransitionLayer';
 import { apiCallApi, getApiCallErrorMessage } from '@/services/api';
 import { useNotificationStore } from '@/stores';
 import { normalizeAuthIndex } from '@/utils/authIndex';
+import { areStringArraysEqual } from '@/utils/compare';
 import { buildHeaderObject } from '@/utils/headers';
 import { buildClaudeRequestHeaders } from '@/utils/claudeAuth';
 import {
@@ -63,25 +66,46 @@ export function AiProvidersClaudeEditPage() {
     ? t('ai_providers.claude_edit_modal_title')
     : t('ai_providers.claude_add_modal_title');
 
+  const pageTransitionLayer = usePageTransitionLayer();
+  const isCurrentLayer = pageTransitionLayer ? pageTransitionLayer.isCurrentLayer : true;
   const swipeRef = useEdgeSwipeBack({ onBack: handleBack });
   const [isTesting, setIsTesting] = useState(false);
   const lastCloakConfigRef = useRef<typeof form.cloak>(null);
+  const [sensitiveWordsText, setSensitiveWordsText] = useState(() =>
+    (form.cloak?.sensitiveWords ?? []).join('\n')
+  );
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        handleBack();
+      if (
+        !isCurrentLayer ||
+        event.key !== 'Escape' ||
+        event.defaultPrevented ||
+        hasOpenModal() ||
+        hasOpenDrawer()
+      ) {
+        return;
       }
+      event.preventDefault();
+      handleBack();
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleBack]);
+  }, [handleBack, isCurrentLayer]);
 
   useEffect(() => {
-    if (!form.cloak) return;
+    if (!form.cloak) {
+      setSensitiveWordsText('');
+      return;
+    }
     lastCloakConfigRef.current = form.cloak;
+    const nextWords = (form.cloak.sensitiveWords ?? [])
+      .map((word) => String(word ?? '').trim())
+      .filter(Boolean);
+    setSensitiveWordsText((prev) =>
+      areStringArraysEqual(parseTextList(prev), nextWords) ? prev : nextWords.join('\n')
+    );
   }, [form.cloak]);
-
   const canSave =
     !disableControls &&
     !loading &&
@@ -315,6 +339,15 @@ export function AiProvidersClaudeEditPage() {
           <div className={styles.sectionHint}>{t('common.invalid_provider_index')}</div>
         ) : (
           <div className={styles.openaiEditForm}>
+            <Input
+              label={t('ai_providers.name_label', { defaultValue: '名称 / 别名' })}
+              placeholder={t('ai_providers.name_placeholder_optional', {
+                defaultValue: '可选，如主力池（留空自动生成）',
+              })}
+              value={form.name ?? ''}
+              onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
+              disabled={saving || disableControls || isTesting}
+            />
             <Input
               label={t('ai_providers.claude_add_modal_key_label')}
               value={form.apiKey}
@@ -568,6 +601,7 @@ export function AiProvidersClaudeEditPage() {
                         return {
                           ...prev,
                           cloak: {
+                            ...restored,
                             mode,
                             strictMode: restored.strictMode ?? false,
                             sensitiveWords: restored.sensitiveWords ?? [],
@@ -630,9 +664,11 @@ export function AiProvidersClaudeEditPage() {
                     <textarea
                       className="input"
                       placeholder={t('ai_providers.claude_cloak_sensitive_words_placeholder')}
-                      value={(form.cloak.sensitiveWords ?? []).join('\n')}
+                      value={sensitiveWordsText}
                       onChange={(e) => {
-                        const nextWords = parseTextList(e.target.value);
+                        const rawValue = e.target.value;
+                        setSensitiveWordsText(rawValue);
+                        const nextWords = parseTextList(rawValue);
                         setForm((prev) => ({
                           ...prev,
                           cloak: {

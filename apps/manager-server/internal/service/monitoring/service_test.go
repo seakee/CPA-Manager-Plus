@@ -2668,6 +2668,44 @@ func TestAccountHistoryIncludesLatestCredentialRequestWithoutExposingRawFailureD
 	}
 }
 
+func TestAccountHistorySupportsAPIKeyAuthIndexTotalsAndRecentRequests(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	baseMS := int64(1_700_600_000_000)
+	ev1 := monitoringEvent("apikey-ok", baseMS+1_000, "claude-sonnet-4-5", "a26021ea73d8d103", "Claude Official", false, 100, 50, 0, 0, 150, nil)
+	ev1.AuthType = "api-key"
+	ev1.Provider = "claude"
+	ev1.AuthProviderSnapshot = "claude"
+	ev2 := monitoringEvent("apikey-fail", baseMS+2_000, "claude-sonnet-4-5", "a26021ea73d8d103", "Claude Official", true, 20, 0, 0, 0, 20, nil)
+	ev2.AuthType = "api-key"
+	ev2.Provider = "claude"
+	ev2.AuthProviderSnapshot = "claude"
+	ev2.FailStatusCode = 502
+	ev2.HeaderErrorKind = "upstream_error"
+	if _, err := db.InsertEvents(ctx, []usage.Event{ev1, ev2}); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	resp, err := New(db).AccountHistory(ctx, AccountHistoryRequest{
+		CatchUp: true,
+		Accounts: []AccountHistoryTarget{{
+			RowKey:               "claude:a26021ea73d8d103",
+			AuthIndex:            "a26021ea73d8d103",
+			AuthProviderSnapshot: "claude",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("AccountHistory failed: %v", err)
+	}
+	if len(resp.Items) != 1 || !resp.Items[0].Matched || resp.Items[0].TotalRequests != 2 ||
+		resp.Items[0].SuccessCalls != 1 || resp.Items[0].FailureCalls != 1 || resp.Items[0].TotalTokens != 170 {
+		t.Fatalf("unexpected item = %#v", resp.Items)
+	}
+	if len(resp.Items[0].RecentRequests) != 2 || resp.Items[0].LatestRequest == nil || !resp.Items[0].LatestRequest.Failed {
+		t.Fatalf("unexpected recent requests = %#v", resp.Items[0].RecentRequests)
+	}
+}
+
 func TestAccountWindowUsageReturnsWindowScopedTotalsAndComputedCost(t *testing.T) {
 	db := newMonitoringTestStore(t)
 	ctx := context.Background()

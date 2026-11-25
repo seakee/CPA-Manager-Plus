@@ -6,7 +6,28 @@ import { SegmentedTabs } from '@/components/ui/SegmentedTabs';
 import { Select } from '@/components/ui/Select';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import { CoolingPolicySelect } from '@/components/providers/CoolingPolicySelect';
-import { IconCode, IconCopy, IconRefreshCw } from '@/components/ui/icons';
+import {
+  DrawerDefinitionList,
+  DrawerDlRow,
+  DrawerEmptyBox,
+  DrawerFormFullRow,
+  DrawerFormGrid,
+  DrawerIndentGroup,
+  DrawerNotice,
+  DrawerSectionCard,
+  DrawerSettingList,
+  DrawerSettingRow,
+} from '@/components/common/WorkspaceDrawer';
+import {
+  IconCode,
+  IconCopy,
+  IconModelCluster,
+  IconRefreshCw,
+  IconSatellite,
+  IconScrollText,
+  IconShield,
+  IconSlidersHorizontal,
+} from '@/components/ui/icons';
 import type { AccountRow } from '@/features/accounts/model/accountRows';
 import { getAccountModelExclusionPriority } from '@/features/accounts/model/accountModelRules';
 import { getProviderLabel } from '@/features/accounts/model/accountsPagePresentation';
@@ -26,6 +47,7 @@ type AccountConfigurationTabProps = {
   disableControls: boolean;
   editor: UseAuthFileConfigurationEditorResult;
   onCopyText: (text: string) => void | Promise<void>;
+  hideInlineActions?: boolean;
 };
 
 export function AccountConfigurationTab({
@@ -33,6 +55,7 @@ export function AccountConfigurationTab({
   disableControls,
   editor,
   onCopyText,
+  hideInlineActions = false,
 }: AccountConfigurationTabProps) {
   const { t } = useTranslation();
   const exclusionPriority = getAccountModelExclusionPriority(
@@ -96,12 +119,12 @@ export function AccountConfigurationTab({
   if (row.runtimeOnly) {
     return (
       <div className={styles.drawerDetailStack}>
-        <section className={styles.drawerSection}>
-          <div className={styles.credentialDefaultState}>
-            <strong>{t('accounts.detail_runtime_config_unavailable')}</strong>
-            <p>{t('accounts.config_runtime_only_desc')}</p>
-          </div>
-        </section>
+        <DrawerSectionCard
+          title={t('accounts.detail_runtime_config_unavailable')}
+          headingLevel="h3"
+        >
+          <DrawerEmptyBox>{t('accounts.config_runtime_only_desc')}</DrawerEmptyBox>
+        </DrawerSectionCard>
       </div>
     );
   }
@@ -117,10 +140,11 @@ export function AccountConfigurationTab({
   if (!draft || !state.record) {
     return (
       <div className={styles.drawerDetailStack}>
-        <section className={styles.drawerSection}>
-          <div className={styles.configurationLoadError} role="alert">
-            <strong>{t('accounts.config_load_failed')}</strong>
-            <p>{state.error || t('accounts.config_error_invalid_source')}</p>
+        <DrawerNotice
+          tone="danger"
+          role="alert"
+          title={t('accounts.config_load_failed')}
+          action={
             <Button
               variant="secondary"
               size="sm"
@@ -131,8 +155,10 @@ export function AccountConfigurationTab({
               <IconRefreshCw size={14} />
               {t('common.retry')}
             </Button>
-          </div>
-        </section>
+          }
+        >
+          {state.error || t('accounts.config_error_invalid_source')}
+        </DrawerNotice>
       </div>
     );
   }
@@ -146,55 +172,66 @@ export function AccountConfigurationTab({
       aria-busy={state.loading}
     >
       {state.error ? (
-        <div className={styles.configurationLoadError} role="alert">
-          <span>{state.error}</span>
-          <Button
-            variant="secondary"
-            size="sm"
-            id={reloadButtonId}
-            data-account-config-reload="retry"
-            onClick={reloadAndRestoreFocus}
-          >
-            <IconRefreshCw size={14} />
-            {t('common.retry')}
-          </Button>
+        <DrawerNotice
+          tone="danger"
+          role="alert"
+          action={
+            <Button
+              variant="secondary"
+              size="sm"
+              id={reloadButtonId}
+              data-account-config-reload="retry"
+              onClick={reloadAndRestoreFocus}
+            >
+              <IconRefreshCw size={14} />
+              {t('common.retry')}
+            </Button>
+          }
+        >
+          {state.error}
+        </DrawerNotice>
+      ) : null}
+      {!hideInlineActions ? (
+        <div className={styles.configurationToolbar}>
+          {dirty ? (
+            <span className={styles.configurationDirtyBadge} role="status">
+              {t('accounts.config_unsaved')}
+            </span>
+          ) : null}
+          <div className={styles.configurationToolbarActions}>
+            <Button
+              variant="secondary"
+              className={styles.configurationToolbarButton}
+              onClick={editor.reset}
+              disabled={!dirty || state.saving}
+            >
+              {t('common.reset')}
+            </Button>
+            <Button
+              className={styles.configurationToolbarButton}
+              onClick={() => void editor.save()}
+              loading={state.saving}
+              disabled={!canSave}
+            >
+              {t('common.save')}
+            </Button>
+          </div>
         </div>
       ) : null}
-      <div className={styles.configurationToolbar}>
-        {dirty ? (
-          <span className={styles.configurationDirtyBadge} role="status">
-            {t('accounts.config_unsaved')}
-          </span>
-        ) : null}
-        <div className={styles.configurationToolbarActions}>
-          <Button
-            variant="secondary"
-            className={styles.configurationToolbarButton}
-            onClick={editor.reset}
-            disabled={!dirty || state.saving}
-          >
-            {t('common.reset')}
-          </Button>
-          <Button
-            className={styles.configurationToolbarButton}
-            onClick={() => void editor.save()}
-            loading={state.saving}
-            disabled={!canSave}
-          >
-            {t('common.save')}
-          </Button>
-        </div>
-      </div>
 
       {sharedSourceReadOnly ? (
-        <div className={styles.configurationReadOnlyNotice} role="note">
+        <DrawerNotice tone="warning" role="note">
           {t('accounts.config_shared_source_read_only', { count: sourceMemberCount })}
-        </div>
+        </DrawerNotice>
       ) : null}
 
-      <section className={styles.configurationSection}>
-        <h3 className={styles.configurationSectionTitle}>{t('accounts.config_section_routing')}</h3>
-        <div className={styles.configurationFieldGrid}>
+      <DrawerSectionCard
+        variant="default"
+        icon={<IconSatellite size={15} />}
+        title={t('accounts.config_section_routing')}
+        headingLevel="h3"
+      >
+        <DrawerFormGrid>
           <Input
             label={t('auth_files.prefix_label')}
             value={draft.prefix}
@@ -203,24 +240,24 @@ export function AccountConfigurationTab({
             disabled={disabled}
             onChange={(event) => editor.updateField('prefix', event.target.value)}
           />
-          <div className={styles.configurationFieldFull}>
-            <Input
-              label={t('auth_files.proxy_url_label')}
-              value={draft.proxyUrl}
-              placeholder={t('auth_files.proxy_url_placeholder')}
-              hint={t('accounts.config_proxy_hint')}
-              disabled={disabled}
-              onChange={(event) => editor.updateField('proxyUrl', event.target.value)}
-            />
-          </div>
-        </div>
-      </section>
+          <Input
+            label={t('auth_files.proxy_url_label')}
+            value={draft.proxyUrl}
+            placeholder={t('auth_files.proxy_url_placeholder')}
+            hint={t('accounts.config_proxy_hint')}
+            disabled={disabled}
+            onChange={(event) => editor.updateField('proxyUrl', event.target.value)}
+          />
+        </DrawerFormGrid>
+      </DrawerSectionCard>
 
-      <section className={styles.configurationSection}>
-        <h3 className={styles.configurationSectionTitle}>
-          {t('accounts.config_section_scheduling')}
-        </h3>
-        <div className={styles.configurationFieldGrid}>
+      <DrawerSectionCard
+        variant="default"
+        icon={<IconSlidersHorizontal size={15} />}
+        title={t('accounts.config_section_scheduling')}
+        headingLevel="h3"
+      >
+        <DrawerFormGrid>
           <Input
             label={t('auth_files.priority_label')}
             type="number"
@@ -243,7 +280,7 @@ export function AccountConfigurationTab({
             disabled={disabled}
             onChange={(event) => editor.updateField('weight', event.target.value)}
           />
-          <div className={styles.configurationFieldFull}>
+          <DrawerFormFullRow>
             <Input
               label={t('auth_files.note_label')}
               value={draft.note}
@@ -251,40 +288,43 @@ export function AccountConfigurationTab({
               disabled={disabled}
               onChange={(event) => editor.updateField('note', event.target.value)}
             />
-          </div>
-        </div>
-      </section>
+          </DrawerFormFullRow>
+        </DrawerFormGrid>
+      </DrawerSectionCard>
 
       {(capabilities.websockets ||
         capabilities.supportsSiwc ||
         draft.useSiwc ||
         capabilities.xaiRouting ||
         capabilities.claudeCloak) && (
-        <section className={styles.configurationSection}>
-          <h3 className={styles.configurationSectionTitle}>
-            {t('accounts.config_section_provider', { provider: providerLabel })}
-          </h3>
-
+        <DrawerSectionCard
+          variant="default"
+          icon={<IconShield size={15} />}
+          title={t('accounts.config_section_provider', { provider: providerLabel })}
+          headingLevel="h3"
+        >
           {capabilities.xaiRouting ? (
-            <div className={styles.configurationProviderGroup}>
-              <div className={styles.configurationFieldLabel}>
-                {t('accounts.config_xai_route_mode')}
+            <>
+              <div className="form-group">
+                <label>{t('accounts.config_xai_route_mode')}</label>
+                <SegmentedTabs<XaiRoutingMode>
+                  variant="joined"
+                  size="sm"
+                  roleMode="group"
+                  responsiveFullWidth={false}
+                  items={xaiRouteItems}
+                  activeTab={draft.xaiRoutingMode}
+                  ariaLabel={t('accounts.config_xai_route_mode')}
+                  idBase="account-xai-route"
+                  onChange={(mode) => editor.updateField('xaiRoutingMode', mode)}
+                  disabled={disabled}
+                />
+                <div className="hint">
+                  {draft.xaiRoutingMode === 'official-api'
+                    ? t('accounts.config_xai_route_official_hint')
+                    : t('accounts.config_xai_route_grok_hint')}
+                </div>
               </div>
-              <SegmentedTabs<XaiRoutingMode>
-                items={xaiRouteItems}
-                activeTab={draft.xaiRoutingMode}
-                ariaLabel={t('accounts.config_xai_route_mode')}
-                idBase="account-xai-route"
-                onChange={(mode) => editor.updateField('xaiRoutingMode', mode)}
-                disabled={disabled}
-                fullWidth
-                equalWidth
-              />
-              <p className={styles.configurationFieldHint}>
-                {draft.xaiRoutingMode === 'official-api'
-                  ? t('accounts.config_xai_route_official_hint')
-                  : t('accounts.config_xai_route_grok_hint')}
-              </p>
               <Input
                 label={t('accounts.config_xai_base_url')}
                 value={draft.baseUrl}
@@ -294,45 +334,51 @@ export function AccountConfigurationTab({
                 disabled={disabled}
                 onChange={(event) => editor.updateField('baseUrl', event.target.value)}
               />
-            </div>
+            </>
           ) : null}
 
-          {capabilities.websockets ? (
-            <div className={styles.configurationToggleRow}>
-              <div>
-                <strong>{t('auth_files.websockets_label')}</strong>
-                <p>{t('auth_files.websockets_hint')}</p>
-              </div>
-              <ToggleSwitch
-                checked={draft.websockets}
-                onChange={(value) => editor.updateField('websockets', value)}
-                disabled={disabled}
-                ariaLabel={t('auth_files.websockets_label')}
-              />
-            </div>
-          ) : null}
+          {capabilities.websockets || capabilities.supportsSiwc || draft.useSiwc ? (
+            <DrawerSettingList>
+              {capabilities.websockets ? (
+                <DrawerSettingRow
+                  title={t('auth_files.websockets_label')}
+                  description={t('auth_files.websockets_hint')}
+                  control={
+                    <ToggleSwitch
+                      size="sm"
+                      checked={draft.websockets}
+                      onChange={(value) => editor.updateField('websockets', value)}
+                      disabled={disabled}
+                      ariaLabel={t('auth_files.websockets_label')}
+                    />
+                  }
+                />
+              ) : null}
 
-          {capabilities.supportsSiwc || draft.useSiwc ? (
-            <div className={styles.configurationToggleRow}>
-              <div>
-                <strong>{t('auth_files.use_siwc_label')}</strong>
-                <p>
-                  {!capabilities.canEnableSiwc && !draft.useSiwc
-                    ? t('auth_files.use_siwc_requires_bind')
-                    : t('auth_files.use_siwc_hint')}
-                </p>
-              </div>
-              <ToggleSwitch
-                checked={draft.useSiwc}
-                onChange={(value) => editor.updateField('useSiwc', value)}
-                disabled={disabled || (!capabilities.canEnableSiwc && !draft.useSiwc)}
-                ariaLabel={t('auth_files.use_siwc_label')}
-              />
-            </div>
+              {capabilities.supportsSiwc || draft.useSiwc ? (
+                <DrawerSettingRow
+                  title={t('auth_files.use_siwc_label')}
+                  description={
+                    !capabilities.canEnableSiwc && !draft.useSiwc
+                      ? t('auth_files.use_siwc_requires_bind')
+                      : t('auth_files.use_siwc_hint')
+                  }
+                  control={
+                    <ToggleSwitch
+                      size="sm"
+                      checked={draft.useSiwc}
+                      onChange={(value) => editor.updateField('useSiwc', value)}
+                      disabled={disabled || (!capabilities.canEnableSiwc && !draft.useSiwc)}
+                      ariaLabel={t('auth_files.use_siwc_label')}
+                    />
+                  }
+                />
+              ) : null}
+            </DrawerSettingList>
           ) : null}
 
           {capabilities.claudeCloak ? (
-            <div className={styles.configurationProviderGroup}>
+            <>
               <div className="form-group">
                 <label>{t('ai_providers.claude_cloak_mode_label')}</label>
                 <Select
@@ -348,64 +394,75 @@ export function AccountConfigurationTab({
                   <div className="hint">{t('ai_providers.claude_cloak_mode_hint')}</div>
                 )}
               </div>
-              <div className={styles.configurationToggleRow}>
-                <div>
-                  <strong>{t('ai_providers.claude_cloak_strict_label')}</strong>
-                  <p>{t('ai_providers.claude_cloak_strict_hint')}</p>
+              <DrawerIndentGroup>
+                <DrawerSettingList>
+                  <DrawerSettingRow
+                    title={t('ai_providers.claude_cloak_strict_label')}
+                    description={t('ai_providers.claude_cloak_strict_hint')}
+                    control={
+                      <ToggleSwitch
+                        size="sm"
+                        checked={draft.cloakStrictMode}
+                        onChange={(value) => editor.updateField('cloakStrictMode', value)}
+                        disabled={disabled}
+                        ariaLabel={t('ai_providers.claude_cloak_strict_label')}
+                      />
+                    }
+                  />
+                  <DrawerSettingRow
+                    title={t('accounts.config_cloak_cache_user_id')}
+                    description={t('accounts.config_cloak_cache_user_id_hint')}
+                    control={
+                      <ToggleSwitch
+                        size="sm"
+                        checked={draft.cloakCacheUserId}
+                        onChange={(value) => editor.updateField('cloakCacheUserId', value)}
+                        disabled={disabled}
+                        ariaLabel={t('accounts.config_cloak_cache_user_id')}
+                      />
+                    }
+                  />
+                  <DrawerSettingRow
+                    title={t('accounts.config_tool_prefix_disabled')}
+                    description={t('accounts.config_tool_prefix_disabled_hint')}
+                    control={
+                      <ToggleSwitch
+                        size="sm"
+                        checked={draft.toolPrefixDisabled}
+                        onChange={(value) => editor.updateField('toolPrefixDisabled', value)}
+                        disabled={disabled}
+                        ariaLabel={t('accounts.config_tool_prefix_disabled')}
+                      />
+                    }
+                  />
+                </DrawerSettingList>
+                <div className="form-group">
+                  <label>{t('ai_providers.claude_cloak_sensitive_words_label')}</label>
+                  <textarea
+                    className="input"
+                    rows={3}
+                    value={draft.cloakSensitiveWordsText}
+                    placeholder={t('ai_providers.claude_cloak_sensitive_words_placeholder')}
+                    aria-label={t('ai_providers.claude_cloak_sensitive_words_label')}
+                    disabled={disabled}
+                    onChange={(event) =>
+                      editor.updateField('cloakSensitiveWordsText', event.target.value)
+                    }
+                  />
+                  <div className="hint">{t('ai_providers.claude_cloak_sensitive_words_hint')}</div>
                 </div>
-                <ToggleSwitch
-                  checked={draft.cloakStrictMode}
-                  onChange={(value) => editor.updateField('cloakStrictMode', value)}
-                  disabled={disabled}
-                  ariaLabel={t('ai_providers.claude_cloak_strict_label')}
-                />
-              </div>
-              <div className="form-group">
-                <label>{t('ai_providers.claude_cloak_sensitive_words_label')}</label>
-                <textarea
-                  className="input"
-                  rows={4}
-                  value={draft.cloakSensitiveWordsText}
-                  placeholder={t('ai_providers.claude_cloak_sensitive_words_placeholder')}
-                  aria-label={t('ai_providers.claude_cloak_sensitive_words_label')}
-                  disabled={disabled}
-                  onChange={(event) =>
-                    editor.updateField('cloakSensitiveWordsText', event.target.value)
-                  }
-                />
-                <div className="hint">{t('ai_providers.claude_cloak_sensitive_words_hint')}</div>
-              </div>
-              <div className={styles.configurationToggleRow}>
-                <div>
-                  <strong>{t('accounts.config_cloak_cache_user_id')}</strong>
-                  <p>{t('accounts.config_cloak_cache_user_id_hint')}</p>
-                </div>
-                <ToggleSwitch
-                  checked={draft.cloakCacheUserId}
-                  onChange={(value) => editor.updateField('cloakCacheUserId', value)}
-                  disabled={disabled}
-                  ariaLabel={t('accounts.config_cloak_cache_user_id')}
-                />
-              </div>
-              <div className={styles.configurationToggleRow}>
-                <div>
-                  <strong>{t('accounts.config_tool_prefix_disabled')}</strong>
-                  <p>{t('accounts.config_tool_prefix_disabled_hint')}</p>
-                </div>
-                <ToggleSwitch
-                  checked={draft.toolPrefixDisabled}
-                  onChange={(value) => editor.updateField('toolPrefixDisabled', value)}
-                  disabled={disabled}
-                  ariaLabel={t('accounts.config_tool_prefix_disabled')}
-                />
-              </div>
-            </div>
+              </DrawerIndentGroup>
+            </>
           ) : null}
-        </section>
+        </DrawerSectionCard>
       )}
 
-      <section className={styles.configurationSection}>
-        <h3 className={styles.configurationSectionTitle}>{t('accounts.config_section_models')}</h3>
+      <DrawerSectionCard
+        variant="default"
+        icon={<IconModelCluster size={15} />}
+        title={t('accounts.config_section_models')}
+        headingLevel="h3"
+      >
         <div className="form-group">
           <label>{t('auth_files.excluded_models_label')}</label>
           <textarea
@@ -434,20 +491,22 @@ export function AccountConfigurationTab({
             </div>
           ) : null}
         </div>
-      </section>
+      </DrawerSectionCard>
 
-      <section className={styles.configurationSection}>
-        <h3 className={styles.configurationSectionTitle}>
-          {t('accounts.config_section_advanced')}
-        </h3>
-        <CoolingPolicySelect
-          value={draft.disableCooling}
-          onChange={(value) => editor.updateField('disableCooling', value)}
-          translationPrefix="auth_files"
-          disabled={disabled}
-          id="account-cooling-policy"
-        />
-        <div className={styles.configurationFieldGrid}>
+      <DrawerSectionCard
+        variant="default"
+        icon={<IconScrollText size={15} />}
+        title={t('accounts.config_section_advanced')}
+        headingLevel="h3"
+      >
+        <DrawerFormGrid>
+          <CoolingPolicySelect
+            value={draft.disableCooling}
+            onChange={(value) => editor.updateField('disableCooling', value)}
+            translationPrefix="auth_files"
+            disabled={disabled}
+            id="account-cooling-policy"
+          />
           <Input
             label={t('accounts.config_request_retry_label')}
             type="number"
@@ -459,7 +518,7 @@ export function AccountConfigurationTab({
             disabled={disabled}
             onChange={(event) => editor.updateField('requestRetry', event.target.value)}
           />
-        </div>
+        </DrawerFormGrid>
         <div className="form-group">
           <label>{t('auth_files.headers_label')}</label>
           <textarea
@@ -478,7 +537,7 @@ export function AccountConfigurationTab({
             <div className="hint">{t('auth_files.headers_hint')}</div>
           )}
         </div>
-      </section>
+      </DrawerSectionCard>
 
       <details className={styles.configurationRawDataDetails}>
         <summary>
@@ -491,20 +550,17 @@ export function AccountConfigurationTab({
           </span>
         </summary>
         <div className={styles.configurationRawDataBody}>
-          <dl className={styles.configurationTechnicalMeta}>
-            <div>
-              <dt>{t('auth_files.paste_file_name_label')}</dt>
-              <dd>{state.fileName}</dd>
-            </div>
-            <div>
-              <dt>{t('accounts.col_provider')}</dt>
-              <dd>{state.providerKey || row.provider}</dd>
-            </div>
-            <div>
-              <dt>{t('accounts.detail_auth_index')}</dt>
-              <dd>{row.authIndex || '-'}</dd>
-            </div>
-          </dl>
+          <DrawerDefinitionList>
+            <DrawerDlRow label={t('auth_files.paste_file_name_label')} mono>
+              {state.fileName}
+            </DrawerDlRow>
+            <DrawerDlRow label={t('accounts.col_provider')} mono>
+              {state.providerKey || row.provider}
+            </DrawerDlRow>
+            <DrawerDlRow label={t('accounts.detail_auth_index')} mono muted={!row.authIndex}>
+              {row.authIndex || '-'}
+            </DrawerDlRow>
+          </DrawerDefinitionList>
           <div className={styles.configurationRawDataHeader}>
             <p>{t('accounts.config_raw_data_hint')}</p>
             <Button

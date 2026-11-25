@@ -1,9 +1,22 @@
 import { useEffect, useRef, useState } from 'react';
 import type { TFunction } from 'i18next';
+import {
+  DrawerNotice,
+  DrawerSectionCard,
+  DrawerSettingList,
+  DrawerSettingRow,
+} from '@/components/common/WorkspaceDrawer';
 import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
-import { IconChevronDown, IconCopy, IconInfo } from '@/components/ui/icons';
+import {
+  IconChevronDown,
+  IconCopy,
+  IconInfo,
+  IconSatellite,
+  IconShield,
+  IconSlidersHorizontal,
+} from '@/components/ui/icons';
 import type { CodexInspectionAutoActionMode } from '@/features/monitoring/codexInspection';
 import { CodexInspectionAutoActionEditor } from '@/features/monitoring/components/CodexInspectionAutoActionEditor';
 import {
@@ -71,9 +84,10 @@ export function InspectionConfigFields({
 
   return (
     <>
-      <section
-        className={styles.configSection}
-        aria-label={t('monitoring.codex_inspection_settings_group_scope')}
+      <DrawerSectionCard
+        icon={<IconSatellite size={15} />}
+        title={t('monitoring.codex_inspection_settings_group_scope')}
+        ariaLabel={t('monitoring.codex_inspection_settings_group_scope')}
       >
         <div className={styles.serverConfigGrid}>
           <div className={`${styles.serverField} ${styles.serverFieldWide}`}>
@@ -105,39 +119,44 @@ export function InspectionConfigFields({
           </div>
           {includesXai ? (
             <>
-              <div
-                id="xaiInferenceEnabled"
-                className={`${styles.xaiInferenceToggle} ${styles.serverFieldWide}`}
-              >
-                <div>
-                  <strong>
-                    {t('monitoring.codex_inspection_settings_xai_inference_enabled_label')}
-                  </strong>
-                  <span>
-                    {t('monitoring.codex_inspection_settings_xai_inference_enabled_hint')}
-                  </span>
-                </div>
-                <ToggleSwitch
-                  checked={draft.xaiInferenceEnabled}
-                  onChange={onXaiInferenceEnabledChange}
-                  ariaLabel={t('monitoring.codex_inspection_settings_xai_inference_enabled_label')}
-                />
+              <div className={styles.serverFieldWide}>
+                <DrawerSettingList>
+                  <DrawerSettingRow
+                    id="xaiInferenceEnabled"
+                    title={t('monitoring.codex_inspection_settings_xai_inference_enabled_label')}
+                    description={t(
+                      'monitoring.codex_inspection_settings_xai_inference_enabled_hint'
+                    )}
+                    control={
+                      <ToggleSwitch
+                        size="sm"
+                        checked={draft.xaiInferenceEnabled}
+                        onChange={onXaiInferenceEnabledChange}
+                        ariaLabel={t(
+                          'monitoring.codex_inspection_settings_xai_inference_enabled_label'
+                        )}
+                      />
+                    }
+                  />
+                </DrawerSettingList>
               </div>
               {draft.xaiInferenceEnabled ? (
-                <div className={`${styles.xaiInferenceNotice} ${styles.serverFieldWide}`}>
-                  <IconInfo size={17} aria-hidden="true" />
-                  <span>{t('monitoring.codex_inspection_settings_xai_inference_notice')}</span>
+                <div className={styles.serverFieldWide}>
+                  <DrawerNotice tone="warning" icon={<IconInfo size={15} />}>
+                    {t('monitoring.codex_inspection_settings_xai_inference_notice')}
+                  </DrawerNotice>
                 </div>
               ) : null}
             </>
           ) : null}
         </div>
-      </section>
+      </DrawerSectionCard>
 
-      <section className={`${styles.configSection} ${styles.configSectionStrategy}`}>
-        <header className={styles.configSectionHeader}>
-          <span>{t('monitoring.codex_inspection_settings_group_strategy')}</span>
-        </header>
+      <DrawerSectionCard
+        icon={<IconSlidersHorizontal size={15} />}
+        title={t('monitoring.codex_inspection_settings_group_strategy')}
+        className={styles.configSectionStrategy}
+      >
         <div className={styles.serverConfigGrid}>
           <div className={styles.serverField}>
             <Input
@@ -167,12 +186,12 @@ export function InspectionConfigFields({
             />
           </div>
         </div>
-      </section>
+      </DrawerSectionCard>
 
-      <section className={styles.configSection}>
-        <header className={styles.configSectionHeader}>
-          <span>{t('monitoring.codex_inspection_settings_group_auto')}</span>
-        </header>
+      <DrawerSectionCard
+        icon={<IconShield size={15} />}
+        title={t('monitoring.codex_inspection_settings_group_auto')}
+      >
         <div className={styles.autoActionField} id="autoActionMode">
           <CodexInspectionAutoActionEditor
             value={draft.autoActionMode}
@@ -182,7 +201,7 @@ export function InspectionConfigFields({
             onAutoRecoverChange={onAutoRecoverEnabledChange}
           />
         </div>
-      </section>
+      </DrawerSectionCard>
 
       <details ref={advancedSectionRef} className={styles.advancedSection}>
         <summary>

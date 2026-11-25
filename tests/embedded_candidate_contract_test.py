@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Contract tests for disposable R1-1 OCI verifier; no Docker or network."""
+import concurrent.futures
 import gzip
 import hashlib
 import importlib.util
@@ -107,7 +108,7 @@ def make_oci(destination, role, license_bytes, *,
     if missing:
         files.pop(missing)
     uncompressed = tar_content(files, bad_mode=bad_mode)
-    layer = gzip.compress(uncompressed)
+    layer = gzip.compress(uncompressed, compresslevel=1)
     layer_id = blob(layer)
     diff_id = blob(uncompressed)
     entrypoint, command = subject.STARTUP[role]
@@ -160,9 +161,7 @@ class EmbeddedCandidateContracts(unittest.TestCase):
         cls.go_fixture_tmp = tempfile.TemporaryDirectory(prefix="cpamp-go-binary-fixture-")
         cls.addClassCleanup(cls.go_fixture_tmp.cleanup)
         base = Path(cls.go_fixture_tmp.name)
-        for key in ("launcher", "manager", "manager_wrong_stamp", "manager_sha_suffix",
-                    "manager_version_suffix", "manager_missing_build_date",
-                    "manager_invalid_build_date", "ingress", "runtime-supervisor"):
+        def build_fixture(key):
             role = "manager" if key.startswith("manager") else key
             module, command = subject.GO_MODULES[role]
             work = base / key
@@ -176,8 +175,8 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                     'package buildinfo\nvar Version = "dev"\nvar SourceCommit = "unknown"\nvar BuildDate = "unknown"\n',
                     encoding="utf-8",
                 )
-                source = ('package main\nimport ("fmt"; "' + module + '/internal/buildinfo")\n'
-                          'func main() { fmt.Println(buildinfo.Version, buildinfo.SourceCommit, buildinfo.BuildDate) }\n')
+                source = ('package main\nimport "' + module + '/internal/buildinfo"\n'
+                          'func main() { println(buildinfo.Version, buildinfo.SourceCommit, buildinfo.BuildDate) }\n')
             (work / command / "main.go").write_text(source, encoding="utf-8")
             env = dict(os.environ, GOTOOLCHAIN="local", GOPROXY="off", GOSUMDB="off",
                        GOOS="linux", GOARCH="amd64", CGO_ENABLED="0")
@@ -206,7 +205,24 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                                        text=True, timeout=75)
             if completed.returncode != 0:
                 raise AssertionError("cannot create local Go fixture: " + completed.stderr)
-            ROLE_BINARIES[key] = (work / "candidate").read_bytes()
+            return key, (work / "candidate").read_bytes()
+
+        # Warm both -trimpath and non-trimpath Go runtime caches once before parallel linking.
+        for warm_key in ("launcher", "manager"):
+            built_key, built_bytes = build_fixture(warm_key)
+            ROLE_BINARIES[built_key] = built_bytes
+        remaining_keys = (
+            "manager_wrong_stamp",
+            "manager_sha_suffix",
+            "manager_version_suffix",
+            "manager_missing_build_date",
+            "manager_invalid_build_date",
+            "ingress",
+            "runtime-supervisor",
+        )
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, os.cpu_count() or 2)) as pool:
+            for built_key, built_bytes in pool.map(build_fixture, remaining_keys):
+                ROLE_BINARIES[built_key] = built_bytes
         ROLE_BINARIES["runtime"] = ROLE_BINARIES["runtime-supervisor"]
 
     def setUp(self):

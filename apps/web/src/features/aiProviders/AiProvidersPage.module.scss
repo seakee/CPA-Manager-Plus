@@ -227,6 +227,14 @@
   max-width: 280px;
 }
 
+.statusBarNoRate {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.statusBarSolo {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+}
 .statusBlocks {
   display: flex;
   gap: 2px;
@@ -259,7 +267,7 @@
 }
 
 .statusBlockIdle {
-  background-color: var(--border-subtle);
+  background-color: color-mix(in srgb, var(--border-primary) 62%, transparent);
 }
 
 .statusTooltip {
@@ -381,6 +389,14 @@
 .statusRateLow {
   color: var(--data-badge-danger-text);
   background: var(--failure-badge-bg);
+}
+
+.statusTrailingTime {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 @include mobile {
@@ -923,4 +939,39 @@
       border-top-color: var(--border-primary);
     }
   }
+}
+
+.dockLeading {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.dockActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.dockDangerButton {
+  color: var(--danger-color);
+}
+
+.priorityModalBody {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.priorityModalHint {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
 }

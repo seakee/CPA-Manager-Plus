@@ -131,7 +131,7 @@ export function CodexInspectionAutoActionEditor({
               aria-pressed={active}
             >
               <span className={styles.settingsAutoOptionIcon}>
-                <option.Icon size={24} />
+                <option.Icon size={16} />
               </span>
               <span className={styles.settingsAutoOptionText}>
                 <strong>{option.title}</strong>
@@ -169,7 +169,7 @@ export function CodexInspectionAutoActionEditor({
                   aria-pressed={active}
                 >
                   <span className={styles.settingsAutoOptionIcon}>
-                    <ProblemIcon size={24} />
+                    <ProblemIcon size={16} />
                   </span>
                   <span className={styles.settingsAutoOptionText}>
                     <strong>
@@ -226,7 +226,7 @@ export function CodexInspectionAutoActionEditor({
                   aria-pressed={active}
                 >
                   <span className={styles.settingsAutoOptionIcon}>
-                    <option.Icon size={24} />
+                    <option.Icon size={16} />
                   </span>
                   <span className={styles.settingsAutoOptionText}>
                     <strong>{option.title}</strong>

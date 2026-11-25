@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import type { TFunction } from 'i18next';
+import { LocalizedPaginationFooter } from '@/components/common/LocalizedPaginationFooter';
 import { Button } from '@/components/ui/Button';
-import { Select } from '@/components/ui/Select';
 import { IconRefreshCw, IconTrash2 } from '@/components/ui/icons';
 import { FailureDetailsTooltip } from '@/features/monitoring/components/FailureDetailsTooltip';
 import {
@@ -378,56 +378,20 @@ export function CodexInspectionResultsPanel({
               </div>
             )}
           </div>
-          {pagination.totalPages > 1 ? (
-            <div className={styles.resultPaginationBar}>
-              <div className={styles.resultPaginationInfo}>
-                {t('monitoring.pagination_info', {
-                  current: pagination.currentPage,
-                  total: pagination.totalPages,
-                  start: pagination.startItem,
-                  end: pagination.endItem,
-                  count: pagination.count,
-                })}
-              </div>
-              <div className={styles.resultPaginationControls}>
-                <div className={styles.resultPageSizeField}>
-                  <span>{t('monitoring.page_size_label')}</span>
-                  <Select
-                    className={styles.resultPageSizeSelect}
-                    triggerClassName={styles.resultPageSizeSelectTrigger}
-                    value={String(pageSize)}
-                    options={pageSizeOptions.map((size) => ({
-                      value: String(size),
-                      label: t('monitoring.page_size_option', { count: size }),
-                    }))}
-                    onChange={(value) => {
-                      const parsed = Number.parseInt(value, 10);
-                      onPageSizeChange(Number.isFinite(parsed) && parsed > 0 ? parsed : pageSize);
-                    }}
-                    ariaLabel={t('monitoring.page_size_label')}
-                    fullWidth={false}
-                  />
-                </div>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => onPageChange(Math.max(1, pagination.currentPage - 1))}
-                  disabled={pagination.currentPage <= 1}
-                >
-                  {t('monitoring.pagination_prev')}
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() =>
-                    onPageChange(Math.min(pagination.totalPages, pagination.currentPage + 1))
-                  }
-                  disabled={pagination.currentPage >= pagination.totalPages}
-                >
-                  {t('monitoring.pagination_next')}
-                </Button>
-              </div>
-            </div>
+          {pagination.count > 0 ? (
+            <LocalizedPaginationFooter
+              variant="inset"
+              currentPage={pagination.currentPage}
+              totalPages={pagination.totalPages}
+              totalCount={pagination.count}
+              startItem={pagination.startItem}
+              endItem={pagination.endItem}
+              pageSize={pageSize}
+              pageSizeOptions={pageSizeOptions}
+              onPageChange={onPageChange}
+              onPageSizeChange={onPageSizeChange}
+              t={t}
+            />
           ) : null}
         </>
       ) : (

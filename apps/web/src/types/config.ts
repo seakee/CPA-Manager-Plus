@@ -47,6 +47,7 @@ export interface Config {
   wsAuth?: boolean;
   forceModelPrefix?: boolean;
   routingStrategy?: string;
+  disableCooling?: boolean;
   apiKeys?: string[];
   geminiApiKeys?: GeminiKeyConfig[];
   interactionsApiKeys?: GeminiKeyConfig[];
@@ -54,9 +55,12 @@ export interface Config {
   xaiApiKeys?: ProviderKeyConfig[];
   claudeApiKeys?: ProviderKeyConfig[];
   vertexApiKeys?: ProviderKeyConfig[];
+  metaApiKeys?: ProviderKeyConfig[];
   openaiCompatibility?: OpenAIProviderConfig[];
   oauthExcludedModels?: Record<string, string[]>;
   raw?: Record<string, unknown>;
+  v8Supported?: boolean;
+  v8Etag?: string;
 }
 
 export type RawConfigSection =
@@ -81,6 +85,7 @@ export type RawConfigSection =
   | 'xai-api-key'
   | 'claude-api-key'
   | 'vertex-api-key'
+  | 'meta-api-key'
   | 'openai-compatibility'
   | 'oauth-excluded-models';
 

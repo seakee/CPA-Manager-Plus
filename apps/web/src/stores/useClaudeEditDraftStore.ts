@@ -19,11 +19,29 @@ export type ClaudeCloakBaseline = {
   mode: string;
   strictMode: boolean;
   sensitiveWords: string[] | null;
+  cacheUserId: boolean | null;
+  sensitiveWordsReplace: Array<{ key: string; value: string }>;
+  sensitivePatternsReplace: Record<string, unknown>[];
 } | null;
 
+export type ClaudeModelBaselineEntry = {
+  name: string;
+  alias: string;
+  priority?: number;
+  testModel?: string;
+  image?: boolean;
+  forceMapping?: boolean;
+  displayName?: string;
+  maxContextLength?: number;
+  isCompat?: boolean;
+  inputModalities?: string[];
+  outputModalities?: string[];
+  thinking?: Record<string, unknown>;
+};
+
 export type ClaudeEditBaseline = {
+  name?: string;
   apiKey: string;
-  authIndex: string;
   priority: number | null;
   weight: number | null;
   prefix: string;
@@ -33,13 +51,7 @@ export type ClaudeEditBaseline = {
   fingerprintProfile: string | undefined;
   rebuildMidSystemMessage: boolean;
   headers: Array<{ key: string; value: string }>;
-  models: Array<{
-    name: string;
-    alias: string;
-    forceMapping?: boolean;
-    inputModalities?: string[];
-    outputModalities?: string[];
-  }>;
+  models: ClaudeModelBaselineEntry[];
   excludedModels: string[];
   cloak: ClaudeCloakBaseline;
 };
@@ -81,6 +93,7 @@ const resolveAction = <T,>(action: SetStateAction<T>, prev: T): T =>
   typeof action === 'function' ? (action as (previous: T) => T)(prev) : action;
 
 const buildEmptyForm = (): ProviderFormState => ({
+  name: '',
   apiKey: '',
   weight: undefined,
   prefix: '',

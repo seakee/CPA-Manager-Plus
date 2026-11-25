@@ -10,8 +10,13 @@ import {
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
+import {
+  DrawerSectionCard,
+  DrawerSettingList,
+  DrawerSettingRow,
+} from '@/components/common/WorkspaceDrawer';
 import { Button } from '@/components/ui/Button';
-import { IconRefreshCw, IconShield, IconTrash2 } from '@/components/ui/icons';
+import { IconClock, IconRefreshCw, IconShield, IconTrash2 } from '@/components/ui/icons';
 import { Input } from '@/components/ui/Input';
 import { Select, type SelectOption } from '@/components/ui/Select';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
@@ -1936,17 +1941,26 @@ export function ServerCodexInspectionPage({
           </>
         }
       >
-        <section className={styles.configSection} id="schedule">
-          <header className={styles.configSectionHeader}>
-            <span>{t('monitoring.server_codex_inspection_config_group_schedule')}</span>
-          </header>
+        <DrawerSectionCard
+          id="schedule"
+          icon={<IconClock size={15} />}
+          title={t('monitoring.server_codex_inspection_config_group_schedule')}
+        >
           <div className={styles.serverConfigGrid}>
             <div className={`${styles.serverField} ${styles.serverFieldWide}`}>
-              <ToggleSwitch
-                checked={draft.enabled}
-                onChange={(value) => updateDraft('enabled', value)}
-                label={t('monitoring.server_codex_inspection_enable_schedule')}
-              />
+              <DrawerSettingList>
+                <DrawerSettingRow
+                  title={t('monitoring.server_codex_inspection_enable_schedule')}
+                  control={
+                    <ToggleSwitch
+                      size="sm"
+                      checked={draft.enabled}
+                      onChange={(value) => updateDraft('enabled', value)}
+                      ariaLabel={t('monitoring.server_codex_inspection_enable_schedule')}
+                    />
+                  }
+                />
+              </DrawerSettingList>
             </div>
 
             <div className={`${styles.serverField} ${styles.serverFieldWide}`}>
@@ -2025,7 +2039,7 @@ export function ServerCodexInspectionPage({
               </div>
             )}
           </div>
-        </section>
+        </DrawerSectionCard>
 
         <InspectionConfigFields
           draft={draft}

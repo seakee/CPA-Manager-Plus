@@ -1,6 +1,20 @@
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
-import { IconInfo, IconRefreshCw, IconTriangleAlert } from '@/components/ui/icons';
+import {
+  DrawerDefinitionList,
+  DrawerDlRow,
+  DrawerNotice,
+  DrawerSectionCard,
+  DrawerTabPanel,
+} from '@/components/common/WorkspaceDrawer';
+import {
+  IconCalendar,
+  IconChartLine,
+  IconInfo,
+  IconRefreshCw,
+  IconSlidersHorizontal,
+  IconTriangleAlert,
+} from '@/components/ui/icons';
 import { SegmentedTabs, type SegmentedTabItem } from '@/components/ui/SegmentedTabs';
 import type { UsageArchivePreview, UsageMaintenanceStatus } from '@/services/api/usageService';
 import { formatDateTime, formatFileSize } from '@/utils/format';
@@ -85,46 +99,42 @@ export function UsageMaintenanceCreateDrawerContent({
   if (confirmStep && preview) {
     const cutoffTimestamp = preview.cutoff_timestamp_ms ?? resolvedCutoffMS;
     return (
-      <div className={styles.drawerBody} data-testid="usage-maintenance-create-confirm">
-        <div className={`${styles.alertBanner} ${styles.alertInfo}`}>
-          <span>
-            {t('usage_maintenance.archive_prepare_confirm_message', {
-              defaultValue:
-                'The archive will be prepared and verified. Online details remain available until you separately confirm cleanup.',
-            })}
-          </span>
-        </div>
+      <DrawerTabPanel testId="usage-maintenance-create-confirm">
+        <DrawerNotice tone="info">
+          {t('usage_maintenance.archive_prepare_confirm_message', {
+            defaultValue:
+              'The archive will be prepared and verified. Online details remain available until you separately confirm cleanup.',
+          })}
+        </DrawerNotice>
 
-        <dl className={styles.drawerKvGrid}>
-          <div className={styles.inlineMetric}>
-            <dt className={styles.inlineMetricLabel}>
-              {t('usage_maintenance.preview_events', { defaultValue: 'New events to archive' })}
-            </dt>
-            <dd className={styles.inlineMetricValue}>
+        <DrawerSectionCard
+          icon={<IconChartLine size={15} />}
+          title={t('usage_maintenance.preview', { defaultValue: 'Impact preview' })}
+        >
+          <DrawerDefinitionList>
+            <DrawerDlRow
+              label={t('usage_maintenance.preview_events', { defaultValue: 'New events to archive' })}
+              mono
+            >
               {preview.event_count.toLocaleString(i18n.language)}
-            </dd>
-          </div>
-          <div className={styles.inlineMetric}>
-            <dt className={styles.inlineMetricLabel}>
-              {t('usage_maintenance.preview_source_bytes')}
-            </dt>
-            <dd className={styles.inlineMetricValue}>{formatFileSize(preview.estimated_bytes)}</dd>
-          </div>
-          <div className={styles.inlineMetric}>
-            <dt className={styles.inlineMetricLabel}>
-              {t('usage_maintenance.cutoff', { defaultValue: 'Archive events before' })}
-            </dt>
-            <dd className={styles.inlineMetricValue}>{formatTime(cutoffTimestamp)}</dd>
-          </div>
-          <div className={styles.inlineMetric}>
-            <dt className={styles.inlineMetricLabel}>
-              {t('usage_maintenance.preview_range', { defaultValue: 'Timestamp range' })}
-            </dt>
-            <dd className={styles.inlineMetricValue}>
+            </DrawerDlRow>
+            <DrawerDlRow label={t('usage_maintenance.preview_source_bytes')} mono>
+              {formatFileSize(preview.estimated_bytes)}
+            </DrawerDlRow>
+            <DrawerDlRow
+              label={t('usage_maintenance.cutoff', { defaultValue: 'Archive events before' })}
+              mono
+            >
+              {formatTime(cutoffTimestamp)}
+            </DrawerDlRow>
+            <DrawerDlRow
+              label={t('usage_maintenance.preview_range', { defaultValue: 'Timestamp range' })}
+              mono
+            >
               {formatTime(preview.min_timestamp_ms)} – {formatTime(preview.max_timestamp_ms)}
-            </dd>
-          </div>
-        </dl>
+            </DrawerDlRow>
+          </DrawerDefinitionList>
+        </DrawerSectionCard>
 
         <p className={styles.flatRowMeta}>
           {t('usage_maintenance.workspace_recalculate', {
@@ -132,16 +142,19 @@ export function UsageMaintenanceCreateDrawerContent({
               'The server recalculates eligible data when the operation starts. This estimate does not include existing archives or promise a disk-space saving.',
           })}
         </p>
-      </div>
+      </DrawerTabPanel>
     );
   }
 
   return (
-    <div className={styles.drawerBody} data-testid="usage-maintenance-create-drawer">
-      <div className={styles.drawerSection}>
-        <h3 className={styles.drawerSectionTitle}>
-          {t('usage_maintenance.workspace_purpose', { defaultValue: 'What would you like to do?' })}
-        </h3>
+    <DrawerTabPanel testId="usage-maintenance-create-drawer">
+      <DrawerSectionCard
+        icon={<IconSlidersHorizontal size={15} />}
+        headingLevel="h3"
+        title={t('usage_maintenance.workspace_purpose', {
+          defaultValue: 'What would you like to do?',
+        })}
+      >
         <div
           className={styles.intentGrid}
           role="group"
@@ -164,14 +177,14 @@ export function UsageMaintenanceCreateDrawerContent({
             </button>
           ))}
         </div>
-      </div>
+      </DrawerSectionCard>
 
-      <div className={styles.drawerSection}>
-        <div className={styles.drawerSectionHeader}>
-          <h3 className={styles.drawerSectionTitle}>
-            {t('usage_maintenance.workspace_range', { defaultValue: 'Choose the data range' })}
-          </h3>
-          {canRecommend ? (
+      <DrawerSectionCard
+        icon={<IconCalendar size={15} />}
+        headingLevel="h3"
+        title={t('usage_maintenance.workspace_range', { defaultValue: 'Choose the data range' })}
+        metaActions={
+          canRecommend ? (
             <Button
               variant="ghost"
               size="xs"
@@ -183,11 +196,12 @@ export function UsageMaintenanceCreateDrawerContent({
                 defaultValue: `Older than ${recommendedDays} days`,
               })}
             </Button>
-          ) : null}
-        </div>
-
+          ) : null
+        }
+      >
         <SegmentedTabs<string>
           variant="joined"
+          size="sm"
           responsiveFullWidth={false}
           activeTab={String(retentionSelection)}
           onChange={(value) => {
@@ -203,15 +217,15 @@ export function UsageMaintenanceCreateDrawerContent({
         />
 
         {retentionSelection === 'custom' ? (
-          <div className={styles.customDateField}>
+          <div className={`form-group ${styles.customDateField}`}>
             <label htmlFor="usage-maintenance-custom-cutoff" className={styles.customDateLabel}>
-              {t('usage_maintenance.cutoff', { defaultValue: 'Archive events before' })}:
+              {t('usage_maintenance.cutoff', { defaultValue: 'Archive events before' })}
             </label>
             <input
               id="usage-maintenance-custom-cutoff"
               type="datetime-local"
               max={toLocalDateTimeValue(referenceNowMS)}
-              className={styles.customDateInput}
+              className={`input ${styles.customDateInput}`}
               value={customCutoff}
               disabled={working}
               onChange={(event) => onChangeCustomCutoff(event.target.value)}
@@ -219,33 +233,33 @@ export function UsageMaintenanceCreateDrawerContent({
           </div>
         ) : null}
 
-        <div className={styles.cutoffSummaryBar}>
-          <span className={styles.flatRowMeta}>
-            {t('usage_maintenance.cutoff', { defaultValue: 'Archive events before' })}
-          </span>
-          <strong className={styles.mono}>{formatTime(resolvedCutoffMS)}</strong>
-        </div>
-        {rawRange.kind === 'available' ? (
-          <div className={styles.cutoffSummaryBar}>
-            <span className={styles.flatRowMeta}>{t('usage_maintenance.online_range_title')}</span>
-            <span className={styles.mono}>
+        <DrawerDefinitionList>
+          <DrawerDlRow
+            label={t('usage_maintenance.cutoff', { defaultValue: 'Archive events before' })}
+            mono
+          >
+            {formatTime(resolvedCutoffMS)}
+          </DrawerDlRow>
+          {rawRange.kind === 'available' ? (
+            <DrawerDlRow label={t('usage_maintenance.online_range_title')} mono>
               {formatTime(rawRange.minTimestampMS)} – {formatTime(rawRange.maxTimestampMS)}
-            </span>
-          </div>
-        ) : null}
+            </DrawerDlRow>
+          ) : null}
+        </DrawerDefinitionList>
         <p className={styles.flatRowMeta}>
           {t('usage_maintenance.workspace_once', {
             defaultValue:
               'This range applies to this operation only. It does not create an automatic retention rule.',
           })}
         </p>
-      </div>
+      </DrawerSectionCard>
 
-      <div className={styles.drawerSection} aria-live="polite" aria-busy={previewLoading}>
-        <div className={styles.drawerSectionHeader}>
-          <h3 className={styles.drawerSectionTitle}>
-            {t('usage_maintenance.preview', { defaultValue: 'Impact preview' })}
-          </h3>
+      <DrawerSectionCard
+        icon={<IconChartLine size={15} />}
+        headingLevel="h3"
+        title={t('usage_maintenance.preview', { defaultValue: 'Impact preview' })}
+        dataAttributes={{ 'aria-live': 'polite', 'aria-busy': previewLoading }}
+        metaActions={
           <Button
             variant="ghost"
             size="xs"
@@ -257,8 +271,8 @@ export function UsageMaintenanceCreateDrawerContent({
             <IconRefreshCw size={13} aria-hidden="true" />
             <span>{t('usage_maintenance.preview_retry', { defaultValue: 'Recalculate' })}</span>
           </Button>
-        </div>
-
+        }
+      >
         {previewLoading ? (
           <div
             className={styles.skeletonGrid}
@@ -364,39 +378,31 @@ export function UsageMaintenanceCreateDrawerContent({
             </div>
           </div>
         ) : null}
-      </div>
+      </DrawerSectionCard>
 
       {recentCutoffWarning ? (
-        <div className={`${styles.alertBanner} ${styles.alertDanger}`} role="alert">
-          <div className={styles.alertStack}>
-            <strong className={styles.alertHeading}>
-              <IconTriangleAlert size={15} aria-hidden="true" />
-              <span>
-                {t('usage_maintenance.cleanup_recent_warning_title', {
-                  defaultValue: 'Selected range includes usage data from the last 14 days',
-                })}
-              </span>
-            </strong>
-            <span>
-              {t('usage_maintenance.cleanup_recent_warning_desc', {
-                defaultValue:
-                  'Recent request-level details will no longer be queryable online after cleanup (archives and aggregates remain intact).',
-              })}
-            </span>
-          </div>
-        </div>
+        <DrawerNotice
+          tone="danger"
+          role="alert"
+          icon={<IconTriangleAlert size={15} />}
+          title={t('usage_maintenance.cleanup_recent_warning_title', {
+            defaultValue: 'Selected range includes usage data from the last 14 days',
+          })}
+        >
+          {t('usage_maintenance.cleanup_recent_warning_desc', {
+            defaultValue:
+              'Recent request-level details will no longer be queryable online after cleanup (archives and aggregates remain intact).',
+          })}
+        </DrawerNotice>
       ) : null}
 
       {hasActiveMutex ? (
-        <div className={`${styles.alertBanner} ${styles.alertWarn}`}>
-          {t('usage_maintenance.create_blocked_active')}
-        </div>
+        <DrawerNotice tone="warning">{t('usage_maintenance.create_blocked_active')}</DrawerNotice>
       ) : archiveReadinessBlocked ? (
-        <div className={`${styles.alertBanner} ${styles.alertWarn}`}>
+        <DrawerNotice tone="warning">
           {t('usage_maintenance.archive_readiness_pending')}
-        </div>
+        </DrawerNotice>
       ) : null}
-
       <p className={styles.flatRowMeta}>
         {intent === 'cleanup'
           ? t('usage_maintenance.workspace_cleanup_hint')
@@ -415,6 +421,6 @@ export function UsageMaintenanceCreateDrawerContent({
           <p>{t('usage_maintenance.preview_source_bytes_hint')}</p>
         </div>
       </details>
-    </div>
+    </DrawerTabPanel>
   );
 }

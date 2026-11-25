@@ -6,10 +6,12 @@ import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { HeaderInputList } from '@/components/ui/HeaderInputList';
 import { ModelInputList } from '@/components/ui/ModelInputList';
-import { modelsToEntries } from '@/components/ui/modelInputListUtils';
+import { entriesToModels, modelsToEntries } from '@/components/ui/modelInputListUtils';
+import { hasOpenDrawer, hasOpenModal } from '@/components/ui/overlayEscapeStack';
 import { useEdgeSwipeBack } from '@/hooks/useEdgeSwipeBack';
 import { useUnsavedChangesGuard } from '@/hooks/useUnsavedChangesGuard';
 import { SecondaryScreenShell } from '@/components/common/SecondaryScreenShell';
+import { usePageTransitionLayer } from '@/components/common/PageTransitionLayer';
 import { providersApi } from '@/services/api';
 import { useAuthStore, useConfigStore, useNotificationStore } from '@/stores';
 import {
@@ -19,6 +21,7 @@ import {
 } from '@/types';
 import { excludedModelsToText, parseExcludedModels } from '@/components/providers/utils';
 import { buildHeaderObject, headersToEntries, normalizeHeaderEntries } from '@/utils/headers';
+import { normalizeAuthIndex } from '@/utils/authIndex';
 import {
   areKeyValueEntriesEqual,
   areModelEntriesEqual,
@@ -40,6 +43,7 @@ import layoutStyles from './AiProvidersEditLayout.module.scss';
 type LocationState = { fromAiProviders?: boolean } | null;
 
 const buildEmptyForm = (): VertexFormState => ({
+  name: '',
   apiKey: '',
   weight: undefined,
   prefix: '',
@@ -63,6 +67,7 @@ const normalizeModelEntries = (entries: Array<{ name: string; alias: string }>) 
   }, []);
 
 type VertexFormBaseline = {
+  name: string;
   apiKey: string;
   priority: number | null;
   weight: number | null;
@@ -76,6 +81,7 @@ type VertexFormBaseline = {
 };
 
 const buildVertexBaseline = (form: VertexFormState): VertexFormBaseline => ({
+  name: String(form.name ?? '').trim(),
   apiKey: String(form.apiKey ?? '').trim(),
   priority:
     form.priority !== undefined && Number.isFinite(form.priority)
@@ -103,23 +109,14 @@ export function AiProvidersVertexEditPage() {
 
   const config = useConfigStore((state) => state.config);
   const fetchConfig = useConfigStore((state) => state.fetchConfig);
-  const isCacheValid = useConfigStore((state) => state.isCacheValid);
   const updateConfigValue = useConfigStore((state) => state.updateConfigValue);
   const clearCache = useConfigStore((state) => state.clearCache);
+  const tRef = useRef(t);
+  tRef.current = t;
 
   const [configs, setConfigs] = useState<ProviderKeyConfig[]>(() => config?.vertexApiKeys ?? []);
-  const [loading, setLoading] = useState(
-    () =>
-      !(
-        isCacheValid('vertex-api-key') ||
-        isCacheValid() ||
-        Array.isArray(config?.vertexApiKeys)
-      )
-  );
+  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const isCacheValidRef = useRef(isCacheValid);
-  isCacheValidRef.current = isCacheValid;
-  const hasCachedVertexConfigsRef = useRef(Array.isArray(config?.vertexApiKeys));
   const [error, setError] = useState('');
   const [form, setForm] = useState<VertexFormState>(() => buildEmptyForm());
   const [baseline, setBaseline] = useState(() => buildVertexBaseline(buildEmptyForm()));
@@ -149,27 +146,31 @@ export function AiProvidersVertexEditPage() {
     navigate('/ai-providers', { replace: true });
   }, [location.state, navigate]);
 
+  const pageTransitionLayer = usePageTransitionLayer();
+  const isCurrentLayer = pageTransitionLayer ? pageTransitionLayer.isCurrentLayer : true;
   const swipeRef = useEdgeSwipeBack({ onBack: handleBack });
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        handleBack();
+      if (
+        !isCurrentLayer ||
+        event.key !== 'Escape' ||
+        event.defaultPrevented ||
+        hasOpenModal() ||
+        hasOpenDrawer()
+      ) {
+        return;
       }
+      event.preventDefault();
+      handleBack();
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleBack]);
+  }, [handleBack, isCurrentLayer]);
 
   useEffect(() => {
     let cancelled = false;
-    const hasValidCache =
-      isCacheValidRef.current('vertex-api-key') ||
-      isCacheValidRef.current() ||
-      hasCachedVertexConfigsRef.current;
-    if (!hasValidCache) {
-      setLoading(true);
-    }
+    setLoading(true);
     setError('');
 
     Promise.all([fetchConfig('vertex-api-key'), providersApi.getVertexConfigs()])
@@ -188,7 +189,7 @@ export function AiProvidersVertexEditPage() {
       .catch((err: unknown) => {
         if (cancelled) return;
         const message = err instanceof Error ? err.message : '';
-        setError(message || t('notification.refresh_failed'));
+        setError(message || tRef.current('notification.refresh_failed'));
       })
       .finally(() => {
         if (cancelled) return;
@@ -198,13 +199,14 @@ export function AiProvidersVertexEditPage() {
     return () => {
       cancelled = true;
     };
-  }, [clearCache, fetchConfig, t, updateConfigValue]);
+  }, [clearCache, fetchConfig, updateConfigValue]);
   useEffect(() => {
     if (loading) return;
 
     if (initialData) {
       const nextForm: VertexFormState = {
         ...initialData,
+        name: initialData.name ?? '',
         disableCooling: coolingPolicyFromOverride(initialData.disableCooling),
         headers: headersToEntries(initialData.headers),
         modelEntries: modelsToEntries(initialData.models),
@@ -255,6 +257,7 @@ export function AiProvidersVertexEditPage() {
     [baseline.excludedModels, normalizedExcludedModels]
   );
   const isDirty =
+    baseline.name !== String(form.name ?? '').trim() ||
     baseline.apiKey !== form.apiKey.trim() ||
     baseline.priority !== normalizedPriority ||
     baseline.weight !== comparableWeight ||
@@ -291,7 +294,11 @@ export function AiProvidersVertexEditPage() {
     setSaving(true);
     setError('');
     try {
+      const existingConfig = editIndex !== null ? configs[editIndex] : undefined;
+      const v8Source = form.v8Source ?? existingConfig?.v8Source;
       const payload: ProviderKeyConfig = {
+        ...(v8Source ? { v8Source } : {}),
+        name: form.name?.trim() || undefined,
         apiKey: form.apiKey.trim(),
         priority:
           form.priority !== undefined && Number.isFinite(form.priority)
@@ -302,14 +309,8 @@ export function AiProvidersVertexEditPage() {
         baseUrl,
         proxyUrl: form.proxyUrl?.trim() || undefined,
         headers: buildHeaderObject(form.headers),
-        models: form.modelEntries
-          .map((entry) => {
-            const name = entry.name.trim();
-            const alias = entry.alias.trim();
-            if (!name || !alias) return null;
-            return { name, alias };
-          })
-          .filter(Boolean) as ProviderKeyConfig['models'],
+        models: entriesToModels(form.modelEntries),
+        authIndex: normalizeAuthIndex(form.authIndex) ?? undefined,
         excludedModels: parseExcludedModels(form.excludedText),
         disableCooling: coolingPolicyToOverride(form.disableCooling),
       };
@@ -399,6 +400,15 @@ export function AiProvidersVertexEditPage() {
           <div className="hint">{t('common.invalid_provider_index')}</div>
         ) : (
           <>
+            <Input
+              label={t('ai_providers.name_label', { defaultValue: '名称 / 别名' })}
+              placeholder={t('ai_providers.name_placeholder_optional', {
+                defaultValue: '可选，如主力池（留空自动生成）',
+              })}
+              value={form.name ?? ''}
+              onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
+              disabled={disableControls || saving}
+            />
             <Input
               label={t('ai_providers.vertex_add_modal_key_label')}
               placeholder={t('ai_providers.vertex_add_modal_key_placeholder')}

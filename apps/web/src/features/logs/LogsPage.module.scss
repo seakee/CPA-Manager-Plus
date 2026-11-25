@@ -561,14 +561,8 @@ $logs-header-offset: calc(var(--header-height, 64px) + #{$spacing-lg} * 2);
  * ============================================================ */
 
 .errorCard {
-  display: flex;
-  flex-direction: column;
   flex: 1;
   min-height: 0;
-  border: 1px solid var(--border-color);
-  border-radius: var(--app-radius-lg);
-  background: var(--bg-primary);
-  overflow: hidden;
 }
 
 .dataPanelHeader {
@@ -616,12 +610,12 @@ $logs-header-offset: calc(var(--header-height, 64px) + #{$spacing-lg} * 2);
     position: sticky;
     top: 0;
     z-index: 1;
-    padding: 10px 16px;
+    padding: 10px 14px;
     border-bottom: 1px solid var(--border-subtle);
-    background: var(--surface-subtle);
+    background: var(--bg-primary);
     color: var(--text-secondary);
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 700;
     text-align: left;
     white-space: nowrap;
 
@@ -629,13 +623,20 @@ $logs-header-offset: calc(var(--header-height, 64px) + #{$spacing-lg} * 2);
       text-align: right;
     }
   }
+  th:first-child,
+  td:first-child {
+    padding-left: var(--list-panel-gutter-x, 16px);
+  }
+  th:last-child,
+  td:last-child {
+    padding-right: var(--list-panel-gutter-x, 16px);
+  }
   tbody td {
-    padding: 11px 16px;
+    padding: 11px 14px;
     border-bottom: 1px solid var(--border-subtle);
     color: var(--text-primary);
     vertical-align: middle;
   }
-
   tbody tr:last-child td {
     border-bottom: none;
   }

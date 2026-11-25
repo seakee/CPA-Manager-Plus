@@ -152,6 +152,7 @@ const getKeyProviderDisplay = (
 ): Pick<ProviderHealthCheckItem, 'providerLabel' | 'providerSubtitle'> => {
   const kindLabel = PROVIDER_KIND_LABELS[row.kind];
   const identity =
+    String(row.alias ?? row.raw.name ?? '').trim() ||
     String(row.raw.prefix ?? '').trim() ||
     maskApiKey(row.raw.apiKey) ||
     getHostLabel(row.baseUrl) ||
@@ -179,13 +180,15 @@ const getConfiguredModelNames = (models?: Array<{ name: string }>): string[] =>
 const requireCredential = (
   apiKey?: string,
   authIndex?: string,
-  headers?: Record<string, string>
+  headers?: Record<string, string>,
+  options?: { allowKeylessBaseUrl?: boolean; baseUrl?: string }
 ) => {
   if (String(apiKey ?? '').trim()) return;
   if (normalizeAuthIndex(authIndex)) return;
   if (hasHeader(headers, 'authorization')) return;
   if (hasHeader(headers, 'x-api-key')) return;
   if (hasHeader(headers, 'x-goog-api-key')) return;
+  if (options?.allowKeylessBaseUrl && String(options.baseUrl ?? '').trim()) return;
   throw new HealthCheckError(
     'Missing API key or auth-index',
     'ai_providers.health_check_error_missing_credential'
@@ -399,7 +402,10 @@ export const runProviderHealthCheckItem = async (
   try {
     let modelCount = 0;
     if (target.kind === 'gemini' || target.kind === 'interactions') {
-      requireCredential(target.config.apiKey, target.config.authIndex, target.config.headers);
+      requireCredential(target.config.apiKey, target.config.authIndex, target.config.headers, {
+        allowKeylessBaseUrl: true,
+        baseUrl: target.config.baseUrl,
+      });
       const models = await modelsApi.fetchGeminiModelsViaApiCall(
         target.config.baseUrl ?? '',
         target.config.apiKey?.trim() || undefined,
@@ -409,7 +415,10 @@ export const runProviderHealthCheckItem = async (
       );
       modelCount = ensureNonEmptyModels(models);
     } else if (target.kind === 'codex' || target.kind === 'xai') {
-      requireCredential(target.config.apiKey, target.config.authIndex, target.config.headers);
+      requireCredential(target.config.apiKey, target.config.authIndex, target.config.headers, {
+        allowKeylessBaseUrl: true,
+        baseUrl: target.config.baseUrl,
+      });
       const hasCustomAuthorization = hasHeader(target.config.headers, 'authorization');
       const models = await modelsApi.fetchV1ModelsViaApiCall(
         target.config.baseUrl ?? '',
@@ -420,7 +429,10 @@ export const runProviderHealthCheckItem = async (
       );
       modelCount = ensureNonEmptyModels(models);
     } else if (target.kind === 'claude') {
-      requireCredential(target.config.apiKey, target.config.authIndex, target.config.headers);
+      requireCredential(target.config.apiKey, target.config.authIndex, target.config.headers, {
+        allowKeylessBaseUrl: true,
+        baseUrl: target.config.baseUrl,
+      });
       const models = await modelsApi.fetchClaudeModelsViaApiCall(
         target.config.baseUrl ?? '',
         target.config.apiKey?.trim() || undefined,

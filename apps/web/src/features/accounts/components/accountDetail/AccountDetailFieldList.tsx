@@ -1,4 +1,9 @@
 import { useTranslation } from 'react-i18next';
+import {
+  DrawerDefinitionList,
+  DrawerDlRow,
+  DrawerEmptyBox,
+} from '@/components/common/WorkspaceDrawer';
 import type { AccountDetailField } from '@/features/accounts/model/accountDetailViewModel';
 import {
   formatMoney,
@@ -11,6 +16,14 @@ import {
 import { CopyableText } from '@/features/accounts/components/CopyableText';
 import { formatCompactNumber } from '@/utils/usage';
 
+const MONO_FIELD_KEYS: Record<string, true> = {
+  authIndex: true,
+  statusCode: true,
+  errorCode: true,
+  trace: true,
+  projectId: true,
+  fileName: true,
+};
 const formatDetailNumber = (value: number): string => {
   if (!Number.isFinite(value)) return '-';
   return Math.abs(value) < 1_000 ? String(value) : formatCompactNumber(value);
@@ -76,17 +89,21 @@ export function AccountDetailFieldValue({ field }: { field: AccountDetailField }
 
 export function AccountDetailFieldList({ fields }: { fields: AccountDetailField[] }) {
   const { t } = useTranslation();
-  if (fields.length === 0) return <p>{t('accounts.detail_no_data')}</p>;
+  if (fields.length === 0) {
+    return <DrawerEmptyBox>{t('accounts.detail_no_data')}</DrawerEmptyBox>;
+  }
   return (
-    <dl>
+    <DrawerDefinitionList>
       {fields.map((field) => (
-        <div key={field.key}>
-          <dt>{t(field.labelKey, { defaultValue: field.labelKey })}</dt>
-          <dd>
-            <AccountDetailFieldValue field={field} />
-          </dd>
-        </div>
+        <DrawerDlRow
+          key={field.key}
+          label={t(field.labelKey, { defaultValue: field.labelKey })}
+          mono={Boolean(MONO_FIELD_KEYS[field.key])}
+          muted={field.value === null || field.value === ''}
+        >
+          <AccountDetailFieldValue field={field} />
+        </DrawerDlRow>
       ))}
-    </dl>
+    </DrawerDefinitionList>
   );
 }

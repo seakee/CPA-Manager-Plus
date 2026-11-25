@@ -1,16 +1,59 @@
 @use '@/styles/variables.scss' as *;
 
 .modelItem {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.columnHeaderRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 16px minmax(0, 1fr) 28px;
+  gap: 8px;
+  align-items: center;
+  padding: 0 0 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border-subtle) 82%, transparent);
+
+  @include mobile {
+    display: none;
+  }
+}
+
+.columnHeaderLabel {
+  min-width: 0;
+  color: var(--text-tertiary);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.columnHeaderSep {
+  min-width: 0;
+}
+
+.columnHeaderActionSpacer {
   min-width: 0;
 }
 
 .advancedRow {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 8px;
+  display: flex;
   align-items: center;
-  margin: -2px 0 8px;
-  padding-left: 4px;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin: 0;
+  padding: 0 2px;
+}
+
+.advancedRowWithModalities {
+  display: grid;
+  grid-template-columns: auto minmax(160px, 1fr) minmax(160px, 1fr);
+  gap: 8px 10px;
+  align-items: center;
+
+  @include mobile {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .thinkingSection {
@@ -18,7 +61,7 @@
   min-width: 0;
   flex-direction: column;
   gap: $spacing-sm;
-  margin-top: $spacing-sm;
+  margin-top: 0;
   padding-left: $spacing-xs;
 }
 

@@ -1,6 +1,12 @@
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import {
+  DrawerEmptyBox,
+  DrawerNotice,
+  DrawerSectionCard,
+  DrawerStatusPill,
+} from '@/components/common/WorkspaceDrawer';
+import {
   IconChartLine,
   IconCheck,
   IconChevronRight,
@@ -76,11 +82,6 @@ export function AccountDiagnosticsTab({
   const monitoringParams = new URLSearchParams({ auth_file: row.fileName });
   if (row.authIndex) monitoringParams.set('auth_index', row.authIndex);
 
-  const evidenceStatusClass = {
-    current: styles.diagnosticEvidenceStatusCurrent,
-    outdated: styles.diagnosticEvidenceStatusOutdated,
-    conflict: styles.diagnosticEvidenceStatusConflict,
-  }[conclusion.evidenceStatus];
   const hasInspectionEvidence = detailView.strategy.inspectionFields.length > 0;
   const hasCodexEvidence = detailView.strategy.codexBadges.length > 0;
   const hasCandidateEvidence =
@@ -97,21 +98,29 @@ export function AccountDiagnosticsTab({
 
   return (
     <div className={styles.diagnosticDetailStack} data-diagnostic-layout="prototype">
-      <section
-        className={`${styles.diagnosticCard} ${styles.diagnosticConclusionCard}`}
-        data-diagnostic-card="conclusion"
-        data-diagnostic-evidence-status={conclusion.evidenceStatus}
-        aria-busy={inspectionLoading}
-      >
-        <div className={styles.diagnosticCardHeader}>
-          <h3 className={styles.diagnosticSectionTitle}>
-            <IconShield size={24} />
-            <span>{t('accounts.detail_diagnostic_conclusion')}</span>
-          </h3>
-          <span className={`${styles.diagnosticEvidenceBadge} ${evidenceStatusClass}`}>
+      <DrawerSectionCard
+        variant="default"
+        icon={<IconShield size={15} />}
+        title={t('accounts.detail_diagnostic_conclusion')}
+        headingLevel="h3"
+        metaActions={
+          <DrawerStatusPill
+            tone={
+              conclusion.evidenceStatus === 'current'
+                ? 'success'
+                : conclusion.evidenceStatus === 'outdated'
+                  ? 'warning'
+                  : 'danger'
+            }
+          >
             {t(conclusion.evidenceStatusLabelKey)}
-          </span>
-        </div>
+          </DrawerStatusPill>
+        }
+        dataAttributes={{
+          'data-diagnostic-card': 'conclusion',
+          'data-diagnostic-evidence-status': conclusion.evidenceStatus,
+        }}
+      >
         <div className={styles.diagnosticConclusionMain}>
           <span
             className={styles.diagnosticConclusionMark}
@@ -127,53 +136,54 @@ export function AccountDiagnosticsTab({
         </div>
         <div className={styles.diagnosticConclusionMeta}>
           <span>
-            <IconFileText size={18} />
+            <IconFileText size={14} />
             <strong>{t('accounts.detail_diagnostic_source')}</strong>
             <span>{t(conclusion.sourceLabelKey)}</span>
           </span>
           {conclusion.observedAtMs !== null ? (
             <span>
-              <IconClock size={18} />
+              <IconClock size={14} />
               <strong>{t('accounts.detail_observed_at')}</strong>
               <span>{formatTimestamp(conclusion.observedAtMs, i18n.language)}</span>
             </span>
           ) : null}
           {conclusion.evidenceStatus !== 'current' && conclusion.latestActivityAtMs !== null ? (
             <span>
-              <IconExternalLink size={18} />
+              <IconExternalLink size={14} />
               <strong>{t('accounts.detail_diagnostic_latest_activity')}</strong>
               <span>{formatTimestamp(conclusion.latestActivityAtMs, i18n.language)}</span>
             </span>
           ) : null}
         </div>
-      </section>
+      </DrawerSectionCard>
 
-      <section
-        className={`${styles.diagnosticCard} ${styles.diagnosticActivityCard}`}
-        data-diagnostic-card="activity"
-        aria-busy={eventsLoading}
-      >
-        <div className={styles.diagnosticCardHeader}>
-          <h3 className={styles.diagnosticSectionTitle}>
-            <IconTrendingUp size={24} />
-            <span>{t('accounts.detail_activity_title')}</span>
-          </h3>
+      <DrawerSectionCard
+        variant="default"
+        icon={<IconTrendingUp size={15} />}
+        title={t('accounts.detail_activity_title')}
+        headingLevel="h3"
+        metaActions={
           <Button
             variant="secondary"
-            size="sm"
-            className={styles.diagnosticRefreshButton}
+            size="xs"
             onClick={onRefreshEvents}
             disabled={eventsUnavailable || eventsLoading || eventsRefreshing || eventsAppending}
             loading={eventsRefreshing}
           >
-            {!eventsRefreshing ? <IconRefreshCw size={14} /> : null}
+            {!eventsRefreshing ? <IconRefreshCw size={13} /> : null}
             {t('common.refresh')}
           </Button>
-        </div>
+        }
+        dataAttributes={{
+          'data-diagnostic-card': 'activity',
+        }}
+      >
         {eventsUnavailable ? (
-          <p className={styles.diagnosticEmptyState}>{t('accounts.detail_events_unavailable')}</p>
+          <DrawerEmptyBox>{t('accounts.detail_events_unavailable')}</DrawerEmptyBox>
         ) : eventsError ? (
-          <div className={styles.errorBox}>{eventsError}</div>
+          <DrawerNotice tone="danger" role="alert">
+            {eventsError}
+          </DrawerNotice>
         ) : (
           <div className={styles.diagnosticActivityBody}>
             <div className={styles.diagnosticKpiGrid}>
@@ -188,7 +198,7 @@ export function AccountDiagnosticsTab({
                   </strong>
                 </div>
                 <span className={`${styles.diagnosticKpiIcon} ${styles.diagnosticKpiIconBlue}`}>
-                  <IconDatabaseZap size={25} />
+                  <IconDatabaseZap size={18} />
                 </span>
               </article>
               <article
@@ -200,7 +210,7 @@ export function AccountDiagnosticsTab({
                   <strong>{formatPercent(activity.failureRate, 1)}</strong>
                 </div>
                 <span className={`${styles.diagnosticKpiIcon} ${styles.diagnosticKpiIconPurple}`}>
-                  <IconChartLine size={25} />
+                  <IconChartLine size={18} />
                 </span>
               </article>
               <article
@@ -212,7 +222,7 @@ export function AccountDiagnosticsTab({
                   <strong>{formatDurationMs(activity.p95LatencyMs)}</strong>
                 </div>
                 <span className={`${styles.diagnosticKpiIcon} ${styles.diagnosticKpiIconGreen}`}>
-                  <IconTimer size={25} />
+                  <IconTimer size={18} />
                 </span>
               </article>
             </div>
@@ -326,23 +336,23 @@ export function AccountDiagnosticsTab({
             )}
           </div>
         )}
-      </section>
+      </DrawerSectionCard>
 
       {hasDiagnosticEvidence ? (
         <details
-          className={`${styles.diagnosticCard} ${styles.diagnosticEvidenceCard}`}
+          className={styles.diagnosticEvidenceCard}
           data-diagnostic-card="evidence"
           aria-busy={inspectionLoading || candidatesLoading}
         >
           <summary>
             <span className={styles.diagnosticEvidenceSummaryTitle}>
-              <IconFileText size={24} />
+              <IconFileText size={15} />
               <span>{t('accounts.detail_diagnostic_evidence')}</span>
             </span>
             {candidatesError ? (
               <small>{t('accounts.detail_diagnostic_evidence_error')}</small>
             ) : null}
-            <IconChevronUp size={22} className={styles.diagnosticEvidenceChevron} />
+            <IconChevronUp size={16} className={styles.diagnosticEvidenceChevron} />
           </summary>
           <div className={styles.diagnosticEvidenceBody}>
             {hasInspectionEvidence ? (
@@ -397,7 +407,9 @@ export function AccountDiagnosticsTab({
                   <h4>{t('accounts.detail_diagnostic_candidate_evidence')}</h4>
                 </div>
                 {candidatesError ? (
-                  <div className={styles.errorBox}>{candidatesError}</div>
+                  <DrawerNotice tone="danger" role="alert">
+                    {candidatesError}
+                  </DrawerNotice>
                 ) : detailView.strategy.actionCandidates.length > 0 ? (
                   <div className={styles.detailCandidateList}>
                     {detailView.strategy.actionCandidates.map((candidate) => {

@@ -17,15 +17,57 @@ import (
 // TestIsCPAV8APIKeysConfigPath pins the one v8 management subtree Manager
 // forwards. The match is on a path segment boundary so a sibling such as
 // /config/api-keys-x, the config root, or any other v8 route stays unmatched.
+func TestIsCPAV8APIKeysFamilyPath(t *testing.T) {
+	for _, family := range []string{
+		"gemini",
+		"interactions",
+		"vertex",
+		"codex",
+		"claude",
+		"xai",
+		"meta",
+		"openai-compatibility",
+	} {
+		got, ok := IsCPAV8APIKeysFamilyPath("/v8/management/config/api-keys/" + family)
+		if !ok || got != family {
+			t.Fatalf("IsCPAV8APIKeysFamilyPath(%q) = (%q, %v), want (%q, true)", family, got, ok, family)
+		}
+	}
+	for _, rejected := range []string{
+		"/v8/management/config/api-keys",
+		"/v8/management/config/api-keys/",
+		"/v8/management/config/api-keys/unknown",
+		"/v8/management/config/api-keys/Claude",
+		"/v8/management/config/api-keys/claude/",
+		"/v8/management/config/api-keys/claude/extra",
+		"/v8/management/config/access/api-keys",
+		"/v8/management/config",
+		"",
+	} {
+		if got, ok := IsCPAV8APIKeysFamilyPath(rejected); ok || got != "" {
+			t.Fatalf("IsCPAV8APIKeysFamilyPath(%q) = (%q, %v), want (\"\", false)", rejected, got, ok)
+		}
+	}
+}
+
 func TestIsCPAV8APIKeysConfigPath(t *testing.T) {
 	tests := []struct {
 		path string
 		want bool
 	}{
 		{path: "/v8/management/config/api-keys", want: true},
-		{path: "/v8/management/config/api-keys/", want: true},
+		{path: "/v8/management/config/api-keys/gemini", want: true},
+		{path: "/v8/management/config/api-keys/interactions", want: true},
+		{path: "/v8/management/config/api-keys/vertex", want: true},
+		{path: "/v8/management/config/api-keys/codex", want: true},
 		{path: "/v8/management/config/api-keys/claude", want: true},
+		{path: "/v8/management/config/api-keys/xai", want: true},
+		{path: "/v8/management/config/api-keys/meta", want: true},
 		{path: "/v8/management/config/api-keys/openai-compatibility", want: true},
+		{path: "/v8/management/config/api-keys/", want: false},
+		{path: "/v8/management/config/api-keys/claude/", want: false},
+		{path: "/v8/management/config/api-keys/claude/extra", want: false},
+		{path: "/v8/management/config/api-keys/unknown", want: false},
 		{path: "/v8/management/config/api-keys-x", want: false},
 		{path: "/v8/management/config/api-key", want: false},
 		{path: "/v8/management/config", want: false},
@@ -83,13 +125,17 @@ func TestV8APIKeysConfigRequestPredicates(t *testing.T) {
 		refused   bool
 	}{
 		{target: "/v8/management/config/api-keys", canonical: true},
-		{target: "/v8/management/config/api-keys/", canonical: true},
 		{target: "/v8/management/config/api-keys/claude?format=json", canonical: true},
-		// Canonical paths outside the subtree are not dirty: the router's ordinary
-		// 404 answers them, not the pre-mux guard.
+		{target: "/v8/management/config/api-keys/openai-compatibility", canonical: true},
+		{target: "/v8/management/config/api-keys/", refused: true},
+		{target: "/v8/management/config/api-keys/claude/", refused: true},
+		// Canonical URL syntax outside the whitelisted endpoints: the router's
+		// ordinary 404 answers them, not the pre-mux dirty-path guard.
+		{target: "/v8/management/config/api-keys/unknown"},
+		{target: "/v8/management/config/api-keys/access"},
+		{target: "/v8/management/config/api-keys/claude/extra"},
 		{target: "/v8/management/config/api-keys-x"},
 		{target: "/v8/management/config/access/api-keys"},
-		{target: "/v8/management/config/api-keys//claude", refused: true},
 		{target: "/v8/management/config/api-keys/./claude", refused: true},
 		{target: "/v8/management/config/api-keys/../credentials", refused: true},
 		{target: "/v8//management/config/api-keys", refused: true},
@@ -112,15 +158,36 @@ func TestV8APIKeysConfigRequestPredicates(t *testing.T) {
 	}
 }
 
-// TestProxyV8APIKeysConfigForwardsOnlyAdminReads pins both halves of the
-// contract: one admitted GET reaches CPA with the saved management key and an
-// untouched path/query, and every other request shape is refused locally.
-func TestProxyV8APIKeysConfigForwardsOnlyAdminReads(t *testing.T) {
+// TestProxyV8APIKeysConfigForwardsOnlyWhitelistedReadsAndFamilyPuts pins the
+// method, family allowlist, and ETag/If-Match pass-through invariants.
+func TestProxyV8APIKeysConfigForwardsOnlyWhitelistedReadsAndFamilyPuts(t *testing.T) {
 	const savedKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	currentETag := `"etag-v1"`
+	var lastPutBody string
+	var lastIfMatch string
+	var seenAcceptEncodings []string
 	fixture := newPluginProxyFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		seenAcceptEncodings = append(seenAcceptEncodings, r.Header.Get("Accept-Encoding"))
 		if strings.Contains(r.URL.Path, "..") {
 			t.Errorf("upstream received a dot-segment path: %q", r.URL.Path)
 		}
+		if r.Method == http.MethodPut {
+			raw, _ := io.ReadAll(r.Body)
+			lastPutBody = string(raw)
+			lastIfMatch = r.Header.Get("If-Match")
+			if lastIfMatch != "" && lastIfMatch != currentETag {
+				w.Header().Set("ETag", currentETag)
+				w.WriteHeader(http.StatusPreconditionFailed)
+				_, _ = w.Write([]byte(`{"error":"precondition_failed"}`))
+				return
+			}
+			currentETag = `"etag-v2"`
+			w.Header().Set("ETag", currentETag)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+			return
+		}
+		w.Header().Set("ETag", currentETag)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`[{"name":"claude-1"}]`))
 	})
@@ -128,6 +195,21 @@ func TestProxyV8APIKeysConfigForwardsOnlyAdminReads(t *testing.T) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 
+	rootReq := httptest.NewRequest(http.MethodGet, "/v8/management/config/api-keys", nil)
+	rootReq.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	rootRecorder := httptest.NewRecorder()
+	fixture.service.ProxyV8APIKeysConfig(
+		rootRecorder,
+		rootReq,
+		writeProxyError,
+		methodNotAllowed,
+	)
+	if rootRecorder.Code != http.StatusOK || rootRecorder.Header().Get("ETag") != `"etag-v1"` {
+		t.Fatalf("root GET status=%d etag=%q body=%q", rootRecorder.Code, rootRecorder.Header().Get("ETag"), rootRecorder.Body.String())
+	}
+	if len(seenAcceptEncodings) != 1 || seenAcceptEncodings[0] != "identity" {
+		t.Fatalf("root GET upstream Accept-Encoding = %#v, want [\"identity\"]", seenAcceptEncodings)
+	}
 	recorder := httptest.NewRecorder()
 	fixture.service.ProxyV8APIKeysConfig(
 		recorder,
@@ -135,14 +217,49 @@ func TestProxyV8APIKeysConfigForwardsOnlyAdminReads(t *testing.T) {
 		writeProxyError,
 		methodNotAllowed,
 	)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d body=%q", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusOK || recorder.Header().Get("ETag") != `"etag-v1"` {
+		t.Fatalf("family GET status=%d etag=%q body=%q", recorder.Code, recorder.Header().Get("ETag"), recorder.Body.String())
 	}
-	if len(*fixture.upstreamPaths) != 1 || (*fixture.upstreamPaths)[0] != "/v8/management/config/api-keys/claude" {
+	if len(*fixture.upstreamPaths) != 2 || (*fixture.upstreamPaths)[1] != "/v8/management/config/api-keys/claude" {
 		t.Fatalf("upstream paths = %#v", *fixture.upstreamPaths)
 	}
-	if got := (*fixture.upstreamAuthorizations)[0]; got != "Bearer "+savedKey {
+	if got := (*fixture.upstreamAuthorizations)[1]; got != "Bearer "+savedKey {
 		t.Fatalf("upstream authorization = %q, want the saved management key", got)
+	}
+
+	stalePut := httptest.NewRequest(http.MethodPut, "/v8/management/config/api-keys/claude", strings.NewReader(`[{"name":"claude-stale"}]`))
+	stalePut.Header.Set("If-Match", `"stale-etag"`)
+	staleRec := httptest.NewRecorder()
+	fixture.service.ProxyV8APIKeysConfig(staleRec, stalePut, writeProxyError, methodNotAllowed)
+	if staleRec.Code != http.StatusPreconditionFailed || staleRec.Header().Get("ETag") != `"etag-v1"` {
+		t.Fatalf("stale PUT status=%d etag=%q body=%q", staleRec.Code, staleRec.Header().Get("ETag"), staleRec.Body.String())
+	}
+
+	putPayload := `[{"name":"claude-primary","api-key":"sk-ant-1"}]`
+	putReq := httptest.NewRequest(http.MethodPut, "/v8/management/config/api-keys/claude", strings.NewReader(putPayload))
+	putReq.Header.Set("Accept-Encoding", "gzip, br")
+	putReq.Header.Set("If-Match", `"etag-v1"`)
+	putRec := httptest.NewRecorder()
+	fixture.service.ProxyV8APIKeysConfig(putRec, putReq, writeProxyError, methodNotAllowed)
+	if putRec.Code != http.StatusOK || putRec.Header().Get("ETag") != `"etag-v2"` {
+		t.Fatalf("family PUT status=%d etag=%q body=%q", putRec.Code, putRec.Header().Get("ETag"), putRec.Body.String())
+	}
+	if lastIfMatch != `"etag-v1"` || lastPutBody != putPayload {
+		t.Fatalf("forwarded PUT If-Match=%q body=%q", lastIfMatch, lastPutBody)
+	}
+	for idx, enc := range seenAcceptEncodings {
+		if enc != "identity" {
+			t.Fatalf("upstream call %d Accept-Encoding = %q, want \"identity\"", idx, enc)
+		}
+	}
+
+	for _, family := range []string{"gemini", "interactions", "vertex", "codex", "xai", "meta", "openai-compatibility"} {
+		famReq := httptest.NewRequest(http.MethodPut, "/v8/management/config/api-keys/"+family, strings.NewReader(`[]`))
+		famRec := httptest.NewRecorder()
+		fixture.service.ProxyV8APIKeysConfig(famRec, famReq, writeProxyError, methodNotAllowed)
+		if famRec.Code != http.StatusOK {
+			t.Fatalf("PUT %s status = %d body=%q", family, famRec.Code, famRec.Body.String())
+		}
 	}
 
 	for _, test := range []struct {
@@ -151,12 +268,23 @@ func TestProxyV8APIKeysConfigForwardsOnlyAdminReads(t *testing.T) {
 		target string
 		want   int
 	}{
-		{name: "post", method: http.MethodPost, target: "/v8/management/config/api-keys", want: http.StatusMethodNotAllowed},
-		{name: "put", method: http.MethodPut, target: "/v8/management/config/api-keys/claude", want: http.StatusMethodNotAllowed},
-		{name: "patch", method: http.MethodPatch, target: "/v8/management/config/api-keys", want: http.StatusMethodNotAllowed},
-		{name: "delete", method: http.MethodDelete, target: "/v8/management/config/api-keys", want: http.StatusMethodNotAllowed},
-		{name: "head", method: http.MethodHead, target: "/v8/management/config/api-keys", want: http.StatusMethodNotAllowed},
-		{name: "options", method: http.MethodOptions, target: "/v8/management/config/api-keys", want: http.StatusMethodNotAllowed},
+		{name: "root put", method: http.MethodPut, target: "/v8/management/config/api-keys", want: http.StatusMethodNotAllowed},
+		{name: "root post", method: http.MethodPost, target: "/v8/management/config/api-keys", want: http.StatusMethodNotAllowed},
+		{name: "root patch", method: http.MethodPatch, target: "/v8/management/config/api-keys", want: http.StatusMethodNotAllowed},
+		{name: "root delete", method: http.MethodDelete, target: "/v8/management/config/api-keys", want: http.StatusMethodNotAllowed},
+		{name: "root head", method: http.MethodHead, target: "/v8/management/config/api-keys", want: http.StatusMethodNotAllowed},
+		{name: "root options", method: http.MethodOptions, target: "/v8/management/config/api-keys", want: http.StatusMethodNotAllowed},
+		{name: "family post", method: http.MethodPost, target: "/v8/management/config/api-keys/claude", want: http.StatusMethodNotAllowed},
+		{name: "family patch", method: http.MethodPatch, target: "/v8/management/config/api-keys/claude", want: http.StatusMethodNotAllowed},
+		{name: "family delete", method: http.MethodDelete, target: "/v8/management/config/api-keys/claude", want: http.StatusMethodNotAllowed},
+		{name: "family head", method: http.MethodHead, target: "/v8/management/config/api-keys/claude", want: http.StatusMethodNotAllowed},
+		{name: "family options", method: http.MethodOptions, target: "/v8/management/config/api-keys/claude", want: http.StatusMethodNotAllowed},
+		{name: "unknown family get", method: http.MethodGet, target: "/v8/management/config/api-keys/unknown", want: http.StatusNotFound},
+		{name: "unknown family put", method: http.MethodPut, target: "/v8/management/config/api-keys/unknown", want: http.StatusNotFound},
+		{name: "nested family subpath", method: http.MethodGet, target: "/v8/management/config/api-keys/claude/extra", want: http.StatusNotFound},
+		{name: "nested family subpath put", method: http.MethodPut, target: "/v8/management/config/api-keys/claude/extra", want: http.StatusNotFound},
+		{name: "trailing slash root", method: http.MethodGet, target: "/v8/management/config/api-keys/", want: http.StatusNotFound},
+		{name: "trailing slash family", method: http.MethodPut, target: "/v8/management/config/api-keys/claude/", want: http.StatusNotFound},
 		{name: "config root", method: http.MethodGet, target: "/v8/management/config", want: http.StatusNotFound},
 		{name: "client keys", method: http.MethodGet, target: "/v8/management/config/access/api-keys", want: http.StatusNotFound},
 		{name: "sibling", method: http.MethodGet, target: "/v8/management/config/api-keys-x", want: http.StatusNotFound},
@@ -215,6 +343,7 @@ func TestV8ModelsRefreshPathAndPredicates(t *testing.T) {
 		refused   bool
 	}{
 		{target: "/v8/management/models/refresh", canonical: true},
+		{target: "/v8/management/models/refresh/", refused: true},
 		{target: "/v8/management/models/refresh/extra"},
 		{target: "/v8/management/models/refresh-x"},
 		{target: "/v8/management/models"},
@@ -671,5 +800,37 @@ func TestProxyV8CredentialsForwardsOnlyCanonicalAdminGets(t *testing.T) {
 	)
 	if unconfiguredRR.Code != http.StatusPreconditionRequired {
 		t.Fatalf("unconfigured status = %d, want %d", unconfiguredRR.Code, http.StatusPreconditionRequired)
+	}
+}
+
+func TestIsUnexposedCPAV8ManagementSubtreePath(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{path: "/v8/management/config/api-keys/access", want: true},
+		{path: "/v8/management/config/api-keys/unknown", want: true},
+		{path: "/v8/management/config/api-keys/claude/0", want: true},
+		{path: "/v8/management/config/api-keys/", want: true},
+		{path: "/v8/management/config/api-keys/claude/", want: true},
+		{path: "/v8/management/models/refresh/", want: true},
+		{path: "/v8/management/models/refresh/extra", want: true},
+		{path: "/v8/management/credentials/", want: true},
+		{path: "/v8/management/credentials/verify", want: true},
+		{path: "/v8/management/oauth/", want: true},
+		{path: "/v8/management/oauth/unknown", want: true},
+		{path: "/v8/management/oauth/status/", want: true},
+		{path: "/v8/management/config/api-keys", want: false},
+		{path: "/v8/management/config/api-keys/claude", want: false},
+		{path: "/v8/management/config/api-keys/openai-compatibility", want: false},
+		{path: "/v8/management/models/refresh", want: false},
+		{path: "/v8/management/credentials", want: false},
+		{path: "/v8/management/oauth/status", want: false},
+		{path: "/v8/management/config/access/api-keys", want: false},
+		{path: "/v0/management/config", want: false},
+	} {
+		if got := IsUnexposedCPAV8ManagementSubtreePath(tc.path); got != tc.want {
+			t.Fatalf("IsUnexposedCPAV8ManagementSubtreePath(%q) = %v, want %v", tc.path, got, tc.want)
+		}
 	}
 }

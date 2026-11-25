@@ -33,4 +33,6 @@ export type ApiError = Error & {
   code?: string;
   details?: unknown;
   data?: unknown;
+  headers?: Record<string, unknown>;
+  etag?: string;
 };

@@ -367,6 +367,14 @@ const en = {
   paginationJumpPrefix: 'Go to',
   paginationJumpLabel: 'Jump to page',
   paginationJumpSuffix: 'page',
+  modelsColumn: 'Models',
+  noModelsInWindow: 'No models yet',
+  noUsageInWindow: 'No requests',
+  workspaceOriginInline: 'Console',
+  installerOriginInline: 'Installer',
+  adoptedOriginInline: 'Adopted',
+  callsUnit: 'calls',
+  recentRequestsHint: 'Last 10 requests (oldest to newest)',
 };
 const zh: typeof en = {
   installerOrigin: '安装生成的密钥',
@@ -715,6 +723,14 @@ const zh: typeof en = {
   paginationJumpPrefix: '前往',
   paginationJumpLabel: '跳转到页码',
   paginationJumpSuffix: '页',
+  modelsColumn: '常用模型',
+  noModelsInWindow: '暂无模型',
+  noUsageInWindow: '暂无调用',
+  workspaceOriginInline: '控制台',
+  installerOriginInline: '安装器',
+  adoptedOriginInline: '接管',
+  callsUnit: '次',
+  recentRequestsHint: '最近 10 次请求（从左到右由旧到新）',
 };
 const tw: typeof en = {
   installerOrigin: '安裝產生的金鑰',
@@ -1063,6 +1079,14 @@ const tw: typeof en = {
   paginationJumpPrefix: '前往',
   paginationJumpLabel: '跳轉到頁碼',
   paginationJumpSuffix: '頁',
+  modelsColumn: '常用模型',
+  noModelsInWindow: '暫無模型',
+  noUsageInWindow: '暫無呼叫',
+  workspaceOriginInline: '控制台',
+  installerOriginInline: '安裝器',
+  adoptedOriginInline: '接管',
+  callsUnit: '次',
+  recentRequestsHint: '最近 10 次請求（從左到右由舊到新）',
 };
 const ru: typeof en = {
   installerOrigin: 'Ключ установки',
@@ -1427,6 +1451,14 @@ const ru: typeof en = {
   paginationJumpPrefix: 'К',
   paginationJumpLabel: 'Перейти к странице',
   paginationJumpSuffix: 'стр.',
+  modelsColumn: 'Модели',
+  noModelsInWindow: 'Нет моделей',
+  noUsageInWindow: 'Нет запросов',
+  workspaceOriginInline: 'Консоль',
+  installerOriginInline: 'Установка',
+  adoptedOriginInline: 'Принятый',
+  callsUnit: 'выз.',
+  recentRequestsHint: 'Последние 10 запросов (слева направо)',
 };
 export function keyWorkspaceText(key: keyof typeof en, languageOverride?: string) {
   const language = languageOverride || fullWebLanguage();

@@ -619,13 +619,19 @@ describe('ServerCodexInspectionPage lifecycle controls', () => {
       .findAllByType('button')
       .find((button) => textContent(button) === 'monitoring.codex_inspection_config_overview_edit');
     expect(editButton).toBeDefined();
-    act(() => editButton!.props.onClick());
+    await act(async () => {
+      editButton!.props.onClick();
+      await flush();
+    });
     const intervalInput = renderer!.root.findByProps({ id: 'intervalMinutes' });
     act(() => intervalInput.props.onChange({ target: { value: '61' } }));
     const closeButton = renderer!.root.findByProps({
       'aria-label': 'common.close',
     });
-    act(() => closeButton.props.onClick());
+    await act(async () => {
+      closeButton.props.onClick();
+      await flush();
+    });
     expect(staleConfirm).not.toBeNull();
 
     mocks.featureAvailability = {
@@ -645,7 +651,10 @@ describe('ServerCodexInspectionPage lifecycle controls', () => {
     const newEditButton = renderer!.root
       .findAllByType('button')
       .find((button) => textContent(button) === 'monitoring.codex_inspection_config_overview_edit');
-    act(() => newEditButton!.props.onClick());
+    await act(async () => {
+      newEditButton!.props.onClick();
+      await flush();
+    });
     expect(renderer!.root.findByProps({ id: 'intervalMinutes' }).props.value).toBe('120');
 
     act(() => staleConfirm?.());

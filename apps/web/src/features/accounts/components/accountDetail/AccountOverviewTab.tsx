@@ -6,7 +6,12 @@ import {
   IconShield,
   IconTriangleAlert,
 } from '@/components/ui/icons';
-import { ProviderStatusBar } from '@/components/providers/ProviderStatusBar';
+import {
+  DrawerEmptyBox,
+  DrawerScopePill,
+  DrawerSectionCard,
+} from '@/components/common/WorkspaceDrawer';
+import { DrawerRecentStatusCard } from '@/components/common/WorkspaceDrawer/DrawerRecentStatusCard';
 import type {
   AccountDetailField,
   AccountDetailOverviewTargetTab,
@@ -27,7 +32,7 @@ import {
   type MetricSummaryCardTone,
 } from '@/components/common/MetricSummaryCard';
 import { statusBarDataFromRecentRequests } from '@/utils/recentRequests';
-import { AccountDetailFieldValue } from './AccountDetailFieldList';
+import { AccountDetailFieldList, AccountDetailFieldValue } from './AccountDetailFieldList';
 import styles from '@/features/accounts/AccountsPage.module.scss';
 
 interface AccountOverviewTabProps {
@@ -36,22 +41,6 @@ interface AccountOverviewTabProps {
   onSelectTab: (tab: AccountDetailOverviewTargetTab) => void;
 }
 
-function OverviewFieldGrid({ fields }: { fields: AccountDetailField[] }) {
-  const { t } = useTranslation();
-  if (fields.length === 0) return null;
-  return (
-    <dl className={styles.overviewFieldGrid}>
-      {fields.map((field) => (
-        <div key={field.key}>
-          <dt>{t(field.labelKey, { defaultValue: field.labelKey })}</dt>
-          <dd>
-            <AccountDetailFieldValue field={field} />
-          </dd>
-        </div>
-      ))}
-    </dl>
-  );
-}
 
 type ActivityCardPresentation = Pick<MetricSummaryCardProps, 'accent' | 'icon' | 'variant'>;
 
@@ -139,25 +128,25 @@ export function AccountOverviewTab({ detailView, getHealthStatusClass }: Account
 
   return (
     <div className={styles.overviewStack}>
-      <section
-        className={styles.overviewDecisionCard}
-        data-overview-section="decision"
-        data-overview-health={decision.status}
-      >
-        <div className={styles.overviewCardHeader}>
-          <div className={styles.overviewSectionHeading}>
-            <span className={styles.overviewSectionIcon} aria-hidden="true">
-              <IconShield size={19} />
-            </span>
-            <h3>{t('accounts.detail_overview_decision_title')}</h3>
-          </div>
+      <DrawerSectionCard
+        as="section"
+        icon={<IconShield size={15} />}
+        title={t('accounts.detail_overview_decision_title')}
+        headingLevel="h3"
+        metaActions={
           <span
             className={`${styles.badge} ${getHealthStatusClass(decision.status)}`}
             title={t(detailView.health.tooltipKey, healthTooltipParams)}
           >
             {t(decision.labelKey)}
           </span>
-        </div>
+        }
+        className={styles.overviewDecisionCard}
+        dataAttributes={{
+          'data-overview-section': 'decision',
+          'data-overview-health': decision.status,
+        }}
+      >
         <p className={styles.overviewDecisionReason}>
           {t(decision.reasonKey, decision.reasonParams)}
         </p>
@@ -184,83 +173,47 @@ export function AccountOverviewTab({ detailView, getHealthStatusClass }: Account
             </strong>
           </div>
         </div>
-      </section>
+      </DrawerSectionCard>
 
-      <section
-        className={styles.overviewRecentStatusCard}
-        data-overview-section="recent-status"
-        data-overview-recent-status-empty={!hasRecentRequests}
-      >
-        <div className={styles.overviewCardHeader}>
-          <div className={styles.overviewSectionHeading}>
-            <span className={styles.overviewSectionIcon} aria-hidden="true">
-              <IconChartLine size={18} />
-            </span>
-            <h3>{t('accounts.detail_overview_recent_status_title')}</h3>
-          </div>
-          <span className={styles.overviewScopePill}>
-            {t('accounts.detail_overview_recent_status_scope')}
-          </span>
-        </div>
-
-        <div className={styles.overviewRecentStatusLayout}>
-          <div className={styles.overviewRecentStatusStats}>
-            <div
-              className={`${styles.overviewRecentStatusMetric} ${styles.overviewRecentStatusMetricSuccess}`}
-            >
-              <span>{t('accounts.detail_overview_recent_status_success')}</span>
-              <strong>{recentStatusData.totalSuccess}</strong>
-            </div>
-            <div
-              className={`${styles.overviewRecentStatusMetric} ${styles.overviewRecentStatusMetricFailure}`}
-            >
-              <span>{t('accounts.detail_overview_recent_status_failure')}</span>
-              <strong>{recentStatusData.totalFailure}</strong>
-            </div>
-          </div>
-
-          <div
-            className={styles.overviewRecentStatusTimeline}
-            data-overview-recent-status-bar="true"
-          >
-            <div className={styles.overviewRecentStatusTimelineHeader}>
-              <span>{t('accounts.detail_overview_recent_status_timeline')}</span>
-              <span>{t('accounts.detail_overview_recent_status_timeline_hint')}</span>
-            </div>
-            <ProviderStatusBar statusData={recentStatusData} styles={styles} />
-          </div>
-        </div>
-
-        {!hasRecentRequests ? (
-          <div
-            className={styles.overviewEmptyState}
-            data-overview-recent-status-empty-message="true"
-          >
-            {t('accounts.detail_overview_recent_status_empty')}
-          </div>
-        ) : null}
-
-        {hasStatusMessage ? (
-          <div
-            className={styles.overviewRecentStatusMessage}
-            data-overview-recent-status-message="true"
-          >
-            <span>{t('accounts.detail_overview_recent_status_message')}</span>
-            <p>{recentStatus.statusMessage}</p>
-          </div>
-        ) : null}
-      </section>
+      <DrawerRecentStatusCard
+        title={t('accounts.detail_overview_recent_status_title')}
+        headingLevel="h3"
+        scopeLabel={t('accounts.detail_overview_recent_status_scope')}
+        statusData={recentStatusData}
+        statusBarStyles={styles}
+        successLabel={t('accounts.detail_overview_recent_status_success')}
+        failureLabel={t('accounts.detail_overview_recent_status_failure')}
+        timelineLabel={t('accounts.detail_overview_recent_status_timeline')}
+        timelineHint={t('accounts.detail_overview_recent_status_timeline_hint')}
+        emptyMessage={t('accounts.detail_overview_recent_status_empty')}
+        failureBannerTitle={
+          hasStatusMessage ? t('accounts.detail_overview_recent_status_message') : undefined
+        }
+        failureBannerMessage={hasStatusMessage ? recentStatus.statusMessage : undefined}
+        dataAttributes={{
+          'data-overview-section': 'recent-status',
+          'data-overview-recent-status-empty': !hasRecentRequests,
+        }}
+        timelineDataAttributes={{
+          'data-overview-recent-status-bar': 'true',
+        }}
+        emptyDataAttributes={{
+          'data-overview-recent-status-empty-message': 'true',
+        }}
+        messageDataAttributes={{
+          'data-overview-recent-status-message': 'true',
+        }}
+      />
 
       <div className={styles.overviewCardGrid}>
-        <section className={styles.overviewCard} data-overview-section="capacity">
-          <div className={styles.overviewCardHeader}>
-            <div className={styles.overviewSectionHeading}>
-              <span className={styles.overviewSectionIcon} aria-hidden="true">
-                <IconDatabaseZap size={18} />
-              </span>
-              <h3>{t('accounts.detail_overview_capacity_title')}</h3>
-            </div>
-          </div>
+        <DrawerSectionCard
+          variant="default"
+          icon={<IconDatabaseZap size={15} />}
+          title={t('accounts.detail_overview_capacity_title')}
+          headingLevel="h3"
+          metaActions={<DrawerScopePill>{t(capacity.statusLabelKey)}</DrawerScopePill>}
+          dataAttributes={{ 'data-overview-section': 'capacity' }}
+        >
           <div className={styles.overviewPrimaryRow}>
             <strong className={styles.overviewPrimaryValue}>
               {capacity.kind === 'group_availability'
@@ -272,49 +225,43 @@ export function AccountOverviewTab({ detailView, getHealthStatusClass }: Account
                   ? t('accounts.detail_overview_capacity_missing')
                   : formatPercent(capacity.remainingPercent)}
             </strong>
-            <span className={styles.overviewStatusPill}>{t(capacity.statusLabelKey)}</span>
           </div>
           <p className={styles.overviewCardDescription}>{t(capacity.descriptionKey)}</p>
-          <OverviewFieldGrid fields={capacity.fields} />
-        </section>
+          {capacity.fields.length > 0 ? <AccountDetailFieldList fields={capacity.fields} /> : null}
+        </DrawerSectionCard>
 
-        <section className={styles.overviewCard} data-overview-section="credential">
-          <div className={styles.overviewCardHeader}>
-            <div className={styles.overviewSectionHeading}>
-              <span className={styles.overviewSectionIcon} aria-hidden="true">
-                <IconKey size={18} />
-              </span>
-              <h3>{t('accounts.detail_overview_credential_title')}</h3>
-            </div>
-          </div>
+        <DrawerSectionCard
+          variant="default"
+          icon={<IconKey size={15} />}
+          title={t('accounts.detail_overview_credential_title')}
+          headingLevel="h3"
+          metaActions={<DrawerScopePill>{t(credential.sourceLabelKey)}</DrawerScopePill>}
+          dataAttributes={{ 'data-overview-section': 'credential' }}
+        >
           <div className={styles.overviewCredentialState}>
             <strong>{t(credential.statusLabelKey)}</strong>
-            <span>{t(credential.sourceLabelKey)}</span>
           </div>
-          <OverviewFieldGrid fields={credential.fields} />
-        </section>
+          {credential.fields.length > 0 ? (
+            <AccountDetailFieldList fields={credential.fields} />
+          ) : null}
+        </DrawerSectionCard>
       </div>
 
-      <section
-        className={styles.overviewActivityCard}
-        data-overview-section="activity"
-        data-overview-activity-scope={activity.scope}
-      >
-        <div className={styles.overviewCardHeader}>
-          <div className={styles.overviewSectionHeading}>
-            <span className={styles.overviewSectionIcon} aria-hidden="true">
-              <IconChartLine size={18} />
-            </span>
-            <h3>{t('accounts.detail_overview_activity_title')}</h3>
-          </div>
-          <span
-            className={`${styles.overviewScopePill} ${
-              activity.scope === 'recent_snapshot' ? styles.overviewScopePillFallback : ''
-            }`}
-          >
+      <DrawerSectionCard
+        variant="highlight"
+        icon={<IconChartLine size={18} />}
+        title={t('accounts.detail_overview_activity_title')}
+        headingLevel="h3"
+        metaActions={
+          <DrawerScopePill fallback={activity.scope === 'recent_snapshot'}>
             {activityScopeLabel}
-          </span>
-        </div>
+          </DrawerScopePill>
+        }
+        dataAttributes={{
+          'data-overview-section': 'activity',
+          'data-overview-activity-scope': activity.scope,
+        }}
+      >
         {activity.hasActivity ? (
           <MetricSummaryGrid
             cards={activityCards}
@@ -322,9 +269,9 @@ export function AccountOverviewTab({ detailView, getHealthStatusClass }: Account
             columns={Math.min(activityCards.length, 5)}
           />
         ) : (
-          <div className={styles.overviewEmptyState}>{t(activity.emptyStateKey)}</div>
+          <DrawerEmptyBox>{t(activity.emptyStateKey)}</DrawerEmptyBox>
         )}
-      </section>
+      </DrawerSectionCard>
 
       {attention ? (
         <section

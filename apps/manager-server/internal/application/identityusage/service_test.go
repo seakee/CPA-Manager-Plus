@@ -124,9 +124,16 @@ func healthy() *fakeRepo {
 		}},
 		collectingAt: 1,
 		projection:   ports.ProjectionState{Status: "ready", LastProcessedEventID: 4, TargetEventID: 4, LatestEventID: 4},
-		windows: map[identity.APIKeyID]ports.Window{testKeyID: {Totals: ports.Totals{
-			Calls: 3, Failure: 1, InputTokens: 30, OutputTokens: 15, TotalTokens: 45, LastUsedAtMS: &lastUsedAtMS,
-		}}},
+		windows: map[identity.APIKeyID]ports.Window{testKeyID: {
+			Totals: ports.Totals{
+				Calls: 3, Failure: 1, InputTokens: 30, OutputTokens: 15, TotalTokens: 45, LastUsedAtMS: &lastUsedAtMS,
+			},
+			TopModels:  []ports.ModelCount{{Model: "claude-sonnet-4-5", Calls: 3}},
+			ModelCount: 1,
+			RecentRequests: []ports.RecentRequest{
+				{TimestampMS: lastUsedAtMS, Failed: true, StatusCode: 429, Model: "claude-sonnet-4-5"},
+			},
+		}},
 	}
 }
 
@@ -385,7 +392,10 @@ func TestSummaryReportsPerKeyCoverageAndHidesUnprovenCalls(t *testing.T) {
 	if len(summary.Items) != 2 {
 		t.Fatalf("items = %+v", summary.Items)
 	}
-	if summary.Items[0].Calls != 3 || summary.Items[0].Coverage.State != "complete" ||
+	if summary.Items[0].Calls != 3 || summary.Items[0].Success != 2 || summary.Items[0].Failure != 1 ||
+		summary.Items[0].TotalTokens != 45 || summary.Items[0].ModelCount != 1 ||
+		len(summary.Items[0].TopModels) != 1 || len(summary.Items[0].RecentRequests) != 1 ||
+		summary.Items[0].Coverage.State != "complete" ||
 		summary.Items[0].LastUsedAtMS == nil || *summary.Items[0].LastUsedAtMS != testNowMS-1_000_000 {
 		t.Fatalf("first item = %+v", summary.Items[0])
 	}

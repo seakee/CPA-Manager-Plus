@@ -55,9 +55,12 @@ interface QuickStat {
 
 interface ProviderStats {
   gemini: number | null;
+  interactions: number | null;
   codex: number | null;
   xai: number | null;
   claude: number | null;
+  vertex: number | null;
+  meta: number | null;
   openai: number | null;
 }
 
@@ -127,9 +130,12 @@ function DashboardPageContent({
 
   const [providerStats, setProviderStats] = useState<ProviderStats>({
     gemini: null,
+    interactions: null,
     codex: null,
     xai: null,
     claude: null,
+    vertex: null,
+    meta: null,
     openai: null,
   });
 
@@ -247,23 +253,123 @@ function DashboardPageContent({
     fetchModelsFromStore,
   ]);
 
+  const loadPerFamilyProviderCounts = useCallback(async () => {
+    const [
+      geminiRes,
+      interactionsRes,
+      codexRes,
+      xaiRes,
+      claudeRes,
+      vertexRes,
+      metaRes,
+      openaiRes,
+    ] = await Promise.allSettled([
+      providersApi.getGeminiKeys(),
+      typeof providersApi.getInteractionsKeys === 'function'
+        ? providersApi.getInteractionsKeys()
+        : Promise.resolve([]),
+      providersApi.getCodexConfigs(),
+      providersApi.getXAIConfigs(),
+      providersApi.getClaudeConfigs(),
+      typeof providersApi.getVertexConfigs === 'function'
+        ? providersApi.getVertexConfigs()
+        : Promise.resolve([]),
+      typeof providersApi.getMetaConfigs === 'function'
+        ? providersApi.getMetaConfigs()
+        : Promise.resolve([]),
+      providersApi.getOpenAIProviders(),
+    ]);
+
+    const counts: ProviderStats = {
+      gemini: resolveProviderCount(geminiRes),
+      interactions: resolveProviderCount(interactionsRes, { unsupportedAsZero: true }),
+      codex: resolveProviderCount(codexRes),
+      xai: resolveProviderCount(xaiRes, { unsupportedAsZero: true }),
+      claude: resolveProviderCount(claudeRes),
+      vertex: resolveProviderCount(vertexRes, { unsupportedAsZero: true }),
+      meta: resolveProviderCount(metaRes, { unsupportedAsZero: true }),
+      openai: resolveProviderCount(openaiRes),
+    };
+
+    const hasError = [
+      counts.gemini,
+      counts.interactions,
+      counts.codex,
+      counts.xai,
+      counts.claude,
+      counts.vertex,
+      counts.meta,
+      counts.openai,
+    ].some((count) => count === null);
+
+    return { counts, hasError };
+  }, []);
+
   const refreshStats = useCallback(async () => {
     const requestId = ++statsRequestId.current;
     if (connectionStatus === 'connected') {
       setLoading(true);
       try {
-        const [keysRes, filesRes, geminiRes, codexRes, xaiRes, claudeRes, openaiRes] =
-          await Promise.allSettled([
+        let keysRes: PromiseSettledResult<string[]>;
+        let filesRes: PromiseSettledResult<{ files: AuthFileItem[] }>;
+        let nextProviderStats: ProviderStats;
+        let providerFetchFailed = false;
+
+        if (typeof providersApi.loadAllProvidersV8Snapshot === 'function') {
+          const [keysResult, filesResult, snapshotResult] = await Promise.allSettled([
             apiKeysApi.list(),
             authFilesApi.list(),
-            providersApi.getGeminiKeys(),
-            providersApi.getCodexConfigs(),
-            providersApi.getXAIConfigs(),
-            providersApi.getClaudeConfigs(),
-            providersApi.getOpenAIProviders(),
+            providersApi.loadAllProvidersV8Snapshot(),
           ]);
+          if (requestId !== statsRequestId.current) return;
+          keysRes = keysResult;
+          filesRes = filesResult;
 
-        if (requestId !== statsRequestId.current) return;
+          if (snapshotResult.status === 'fulfilled') {
+            const snapshot = snapshotResult.value;
+            nextProviderStats = {
+              gemini: snapshot.gemini.length,
+              interactions: snapshot.interactions.length,
+              codex: snapshot.codex.length,
+              xai: snapshot.xai.length,
+              claude: snapshot.claude.length,
+              vertex: snapshot.vertex.length,
+              meta: snapshot.meta?.length ?? 0,
+              openai: snapshot.openai.length,
+            };
+          } else {
+            const fallback = await loadPerFamilyProviderCounts();
+            if (requestId !== statsRequestId.current) return;
+            nextProviderStats = fallback.counts;
+            providerFetchFailed = fallback.hasError;
+          }
+        } else {
+          const [keysResult, filesResult, fallbackResult] = await Promise.allSettled([
+            apiKeysApi.list(),
+            authFilesApi.list(),
+            loadPerFamilyProviderCounts(),
+          ]);
+          if (requestId !== statsRequestId.current) return;
+          keysRes = keysResult;
+          filesRes = filesResult;
+          if (fallbackResult.status === 'fulfilled') {
+            nextProviderStats = fallbackResult.value.counts;
+            providerFetchFailed = fallbackResult.value.hasError;
+          } else {
+            nextProviderStats = {
+              gemini: null,
+              interactions: null,
+              codex: null,
+              xai: null,
+              claude: null,
+              vertex: null,
+              meta: null,
+              openai: null,
+            };
+            providerFetchFailed = true;
+          }
+        }
+
         setStats((current) => ({
           apiKeys: keysRes.status === 'fulfilled' ? keysRes.value.length : current.apiKeys,
           authFiles:
@@ -271,16 +377,17 @@ function DashboardPageContent({
         }));
 
         setProviderStats((current) => ({
-          gemini: resolveProviderCount(geminiRes) ?? current.gemini,
-          codex: resolveProviderCount(codexRes) ?? current.codex,
-          xai: resolveProviderCount(xaiRes, { unsupportedAsZero: true }) ?? current.xai,
-          claude: resolveProviderCount(claudeRes) ?? current.claude,
-          openai: resolveProviderCount(openaiRes) ?? current.openai,
+          gemini: nextProviderStats.gemini ?? current.gemini,
+          interactions: nextProviderStats.interactions ?? current.interactions,
+          codex: nextProviderStats.codex ?? current.codex,
+          xai: nextProviderStats.xai ?? current.xai,
+          claude: nextProviderStats.claude ?? current.claude,
+          vertex: nextProviderStats.vertex ?? current.vertex,
+          meta: nextProviderStats.meta ?? current.meta,
+          openai: nextProviderStats.openai ?? current.openai,
         }));
         setStatsError(
-          [keysRes, filesRes, geminiRes, codexRes, xaiRes, claudeRes, openaiRes].some(
-            (result) => result.status === 'rejected'
-          )
+          keysRes.status === 'rejected' || filesRes.status === 'rejected' || providerFetchFailed
             ? t('notification.refresh_failed')
             : ''
         );
@@ -290,7 +397,7 @@ function DashboardPageContent({
     } else {
       setLoading(false);
     }
-  }, [connectionStatus, t]);
+  }, [connectionStatus, loadPerFamilyProviderCounts, t]);
 
   const usageEnabled = usageSummary.enabled;
   const usageServiceBase = usageSummary.serviceBase;
@@ -304,9 +411,11 @@ function DashboardPageContent({
     () =>
       buildSourceInfoMap({
         geminiApiKeys: config?.geminiApiKeys || [],
+        interactionsApiKeys: config?.interactionsApiKeys || [],
         claudeApiKeys: config?.claudeApiKeys || [],
         codexApiKeys: config?.codexApiKeys || [],
         xaiApiKeys: config?.xaiApiKeys || [],
+        metaApiKeys: config?.metaApiKeys || [],
         vertexApiKeys: config?.vertexApiKeys || [],
         openaiCompatibility: config?.openaiCompatibility || [],
       }),
@@ -448,30 +557,42 @@ function DashboardPageContent({
   // Calculate total provider keys only when all provider stats are available.
   const providerStatsReady =
     providerStats.gemini !== null &&
+    providerStats.interactions !== null &&
     providerStats.codex !== null &&
     providerStats.xai !== null &&
     providerStats.claude !== null &&
+    providerStats.vertex !== null &&
+    providerStats.meta !== null &&
     providerStats.openai !== null;
   const hasProviderStats =
     providerStats.gemini !== null ||
+    providerStats.interactions !== null ||
     providerStats.codex !== null ||
     providerStats.xai !== null ||
     providerStats.claude !== null ||
+    providerStats.vertex !== null ||
+    providerStats.meta !== null ||
     providerStats.openai !== null;
   const totalProviderKeys = providerStatsReady
     ? (providerStats.gemini ?? 0) +
+      (providerStats.interactions ?? 0) +
       (providerStats.codex ?? 0) +
       (providerStats.xai ?? 0) +
       (providerStats.claude ?? 0) +
+      (providerStats.vertex ?? 0) +
+      (providerStats.meta ?? 0) +
       (providerStats.openai ?? 0)
     : 0;
 
   const providerSummaryParts = (
     [
       ['Gemini', providerStats.gemini],
+      ['Interactions', providerStats.interactions],
       ['Codex', providerStats.codex],
       ['xAI', providerStats.xai],
       ['Claude', providerStats.claude],
+      ['Vertex', providerStats.vertex],
+      ['Meta', providerStats.meta],
       ['OpenAI', providerStats.openai],
     ] as const
   ).filter(([, count]) => typeof count === 'number' && count > 0);

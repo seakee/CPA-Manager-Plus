@@ -820,3 +820,83 @@ func BenchmarkRecentAccountRequestsDenseCredential(b *testing.B) {
 		}
 	}
 }
+
+func TestRecentAccountRequestsSupportsAuthIndexProviderTargets(t *testing.T) {
+	for _, withIndexes := range []bool{true, false} {
+		label := "batched"
+		if withIndexes {
+			label = "indexed"
+		}
+		t.Run(label, func(t *testing.T) {
+			db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+			if err != nil {
+				t.Fatalf("open database: %v", err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			if !withIndexes {
+				if _, err := db.Exec(`drop index if exists idx_usage_events_latest_request_auth_file;
+					drop index if exists idx_usage_events_latest_request_source;`); err != nil {
+					t.Fatalf("drop latest-request indexes: %v", err)
+				}
+			}
+			repo := New(db)
+			ctx := context.Background()
+			baseMS := int64(1_700_500_000_000)
+
+			claudeOK := latestAccountRequestEvent("claude-ok", baseMS+1_000, "", "a26021ea73d8d103", "Claude Official")
+			claudeOK.AuthType = "api-key"
+			claudeOK.Provider = "claude"
+			claudeOK.AuthProviderSnapshot = "claude"
+
+			claudeFail := latestAccountRequestEvent("claude-fail", baseMS+2_000, "", "a26021ea73d8d103", "Claude Official")
+			claudeFail.AuthType = "api-key"
+			claudeFail.Provider = "claude"
+			claudeFail.AuthProviderSnapshot = "claude"
+			claudeFail.Failed = true
+			claudeFail.FailStatusCode = 429
+			claudeFail.HeaderErrorKind = "rate_limit"
+
+			xaiLegacyProvider := latestAccountRequestEvent("xai-ok", baseMS+3_000, "", "48B81DC22093C613", "xAI Pool")
+			xaiLegacyProvider.AuthType = "api-key"
+			xaiLegacyProvider.Provider = "grok"
+			xaiLegacyProvider.AuthProviderSnapshot = "x-ai"
+
+			otherProviderSameIdx := latestAccountRequestEvent("other-provider", baseMS+4_000, "", "a26021ea73d8d103", "Gemini")
+			otherProviderSameIdx.AuthType = "api-key"
+			otherProviderSameIdx.Provider = "gemini"
+			otherProviderSameIdx.AuthProviderSnapshot = "gemini"
+
+			fileBackedSameIdx := latestAccountRequestEvent("file-backed", baseMS+5_000, "oauth.json", "a26021ea73d8d103", "oauth.json")
+			fileBackedSameIdx.Provider = "claude"
+			fileBackedSameIdx.AuthProviderSnapshot = "claude"
+
+			if _, err := repo.InsertBatch(ctx, []usage.Event{
+				claudeOK,
+				claudeFail,
+				xaiLegacyProvider,
+				otherProviderSameIdx,
+				fileBackedSameIdx,
+			}); err != nil {
+				t.Fatalf("insert events: %v", err)
+			}
+
+			requests, err := repo.RecentAccountRequests(ctx, []LatestAccountRequestQuery{
+				{RequestIndex: 0, AuthIndex: "A26021EA73D8D103", Provider: "claude"},
+				{RequestIndex: 1, AuthIndex: "48b81dc22093c613", Provider: "xai"},
+			}, 10)
+			if err != nil {
+				t.Fatalf("recent account requests: %v", err)
+			}
+			byIndex := make(map[int][]LatestAccountRequest)
+			for _, req := range requests {
+				byIndex[req.RequestIndex] = append(byIndex[req.RequestIndex], req)
+			}
+			if len(byIndex[0]) != 2 || byIndex[0][0].TimestampMS != claudeFail.TimestampMS || !byIndex[0][0].Failed || byIndex[0][1].TimestampMS != claudeOK.TimestampMS {
+				t.Fatalf("claude requests = %#v", byIndex[0])
+			}
+			if len(byIndex[1]) != 1 || byIndex[1][0].TimestampMS != xaiLegacyProvider.TimestampMS {
+				t.Fatalf("xai requests = %#v", byIndex[1])
+			}
+		})
+	}
+}

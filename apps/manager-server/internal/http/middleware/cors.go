@@ -36,5 +36,6 @@ func WriteCORS(cfg config.Config, w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Vary", "Origin")
 	}
 	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Usage-Import-Prefix-SHA256")
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, If-Match, X-Usage-Import-Prefix-SHA256")
+	w.Header().Set("Access-Control-Expose-Headers", "ETag, X-CPA-Version, X-CPA-Commit, X-CPA-Build-Date, X-CPA-Support-Plugin, X-Server-Version, X-Server-Commit, X-Server-Build-Date")
 }

@@ -92,6 +92,15 @@
   padding: 0 16px 14px;
 }
 
+.controlToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 12px;
+  width: 100%;
+  min-width: 0;
+}
+
 .controlRow {
   display: flex;
   flex-wrap: wrap;
@@ -104,7 +113,9 @@
   position: relative;
   display: inline-flex;
   align-items: center;
-  min-width: 196px;
+  flex: 1 1 240px;
+  min-width: 180px;
+  max-width: 340px;
 }
 
 .searchIcon {
@@ -161,25 +172,27 @@
 
 .customDateField {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  gap: 5px;
 }
 
 .customDateLabel {
-  font-size: 12.5px;
   color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.35;
 }
 
 .customDateInput {
-  height: var(--control-height-sm);
-  min-height: var(--control-height-sm);
-  padding: 0 10px;
+  height: var(--control-height-md);
+  min-height: var(--control-height-md);
+  padding: 0 11px;
   border: 1px solid var(--app-input-border);
   border-radius: var(--app-radius-sm);
   background: var(--app-input-bg);
   color: var(--text-primary);
   font-size: 13px;
+  line-height: 1.4;
   font-family: inherit;
   transition: border-color 150ms ease, background-color 150ms ease;
 
@@ -387,7 +400,7 @@
 }
 
 .statusSelectWrap {
-  min-width: 176px;
+  min-width: 140px;
 }
 
 .tableWrap {
@@ -409,15 +422,25 @@
     font-size: 12.5px;
   }
 
+  th:first-child,
+  td:first-child {
+    padding-left: var(--list-panel-gutter-x, 16px);
+  }
+
+  th:last-child,
+  td:last-child {
+    padding-right: var(--list-panel-gutter-x, 16px);
+  }
+
   th {
-    padding: 10px 14px;
-    background: var(--surface-subtle);
+    padding-top: 10px;
+    padding-bottom: 10px;
+    background: transparent;
     color: var(--text-secondary);
-    font-size: 11.5px;
+    font-size: 12px;
     font-weight: 700;
     white-space: nowrap;
   }
-
   tbody tr:hover td {
     background: color-mix(in srgb, var(--surface-subtle) 48%, transparent);
   }

@@ -178,4 +178,196 @@ describe('ApiClient request scoping', () => {
       buildDate: null,
     });
   });
+
+  it('surfaces detailed response message when CPA returns machine error codes alongside message', async () => {
+    const currentConfig = applyRequestInterceptor({
+      url: '/config',
+      headers: {},
+    });
+
+    await expect(
+      applyResponseErrorInterceptor({
+        isAxiosError: true,
+        message: 'Request failed with status code 400',
+        config: currentConfig,
+        response: {
+          status: 400,
+          data: {
+            error: 'invalid_config',
+            message: 'yaml: unmarshal errors:\n  line 4: field priority not found in type config.ClaudeModel',
+          },
+        },
+      })
+    ).rejects.toMatchObject({
+      status: 400,
+      message: 'yaml: unmarshal errors:\n  line 4: field priority not found in type config.ClaudeModel',
+      details: {
+        error: 'invalid_config',
+        message: 'yaml: unmarshal errors:\n  line 4: field priority not found in type config.ClaudeModel',
+      },
+    });
+
+    await expect(
+      applyResponseErrorInterceptor({
+        isAxiosError: true,
+        message: 'Request failed with status code 400',
+        config: currentConfig,
+        response: {
+          status: 400,
+          data: {
+            error: 'Validation failed',
+            message: 'base-url is required',
+          },
+        },
+      })
+    ).rejects.toMatchObject({
+      status: 400,
+      message: 'Validation failed: base-url is required',
+    });
+  });
+
+  it('retains response headers and normalized etag on ApiError from Axios responses', async () => {
+    const currentConfig = applyRequestInterceptor({
+      url: '/config/api-keys/claude',
+      headers: {},
+    });
+    const responseHeaders = {
+      ETag: '  "sha256-etag-99"  ',
+      'content-type': 'application/json',
+    };
+
+    await expect(
+      applyResponseErrorInterceptor({
+        isAxiosError: true,
+        message: 'Request failed with status code 412',
+        config: currentConfig,
+        response: {
+          status: 412,
+          headers: responseHeaders,
+          data: { error: 'precondition_failed' },
+        },
+      })
+    ).rejects.toMatchObject({
+      name: 'ApiError',
+      status: 412,
+      etag: '"sha256-etag-99"',
+      headers: responseHeaders,
+    });
+  });
+
+  it('strips weak W/ and w/ ETag prefixes when populating ApiError.etag', async () => {
+    const currentConfig = applyRequestInterceptor({
+      url: '/config/api-keys/claude',
+      headers: {},
+    });
+
+    await expect(
+      applyResponseErrorInterceptor({
+        isAxiosError: true,
+        message: 'Request failed with status code 412',
+        config: currentConfig,
+        response: {
+          status: 412,
+          headers: { ETag: '  W/"sha256-weak-upper"  ' },
+          data: { error: 'precondition_failed' },
+        },
+      })
+    ).rejects.toMatchObject({
+      name: 'ApiError',
+      status: 412,
+      etag: '"sha256-weak-upper"',
+    });
+
+    await expect(
+      applyResponseErrorInterceptor({
+        isAxiosError: true,
+        message: 'Request failed with status code 412',
+        config: currentConfig,
+        response: {
+          status: 412,
+          headers: { etag: 'w/"sha256-weak-lower"' },
+          data: { error: 'precondition_failed' },
+        },
+      })
+    ).rejects.toMatchObject({
+      name: 'ApiError',
+      status: 412,
+      etag: '"sha256-weak-lower"',
+    });
+
+    await expect(
+      applyResponseErrorInterceptor({
+        isAxiosError: true,
+        message: 'Request failed with status code 412',
+        config: currentConfig,
+        response: {
+          status: 412,
+          headers: { etag: 'W/   ' },
+          data: { error: 'precondition_failed' },
+        },
+      })
+    ).rejects.toMatchObject({
+      name: 'ApiError',
+      status: 412,
+      etag: undefined,
+    });
+  });
+
+  it('increments connectionEpoch only when apiBase or managementKey changes', () => {
+    const initialEpoch = apiClient.getConnectionEpoch();
+
+    apiClient.setConfig({
+      apiBase: 'http://new-cpa.local:8317',
+      managementKey: 'new-cpa-key',
+      timeout: 15_000,
+    });
+    expect(apiClient.getConnectionEpoch()).toBe(initialEpoch);
+
+    apiClient.setConfig({
+      apiBase: 'http://new-cpa.local:8317',
+      managementKey: 'rotated-cpa-key',
+    });
+    expect(apiClient.getConnectionEpoch()).toBe(initialEpoch + 1);
+
+    apiClient.setConfig({
+      apiBase: 'http://other-cpa.local:8317',
+      managementKey: 'rotated-cpa-key',
+    });
+    expect(apiClient.getConnectionEpoch()).toBe(initialEpoch + 2);
+  });
+
+  it('snapshots current v0 and v8 connection scopes and preserves them across later setConfig changes', async () => {
+    apiClient.setConfig({
+      apiBase: 'http://origin-a.local:8317',
+      managementKey: 'key-origin-a',
+    });
+
+    const scopedV0 = apiClient.createCurrentScopedConfig();
+    const scopedV8 = apiClient.createCurrentScopedV8Config();
+
+    apiClient.setConfig({
+      apiBase: 'http://origin-b.local:8317',
+      managementKey: 'key-origin-b',
+    });
+
+    const preparedV0 = await applyRequestInterceptor({
+      url: '/claude-api-key',
+      ...scopedV0,
+      headers: { ...(scopedV0.headers as Record<string, string>) },
+    });
+    expect(preparedV0.baseURL).toBe('http://origin-a.local:8317/v0/management');
+    expect(preparedV0.headers.Authorization).toBe('Bearer key-origin-a');
+
+    const preparedV8 = await applyRequestInterceptor({
+      url: '/config/api-keys/claude',
+      ...scopedV8,
+      headers: {
+        ...(scopedV8.headers as Record<string, string>),
+        'If-Match': '"sha256-a"',
+      },
+    });
+    expect(preparedV8.baseURL).toBe('http://origin-a.local:8317/v8/management');
+    expect(preparedV8.headers.Authorization).toBe('Bearer key-origin-a');
+    expect(preparedV8.headers['If-Match']).toBe('"sha256-a"');
+  });
 });

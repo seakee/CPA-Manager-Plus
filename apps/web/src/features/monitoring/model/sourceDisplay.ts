@@ -11,18 +11,36 @@ import {
 } from './apiKeys';
 import type { MonitoringAuthMeta, MonitoringChannelMeta } from './types';
 
-const GENERIC_PROVIDER_LABELS = new Set([
-  'codex',
-  'antigravity',
-  'openai',
-  'openai-compatibility',
-  'gemini',
-  'claude',
-  'vertex',
-  'xai',
-  'x-ai',
-  'grok',
-]);
+const GENERIC_PROVIDER_LABELS: Record<string, true> = {
+  codex: true,
+  antigravity: true,
+  openai: true,
+  'openai-compatibility': true,
+  gemini: true,
+  'gemini-apikey': true,
+  'gemini-api-key': true,
+  interactions: true,
+  'gemini-interactions': true,
+  'interactions-apikey': true,
+  'interactions-api-key': true,
+  claude: true,
+  'claude-apikey': true,
+  'claude-api-key': true,
+  'codex-apikey': true,
+  'codex-api-key': true,
+  vertex: true,
+  'vertex-apikey': true,
+  'vertex-api-key': true,
+  'vertex-compat': true,
+  xai: true,
+  'xai-apikey': true,
+  'xai-api-key': true,
+  'x-ai': true,
+  grok: true,
+  meta: true,
+  'meta-apikey': true,
+  'meta-api-key': true,
+};
 
 const hasReadableValue = (value: string | null | undefined) => {
   const trimmed = readString(value);
@@ -30,7 +48,7 @@ const hasReadableValue = (value: string | null | undefined) => {
 };
 
 export const isGenericMonitoringProviderLabel = (value: string) =>
-  GENERIC_PROVIDER_LABELS.has(value.trim().toLowerCase());
+  Object.prototype.hasOwnProperty.call(GENERIC_PROVIDER_LABELS, value.trim().toLowerCase());
 
 export const isProviderLikeMonitoringLabel = (
   value: string | null | undefined,
@@ -196,34 +214,48 @@ export const buildMonitoringSourceDisplay = (
   const explicitLabel = readString(input.authLabel);
   const explicitAccount = readString(input.account);
 
-  const account = firstReadable(
-    authMeta?.account,
-    explicitAccount,
-    snapshotAccount,
-    explicitLabel,
-    snapshotLabel
-  );
-  const provider = firstReadable(authMeta?.provider, snapshotProvider, sourceMeta.type);
-  const channel = firstReadable(channelMeta?.name, explicitChannel, provider);
-  const channelHost = firstReadable(channelMeta?.host);
   const resolvedSourceName = firstReadable(sourceMeta.displayName);
-  const labelCandidates = firstReadable(authMeta?.label, explicitLabel, snapshotLabel);
   const configuredSourceName = Boolean(
     resolvedSourceName &&
       sourceMeta.identityKey &&
       !sourceMeta.identityKey.startsWith('source:') &&
       !sourceMeta.identityKey.startsWith('auth:')
   );
-  // Prefer key-disambiguated source names (e.g. "kuaileshifu #1") over the bare
-  // OpenAI-compatible provider/channel name when multi-key providers share a label.
+  const matchedConfiguredByAuthIndex = Boolean(
+    authIndex !== '-' && sourceInfoMap.byAuthIndex.get(authIndex)
+  );
+  const isConfiguredApiKeySource =
+    configuredSourceName && !authMeta && matchedConfiguredByAuthIndex;
+  const account = firstReadable(
+    authMeta?.account,
+    isConfiguredApiKeySource ? '' : explicitAccount,
+    isConfiguredApiKeySource ? '' : snapshotAccount,
+    isConfiguredApiKeySource ? '' : explicitLabel,
+    isConfiguredApiKeySource ? '' : snapshotLabel,
+    isConfiguredApiKeySource ? resolvedSourceName : ''
+  );
+  const provider = firstReadable(authMeta?.provider, snapshotProvider, sourceMeta.type);
+  const channel = firstReadable(
+    channelMeta?.name,
+    isConfiguredApiKeySource ? '' : explicitChannel,
+    provider
+  );
+  const channelHost = firstReadable(channelMeta?.host);
+  const labelCandidates = firstReadable(authMeta?.label, explicitLabel, snapshotLabel);
+  const hasNonGenericSnapshotIdentity =
+    (Boolean(labelCandidates) && !isProviderLikeMonitoringLabel(labelCandidates, provider)) ||
+    (Boolean(account) && !isProviderLikeMonitoringLabel(account, provider));
+  // Prefer live configured API-key provider aliases (and key-disambiguated names
+  // such as "kuaileshifu #1") over stale historical snapshot/channel labels only
+  // when authIndex matched a live configured API-key entry.
   const sourceLabel = firstReadable(
+    isConfiguredApiKeySource ? resolvedSourceName : '',
     resolvedSourceName &&
       (isKeyDisambiguatedLabel(resolvedSourceName, channel) ||
         isKeyDisambiguatedLabel(resolvedSourceName, channelHost) ||
         isKeyDisambiguatedLabel(resolvedSourceName, labelCandidates) ||
         isKeyDisambiguatedLabel(resolvedSourceName, account) ||
-        (configuredSourceName &&
-          isProviderLikeMonitoringLabel(firstReadable(labelCandidates, account), provider)))
+        (configuredSourceName && !hasNonGenericSnapshotIdentity))
       ? resolvedSourceName
       : '',
     labelCandidates,
@@ -256,6 +288,7 @@ export const buildMonitoringSourceDisplay = (
   const primary =
     firstReadable(
       keyDisambiguatedSource,
+      isConfiguredApiKeySource ? nonGenericSource : '',
       nonGenericChannel,
       channelHost,
       nonGenericSource,

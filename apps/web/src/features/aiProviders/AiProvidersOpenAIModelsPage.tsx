@@ -6,7 +6,9 @@ import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 import { SelectionCheckbox } from '@/components/ui/SelectionCheckbox';
+import { hasOpenDrawer, hasOpenModal } from '@/components/ui/overlayEscapeStack';
 import { SecondaryScreenShell } from '@/components/common/SecondaryScreenShell';
+import { usePageTransitionLayer } from '@/components/common/PageTransitionLayer';
 import { useEdgeSwipeBack } from '@/hooks/useEdgeSwipeBack';
 import { modelsApi } from '@/services/api';
 import type { ModelInfo } from '@/utils/models';
@@ -174,18 +176,27 @@ export function AiProvidersOpenAIModelsPage() {
     navigate(-1);
   }, [navigate]);
 
+  const pageTransitionLayer = usePageTransitionLayer();
+  const isCurrentLayer = pageTransitionLayer ? pageTransitionLayer.isCurrentLayer : true;
   const swipeRef = useEdgeSwipeBack({ onBack: handleBack });
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        handleBack();
+      if (
+        !isCurrentLayer ||
+        event.key !== 'Escape' ||
+        event.defaultPrevented ||
+        hasOpenModal() ||
+        hasOpenDrawer()
+      ) {
+        return;
       }
+      event.preventDefault();
+      handleBack();
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleBack]);
-
+  }, [handleBack, isCurrentLayer]);
   const toggleSelection = (name: string) => {
     if (configuredModelNames.has(name.toLowerCase())) return;
     setSelected((prev) => {

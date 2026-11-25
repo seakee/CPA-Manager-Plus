@@ -1,6 +1,16 @@
 // The legacy CPA client remains the Panel transport. Its relative endpoint
 // paths must stay beneath the configured CPA Management namespace.
 const ALLOWED_V8_MANAGEMENT_PATHS: Record<string, true> = {
+  '/config/api-keys': true,
+  '/config/api-keys/gemini': true,
+  '/config/api-keys/interactions': true,
+  '/config/api-keys/vertex': true,
+  '/config/api-keys/codex': true,
+  '/config/api-keys/claude': true,
+  '/config/api-keys/xai': true,
+  '/config/api-keys/meta': true,
+  '/config/api-keys/openai-compatibility': true,
+  '/models/refresh': true,
   '/credentials': true,
   '/oauth/siwc/bind': true,
   '/oauth/callback': true,

@@ -1,5 +1,5 @@
 import type { Dispatch, SetStateAction } from 'react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Outlet, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useUnsavedChangesGuard } from '@/hooks/useUnsavedChangesGuard';
@@ -197,12 +197,13 @@ export function AiProvidersOpenAIEditLayout() {
   const config = useConfigStore((state) => state.config);
   const fetchConfig = useConfigStore((state) => state.fetchConfig);
   const updateConfigValue = useConfigStore((state) => state.updateConfigValue);
-  const isCacheValid = useConfigStore((state) => state.isCacheValid);
+  const tRef = useRef(t);
+  tRef.current = t;
 
   const [providers, setProviders] = useState<OpenAIProviderConfig[]>(
     () => config?.openaiCompatibility ?? []
   );
-  const [loading, setLoading] = useState(() => !isCacheValid('openai-compatibility'));
+  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
   const draftKey = useMemo(() => {
@@ -308,10 +309,7 @@ export function AiProvidersOpenAIEditLayout() {
 
   useEffect(() => {
     let cancelled = false;
-    const hasValidCache = isCacheValid('openai-compatibility');
-    if (!hasValidCache) {
-      setLoading(true);
-    }
+    setLoading(true);
 
     providersApi
       .getOpenAIProviders()
@@ -329,8 +327,8 @@ export function AiProvidersOpenAIEditLayout() {
           setProviders(Array.isArray(fallback) ? (fallback as OpenAIProviderConfig[]) : []);
         } catch {
           if (cancelled) return;
-          const message = getErrorMessage(err) || t('notification.refresh_failed');
-          showNotification(`${t('notification.load_failed')}: ${message}`, 'error');
+          const message = getErrorMessage(err) || tRef.current('notification.refresh_failed');
+          showNotification(`${tRef.current('notification.load_failed')}: ${message}`, 'error');
         }
       })
       .finally(() => {
@@ -341,7 +339,7 @@ export function AiProvidersOpenAIEditLayout() {
     return () => {
       cancelled = true;
     };
-  }, [fetchConfig, isCacheValid, showNotification, t, updateConfigValue]);
+  }, [fetchConfig, showNotification, updateConfigValue]);
 
   useEffect(() => {
     if (loading) return;
@@ -453,7 +451,7 @@ export function AiProvidersOpenAIEditLayout() {
     [setForm, showNotification, t]
   );
 
-  const resolvedLoading = !draft?.initialized;
+  const resolvedLoading = loading || !draft?.initialized;
   const baseline = draft?.baseline ?? null;
   const normalizedHeaders = useMemo(() => normalizeHeaderEntries(form.headers), [form.headers]);
   const normalizedModels = useMemo(
@@ -537,6 +535,7 @@ export function AiProvidersOpenAIEditLayout() {
     setSaving(true);
     try {
       const payload: OpenAIProviderConfig = {
+        ...(initialData?.v8Source ? { v8Source: initialData.v8Source } : {}),
         name,
         prefix: form.prefix?.trim() || undefined,
         baseUrl,
@@ -614,6 +613,7 @@ export function AiProvidersOpenAIEditLayout() {
     form,
     handleBack,
     initialData?.disabled,
+    initialData?.v8Source,
     providers,
     setDraftBaseline,
     setForm,

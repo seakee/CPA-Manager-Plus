@@ -1,10 +1,7 @@
 import { createElement, type ComponentType, type ReactNode } from 'react';
-import { act, create, type ReactTestRenderer } from 'react-test-renderer';
+import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ClaudeEditDrawer } from '@/components/providers/ProviderEditDrawer/ClaudeEditDrawer';
-import { CodexEditDrawer } from '@/components/providers/ProviderEditDrawer/CodexEditDrawer';
-import { GeminiEditDrawer } from '@/components/providers/ProviderEditDrawer/GeminiEditDrawer';
-import { OpenAIEditDrawer } from '@/components/providers/ProviderEditDrawer/OpenAIEditDrawer';
+import { buildProviderRows, ProviderWorkspaceDrawer } from '@/components/providers';
 import { AiProvidersClaudeModelsPage } from './AiProvidersClaudeModelsPage';
 import { AiProvidersOpenAIModelsPage } from './AiProvidersOpenAIModelsPage';
 import { AiProvidersCodexEditPage } from './AiProvidersCodexEditPage';
@@ -26,7 +23,8 @@ const mocks = vi.hoisted(() => {
     apiKeyEntries: [{ apiKey: 'test-key', proxyUrl: '' }],
   };
   return {
-    t: (key: string) => key,
+    t: (key: string, options?: Record<string, unknown>) =>
+      options?.count !== undefined ? `${key}:${String(options.count)}` : key,
     auth: { apiBase: 'https://a.test', managementKey: 'a', connectionStatus: 'connected' },
     fetch: vi.fn(),
     fetchConfig: vi.fn(),
@@ -88,7 +86,13 @@ vi.mock('@/stores', () => ({
       clearCache: mocks.noop,
       isCacheValid: () => true,
     }),
-  useNotificationStore: () => ({ showNotification: mocks.noop }),
+  useNotificationStore: (selector?: (s: { showNotification: typeof mocks.noop; showConfirmation: typeof mocks.noop }) => unknown) => {
+    const state = {
+      showNotification: mocks.noop,
+      showConfirmation: mocks.noop,
+    };
+    return selector ? selector(state) : state;
+  },
 }));
 vi.mock('@/services/api', () => ({
   modelsApi: {
@@ -102,7 +106,10 @@ vi.mock('@/services/api', () => ({
   },
   providersApi: { getOpenAIProviders: async () => mocks.config.openaiCompatibility },
   apiCallApi: {},
-  getApiCallErrorMessage: () => '',
+  getApiCallErrorDetails: () => null,
+  getApiCallErrorMessage: (err: unknown) => (err instanceof Error ? err.message : String(err)),
+  readBackClaudeConfigAfterSave: vi.fn(),
+  verifyClaudeFingerprintInRawConfig: vi.fn(),
 }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -115,6 +122,12 @@ const deferred = () => {
   });
   return { resolve, reject, promise };
 };
+const extractText = (node: ReactTestInstance): string =>
+  node.children
+    .map((child) =>
+      typeof child === 'string' || typeof child === 'number' ? String(child) : extractText(child)
+    )
+    .join(' ');
 let renderer: ReactTestRenderer;
 afterEach(() => {
   act(() => renderer?.unmount());
@@ -138,11 +151,26 @@ beforeEach(() => {
       : mocks.config
   );
 });
+
+const buildDrawerRow = (provider: 'claude' | 'codex' | 'gemini' | 'openai') => {
+  const rows = buildProviderRows({
+    gemini: provider === 'gemini' ? mocks.config.geminiApiKeys : [],
+    interactions: [],
+    codex: provider === 'codex' ? mocks.config.codexApiKeys : [],
+    xai: [],
+    claude: provider === 'claude' ? mocks.config.claudeApiKeys : [],
+    vertex: [],
+    openai: provider === 'openai' ? mocks.config.openaiCompatibility : [],
+    usageByProvider: new Map(),
+  });
+  return rows[0] ?? null;
+};
+
 const cases = [
-  ['Claude drawer', ClaudeEditDrawer, 'claude', true],
-  ['Codex drawer', CodexEditDrawer, 'codex', true],
-  ['Gemini drawer', GeminiEditDrawer, 'gemini', true],
-  ['OpenAI drawer', OpenAIEditDrawer, 'openai', true],
+  ['Claude workspace drawer', ProviderWorkspaceDrawer, 'claude', true],
+  ['Codex workspace drawer', ProviderWorkspaceDrawer, 'codex', true],
+  ['Gemini workspace drawer', ProviderWorkspaceDrawer, 'gemini', true],
+  ['OpenAI workspace drawer', ProviderWorkspaceDrawer, 'openai', true],
   ['Claude models route', AiProvidersClaudeModelsPage, 'claude', false],
   ['OpenAI models route', AiProvidersOpenAIModelsPage, 'openai', false],
   ['Codex edit route', AiProvidersCodexEditPage, 'codex', false],
@@ -150,61 +178,76 @@ const cases = [
 ] as const;
 
 describe.each(cases)('%s revalidation', (_name, Component, provider, drawer) => {
+  const loadingKey = drawer
+    ? 'ai_providers.fetching_models_loading'
+    : `ai_providers.${provider}_models_fetch_loading`;
+  const emptyKey = drawer
+    ? 'ai_providers.no_discovered_models'
+    : `ai_providers.${provider}_models_fetch_empty`;
+
   const element = () =>
     createElement(
       Component as ComponentType<Record<string, unknown>>,
       drawer
-        ? { open: true, editIndex: 0, disabled: false, onClose: mocks.noop, onSaved: mocks.noop }
+        ? {
+            open: true,
+            mode: 'view-edit',
+            row: buildDrawerRow(provider),
+            initialTab: 'models',
+            usageByProvider: new Map(),
+            onClose: mocks.noop,
+            onSaved: mocks.noop,
+          }
         : {}
     );
-  const button = (suffix: string) =>
+  const findButtonByLabel = (label: string) =>
     renderer.root
       .findAllByType('button')
-      .find((node) =>
-        node
-          .findAllByType('span')
-          .some((span) => span.children.includes(`ai_providers.${provider}_models_fetch_${suffix}`))
-      )!;
+      .find((node) => node.findAllByType('span').some((span) => span.children.includes(label)));
+
+  const triggerOpenButton = () =>
+    drawer
+      ? findButtonByLabel('ai_providers.fetch_upstream_models_btn')
+      : findButtonByLabel(`ai_providers.${provider}_models_fetch_button`);
+
   const modelVisible = (name: string) =>
     renderer.root.findAllByType('input').some((node) => node.props['aria-label'] === name);
+
   const revalidate = async () => {
-    const refresh = button('refresh');
+    const refresh = drawer
+      ? findButtonByLabel('common.refresh')
+      : findButtonByLabel(`ai_providers.${provider}_models_fetch_refresh`);
     if (refresh) {
       await act(async () => {
         refresh.props.onClick();
       });
       return;
     }
-    const cancel = renderer.root
-      .findAllByType('button')
-      .find((node) =>
-        node.findAllByType('span').some((span) => span.children.includes('common.cancel'))
-      )!;
+    const cancel = findButtonByLabel('common.cancel')!;
     act(() => {
       cancel.props.onClick();
     });
     await act(async () => {
-      button('button').props.onClick();
+      triggerOpenButton()!.props.onClick();
     });
   };
   const open = async () => {
     await act(async () => {
       renderer = create(element());
     });
-    const trigger = button('button');
-    if (trigger)
+    const trigger = triggerOpenButton();
+    if (trigger) {
       await act(async () => {
         trigger.props.onClick();
       });
+    }
   };
   it('keeps model choices during refresh and failure, then replaces them on success', async () => {
     const first = deferred();
     mocks.fetch.mockReturnValueOnce(first.promise);
     await open();
     expect(modelVisible('old-model')).toBe(false);
-    expect(JSON.stringify(renderer.toJSON())).toContain(
-      `ai_providers.${provider}_models_fetch_loading`
-    );
+    expect(JSON.stringify(renderer.toJSON())).toContain(loadingKey);
     await act(async () => {
       first.resolve([{ name: 'old-model' }]);
     });
@@ -246,10 +289,10 @@ describe.each(cases)('%s revalidation', (_name, Component, provider, drawer) => 
     const pending = deferred();
     mocks.fetch.mockReturnValueOnce(pending.promise);
     await revalidate();
-    expect(JSON.stringify(renderer.toJSON())).not.toContain(
-      `ai_providers.${provider}_models_fetch_loading`
-    );
-    await act(async () => { pending.reject(new Error('offline')); });
+    expect(JSON.stringify(renderer.toJSON())).not.toContain(loadingKey);
+    await act(async () => {
+      pending.reject(new Error('offline'));
+    });
     expect(JSON.stringify(renderer.toJSON())).toContain('offline');
   });
 
@@ -257,9 +300,105 @@ describe.each(cases)('%s revalidation', (_name, Component, provider, drawer) => 
     const first = deferred();
     mocks.fetch.mockReturnValueOnce(first.promise);
     await open();
-    await act(async () => { first.reject(new Error('bootstrap offline')); });
+    await act(async () => {
+      first.reject(new Error('bootstrap offline'));
+    });
     const output = JSON.stringify(renderer.toJSON());
     expect(output).toContain('bootstrap offline');
-    expect(output).not.toContain(`ai_providers.${provider}_models_fetch_empty`);
+    expect(output).not.toContain(emptyKey);
+  });
+});
+describe('ProviderWorkspaceDrawer model discovery & merge', () => {
+  it('merges OpenAI per-key headers during discovery and preserves multi-alias entries with deterministic addedCount', async () => {
+    mocks.noop.mockClear();
+    mocks.fetch.mockResolvedValueOnce([
+      { name: 'gpt-4o', alias: 'gpt-4o-discovered' },
+      { name: 'gpt-4.1', alias: 'g41' },
+      { name: 'o3-mini' },
+    ]);
+
+    const rows = buildProviderRows({
+      gemini: [],
+      interactions: [],
+      codex: [],
+      xai: [],
+      claude: [],
+      vertex: [],
+      openai: [
+        {
+          name: 'OpenAI Multi-Alias',
+          baseUrl: 'https://provider.test/v1',
+          headers: { 'X-Provider': 'base', 'X-Shared': 'provider' },
+          apiKeyEntries: [
+            {
+              apiKey: 'sk-entry-1',
+              headers: { 'X-Entry': 'entry-val', 'X-Shared': 'override' },
+            },
+          ],
+          models: [
+            { name: 'gpt-4o', alias: 'fast' },
+            { name: 'gpt-4o', alias: 'smart' },
+          ],
+        },
+      ],
+      usageByProvider: new Map(),
+    });
+
+    await act(async () => {
+      renderer = create(
+        createElement(ProviderWorkspaceDrawer, {
+          open: true,
+          mode: 'view-edit',
+          row: rows[0],
+          initialTab: 'models',
+          usageByProvider: new Map(),
+          onClose: mocks.noop,
+          onSaved: mocks.noop,
+        })
+      );
+    });
+
+    const discoverBtn = renderer.root
+      .findAllByType('button')
+      .find((btn) => extractText(btn).includes('ai_providers.fetch_upstream_models_btn'));
+    expect(discoverBtn).toBeDefined();
+    await act(async () => {
+      discoverBtn!.props.onClick();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(mocks.fetch).toHaveBeenCalledWith(
+      'https://provider.test/v1',
+      'sk-entry-1',
+      { 'X-Provider': 'base', 'X-Shared': 'override', 'X-Entry': 'entry-val' },
+      undefined,
+      undefined,
+      false
+    );
+
+    const selectAllBtn = renderer.root
+      .findAllByType('button')
+      .find((btn) => extractText(btn).includes('common.select_all'));
+    expect(selectAllBtn).toBeDefined();
+    await act(async () => {
+      selectAllBtn!.props.onClick();
+    });
+
+    const applyBtn = renderer.root
+      .findAllByType('button')
+      .find((btn) => extractText(btn).includes('ai_providers.apply_selected_models_btn'));
+    expect(applyBtn).toBeDefined();
+    await act(async () => {
+      applyBtn!.props.onClick();
+    });
+    expect(mocks.noop).toHaveBeenCalledWith('ai_providers.openai_models_fetch_added:2', 'success');
+    const inputValues = renderer.root
+      .findAllByType('input')
+      .map((input) => String(input.props.value ?? ''));
+    expect(inputValues).toEqual(
+      expect.arrayContaining(['gpt-4o', 'fast', 'smart', 'gpt-4.1', 'g41', 'o3-mini'])
+    );
   });
 });

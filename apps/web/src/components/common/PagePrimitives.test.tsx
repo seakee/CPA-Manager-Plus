@@ -13,6 +13,7 @@ import { MetricSummaryCard, MetricSummaryGrid } from './MetricSummaryCard';
 import { PageControlBar } from './PageControlBar';
 import { PageTransitionLayerContext } from './PageTransitionLayer';
 import { PaginationFooter } from './PaginationFooter';
+import { WorkspaceListPanel } from './WorkspaceListPanel';
 import { SectionActionFooter } from './SectionActionFooter';
 
 describe('Page header and footer primitives', () => {
@@ -241,5 +242,101 @@ describe('Page header and footer primitives', () => {
     expect(devVersionLink.children).toEqual(['v2.0.0']);
     expect(devVersionLink.props.href).toBe(APP_RELEASES_URL);
     expect(devVersionLink.props.title).toBe('v2.0.0-dev.542e83fb');
+  });
+
+  it('renders WorkspaceListPanel header meta, view switcher, empty fallback, and default flush footer', () => {
+    const onPageChange = vi.fn();
+    const onModeChange = vi.fn();
+    let renderer!: ReactTestRenderer;
+    act(() => {
+      renderer = create(
+        <WorkspaceListPanel
+          testId="list-panel"
+          headerTestId="list-header"
+          summary="共 10 条"
+          hint="批量提示"
+          selectionActive
+          selectionBadge="已选 2 项"
+          selectionTools={<button type="button">全选</button>}
+          headerActions={<button type="button">批量选择</button>}
+          viewMode={{
+            value: 'table',
+            onChange: onModeChange,
+            tableLabel: '表格',
+            cardsLabel: '卡片',
+            ariaLabel: '视图切换',
+            tableTestId: 'view-table',
+            cardsTestId: 'view-cards',
+          }}
+          empty
+          emptyFallback={<div data-testid="empty-box">暂无数据</div>}
+          pagination={{
+            currentPage: 1,
+            totalPages: 2,
+            infoText: '第 1 / 2 页',
+            prevLabel: '上一页',
+            nextLabel: '下一页',
+            onPageChange,
+          }}
+        >
+          <div data-testid="list-body">rows</div>
+        </WorkspaceListPanel>
+      );
+    });
+
+    expect(renderer.root.findAllByProps({ 'data-testid': 'list-header' })).toHaveLength(1);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'empty-box' })).toHaveLength(1);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'list-body' })).toHaveLength(0);
+
+    const footer = renderer.root.findByType(PaginationFooter);
+    expect(footer.props.variant).toBe('flush');
+    expect(footer.props.showPageJump).toBe(true);
+
+    const tabs = renderer.root.findByType(SegmentedTabs);
+    act(() => {
+      tabs.props.onChange?.('grid');
+    });
+    expect(onModeChange).toHaveBeenCalledWith('grid');
+
+    act(() => renderer.unmount());
+  });
+
+  it('preserves WorkspaceListPanel banner across empty and loading fallbacks', () => {
+    let renderer!: ReactTestRenderer;
+    act(() => {
+      renderer = create(
+        <WorkspaceListPanel
+          summary="共 0 条"
+          banner={<div role="alert" data-testid="panel-banner">刷新失败</div>}
+          empty
+          emptyFallback={<div data-testid="empty-box">暂无数据</div>}
+        >
+          <div data-testid="list-body">rows</div>
+        </WorkspaceListPanel>
+      );
+    });
+
+    expect(renderer.root.findAllByProps({ 'data-testid': 'panel-banner' })).toHaveLength(1);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'empty-box' })).toHaveLength(1);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'list-body' })).toHaveLength(0);
+
+    act(() => {
+      renderer.update(
+        <WorkspaceListPanel
+          summary="加载中"
+          banner={<div role="alert" data-testid="panel-banner">重试告警</div>}
+          loading
+          loadingFallback={<div data-testid="loading-box">加载骨架</div>}
+        >
+          <div data-testid="list-body">rows</div>
+        </WorkspaceListPanel>
+      );
+    });
+
+    expect(renderer.root.findAllByProps({ 'data-testid': 'panel-banner' })).toHaveLength(1);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'loading-box' })).toHaveLength(1);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'list-body' })).toHaveLength(0);
+
+    act(() => renderer.unmount());
   });
 });

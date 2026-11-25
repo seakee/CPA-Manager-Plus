@@ -65,3 +65,8 @@ export type VertexFormState = Omit<ProviderKeyConfig, 'headers' | 'weight' | 'di
   modelEntries: ModelEntry[];
   excludedText: string;
 };
+
+export type ProviderStatusFilter = 'all' | 'enabled' | 'disabled';
+export type ProviderHealthFilter = 'all' | 'has_failure' | 'active' | 'idle';
+export type ProviderLayoutMode = 'table' | 'grid';
+export type ProviderDrawerTab = 'overview' | 'config' | 'models' | 'connectivity';

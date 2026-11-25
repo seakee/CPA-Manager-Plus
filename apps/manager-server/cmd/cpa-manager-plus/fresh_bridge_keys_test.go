@@ -530,13 +530,22 @@ func TestSanitizeBridgedConfigYAMLAliasesMergeKeysAndFailClosedWriter(t *testing
 	yamlWithAnchors := []byte(`
 defaults: &defs
   api-keys: &shared_keys
-    - sk-merged-secret-1111
-    - cpk_merged_secret_2222
+    - &first_key sk-merged-secret-1111
+    - &second_key cpk_merged_secret_2222
   port: 8317
 <<: *defs
 access:
   <<: *defs
   mode: strict
+nested-int-map:
+  1: *first_key
+  2: keep-int-entry
+nested-key-map:
+  *first_key: mapped-role
+  safe-key: keep-role
+nested-mixed-map:
+  1: keep-mixed-entry
+  *second_key: mapped-mixed-role
 gemini-api-key:
   - api-key: AIzaSyProviderMustSurvive
 `)
@@ -553,8 +562,10 @@ gemini-api-key:
 			t.Fatalf("sanitized YAML leaked anchored/merged client secret %q:\n%s", leaked, text)
 		}
 	}
-	if !strings.Contains(text, "AIzaSyProviderMustSurvive") {
-		t.Fatalf("sanitized YAML dropped upstream provider key:\n%s", text)
+	for _, preserved := range []string{"AIzaSyProviderMustSurvive", "keep-int-entry", "keep-role", "keep-mixed-entry"} {
+		if !strings.Contains(text, preserved) {
+			t.Fatalf("sanitized YAML dropped expected non-secret value %q:\n%s", preserved, text)
+		}
 	}
 
 	// 2) Non-200 206 Partial Content, unexpected Content-Encoding, and secret-bearing 500 error bodies fail closed.

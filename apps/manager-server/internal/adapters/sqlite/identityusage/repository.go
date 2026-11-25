@@ -8,14 +8,17 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	ports "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/ports/identityusage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/coverageincomplete"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/modelprice"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/pricing"
 )
-
 const (
 	stateName = "canonical_identity_v1"
 	// collectionStartKey is the settings row recording the first durable
@@ -297,7 +300,239 @@ func (r *repository) windowsBatch(ctx context.Context, result map[identity.APIKe
 		window.UnmappedEvents = count
 		result[identity.APIKeyID(rawID)] = window
 	}
-	return unmappedRows.Err()
+	if err := unmappedRows.Err(); err != nil {
+		return err
+	}
+	unmappedRows.Close()
+
+	if err := r.populateWindowDetails(ctx, result, ranges, toMS); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *repository) populateWindowDetails(
+	ctx context.Context,
+	result map[identity.APIKeyID]ports.Window,
+	ranges []ports.KeyRange,
+	toMS int64,
+) error {
+	if len(result) == 0 || len(ranges) == 0 {
+		return nil
+	}
+	rangeArgs, valuesClause, minFromMS := keyRangeArgs(ranges)
+	queryArgs := append(append([]any{}, rangeArgs...), minFromMS, toMS)
+
+	prices, err := modelprice.New(r.db).LoadAll(ctx)
+	if err != nil {
+		prices = map[string]model.ModelPrice{}
+	}
+
+	modelRows, err := r.db.QueryContext(ctx, `
+		with floors(api_key_id, from_ms) as (values `+valuesClause+`)
+		select p.api_key_id,
+		       coalesce(nullif(trim(u.model), ''), nullif(trim(u.requested_model), ''), ''),
+		       coalesce(nullif(trim(u.resolved_model), ''), nullif(trim(u.model), ''), ''),
+		       coalesce(trim(u.service_tier), ''),
+		       count(*),
+		       coalesce(sum(coalesce(u.normalized_total_input_tokens, u.input_tokens, 0)), 0),
+		       coalesce(sum(u.output_tokens), 0),
+		       coalesce(sum(max(
+		           max(coalesce(u.cached_tokens, 0), coalesce(u.cache_tokens, 0)) -
+		           max(coalesce(u.cache_read_tokens, 0), 0) -
+		           max(coalesce(u.cache_creation_tokens, 0), 0),
+		           0
+		       )), 0),
+		       coalesce(sum(coalesce(u.cache_read_tokens, 0)), 0),
+		       coalesce(sum(coalesce(u.cache_creation_tokens, 0)), 0),
+		       max(u.timestamp_ms)
+		from `+sqliterepo.GatewayUsageIdentityProjectionTable+` p
+		join floors f on f.api_key_id = p.api_key_id
+		join usage_events u on u.id = p.usage_event_id
+		where p.api_key_state = 'mapped'
+		  and u.timestamp_ms >= ? and u.timestamp_ms < ?
+		  and u.timestamp_ms >= f.from_ms
+		group by p.api_key_id,
+		         coalesce(nullif(trim(u.model), ''), nullif(trim(u.requested_model), ''), ''),
+		         coalesce(nullif(trim(u.resolved_model), ''), nullif(trim(u.model), ''), ''),
+		         coalesce(trim(u.service_tier), '')`, queryArgs...)
+	if err != nil {
+		return fmt.Errorf("aggregate canonical key models and cost: %w", err)
+	}
+	defer modelRows.Close()
+
+	type modelAccum struct {
+		calls  int64
+		lastMS int64
+	}
+	modelsByKey := map[identity.APIKeyID]map[string]*modelAccum{}
+	costByKey := map[identity.APIKeyID]float64{}
+	pricedByKey := map[identity.APIKeyID]bool{}
+
+	for modelRows.Next() {
+		var rawID, displayModel, billingModel, serviceTier string
+		var calls, inputTok, outputTok, cachedTok, cacheReadTok, cacheCreateTok, lastMS int64
+		if err := modelRows.Scan(
+			&rawID, &displayModel, &billingModel, &serviceTier,
+			&calls, &inputTok, &outputTok, &cachedTok, &cacheReadTok, &cacheCreateTok, &lastMS,
+		); err != nil {
+			return fmt.Errorf("scan canonical key models and cost: %w", err)
+		}
+		id := identity.APIKeyID(rawID)
+		if displayModel != "" {
+			perModel := modelsByKey[id]
+			if perModel == nil {
+				perModel = map[string]*modelAccum{}
+				modelsByKey[id] = perModel
+			}
+			acc := perModel[displayModel]
+			if acc == nil {
+				acc = &modelAccum{}
+				perModel[displayModel] = acc
+			}
+			acc.calls += calls
+			if lastMS > acc.lastMS {
+				acc.lastMS = lastMS
+			}
+		}
+		if len(prices) > 0 && hasMatchingModelPrice(prices, billingModel, displayModel) {
+			pricedByKey[id] = true
+			costByKey[id] += pricing.CostForModelCandidatesWithServiceTier(
+				[]string{billingModel, displayModel},
+				serviceTier,
+				pricing.ModelTokens{
+					InputTokens:         inputTok,
+					OutputTokens:        outputTok,
+					CachedTokens:        cachedTok,
+					CacheReadTokens:     cacheReadTok,
+					CacheCreationTokens: cacheCreateTok,
+				},
+				prices,
+			)
+		}
+	}
+	if err := modelRows.Err(); err != nil {
+		return fmt.Errorf("iterate canonical key models and cost: %w", err)
+	}
+	modelRows.Close()
+
+	for id, perModel := range modelsByKey {
+		window, ok := result[id]
+		if !ok {
+			continue
+		}
+		ranked := make([]struct {
+			model  string
+			calls  int64
+			lastMS int64
+		}, 0, len(perModel))
+		for m, acc := range perModel {
+			ranked = append(ranked, struct {
+				model  string
+				calls  int64
+				lastMS int64
+			}{model: m, calls: acc.calls, lastMS: acc.lastMS})
+		}
+		sort.SliceStable(ranked, func(i, j int) bool {
+			if ranked[i].calls != ranked[j].calls {
+				return ranked[i].calls > ranked[j].calls
+			}
+			if ranked[i].lastMS != ranked[j].lastMS {
+				return ranked[i].lastMS > ranked[j].lastMS
+			}
+			return ranked[i].model < ranked[j].model
+		})
+		window.ModelCount = len(ranked)
+		limit := min(len(ranked), 3)
+		topModels := make([]ports.ModelCount, 0, limit)
+		for i := range limit {
+			topModels = append(topModels, ports.ModelCount{
+				Model: ranked[i].model,
+				Calls: ranked[i].calls,
+			})
+		}
+		window.TopModels = topModels
+		result[id] = window
+	}
+
+	for id, hasPrice := range pricedByKey {
+		if !hasPrice {
+			continue
+		}
+		window, ok := result[id]
+		if !ok {
+			continue
+		}
+		cost := costByKey[id]
+		window.EstimatedCostUSD = &cost
+		result[id] = window
+	}
+
+	recentRows, err := r.db.QueryContext(ctx, `
+		with floors(api_key_id, from_ms) as (values `+valuesClause+`),
+		     ranked as (
+		         select p.api_key_id,
+		                u.timestamp_ms,
+		                u.failed,
+		                coalesce(u.fail_status_code, 0) as status_code,
+		                coalesce(nullif(trim(u.model), ''), nullif(trim(u.requested_model), ''), '') as model,
+		                row_number() over (partition by p.api_key_id order by u.timestamp_ms desc, u.id desc) as rn
+		         from `+sqliterepo.GatewayUsageIdentityProjectionTable+` p
+		         join floors f on f.api_key_id = p.api_key_id
+		         join usage_events u on u.id = p.usage_event_id
+		         where p.api_key_state = 'mapped'
+		           and u.timestamp_ms >= ? and u.timestamp_ms < ?
+		           and u.timestamp_ms >= f.from_ms
+		     )
+		select api_key_id, timestamp_ms, failed, status_code, model
+		from ranked
+		where rn <= 10
+		order by api_key_id, timestamp_ms desc, rn asc`, queryArgs...)
+	if err != nil {
+		return fmt.Errorf("read canonical key recent requests: %w", err)
+	}
+	defer recentRows.Close()
+
+	for recentRows.Next() {
+		var rawID, modelName string
+		var ts int64
+		var failedInt, statusCode int
+		if err := recentRows.Scan(&rawID, &ts, &failedInt, &statusCode, &modelName); err != nil {
+			return fmt.Errorf("scan canonical key recent request: %w", err)
+		}
+		id := identity.APIKeyID(rawID)
+		window, ok := result[id]
+		if !ok {
+			continue
+		}
+		window.RecentRequests = append(window.RecentRequests, ports.RecentRequest{
+			TimestampMS: ts,
+			Failed:      failedInt != 0,
+			StatusCode:  statusCode,
+			Model:       modelName,
+		})
+		result[id] = window
+	}
+	return recentRows.Err()
+}
+
+func hasMatchingModelPrice(prices map[string]model.ModelPrice, candidates ...string) bool {
+	for _, candidate := range candidates {
+		trimmed := strings.TrimSpace(candidate)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := prices[trimmed]; ok {
+			return true
+		}
+		lower := strings.ToLower(trimmed)
+		for k := range prices {
+			if strings.ToLower(k) == lower {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (r *repository) Series(ctx context.Context, id identity.APIKeyID, fromMS, toMS, bucketMS int64) ([]ports.Bucket, error) {

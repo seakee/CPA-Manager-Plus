@@ -682,47 +682,23 @@ describe('Fresh client key persistence UI', () => {
           })
         );
       await mount(withIdleKeyOperation(fetchMock));
-      const runtime = renderer.root.findByProps({ 'data-testid': 'key-summary-runtime' });
-      expect(runtime.findByType('strong').children).toEqual(['—']);
-      expect(runtime.findByType('small').children.join('')).toContain(k('summaryGatewaySetupHelp'));
-      expect(
-        renderer.root.findByProps({ 'data-testid': 'key-summary-saved' }).findByType('strong')
-          .children
-      ).toEqual(['1']);
-
-      await click(t('refresh'));
-      expect(
-        renderer.root.findByProps({ 'data-testid': 'key-summary-saved' }).findByType('strong')
-          .children
-      ).toEqual(['1']);
-      expect(
-        renderer.root
-          .findByProps({ 'data-testid': 'key-summary-runtime' })
-          .findByType('strong').children
-      ).toEqual(['1']);
-      expect(
-        renderer.root.findByProps({ 'data-testid': 'key-summary-runtime' }).findByType('small')
-          .children.join('')
-      ).toContain(k('summaryGatewayConsistent'));
       expect(
         renderer.root.findAllByProps({ 'data-testid': 'keys-presence-unverified' })
       ).toHaveLength(0);
+      expect(
+        renderer.root.findByProps({ 'data-testid': 'key-row-' + key.id }).findAllByType('td')
+      ).toHaveLength(5);
+
+      await click(t('refresh'));
+      expect(
+        renderer.root.findAllByProps({ 'data-testid': 'keys-presence-unverified' })
+      ).toHaveLength(0);
+      expect(view()).toContain(k('statusActive'));
 
       await click(t('refresh'));
       expect(
         renderer.root.findAllByProps({ 'data-testid': 'keys-presence-unverified' })
       ).toHaveLength(1);
-      expect(
-        renderer.root
-          .findByProps({ 'data-testid': 'key-summary-runtime' })
-          .findByType('strong').children
-      ).toEqual(['—']);
-      expect(
-        renderer.root
-          .findByProps({ 'data-testid': 'key-summary-runtime' })
-          .findByType('small')
-          .children.join('')
-      ).toContain(k('summaryGatewaySetupHelp'));
     }
   );
 
@@ -767,17 +743,12 @@ describe('Fresh client key persistence UI', () => {
     });
     await mount(fetchMock);
 
-    // Summary strip shows real counts and explicit Unavailable usage
+    // Lifecycle tab badges show real counts
     expect(
-      renderer.root.findByProps({ 'data-testid': 'key-summary-saved' }).findByType('strong')
-        .children
-    ).toEqual(['2']);
-    expect(
-      renderer.root.findByProps({ 'data-testid': 'key-summary-replaced' }).findByType('strong')
-        .children
-    ).toEqual(['1']);
-    expect(view()).toContain(k('summaryUsageValue'));
-
+      renderer.root.findByProps({ 'data-testid': 'key-filter-saved' }).props.children
+    ).toBeTruthy();
+    expect(view()).toContain('2');
+    expect(view()).toContain('1');
     // Switch to Saved filter, search "Alpha", and toggle Cards view
     await act(async () =>
       renderer.root.findByProps({ 'data-testid': 'key-filter-saved' }).props.onClick()
@@ -828,8 +799,6 @@ describe('Fresh client key persistence UI', () => {
     expect(view()).toContain(k('usageStatePartial'));
     // The last-used instant comes from this key's summary item.
     expect(view()).toContain(String(new Date(lastUsedAtMs).getFullYear()));
-    expect(view()).toContain(k('usageLastUsed'));
-
     await act(async () => {
       renderer.unmount();
     });
@@ -847,50 +816,82 @@ describe('Fresh client key persistence UI', () => {
     renderer.root.findByProps({ 'data-testid': 'key-usage-' + key.id });
     expect(view()).toContain('—');
     expect(view()).toContain(k('usageStateUnavailable'));
+    expect(view()).toContain(k('usageLastUsed'));
   });
-  it('shows the summary total as a lower bound or hides it when a key is incomplete', async () => {
+
+  it('renders models, success/failure stats, cost, and 10-slot status timeline without key-resource-icon in rows', async () => {
     const lastUsedAtMs = Date.UTC(2026, 0, 2, 3, 4);
-    const summaryCard = () =>
-      renderer.root
-        .findByProps({ 'data-testid': 'key-summary-usage' })
-        .findAllByType('span')
-        .flatMap((node) => (Array.isArray(node.props.children) ? node.props.children : [node.props.children]))
-        .filter((child): child is string => typeof child === 'string')
-        .join(' | ');
     const keysOnly = () =>
       vi.fn<typeof fetch>().mockImplementation(() =>
         Promise.resolve(Response.json({ keys: [key], gatewayPending: true, revocationAvailable: false }))
       );
-    // One proven key plus one key without attribution: the strip total is a
-    // lower bound, never the exact sum.
     await mount(keysOnly(), vi.fn(), {
       fromMs: 1,
       toMs: 2,
-      coverage: { state: 'partial', reason: 'binding_missing' },
+      coverage: { state: 'complete', reason: 'observed' },
       items: [
-        { keyId: key.id, calls: 5, lastUsedAtMs, coverage: { state: 'complete', reason: 'observed' } },
-        { keyId: 'd'.repeat(32), calls: 0, lastUsedAtMs: null, coverage: { state: 'unavailable', reason: 'binding_missing' } },
+        {
+          keyId: key.id,
+          calls: 18,
+          success: 16,
+          failure: 2,
+          totalTokens: 24500,
+          estimatedCostUsd: 1.42,
+          topModels: [
+            { model: 'claude-sonnet-4-5', calls: 12 },
+            { model: 'gemini-2.5-pro', calls: 6 },
+          ],
+          modelCount: 3,
+          recentRequests: [
+            { timestampMs: lastUsedAtMs - 120_000, failed: false, model: 'claude-sonnet-4-5' },
+            { timestampMs: lastUsedAtMs, failed: true, statusCode: 429, model: 'gemini-2.5-pro' },
+          ],
+          lastUsedAtMs,
+          coverage: { state: 'complete', reason: 'observed' },
+        },
       ],
     });
-    expect(summaryCard()).toContain('≥5');
-    expect(summaryCard()).toContain(k('usageStatePartial'));
+    const rowNode = renderer.root.findByProps({ 'data-testid': 'key-row-' + key.id });
+    expect(
+      rowNode.findAll(
+        (node) =>
+          typeof node.props?.className === 'string' &&
+          node.props.className.includes('key-resource-icon')
+      )
+    ).toHaveLength(0);
+    expect(view()).toContain(k('modelsColumn'));
+    expect(view()).toContain('claude-sonnet-4-5');
+    expect(readText(rowNode)).toContain('+2');
+    expect(readText(rowNode)).toContain('12 calls · gemini-2.5-pro (6)');
 
-    // An unobserved key makes the total unprovable, so the strip hides it.
-    await act(async () => {
-      renderer.unmount();
-    });
-    await mount(keysOnly(), vi.fn(), {
-      fromMs: 1,
-      toMs: 2,
-      coverage: { state: 'unknown', reason: 'window_unobserved' },
-      items: [
-        { keyId: key.id, calls: 5, lastUsedAtMs, coverage: { state: 'complete', reason: 'observed' } },
-        { keyId: 'e'.repeat(32), calls: 0, lastUsedAtMs: null, coverage: { state: 'unknown', reason: 'window_unobserved' } },
-      ],
-    });
-    expect(summaryCard()).toContain('—');
-    expect(summaryCard()).not.toContain('≥5');
-    expect(summaryCard()).toContain(k('usageStateUnknown'));
+    const usageNode = renderer.root.findByProps({ 'data-testid': 'key-usage-' + key.id });
+    expect(readText(usageNode.findByProps({ className: 'key-stat-total' }))).toBe('18 calls');
+    expect(readText(usageNode.findByProps({ className: 'key-stat-success' }))).toBe('16');
+    expect(readText(usageNode.findByProps({ className: 'key-stat-failure' }))).toBe('2');
+    expect(readText(usageNode)).toContain('88.9%');
+    expect(readText(usageNode)).toContain('24.5K tok');
+    expect(readText(usageNode)).toContain('$1.42');
+    expect(
+      usageNode.findAll(
+        (node) =>
+          typeof node.props?.className === 'string' &&
+          node.props.className.includes('key-recent-block')
+      )
+    ).toHaveLength(10);
+    expect(
+      usageNode.findAll(
+        (node) =>
+          typeof node.props?.className === 'string' &&
+          node.props.className.includes('key-recent-block is-success')
+      )
+    ).toHaveLength(1);
+    expect(
+      usageNode.findAll(
+        (node) =>
+          typeof node.props?.className === 'string' &&
+          node.props.className.includes('key-recent-block is-failure')
+      )
+    ).toHaveLength(1);
   });
   it('keeps the key list usable when the usage read fails and avoids duplicate Unavailable pills', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json({
@@ -900,11 +901,9 @@ describe('Fresh client key persistence UI', () => {
     }));
     await mount(fetchMock, vi.fn(), new Response('failed', { status: 503 }));
     expect(view()).toContain(key.id);
-    expect(view()).toContain(k('summaryUsageValue'));
+    expect(view()).toContain(k('usageStateUnknown'));
     expect(
-      renderer.root
-        .findByProps({ 'data-testid': 'key-summary-usage' })
-        .findAllByProps({ className: 'key-state-pill is-unavailable' })
+      renderer.root.findAllByProps({ className: 'key-state-pill is-unavailable' })
     ).toHaveLength(0);
     expect(view()).not.toContain('≥');
   });
@@ -1674,14 +1673,8 @@ describe('Fresh client key persistence UI', () => {
         Response.json({ keys: [key, second], gatewayPending: false, revocationAvailable: true })
       );
     });
-    expect(
-      renderer.root.findByProps({ 'data-testid': 'key-summary-saved' }).findByType('strong').children
-    ).toEqual(['1']);
-    expect(
-      renderer.root.findByProps({ 'data-testid': 'key-summary-replaced' }).findByType('strong')
-        .children
-    ).toEqual(['1']);
     expect(renderer.root.findAllByProps({ 'data-testid': 'key-row-' + key.id })).toHaveLength(0);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'key-row-' + second.id })).toHaveLength(1);
   });
 
   it('reloads keys and clears stale key-list blockers on rebind even while the details drawer is open', async () => {
@@ -1812,13 +1805,6 @@ describe('Fresh client key persistence UI', () => {
     expect(renderer.root.findAllByProps({ 'data-testid': 'pending-operation-banner' })).toHaveLength(1);
     expect(view()).toContain(k('pendingBannerOpRotate'));
     expect(view()).toContain('Gateway Alpha');
-    // 2. Complete usage omits redundant coverage pill in key-summary-usage.
-    expect(
-      renderer.root
-        .findByProps({ 'data-testid': 'key-summary-usage' })
-        .findAllByProps({ className: 'key-state-pill is-effective' })
-    ).toHaveLength(0);
-
     // 3. Table carries explicit ARIA roles for accessibility.
     expect(renderer.root.findByType('table').props.role).toBe('table');
     expect(renderer.root.findAllByProps({ role: 'columnheader' }).length).toBe(5);
@@ -3261,10 +3247,7 @@ describe('Fresh client key persistence UI', () => {
     expect(
       renderer.root.findByProps({ 'data-testid': 'key-filter-saved' }).props['aria-selected']
     ).toBe(true);
-    const runtimeCard = renderer.root.findByProps({ 'data-testid': 'key-summary-runtime' });
-    expect(JSON.stringify(runtimeCard.findByType('small').children)).toContain(
-      k('summaryGatewayConsistent')
-    );
+    expect(view()).toContain(k('statusActive'));
     expect(
       renderer.root.findAllByType('button').some((node) => node.props.children === k('clear'))
     ).toBe(false);
@@ -3285,10 +3268,11 @@ describe('Fresh client key persistence UI', () => {
     ).toBeTruthy();
 
     await click(t('refresh'));
-    const unverifiedCard = renderer.root.findByProps({ 'data-testid': 'key-summary-runtime' });
-    expect(JSON.stringify(unverifiedCard.findByType('small').children)).toContain(
-      `0/1 ${k('summaryRuntimeVerifiedCount')}`
-    );
+    expect(
+      renderer.root
+        .findByProps({ 'data-testid': 'key-row-' + key.id })
+        .findAllByProps({ className: 'key-state-pill is-pending' })
+    ).toHaveLength(1);
   });
 
   it('copies a saved key secret on demand from the list row, filters by runtime state, sorts by usage, and opens usage tab directly', async () => {
@@ -3536,7 +3520,7 @@ describe('Fresh client key persistence UI', () => {
         (node) => typeof node.props?.className === 'string' && node.props.className.includes('key-state-pill')
       )
     ).toHaveLength(0);
-    expect(usageCellNode.findByType('strong').props.children).toBe('15');
+    expect(readText(usageCellNode.findByProps({ className: 'key-stat-success' }))).toBe('15');
     const detailBtn = renderer.root.findByProps({ 'data-testid': `open-key-${activeKey.id}` });
     expect(readText(detailBtn)).toBe(k('rowDetails'));
     expect(detailBtn.findAllByType('svg')).toHaveLength(0);
@@ -3800,7 +3784,8 @@ describe('Fresh client key persistence UI', () => {
     const createdUsageCell = renderer.root.findByProps({
       'data-testid': `key-usage-${created.id}`,
     });
-    expect(readText(createdUsageCell)).toContain('0');
+    expect(readText(createdUsageCell)).toContain(k('noUsageInWindow'));
+    expect(readText(createdUsageCell)).toContain(k('usageLastUsed'));
     expect(
       createdUsageCell.findAll(
         (node) =>

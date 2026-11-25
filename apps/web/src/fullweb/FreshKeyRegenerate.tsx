@@ -565,14 +565,17 @@ export function FreshKeyRegenerate({
       onClose={onClose}
       closeDisabled={busy}
       title={k('regenerateModalTitle')}
-      width={540}
+      width={520}
       footer={modalFooter}
     >
       <section className="key-revocation-workspace is-modal" aria-busy={busy}>
         {displayKey && (
-          <div className="key-operation-target-card" data-testid="key-regenerate-target-card">
-            <span className="key-field-label">{k('operationTargetLabel')}</span>
-            <div className="key-operation-target-meta">
+          <div className="key-operation-resource" data-testid="key-regenerate-target-card">
+            <span className="key-resource-icon" aria-hidden="true">
+              <FullWebIcon name="key" size={16} />
+            </span>
+            <div className="key-operation-resource-body">
+              <span className="key-operation-resource-label">{k('operationTargetLabel')}</span>
               <strong>{targetDisplayName}</strong>
               <code>{displayKey.maskedPreview}</code>
             </div>
@@ -583,7 +586,6 @@ export function FreshKeyRegenerate({
           <div className="key-notice key-notice-warning" role="note">
             <FullWebIcon name="alert" />
             <div>
-              <strong>{k('regenerateModalTitle')}</strong>
               <p>{k('regenerateWarning')}</p>
             </div>
           </div>

@@ -60,5 +60,31 @@
 .label {
   min-width: 0;
   color: var(--text-primary);
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.sizeSm {
+  gap: 6px;
+
+  .track {
+    width: 32px;
+    height: 18px;
+  }
+
+  .thumb {
+    width: 14px;
+    height: 14px;
+  }
+
+  input:checked + .track .thumb {
+    transform: translateX(14px);
+  }
+
+  .label {
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 500;
+  }
 }

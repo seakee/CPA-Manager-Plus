@@ -101,12 +101,18 @@ type DetailResponse struct {
 
 // SummaryItem is one row of the Key list usage column.
 type SummaryItem struct {
-	KeyID        string        `json:"keyId"`
-	Calls        int64         `json:"calls"`
-	LastUsedAtMS *int64        `json:"lastUsedAtMs"`
-	Coverage     CoverageState `json:"coverage"`
+	KeyID            string                `json:"keyId"`
+	Calls            int64                 `json:"calls"`
+	Success          int64                 `json:"success"`
+	Failure          int64                 `json:"failure"`
+	TotalTokens      int64                 `json:"totalTokens"`
+	EstimatedCostUSD *float64              `json:"estimatedCostUsd,omitempty"`
+	TopModels        []ports.ModelCount    `json:"topModels,omitempty"`
+	ModelCount       int                   `json:"modelCount,omitempty"`
+	RecentRequests   []ports.RecentRequest `json:"recentRequests,omitempty"`
+	LastUsedAtMS     *int64                `json:"lastUsedAtMs"`
+	Coverage         CoverageState         `json:"coverage"`
 }
-
 // SummaryResponse is the batched usage column of the Key list.
 type SummaryResponse struct {
 	FromMS   int64         `json:"fromMs"`
@@ -510,6 +516,13 @@ func (s *Service) Summary(ctx context.Context, ids []identity.APIKeyID) (Summary
 				}
 			}
 			item.Calls = window.Totals.Calls
+			item.Success = window.Totals.Calls - window.Totals.Failure
+			item.Failure = window.Totals.Failure
+			item.TotalTokens = window.Totals.TotalTokens
+			item.EstimatedCostUSD = window.EstimatedCostUSD
+			item.TopModels = window.TopModels
+			item.ModelCount = window.ModelCount
+			item.RecentRequests = window.RecentRequests
 			item.LastUsedAtMS = lastUsedAtMS
 			if windowFromMS < toMS && (!hasPublished || windowFromMS < publishedFromMS) {
 				publishedFromMS = windowFromMS

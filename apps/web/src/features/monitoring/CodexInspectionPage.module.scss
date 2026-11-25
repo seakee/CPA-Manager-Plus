@@ -1,6 +1,6 @@
 .page,
 .settingsModal,
-.configDrawerOverlay {
+.configDrawerPanel {
   --inspect-surface-elevated: color-mix(in srgb, var(--bg-primary) 82%, var(--surface-subtle));
   --inspect-surface-hover: color-mix(in srgb, var(--surface-subtle-hover) 74%, var(--bg-primary));
   --inspect-muted: var(--text-secondary);
@@ -664,61 +664,6 @@
   color: var(--text-secondary);
 }
 
-.resultPaginationBar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: 10px;
-  padding: 10px 12px;
-  border: 1px solid var(--border-color);
-  border-radius: var(--app-radius-md);
-  background: color-mix(in srgb, var(--surface-subtle) 62%, var(--bg-primary));
-}
-
-.resultPaginationInfo {
-  min-width: 0;
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-  line-height: 1.4;
-}
-
-.resultPaginationControls {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 8px;
-  min-width: 0;
-}
-
-.resultPageSizeField {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: var(--control-height-sm);
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.resultPageSizeSelect {
-  width: 118px;
-  flex: 0 0 auto;
-}
-
-.resultPageSizeSelect .resultPageSizeSelectTrigger,
-.resultPageSizeSelectTrigger.resultPageSizeSelectTrigger {
-  min-width: 96px;
-  height: var(--control-height-sm);
-  padding: 0 2px 0 10px;
-  border-radius: var(--app-radius-sm);
-  font-size: 12px;
-  font-weight: 700;
-}
 
 .primaryCell {
   display: grid;
@@ -1131,9 +1076,10 @@
 
 .settingsAutoSubLabel {
   margin-top: 2px;
-  color: var(--text-primary);
-  font-size: 13px;
-  font-weight: 700;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.35;
   letter-spacing: 0;
 }
 
@@ -1161,8 +1107,8 @@
   align-items: start;
   gap: 10px;
   min-width: 0;
-  min-height: 82px;
-  padding: 10px;
+  min-height: 62px;
+  padding: 10px 12px;
   border: 1px solid var(--border-color);
   border-radius: var(--app-radius-md);
   background: var(--inspect-surface-elevated);
@@ -1216,8 +1162,8 @@
 .settingsAutoOptionIcon {
   display: inline-grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
+  width: 30px;
+  height: 30px;
   border-radius: var(--app-radius-sm);
   background: color-mix(in srgb, var(--auto-color) 12%, var(--bg-primary));
   color: var(--auto-color-strong);
@@ -1225,22 +1171,22 @@
 
 .settingsAutoOptionText {
   display: grid;
-  gap: 4px;
+  gap: 2px;
   min-width: 0;
 }
 
 .settingsAutoOptionText strong {
   color: var(--text-primary);
-  font-size: 14px;
-  font-weight: 700;
-  line-height: 1.3;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
 }
 
 .settingsAutoOptionText small {
   color: var(--text-secondary);
   font-size: 12px;
   font-weight: 500;
-  line-height: 1.4;
+  line-height: 1.45;
 }
 
 .settingsAutoOptionCheck {
@@ -1715,16 +1661,6 @@
   white-space: nowrap;
 }
 
-.configDrawerOverlay {
-  container: codex-inspection-page / inline-size;
-  position: fixed;
-  inset: 0;
-  z-index: 1200;
-  display: flex;
-  justify-content: flex-end;
-  background: var(--overlay-scrim-drawer);
-}
-
 .xaiInferenceToggle {
   display: flex;
   align-items: center;
@@ -1832,111 +1768,6 @@
   opacity: 0.5;
 }
 
-.configDrawer {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  width: min(720px, calc(100vw - 32px));
-  height: 100dvh;
-  max-height: 100dvh;
-  min-width: 0;
-  overflow: hidden;
-  border-left: 1px solid var(--border-color);
-  background: var(--bg-primary);
-  /* floating layer: elevation allowed */
-  box-shadow: var(--floating-shadow-drawer);
-}
-
-.configDrawerHeader {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 14px;
-  padding: 20px 22px 16px;
-  border-bottom: 1px solid var(--border-color);
-}
-
-.configDrawerHeader h2 {
-  margin: 0;
-  color: var(--text-primary);
-  font-size: 20px;
-  font-weight: 700;
-  letter-spacing: 0;
-  line-height: 1.25;
-}
-
-.configDrawerHeader p {
-  margin: 6px 0 0;
-  color: var(--text-secondary);
-  font-size: 13px;
-  line-height: 1.55;
-}
-
-.configDrawerClose {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: var(--control-height-sm);
-  height: var(--control-height-sm);
-  flex: 0 0 var(--control-height-sm);
-  border: 1px solid var(--border-color);
-  border-radius: var(--app-radius-sm);
-  background: var(--inspect-surface-elevated);
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition:
-    border-color 0.18s ease,
-    background-color 0.18s ease,
-    color 0.18s ease;
-}
-
-.configDrawerClose:hover {
-  border-color: color-mix(in srgb, var(--primary-color) 32%, var(--border-primary));
-  background: var(--inspect-surface-hover);
-  color: var(--text-primary);
-}
-
-.configDrawerBody {
-  display: grid;
-  gap: 14px;
-  align-content: start;
-  min-height: 0;
-  padding: 16px 22px 24px;
-  font-size: 13px;
-  overscroll-behavior: contain;
-  overflow-y: auto;
-}
-
-.configDrawer :global(.form-group) {
-  gap: 6px;
-}
-
-.configDrawer :global(.form-group > label) {
-  color: var(--text-primary);
-  font-size: 13px;
-  font-weight: 700;
-  line-height: 1.4;
-}
-
-.configDrawer :global(input.input) {
-  height: var(--control-height-md);
-  min-height: var(--control-height-md);
-  font-size: 14px;
-  font-weight: 400;
-  line-height: 1.4;
-}
-
-.configDrawer :global(textarea.input) {
-  padding: 10px 12px;
-  font-size: 14px;
-  font-weight: 400;
-  line-height: 1.45;
-}
-
-.configDrawer :global(.hint) {
-  font-size: 12px;
-  line-height: 1.45;
-}
-
 .configSection {
   display: grid;
   gap: 12px;
@@ -1966,20 +1797,14 @@
   line-height: 1.35;
 }
 
-.configDrawerFooter {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+.configDrawerFooter > div {
+  flex: 1 1 auto;
+  justify-content: flex-end;
   gap: 12px;
-  padding: 14px 22px;
-  border-top: 1px solid var(--border-color);
-  background: var(--bg-primary);
-  box-shadow: none;
 }
 
 .configDrawerStatus {
+  margin-right: auto;
   min-width: 0;
   color: var(--text-secondary);
   font-size: 12px;
@@ -2054,23 +1879,23 @@
 
 .configSelectTrigger {
   height: var(--control-height-md);
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
 }
 
 .configSelectDropdown button {
-  font-size: 14px;
+  font-size: 13px;
 }
-
 .serverFieldWide {
   grid-column: span 12;
 }
 
 .advancedSection {
-  margin-top: 4px;
-  border: 1px solid var(--border-color);
+  margin-top: 0;
+  border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
   border-radius: var(--app-radius-md);
-  background: var(--inspect-surface-elevated);
+  background: var(--bg-primary);
+  box-shadow: var(--app-specular-highlight);
 }
 
 .advancedSection > summary {
@@ -2078,12 +1903,13 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 12px 14px;
+  padding: 13px 16px;
   list-style: none;
   cursor: pointer;
   color: var(--text-primary);
   font-size: 14px;
   font-weight: 700;
+  line-height: 1.35;
 }
 
 .advancedSummaryCopy {
@@ -2137,9 +1963,9 @@
   min-width: 0;
   margin: 0;
   color: var(--text-primary);
-  font-size: 14px;
-  font-weight: 700;
-  line-height: 1.35;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
 }
 
 .advancedGroupTitle::after {
@@ -2165,7 +1991,21 @@
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
-.advancedExecutionGrid .serverField {
+.configDrawerPanel .serverField {
+  grid-column: span 6;
+}
+
+.configDrawerPanel .serverFieldWide {
+  grid-column: span 12;
+}
+
+.configDrawerPanel .advancedExecutionGrid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.advancedExecutionGrid .serverField,
+.configDrawerPanel .advancedExecutionGrid .serverField,
+.configDrawerPanel .configSectionStrategy .serverField {
   grid-column: auto;
 }
 
@@ -2190,7 +2030,7 @@
   border-left: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
   background: transparent;
   color: color-mix(in srgb, var(--text-secondary) 84%, var(--text-primary));
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   white-space: nowrap;
   cursor: pointer;
@@ -2235,11 +2075,11 @@
 
 .serverFieldLabel {
   display: block;
-  margin-bottom: 6px;
-  color: var(--text-primary);
-  font-size: 13px;
-  font-weight: 700;
-  line-height: 1.4;
+  margin-bottom: 5px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.35;
 }
 
 .advancedGroup :global(.form-group > label),
@@ -2541,15 +2381,6 @@
     border-top: 1px dashed var(--border-color);
   }
 
-  .resultPaginationBar {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
-  .resultPaginationControls {
-    justify-content: flex-start;
-    width: 100%;
-  }
 }
 
 @container codex-inspection-page (max-width: 640px) {
@@ -2659,16 +2490,6 @@
     width: 100%;
   }
 
-  .resultPaginationControls {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .resultPageSizeField,
-  .resultPageSizeSelect,
-  .resultPageSizeSelectTrigger {
-    width: 100%;
-  }
 
   .settingsField,
   .settingsFieldWide,
@@ -2754,22 +2575,6 @@
     display: none;
   }
 
-  .configDrawer {
-    width: 100vw;
-  }
-
-  .configDrawerHeader,
-  .configDrawerBody,
-  .configDrawerFooter {
-    padding-right: 16px;
-    padding-left: 16px;
-  }
-
-  .configDrawerFooter {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
   .configDrawerActions {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2777,6 +2582,44 @@
   }
 
   .configDrawerActions :global(button) {
+    width: 100%;
+  }
+}
+
+@media (max-width: 640px) {
+  .configDrawerPanel .serverField,
+  .configDrawerPanel .serverFieldWide {
+    grid-column: span 12;
+  }
+
+  .configDrawerPanel .configSectionStrategy .serverConfigGrid,
+  .configDrawerPanel .advancedExecutionGrid,
+  .configDrawerPanel .scheduleTimePointFields,
+  .configDrawerPanel .settingsAutoCards {
+    grid-template-columns: 1fr;
+  }
+
+  .configDrawerPanel .configSectionStrategy .serverField,
+  .configDrawerPanel .scheduleTimePointHint {
+    grid-column: auto;
+  }
+
+  .configDrawerPanel .configDrawerFooter > div {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .configDrawerPanel .configDrawerStatus {
+    margin-right: 0;
+  }
+
+  .configDrawerPanel .configDrawerActions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .configDrawerPanel .configDrawerActions :global(button) {
     width: 100%;
   }
 }

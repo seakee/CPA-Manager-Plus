@@ -569,24 +569,10 @@
 
 .dataPanel {
   min-width: 0;
-  overflow: hidden;
-  border: 1px solid var(--border-color);
-  border-radius: var(--app-radius-lg);
-  background: var(--bg-primary);
-  box-shadow: var(--app-specular-highlight);
-  padding: 0;
 }
 
 .dataPanelHeader {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
   min-width: 0;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--border-subtle);
-  background: color-mix(in srgb, var(--surface-subtle) 34%, var(--bg-primary));
 }
 
 .dataPanelTabs {
@@ -613,7 +599,7 @@
 }
 
 .dataPanelBody {
-  padding: 14px 16px 16px;
+  padding: 0;
 }
 
 .dataPanelTabPanel[hidden] {
@@ -2213,7 +2199,6 @@
 
   .dataPanelHeader {
     gap: 8px;
-    padding: 10px 12px;
   }
 
   .segmentedControl {

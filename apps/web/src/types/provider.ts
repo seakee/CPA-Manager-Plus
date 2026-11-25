@@ -119,6 +119,12 @@ export interface ModelAlias {
   inputModalities?: string[];
   outputModalities?: string[];
   thinking?: Record<string, unknown>;
+  displayName?: string;
+  maxContextLength?: number;
+  isCompat?: boolean;
+  openapi?: boolean;
+  supportConfigurationUpdate?: boolean;
+  useMaxCompletionTokens?: boolean;
   [MODEL_THINKING_LEVELS_CLEAR_MARKER]?: true;
   [MODEL_THINKING_LEVELS_EDIT_MARKER]?: true;
 }
@@ -136,6 +142,8 @@ export interface CloakConfig {
   strictMode?: boolean;
   sensitiveWords?: string[];
   cacheUserId?: boolean;
+  sensitiveWordsReplace?: Record<string, string>;
+  sensitivePatternsReplace?: Record<string, unknown>[];
 }
 
 /**
@@ -146,7 +154,27 @@ export interface CloakConfig {
  */
 export type ClaudeFingerprintProfile = '' | 'claude-code-cli';
 
+export type ProviderV8Family =
+  | 'gemini'
+  | 'interactions'
+  | 'vertex'
+  | 'codex'
+  | 'claude'
+  | 'xai'
+  | 'meta'
+  | 'openai-compatibility';
+
+export interface ProviderV8GroupSource {
+  family: ProviderV8Family;
+  groupIndex: number;
+  keyIndex?: number;
+  group: Record<string, unknown>;
+  groups?: Record<string, unknown>[];
+  etag?: string;
+}
+
 export interface GeminiKeyConfig {
+  name?: string;
   apiKey: string;
   priority?: number;
   weight?: number;
@@ -158,9 +186,11 @@ export interface GeminiKeyConfig {
   excludedModels?: string[];
   authIndex?: string;
   disableCooling?: boolean | null;
+  v8Source?: ProviderV8GroupSource;
 }
 
 export interface ProviderKeyConfig {
+  name?: string;
   apiKey: string;
   priority?: number;
   weight?: number;
@@ -182,6 +212,7 @@ export interface ProviderKeyConfig {
    */
   experimentalCchSigning?: boolean;
   rebuildMidSystemMessage?: boolean;
+  v8Source?: ProviderV8GroupSource;
 }
 
 export interface OpenAIProviderConfig {
@@ -196,5 +227,6 @@ export interface OpenAIProviderConfig {
   testModel?: string;
   authIndex?: string;
   disableCooling?: boolean | null;
+  v8Source?: ProviderV8GroupSource;
   [key: string]: unknown;
 }

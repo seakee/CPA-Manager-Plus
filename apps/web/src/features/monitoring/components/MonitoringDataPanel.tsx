@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { Card } from '@/components/ui/Card';
+import { WorkspaceListPanel } from '@/components/common/WorkspaceListPanel';
 import {
   MonitoringTabsBar,
   type MonitoringTab,
@@ -26,8 +26,12 @@ export function MonitoringDataPanel<Id extends string>({
   renderContent,
 }: MonitoringDataPanelProps<Id>) {
   return (
-    <Card className={styles.dataPanel}>
-      <div className={styles.dataPanelHeader}>
+    <WorkspaceListPanel
+      as="div"
+      className={styles.dataPanel}
+      headerClassName={styles.dataPanelHeader}
+      bodyClassName={styles.dataPanelBody}
+      headerLeading={
         <div className={styles.dataPanelTabs}>
           <MonitoringTabsBar
             tabs={tabs}
@@ -38,11 +42,10 @@ export function MonitoringDataPanel<Id extends string>({
             variant="cards"
           />
         </div>
-        {actions ? <div className={styles.dataPanelActions}>{actions}</div> : null}
-      </div>
-
-      <div className={styles.dataPanelBody}>
-        {tabs.map((tab) => {
+      }
+      headerActions={actions}
+    >
+      {tabs.map((tab) => {
           const isActive = tab.id === activeTab;
           return (
             <div
@@ -57,7 +60,6 @@ export function MonitoringDataPanel<Id extends string>({
             </div>
           );
         })}
-      </div>
-    </Card>
+    </WorkspaceListPanel>
   );
 }

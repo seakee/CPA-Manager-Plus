@@ -31,6 +31,7 @@ interface SelectProps {
   ariaDescribedBy?: string;
   fullWidth?: boolean;
   id?: string;
+  size?: 'sm' | 'md';
 }
 
 const VIEWPORT_MARGIN = 8;
@@ -46,12 +47,14 @@ const resolveDropdownStyle = (element: HTMLElement): CSSProperties => {
   const rect = element.getBoundingClientRect();
   const viewportWidth = window.innerWidth;
   const viewportHeight = window.innerHeight;
-  const width = Math.min(rect.width, Math.max(0, viewportWidth - VIEWPORT_MARGIN * 2));
+  const maxAvailableWidth = Math.max(0, viewportWidth - VIEWPORT_MARGIN * 2);
+  const minWidth = Math.min(rect.width, maxAvailableWidth);
   const left = clamp(
     rect.left,
     VIEWPORT_MARGIN,
-    Math.max(VIEWPORT_MARGIN, viewportWidth - width - VIEWPORT_MARGIN)
+    Math.max(VIEWPORT_MARGIN, viewportWidth - minWidth - VIEWPORT_MARGIN)
   );
+  const maxWidth = Math.max(minWidth, viewportWidth - left - VIEWPORT_MARGIN);
   const spaceBelow = viewportHeight - rect.bottom - VIEWPORT_MARGIN - DROPDOWN_OFFSET;
   const spaceAbove = rect.top - VIEWPORT_MARGIN - DROPDOWN_OFFSET;
   const direction = spaceBelow >= DROPDOWN_MAX_HEIGHT || spaceBelow >= spaceAbove ? 'down' : 'up';
@@ -63,7 +66,9 @@ const resolveDropdownStyle = (element: HTMLElement): CSSProperties => {
         position: 'fixed',
         top: rect.bottom + DROPDOWN_OFFSET,
         left,
-        width,
+        minWidth,
+        width: 'max-content',
+        maxWidth,
         maxHeight,
         zIndex: DROPDOWN_Z_INDEX,
       }
@@ -71,7 +76,9 @@ const resolveDropdownStyle = (element: HTMLElement): CSSProperties => {
         position: 'fixed',
         bottom: viewportHeight - rect.top + DROPDOWN_OFFSET,
         left,
-        width,
+        minWidth,
+        width: 'max-content',
+        maxWidth,
         maxHeight,
         zIndex: DROPDOWN_Z_INDEX,
       };
@@ -91,6 +98,7 @@ export function Select({
   ariaDescribedBy,
   fullWidth = true,
   id,
+  size = 'md',
 }: SelectProps) {
   const generatedId = useId();
   const selectId = id ?? generatedId;
@@ -351,7 +359,13 @@ export function Select({
         <button
           id={selectId}
           type="button"
-          className={[styles.trigger, triggerClassName].filter(Boolean).join(' ')}
+          className={[
+            styles.trigger,
+            size === 'sm' ? styles.triggerSm : '',
+            triggerClassName,
+          ]
+            .filter(Boolean)
+            .join(' ')}
           onClick={disabled ? undefined : toggleOpen}
           onKeyDown={handleKeyDown}
           aria-haspopup="listbox"

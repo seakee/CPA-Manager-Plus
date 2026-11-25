@@ -1,87 +1,97 @@
 @use '@/styles/variables.scss' as *;
 @use '@/styles/mixins.scss' as *;
 
-// 类型 / 标识 / 地址 / 模型 / 优先级 / 近期请求 / 启用 / 操作
-$table-columns: 112px minmax(112px, 0.75fr) minmax(140px, 1fr) 68px 72px minmax(176px, 0.85fr) 68px 104px;
+// 标识 / 端点与路由 / 模型 / 调度 / 请求与健康 / 操作
+$table-columns:
+  minmax(168px, 1.15fr)
+  minmax(144px, 0.96fr)
+  minmax(164px, 1.12fr)
+  96px
+  minmax(204px, 1.28fr)
+  168px;
 
-@mixin provider-card-layout {
-  @media (max-width: 1280px) {
-    @content;
-  }
+$table-columns-with-selection:
+  34px
+  minmax(168px, 1.15fr)
+  minmax(144px, 0.96fr)
+  minmax(164px, 1.12fr)
+  96px
+  minmax(204px, 1.28fr)
+  168px;
+.tableScroller {
+  width: 100%;
+  min-width: 0;
+  overflow-x: auto;
 }
 
 .table {
   display: flex;
   flex-direction: column;
-  min-width: 0;
-  overflow-x: auto;
+  gap: 8px;
+  padding: 8px var(--list-panel-gutter-x, 16px) 14px;
+  min-width: 960px;
+  font-variant-numeric: tabular-nums;
 }
 
 .headerRow {
+  @include card-row-table-header;
   display: grid;
   grid-template-columns: $table-columns;
   align-items: center;
   gap: 12px;
-  min-width: 960px;
-  padding: $spacing-sm $spacing-md;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-tertiary);
-  border-bottom: 1px solid var(--border-color);
-  white-space: nowrap;
-
-  @include provider-card-layout {
-    display: none;
-  }
+  min-height: 32px;
+  padding: 2px 14px 2px;
 }
 
 .row {
+  @include card-row-table-surface;
   display: grid;
   grid-template-columns: $table-columns;
   align-items: center;
   gap: 12px;
-  min-width: 960px;
-  min-height: 58px;
-  padding: 10px $spacing-md;
-  border-bottom: 1px solid var(--border-subtle);
+  min-height: 68px;
+  padding: 11px 14px;
   cursor: pointer;
-  transition: background $transition-fast;
+  transition:
+    background-color $transition-fast,
+    border-color $transition-fast,
+    box-shadow $transition-fast;
 
   &:hover,
   &:focus-visible {
-    background: var(--surface-subtle);
+    border-color: color-mix(in srgb, var(--primary-color) 28%, var(--border-color));
+    background: color-mix(in srgb, var(--primary-color) 3.5%, var(--bg-primary));
     outline: none;
   }
 
-  &:last-child {
-    border-bottom: none;
+  &:focus-visible {
+    box-shadow: inset 0 0 0 1px var(--focus-inset);
   }
-
-  @include provider-card-layout {
-    min-width: 0;
-    grid-template-columns: 1fr auto;
-    grid-template-areas:
-      'type toggle'
-      'identity identity'
-      'url url'
-      'priority models'
-      'recent recent'
-      'actions actions';
-    column-gap: 10px;
-    row-gap: 6px;
-    padding: $spacing-md;
-    border: 1px solid var(--border-color);
-    border-radius: var(--app-radius-md);
-    margin-bottom: $spacing-sm;
-    background: var(--bg-primary);
+}
+.tableWithSelection {
+  .headerRow,
+  .row {
+    grid-template-columns: $table-columns-with-selection;
   }
 }
 
+.rowSelectionMode {
+  cursor: pointer;
+}
+
+.rowSelected {
+  border-color: color-mix(in srgb, var(--primary-color) 52%, var(--border-color));
+  background: color-mix(in srgb, var(--primary-color) 5%, var(--bg-primary));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary-color) 16%, transparent);
+}
+
+.rowBulkSelected {
+  border-color: color-mix(in srgb, var(--primary-color) 48%, var(--border-color));
+  background: color-mix(in srgb, var(--primary-color) 5%, var(--bg-primary));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary-color) 16%, transparent);
+}
+
 // 停用行：用文字色阶降级表达不可用，可读文字不叠加透明度。
-// Alpha dimming composites the muted step down again: --text-tertiary (#52606f)
-// at 0.85 is 4.48:1 on the card and 4.36:1 on the hover tint (#f6faff), below
-// AA. Only the decorative kind icon keeps alpha; every text cell moves one step
-// down the opaque ramp instead (tertiary >= 6.14:1 on the hover tint).
 .rowDisabled {
   .kindIconFrame {
     opacity: 0.6;
@@ -92,78 +102,71 @@ $table-columns: 112px minmax(112px, 0.75fr) minmax(140px, 1fr) 68px 72px minmax(
   }
 
   .kindLabel,
-  .cellUrl,
-  .cellModels,
+  .maskedKey,
+  .urlText,
+  .modelsTrigger,
   .priorityValueButton,
   .priorityInput {
     color: var(--text-tertiary);
   }
 }
 
-.cellType {
+.cellSelectHeader,
+.cellSelect {
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-width: 0;
+  justify-content: center;
+}
 
-  @include provider-card-layout {
-    grid-area: type;
-  }
+.cellIdentity {
+  min-width: 0;
+}
+
+.identityBlock {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
 }
 
 .kindIconFrame {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
+  width: 32px;
+  height: 32px;
   flex-shrink: 0;
 }
 
 .kindIcon {
-  width: 18px;
-  height: 18px;
+  width: 28px;
+  height: 28px;
   display: block;
   object-fit: contain;
   flex-shrink: 0;
 }
 
 .kindIconCodex {
-  transform: scale(1.16);
+  transform: scale(1.1);
 }
 
 .kindIconOpenai {
-  transform: scale(0.98);
+  transform: scale(0.92);
 }
 
-.kindLabel {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  @include text-ellipsis;
-}
-
-.cellIdentity {
+.identityText {
   display: flex;
   flex-direction: column;
-  gap: 0;
+  gap: 3px;
   min-width: 0;
-
-  @include provider-card-layout {
-    grid-area: identity;
-  }
+  flex: 1;
 }
 
-.identityMain {
+.identityLine1 {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   min-width: 0;
-
-  @include provider-card-layout {
-    flex-wrap: wrap;
-    row-gap: 2px;
-  }
 }
 
 .identityLabel {
@@ -171,114 +174,604 @@ $table-columns: 112px minmax(112px, 0.75fr) minmax(140px, 1fr) 68px 72px minmax(
   font-size: 13px;
   font-weight: 600;
   color: var(--text-primary);
-  font-family: var(--font-mono);
   @include text-ellipsis;
 }
 
-.identityMeta {
+.inlineCopyButton {
+  @include button-reset;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--app-radius-xs);
+  color: var(--text-tertiary);
   flex-shrink: 0;
+  transition:
+    opacity $transition-fast,
+    background-color $transition-fast,
+    color $transition-fast;
+
+  &:hover,
+  &:focus-visible {
+    background: var(--app-accent-soft);
+    color: var(--primary-text);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--app-input-border-focus);
+    outline-offset: 1px;
+  }
+}
+
+.identityKeyMeta {
+  font-size: 11.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.identityKeyWarn {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--data-badge-warning-text);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.identityLine2 {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 5px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.metaSep {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  user-select: none;
+}
+
+.kindLabel {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.maskedKey {
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  line-height: 1.3;
+  @include text-ellipsis;
+}
+
+.prefixBadge {
+  @include button-reset;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 18px;
+  margin: 0 -3px;
+  padding: 0 3px;
+  border-radius: var(--app-radius-xs);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  transition:
+    background-color $transition-fast,
+    color $transition-fast;
+
+  &:hover,
+  &:focus-visible {
+    background: var(--app-accent-soft);
+    color: var(--primary-text);
+  }
+  &:focus-visible {
+    outline: 2px solid var(--app-input-border-focus);
+    outline-offset: 1px;
+  }
+}
+
+.prefixBadgeLabel {
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
+
+.prefixBadgeValue {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.capabilityChip {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: var(--app-radius-xs);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.capabilityChipWarn {
+  border-color: var(--data-badge-warning-border);
+  background: var(--data-badge-warning-bg);
+  color: var(--data-badge-warning-text);
+}
+
+.capabilityChipInfo {
+  border-color: var(--data-badge-info-border);
+  background: var(--data-badge-info-bg);
+  color: var(--data-badge-info-text);
+}
+
+.cellUrl {
+  min-width: 0;
+}
+
+.endpointBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.endpointChips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+
+.endpointMetaItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.endpointOfficialTag {
+  color: var(--primary-text);
+  font-weight: 600;
+}
+.urlCellWrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.urlText {
+  min-width: 0;
+  flex: 0 1 auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  @include text-ellipsis;
+}
+.urlCopyButton {
+  @include button-reset;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--app-radius-xs);
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+  transition:
+    opacity $transition-fast,
+    background-color $transition-fast,
+    color $transition-fast;
+
+  &:hover,
+  &:focus-visible {
+    background: var(--app-accent-soft);
+    color: var(--primary-text);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--app-input-border-focus);
+    outline-offset: 1px;
+  }
+}
+
+@media (hover: hover) {
+  .inlineCopyButton,
+  .urlCopyButton {
+    opacity: 0;
+  }
+
+  .row:hover .inlineCopyButton,
+  .row:focus-within .inlineCopyButton,
+  .row:hover .urlCopyButton,
+  .row:focus-within .urlCopyButton {
+    opacity: 1;
+  }
+}
+
+.urlDefault {
   font-size: 12px;
   color: var(--text-tertiary);
+  font-style: normal;
+  white-space: nowrap;
+}
 
-  @include provider-card-layout {
-    flex-shrink: 1;
-    min-width: 0;
-    max-width: 100%;
+.cellModelsHeader {
+  text-align: left;
+}
+
+.cellPriorityHeader {
+  text-align: left;
+}
+
+.cellModels {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  min-width: 0;
+}
+
+.modelsTriggerWrap {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+}
+
+.modelsTrigger {
+  @include button-reset;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  max-width: calc(100% + 8px);
+  min-width: 0;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  border-radius: var(--app-radius-sm);
+  color: var(--text-primary);
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.25;
+  transition:
+    background-color $transition-fast,
+    color $transition-fast;
+
+  &:hover:not(:disabled) {
+    background: var(--surface-subtle);
+    color: var(--primary-text);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--app-input-border-focus);
+    outline-offset: 1px;
+  }
+
+  &:disabled {
+    opacity: 0.6;
+  }
+}
+
+.modelsTriggerWildcard {
+  .modelsPrimaryText {
+    display: inline-flex;
+    align-items: center;
+    height: 22px;
+    padding: 0 8px;
+    border-radius: var(--app-radius-xs);
+    border: 1px solid var(--data-badge-success-border);
+    background: var(--data-badge-success-bg);
+    color: var(--data-badge-success-text);
+  }
+}
+
+.modelsTopRow {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.modelPreviewChip {
+  display: block;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--app-radius-xs);
+  background: var(--surface-subtle);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 20px;
+  @include text-ellipsis;
+}
+
+.modelPreviewChipPair {
+  max-width: 140px;
+}
+
+.modelsMoreBadge {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: var(--app-radius-xs);
+  background: color-mix(in srgb, var(--primary-color) 10%, transparent);
+  color: var(--primary-text);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.modelsSubRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 5px;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.modelsSummaryItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.modelsExcludedInline {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--data-badge-warning-text);
+  white-space: nowrap;
+}
+.modelsPrimaryText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.excludedBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border-radius: var(--app-radius-pill);
+  border: 1px solid var(--data-badge-warning-border);
+  background: var(--data-badge-warning-bg);
+  color: var(--data-badge-warning-text);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.modelsTooltip {
+  position: fixed;
+  z-index: $z-notification;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 200px;
+  max-width: 340px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--app-radius-md);
+  background: var(--bg-primary);
+  /* floating layer: elevation allowed */
+  box-shadow: var(--floating-shadow-md);
+  color: var(--text-primary);
+  pointer-events: none;
+}
+
+.modelsTooltipHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.modelsTooltipTitle {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.modelsTooltipSubtitle {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+}
+.modelsTooltipList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 3px;
+
+  li {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--text-primary);
     @include text-ellipsis;
   }
 }
 
-.cellUrl {
-  font-size: 12px;
+.modelsTooltipMappingRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.modelsTooltipAlias {
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.modelsTooltipArrow {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.modelsTooltipUpstream {
   color: var(--text-secondary);
+  min-width: 0;
   @include text-ellipsis;
-
-  @include provider-card-layout {
-    grid-area: url;
-    white-space: normal;
-    overflow-wrap: anywhere;
-  }
 }
 
-.cellNumeric {
-  text-align: right;
-
-  @include provider-card-layout {
-    text-align: left;
-  }
+.modelsTooltipExcluded {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-subtle);
 }
 
-.cellPriority,
-.cellModels {
-  font-size: 13px;
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
-
-  @include provider-card-layout {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
+.modelsTooltipExcludedOnly {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
-.cellModelsHeader,
-.cellPriorityHeader {
-  text-align: center;
+.modelsTooltipExcludedTitle {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--data-badge-warning-text);
+}
+
+.modelsTooltipMore {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
 }
 
 .cellPriority {
   display: flex;
   align-items: center;
-  justify-content: center;
-
-  @include provider-card-layout {
-    grid-area: priority;
-    justify-content: flex-start;
-  }
+  justify-content: flex-start;
+  min-width: 0;
 }
 
+.schedulingCell {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.priorityPillWrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.priorityPrefix {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.2;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.schedulingSubRow {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  flex-wrap: nowrap;
+  gap: 4px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.weightMeta,
+.coolingMeta {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.coolingWarnMeta {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--data-badge-warning-text);
+  white-space: nowrap;
+}
 .priorityControl {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   cursor: default;
-
-  @include provider-card-layout {
-    justify-content: flex-start;
-  }
 }
 
 .priorityValueButton {
   max-width: 100%;
-  min-width: 0;
-  height: 30px;
-  padding: 0 4px;
+  min-width: 26px;
+  height: 22px;
+  padding: 0 5px;
   border: 0;
   border-radius: var(--app-radius-xs);
   outline: none;
   background: transparent;
-  text-align: center;
-  font: inherit;
-  font-size: 12px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 13px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
-  line-height: 30px;
+  line-height: 22px;
   color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   cursor: pointer;
   transition:
-    background $transition-fast,
-    color $transition-fast,
-    box-shadow $transition-fast;
+    background-color $transition-fast,
+    color $transition-fast;
 
   &:hover:not(:disabled) {
     background: var(--app-accent-soft);
     color: var(--primary-text);
   }
 
-  &:focus {
+  &:focus-visible {
     background: var(--focus-bg);
     color: var(--focus-text);
     box-shadow: inset 0 0 0 1px var(--focus-inset);
@@ -291,37 +784,28 @@ $table-columns: 112px minmax(112px, 0.75fr) minmax(140px, 1fr) 68px 72px minmax(
 }
 
 .priorityInput {
-  width: 36px;
-  min-width: 36px;
-  height: 30px;
-  padding: 0 3px;
-  border: 0;
+  box-sizing: border-box;
+  width: 44px;
+  min-width: 44px;
+  height: 22px;
+  padding: 0 5px;
+  border: 1px solid var(--app-input-border-focus);
   border-radius: var(--app-radius-xs);
   outline: none;
   appearance: textfield;
-  background: transparent;
-  text-align: center;
+  background: var(--app-input-bg-focus);
+  text-align: left;
   font: inherit;
-  font-size: 12px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   color: var(--text-primary);
-  transition:
-    background $transition-fast,
-    color $transition-fast,
-    box-shadow $transition-fast;
-
-  &:focus {
-    background: var(--focus-bg);
-    color: var(--focus-text);
-    box-shadow: inset 0 0 0 1px var(--focus-inset);
-  }
 
   &:disabled {
     cursor: not-allowed;
     opacity: 0.62;
   }
-
   &::-webkit-outer-spin-button,
   &::-webkit-inner-spin-button {
     margin: 0;
@@ -329,61 +813,124 @@ $table-columns: 112px minmax(112px, 0.75fr) minmax(140px, 1fr) 68px 72px minmax(
   }
 }
 
-.cellModels {
-  text-align: center;
-
-  @include provider-card-layout {
-    grid-area: models;
-    text-align: left;
-  }
-}
-
 .cellRecentHeader {
-  padding-left: 8px;
+  padding-left: 4px;
   text-align: left;
-
-  @include provider-card-layout {
-    padding-left: 0;
-  }
-}
-
-// 仅移动端展示的内联字段名
-.cellCaption {
-  display: none;
-
-  @include provider-card-layout {
-    display: inline;
-    font-size: 12px;
-    color: var(--text-tertiary);
-  }
 }
 
 .cellRecent {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  column-gap: $spacing-sm;
-  row-gap: 4px;
   min-width: 0;
-  width: auto;
-  max-width: none;
-  padding-left: 8px;
+  padding-left: 4px;
+  padding-right: 8px;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
-
-  @include provider-card-layout {
-    grid-area: recent;
-    width: 100%;
-    max-width: 100%;
-    padding-left: 0;
-  }
 }
 
-// 中和 ProviderStatusBar 默认样式中的纵向留白，保证单行对齐
+.recentActiveWrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+}
+
+.recentTopRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 74px;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+
+.recentTrailingSlot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  width: 100%;
+  min-width: 0;
+}
+
+.recentTrailingTime {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+  line-height: 1;
+  white-space: nowrap;
+}
+.recentTrailingEmpty {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  opacity: 0.45;
+  line-height: 1;
+  user-select: none;
+}
+
+.latestFailureBadge {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--app-radius-xs);
+  background: var(--data-badge-danger-bg);
+  color: var(--data-badge-danger-text);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.recentCountsRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: nowrap;
+  gap: 8px;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.recentStatsGroup {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+.recentHistoryMeta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.recentHistoryNum {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.recentMetaDot {
+  color: var(--text-tertiary);
+  opacity: 0.72;
+  user-select: none;
+}
+// 中和 ProviderStatusBar 默认样式中的纵向留白，保证紧凑对齐
 .recentBarWrap {
-  flex: 1 1 88px;
-  min-width: 88px;
-  max-width: 220px;
+  flex: 1 1 auto;
+  min-width: 0;
+
   > div {
     margin-top: 0;
     padding: 0;
@@ -403,11 +950,6 @@ $table-columns: 112px minmax(112px, 0.75fr) minmax(140px, 1fr) 68px 72px minmax(
   > div > span:last-child {
     flex-shrink: 0;
   }
-
-  @include provider-card-layout {
-    min-width: 0;
-    max-width: none;
-  }
 }
 
 .noRecent {
@@ -415,56 +957,244 @@ $table-columns: 112px minmax(112px, 0.75fr) minmax(140px, 1fr) 68px 72px minmax(
   max-width: 100%;
   font-size: 12px;
   color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.recentBarWrap ~ .noRecent {
-  flex: 1 1 56px;
-  max-width: max-content;
-}
-
-.statSuccess {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  min-width: 0;
-  color: var(--data-badge-success-text);
+.statTotal {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
   flex-shrink: 0;
 }
 
 .statFailure {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: 2px;
   min-width: 0;
-  color: var(--data-badge-danger-text);
+  font-size: 11.5px;
+  color: var(--error-color);
+  font-weight: 600;
+  white-space: nowrap;
   flex-shrink: 0;
 }
 
-.cellToggle {
-  display: flex;
-  justify-content: flex-start;
-  cursor: default;
+.statRate {
+  min-width: 46px;
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
 
-  @include provider-card-layout {
-    grid-area: toggle;
-    justify-content: flex-end;
-  }
+.statRateHigh {
+  color: var(--text-primary);
+}
+
+.statRateMedium {
+  color: var(--text-primary);
+}
+
+.statRateLow {
+  color: var(--error-color);
+}
+.cellActionsHeader {
+  padding-left: 20px;
+  text-align: left;
 }
 
 .cellActions {
+  position: relative;
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 5px;
-  cursor: default;
+  align-self: stretch;
+  justify-content: flex-end;
+  min-width: 0;
+  padding-left: 20px;
 
-  @include provider-card-layout {
-    grid-area: actions;
-    justify-content: flex-end;
-    padding-top: 2px;
+  &::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 2px;
+    bottom: 2px;
+    width: 1px;
+    border-radius: var(--app-radius-pill);
+    background: linear-gradient(
+      180deg,
+      transparent,
+      color-mix(in srgb, var(--border-primary) 72%, transparent),
+      transparent
+    );
+    opacity: 0.78;
+    pointer-events: none;
   }
 }
 
-.cellActionsHeader {
-  text-align: center;
+.rowActions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  cursor: default;
+}
+
+.quickActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.actionIconBtn:global(.btn.btn-xs) {
+  border: 1px solid transparent;
+  box-shadow: none;
+}
+
+.actionIconBtnProbe:global(.btn) {
+  background: color-mix(in srgb, var(--primary-color) 10%, var(--bg-primary));
+  color: var(--primary-text);
+
+  &:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--primary-color) 24%, transparent);
+    background: color-mix(in srgb, var(--primary-color) 16%, var(--bg-primary));
+  }
+}
+
+.actionIconBtnSettings:global(.btn) {
+  background: color-mix(in srgb, var(--primary-color) 8%, var(--bg-primary));
+  color: var(--primary-text);
+
+  &:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--primary-color) 22%, transparent);
+    background: color-mix(in srgb, var(--primary-color) 14%, var(--bg-primary));
+  }
+}
+
+.moreMenuTrigger.moreMenuTrigger {
+  width: var(--control-height-xs);
+  min-width: var(--control-height-xs);
+  height: var(--control-height-xs);
+  min-height: var(--control-height-xs);
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--app-radius-xs);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+
+  &:hover:not(:disabled) {
+    transform: none;
+    border-color: var(--border-subtle);
+    background: var(--surface-subtle-hover);
+    color: var(--text-primary);
+  }
+}
+
+.actionsDivider {
+  width: 1px;
+  height: 18px;
+  align-self: center;
+  border-radius: var(--app-radius-pill);
+  background: color-mix(in srgb, var(--border-color) 65%, transparent);
+}
+
+.toggleWrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--control-height-xs);
+
+  :global(label) {
+    transform: scale(0.9);
+    transform-origin: center;
+  }
+}
+
+// 1280px–1380px 笔记本视口（侧边栏展开时可用约 1020px）：同步收紧 6 列最小宽度与间距，避免操作列开关被右缘裁切
+@media (max-width: 1380px) {
+  .table {
+    min-width: 880px;
+    padding: 8px var(--list-panel-gutter-x, 14px) 14px;
+  }
+
+  .headerRow,
+  .row {
+    grid-template-columns:
+      minmax(148px, 1.12fr)
+      minmax(128px, 0.94fr)
+      minmax(142px, 1.08fr)
+      84px
+      minmax(196px, 1.28fr)
+      152px;
+    gap: 8px;
+    padding-inline: 12px;
+  }
+
+  .tableWithSelection {
+    .headerRow,
+    .row {
+      grid-template-columns:
+        30px
+        minmax(148px, 1.12fr)
+        minmax(128px, 0.94fr)
+        minmax(142px, 1.08fr)
+        84px
+        minmax(196px, 1.28fr)
+        152px;
+    }
+  }
+
+  .cellRecent {
+    padding-left: 2px;
+    padding-right: 4px;
+  }
+
+  .recentTopRow {
+    grid-template-columns: minmax(0, 1fr) 68px;
+    gap: 6px;
+  }
+
+  .recentCountsRow {
+    gap: 6px;
+  }
+
+  .recentStatsGroup {
+    gap: 4px;
+  }
+
+  .statRate {
+    min-width: 42px;
+    font-size: 11.5px;
+  }
+
+  .statTotal,
+  .statFailure {
+    font-size: 11px;
+  }
+
+  .recentHistoryMeta {
+    gap: 3px;
+    font-size: 10.5px;
+    overflow: hidden;
+  }
+
+  .cellActionsHeader {
+    padding-left: 14px;
+  }
+
+  .cellActions {
+    padding-left: 14px;
+  }
+
+  .rowActions {
+    gap: 6px;
+  }
+
+  .quickActions {
+    gap: 2px;
+  }
 }

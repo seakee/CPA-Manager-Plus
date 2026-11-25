@@ -10,6 +10,12 @@ import {
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { IconX } from './icons';
+import {
+  acquireOverlayScrollLock,
+  getOverlayFocusableElements,
+  isTopmostModal,
+  registerOpenModal,
+} from './overlayEscapeStack';
 
 interface ModalProps {
   open: boolean;
@@ -21,100 +27,10 @@ interface ModalProps {
   closeDisabled?: boolean;
 }
 
+type ModalPhase = 'closed' | 'entering' | 'closing';
+
 const CLOSE_ANIMATION_DURATION = 350;
-const MODAL_LOCK_CLASS = 'modal-open';
-const FOCUSABLE_SELECTOR = [
-  'a[href]',
-  'button:not([disabled])',
-  'input:not([disabled])',
-  'select:not([disabled])',
-  'textarea:not([disabled])',
-  '[tabindex]:not([tabindex="-1"])',
-].join(',');
-let activeModalCount = 0;
-
-const scrollLockSnapshot = {
-  scrollY: 0,
-  contentScrollTop: 0,
-  contentEl: null as HTMLElement | null,
-  bodyPosition: '',
-  bodyTop: '',
-  bodyLeft: '',
-  bodyRight: '',
-  bodyWidth: '',
-  bodyOverflow: '',
-  htmlOverflow: '',
-};
-
-const resolveContentScrollContainer = () => {
-  if (typeof document === 'undefined') return null;
-  const contentEl = document.querySelector('.content');
-  return contentEl instanceof HTMLElement ? contentEl : null;
-};
-
-const lockScroll = () => {
-  if (typeof document === 'undefined') return;
-  if (activeModalCount === 0) {
-    const body = document.body;
-    const html = document.documentElement;
-    const contentEl = resolveContentScrollContainer();
-
-    scrollLockSnapshot.scrollY = window.scrollY || window.pageYOffset || html.scrollTop || 0;
-    scrollLockSnapshot.contentEl = contentEl;
-    scrollLockSnapshot.contentScrollTop = contentEl?.scrollTop ?? 0;
-    scrollLockSnapshot.bodyPosition = body.style.position;
-    scrollLockSnapshot.bodyTop = body.style.top;
-    scrollLockSnapshot.bodyLeft = body.style.left;
-    scrollLockSnapshot.bodyRight = body.style.right;
-    scrollLockSnapshot.bodyWidth = body.style.width;
-    scrollLockSnapshot.bodyOverflow = body.style.overflow;
-    scrollLockSnapshot.htmlOverflow = html.style.overflow;
-
-    body.classList.add(MODAL_LOCK_CLASS);
-    html.classList.add(MODAL_LOCK_CLASS);
-
-    body.style.position = 'fixed';
-    body.style.top = `-${scrollLockSnapshot.scrollY}px`;
-    body.style.left = '0';
-    body.style.right = '0';
-    body.style.width = '100%';
-    body.style.overflow = 'hidden';
-    html.style.overflow = 'hidden';
-  }
-  activeModalCount += 1;
-};
-
-const unlockScroll = () => {
-  if (typeof document === 'undefined') return;
-  activeModalCount = Math.max(0, activeModalCount - 1);
-  if (activeModalCount === 0) {
-    const body = document.body;
-    const html = document.documentElement;
-    const scrollY = scrollLockSnapshot.scrollY;
-    const contentScrollTop = scrollLockSnapshot.contentScrollTop;
-    const contentEl = scrollLockSnapshot.contentEl;
-
-    body.classList.remove(MODAL_LOCK_CLASS);
-    html.classList.remove(MODAL_LOCK_CLASS);
-
-    body.style.position = scrollLockSnapshot.bodyPosition;
-    body.style.top = scrollLockSnapshot.bodyTop;
-    body.style.left = scrollLockSnapshot.bodyLeft;
-    body.style.right = scrollLockSnapshot.bodyRight;
-    body.style.width = scrollLockSnapshot.bodyWidth;
-    body.style.overflow = scrollLockSnapshot.bodyOverflow;
-    html.style.overflow = scrollLockSnapshot.htmlOverflow;
-
-    if (contentEl) {
-      contentEl.scrollTo({ top: contentScrollTop, left: 0, behavior: 'auto' });
-    }
-    window.scrollTo({ top: scrollY, left: 0, behavior: 'auto' });
-
-    scrollLockSnapshot.scrollY = 0;
-    scrollLockSnapshot.contentScrollTop = 0;
-    scrollLockSnapshot.contentEl = null;
-  }
-};
+const CLOSE_RECONCILE_DELAY = 100;
 
 export function Modal({
   open,
@@ -128,50 +44,92 @@ export function Modal({
 }: PropsWithChildren<ModalProps>) {
   const { t } = useTranslation();
   const titleId = useId();
-  const [isVisible, setIsVisible] = useState(false);
-  const [isClosing, setIsClosing] = useState(false);
+  const [phase, setPhase] = useState<ModalPhase>('closed');
+  const phaseRef = useRef<ModalPhase>(phase);
+  phaseRef.current = phase;
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconcileTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const internalCloseCompletedRef = useRef(false);
+  const openRef = useRef(open);
+  openRef.current = open;
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const closeDisabledRef = useRef(closeDisabled);
+  closeDisabledRef.current = closeDisabled;
   const modalRef = useRef<HTMLDivElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
 
-  const getFocusableElements = useCallback(() => {
-    if (!modalRef.current) return [] as HTMLElement[];
-    return Array.from(modalRef.current.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
-      (element) => !element.hasAttribute('disabled') && element.tabIndex !== -1
-    );
-  }, []);
+  const getFocusableElements = useCallback(() => getOverlayFocusableElements(modalRef.current), []);
 
-  const startClose = useCallback(
-    (notifyParent: boolean) => {
-      if (closeTimerRef.current !== null) return;
-      setIsClosing(true);
-      closeTimerRef.current = window.setTimeout(() => {
-        setIsVisible(false);
-        setIsClosing(false);
-        closeTimerRef.current = null;
-        if (notifyParent) {
-          onClose();
+  const startClose = useCallback((notifyParent: boolean) => {
+    if (closeTimerRef.current !== null || (!openRef.current && phaseRef.current === 'closed')) {
+      return;
+    }
+    if (reconcileTimerRef.current !== null) {
+      globalThis.clearTimeout(reconcileTimerRef.current);
+      reconcileTimerRef.current = null;
+    }
+    setPhase('closing');
+    closeTimerRef.current = globalThis.setTimeout(() => {
+      closeTimerRef.current = null;
+      if (notifyParent && closeDisabledRef.current && openRef.current) {
+        internalCloseCompletedRef.current = false;
+        setPhase('entering');
+        return;
+      }
+      if (notifyParent && openRef.current) {
+        // Keep closing state until parent flips `open` to false so async `onClose`
+        // never flashes the modal back open or hides prematurely. If the parent
+        // declines to close, reconcile back to `entering` after a short grace window.
+        internalCloseCompletedRef.current = true;
+        try {
+          onCloseRef.current();
+        } finally {
+          if (openRef.current && internalCloseCompletedRef.current) {
+            reconcileTimerRef.current = globalThis.setTimeout(() => {
+              reconcileTimerRef.current = null;
+              if (openRef.current && internalCloseCompletedRef.current) {
+                internalCloseCompletedRef.current = false;
+                setPhase('entering');
+              }
+            }, CLOSE_RECONCILE_DELAY);
+          }
         }
-      }, CLOSE_ANIMATION_DURATION);
-    },
-    [onClose]
-  );
+      } else {
+        internalCloseCompletedRef.current = false;
+        setPhase('closed');
+      }
+    }, CLOSE_ANIMATION_DURATION);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
+    if (reconcileTimerRef.current !== null) {
+      globalThis.clearTimeout(reconcileTimerRef.current);
+      reconcileTimerRef.current = null;
+    }
 
     if (open) {
+      internalCloseCompletedRef.current = false;
       if (closeTimerRef.current !== null) {
-        window.clearTimeout(closeTimerRef.current);
+        globalThis.clearTimeout(closeTimerRef.current);
         closeTimerRef.current = null;
       }
       queueMicrotask(() => {
         if (cancelled) return;
-        setIsVisible(true);
-        setIsClosing(false);
+        setPhase('entering');
       });
-    } else if (isVisible) {
+    } else if (internalCloseCompletedRef.current) {
+      internalCloseCompletedRef.current = false;
+      queueMicrotask(() => {
+        if (cancelled) return;
+        setPhase('closed');
+      });
+    } else if (
+      phaseRef.current === 'entering' ||
+      (phaseRef.current === 'closing' && closeTimerRef.current === null)
+    ) {
       queueMicrotask(() => {
         if (cancelled) return;
         startClose(false);
@@ -181,62 +139,124 @@ export function Modal({
     return () => {
       cancelled = true;
     };
-  }, [open, isVisible, startClose]);
+  }, [open, startClose]);
+
+  useEffect(() => {
+    if (!closeDisabled || !open) return;
+    let cancelled = false;
+    const wasClosing =
+      phaseRef.current === 'closing' ||
+      closeTimerRef.current !== null ||
+      internalCloseCompletedRef.current;
+    if (closeTimerRef.current !== null) {
+      globalThis.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+    if (reconcileTimerRef.current !== null) {
+      globalThis.clearTimeout(reconcileTimerRef.current);
+      reconcileTimerRef.current = null;
+    }
+    internalCloseCompletedRef.current = false;
+    if (wasClosing) {
+      queueMicrotask(() => {
+        if (cancelled || !openRef.current) return;
+        setPhase('entering');
+      });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [closeDisabled, open]);
 
   const handleClose = useCallback(() => {
+    if (closeDisabled || closeTimerRef.current !== null || internalCloseCompletedRef.current) {
+      return;
+    }
     startClose(true);
-  }, [startClose]);
+  }, [closeDisabled, startClose]);
 
   useEffect(() => {
     return () => {
       if (closeTimerRef.current !== null) {
-        window.clearTimeout(closeTimerRef.current);
+        globalThis.clearTimeout(closeTimerRef.current);
+      }
+      if (reconcileTimerRef.current !== null) {
+        globalThis.clearTimeout(reconcileTimerRef.current);
       }
     };
   }, []);
 
-  const shouldLockScroll = open || isVisible;
+  const isVisible = phase !== 'closed';
+  const isClosing = phase === 'closing';
+  const isActive = open || isVisible;
 
   useEffect(() => {
-    if (!shouldLockScroll) return;
-    lockScroll();
-    return () => unlockScroll();
-  }, [shouldLockScroll]);
+    if (!isActive) return;
+    return acquireOverlayScrollLock('modal');
+  }, [isActive]);
 
   useEffect(() => {
-    if (!open) return;
-
+    if (!isActive || typeof document === 'undefined') return;
     previouslyFocusedRef.current =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    return () => {
+      const target = previouslyFocusedRef.current;
+      previouslyFocusedRef.current = null;
+      if (typeof target?.focus === 'function') {
+        target.focus();
+      }
+    };
+  }, [isActive]);
 
-    const focusTimer = window.setTimeout(() => {
+  useEffect(() => {
+    if (!open || typeof document === 'undefined') return;
+
+    const focusTimer = globalThis.setTimeout(() => {
       const firstFocusable = getFocusableElements()[0];
-      (firstFocusable ?? closeButtonRef.current ?? modalRef.current)?.focus();
+      const target = firstFocusable ?? closeButtonRef.current ?? modalRef.current;
+      if (typeof target?.focus === 'function') {
+        target.focus();
+      }
     }, 0);
 
     return () => {
-      window.clearTimeout(focusTimer);
+      globalThis.clearTimeout(focusTimer);
     };
   }, [getFocusableElements, open]);
 
-  useEffect(() => {
-    if (open || isVisible) return;
-    previouslyFocusedRef.current?.focus();
-    previouslyFocusedRef.current = null;
-  }, [isVisible, open]);
+  const modalTokenRef = useRef<symbol | null>(null);
 
   useEffect(() => {
-    if (!open) return;
+    if (!isActive || typeof document === 'undefined') return;
+    const unregisterModal = registerOpenModal();
+    modalTokenRef.current = unregisterModal.token;
+    return () => {
+      modalTokenRef.current = null;
+      unregisterModal();
+    };
+  }, [isActive]);
+
+  useEffect(() => {
+    if (!isActive || typeof document === 'undefined') return;
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        if (closeDisabled) return;
+        const token = modalTokenRef.current;
+        if (!token || !isTopmostModal(token)) return;
         event.preventDefault();
+        event.stopImmediatePropagation?.();
+        if (closeDisabled || isClosing || !open) return;
         handleClose();
         return;
       }
-
       if (event.key !== 'Tab') return;
+
+      const token = modalTokenRef.current;
+      if (!token || !isTopmostModal(token)) return;
+      if (isClosing || !open) {
+        event.preventDefault();
+        return;
+      }
 
       const focusableElements = getFocusableElements();
       if (focusableElements.length === 0) {
@@ -248,27 +268,40 @@ export function Modal({
       const firstElement = focusableElements[0];
       const lastElement = focusableElements[focusableElements.length - 1];
       const activeElement = document.activeElement as HTMLElement | null;
+      const isInsideModal =
+        activeElement !== null &&
+        (activeElement === modalRef.current ||
+          focusableElements.includes(activeElement) ||
+          Boolean(
+            typeof modalRef.current?.contains === 'function' &&
+              modalRef.current.contains(activeElement)
+          ));
 
       if (event.shiftKey) {
-        if (activeElement === firstElement || activeElement === modalRef.current) {
+        if (
+          !isInsideModal ||
+          activeElement === firstElement ||
+          activeElement === modalRef.current
+        ) {
           event.preventDefault();
           lastElement.focus();
         }
         return;
       }
 
-      if (activeElement === lastElement) {
+      if (!isInsideModal || activeElement === lastElement) {
         event.preventDefault();
         firstElement.focus();
       }
     };
 
     document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [closeDisabled, getFocusableElements, handleClose, open]);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [closeDisabled, getFocusableElements, handleClose, isActive, isClosing, open]);
 
-  if (!open && !isVisible) return null;
-
+  if (!isActive) return null;
   const overlayClass = `modal-overlay ${isClosing ? 'modal-overlay-closing' : 'modal-overlay-entering'}`;
   const modalClass = `modal ${isClosing ? 'modal-closing' : 'modal-entering'}${className ? ` ${className}` : ''}`;
 

@@ -1,0 +1,838 @@
+import {
+  useCallback,
+  useId,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+  type Ref,
+} from 'react';
+import { useTranslation } from 'react-i18next';
+import {
+  DRAWER_WIDTH,
+  DrawerActionFooter,
+  DrawerBodyShell,
+  DrawerCopyableMeta,
+  DrawerDangerButton,
+  DrawerIdentityHeader,
+  DrawerNotice,
+  DrawerStatusPill,
+  DrawerTabBar,
+  DrawerViewport,
+  useDrawerSubViewEscape,
+  type DrawerTabItem,
+} from '@/components/common/WorkspaceDrawer';
+import { Button } from '@/components/ui/Button';
+import { Drawer } from '@/components/ui/Drawer';
+import { SegmentedTabs, type SegmentedTabItem } from '@/components/ui/SegmentedTabs';
+import { useConfigStore, useNotificationStore } from '@/stores';
+import { copyToClipboard } from '@/utils/clipboard';
+import { getProviderKindIcon, PROVIDER_KIND_LABELS } from '../ProviderTable/kindMeta';
+import type { ProviderV8GroupSource } from '@/types';
+import type { ProviderKind, ProviderRow } from '../ProviderTable/rowData';
+import type { ProviderDrawerTab } from '../types';
+import type { ProviderRecentUsageMap } from '../utils';
+import { ProviderConfigurationTab } from './ProviderConfigurationTab';
+import { ProviderConnectivityTab } from './ProviderConnectivityTab';
+import { ProviderModelsTab } from './ProviderModelsTab';
+import { ProviderOverviewTab } from './ProviderOverviewTab';
+import {
+  isSameProviderEntryAcrossIndexShift,
+  rowMatchesSavedAnchor,
+  useProviderDrawerEditor,
+  type ProviderMutationLockRunner,
+} from './useProviderDrawerEditor';
+import styles from './ProviderWorkspaceDrawer.module.scss';
+
+export interface ProviderSavedIdentityHint {
+  name?: string;
+  apiKey?: string;
+  baseUrl?: string;
+  proxyUrl?: string;
+  prefix?: string;
+  authIndex?: string;
+  v8Source?: ProviderV8GroupSource;
+  originalIndex?: number;
+}
+
+export interface ProviderWorkspaceDrawerHandle {
+  requestCloseOrSwitch: () => Promise<boolean>;
+  isDirty?: () => boolean;
+}
+
+export interface ProviderWorkspaceDrawerProps {
+  open: boolean;
+  mode: 'view-edit' | 'create';
+  row: ProviderRow | null;
+  createKind?: ProviderKind;
+  supportedKinds?: ReadonlySet<ProviderKind>;
+  onCreateKindChange?: (kind: ProviderKind) => void;
+  initialTab?: ProviderDrawerTab;
+  v8AliasSupported?: boolean;
+  usageByProvider: ProviderRecentUsageMap;
+  resolvedTheme?: string;
+  actionsDisabled?: boolean;
+  rowDeletedExternally?: boolean;
+  routingStrategy?: string;
+  globalDisableCooling?: boolean;
+  sessionId?: string | number;
+  onClose: () => void;
+  onSaved: (
+    kind: ProviderKind,
+    savedIdentity?: ProviderSavedIdentityHint
+  ) => Promise<boolean | void> | boolean | void;
+  onToggleEnabled?: (row: ProviderRow, enabled: boolean) => void;
+  onDelete?: (row: ProviderRow) => void;
+  toggleDisabled?: boolean;
+  deleteDisabled?: boolean;
+  runWithMutationLock?: ProviderMutationLockRunner;
+  ref?: Ref<ProviderWorkspaceDrawerHandle>;
+}
+
+const CANONICAL_PROVIDER_KINDS: ProviderKind[] = [
+  'openai',
+  'claude',
+  'codex',
+  'xai',
+  'gemini',
+  'interactions',
+  'vertex',
+];
+
+const resolveInitialTab = (
+  mode: 'view-edit' | 'create',
+  initialTab?: ProviderDrawerTab
+): ProviderDrawerTab => {
+  if (mode === 'create') {
+    return initialTab && initialTab !== 'overview' ? initialTab : 'config';
+  }
+  return initialTab ?? 'overview';
+};
+
+export function ProviderWorkspaceDrawer({
+  open,
+  mode,
+  row,
+  createKind,
+  supportedKinds,
+  onCreateKindChange,
+  initialTab,
+  v8AliasSupported,
+  usageByProvider,
+  resolvedTheme,
+  actionsDisabled = false,
+  rowDeletedExternally = false,
+  routingStrategy,
+  globalDisableCooling,
+  sessionId,
+  onClose,
+  onSaved,
+  onToggleEnabled,
+  onDelete,
+  toggleDisabled,
+  deleteDisabled,
+  runWithMutationLock,
+  ref,
+}: ProviderWorkspaceDrawerProps) {
+  const { t } = useTranslation();
+  const showNotification = useNotificationStore((state) => state.showNotification);
+
+  const config = useConfigStore((state) => state.config);
+  const effectiveRoutingStrategy = routingStrategy ?? (config ? config.routingStrategy || 'round-robin' : undefined);
+  const effectiveGlobalDisableCooling = globalDisableCooling ?? config?.disableCooling;
+  const availableCreateKinds = useMemo(() => {
+    if (!supportedKinds || supportedKinds.size === 0) {
+      return CANONICAL_PROVIDER_KINDS;
+    }
+    const filtered = CANONICAL_PROVIDER_KINDS.filter((kind) => supportedKinds.has(kind));
+    return filtered.length ? filtered : CANONICAL_PROVIDER_KINDS;
+  }, [supportedKinds]);
+
+  const [internalCreateKind, setInternalCreateKind] = useState<ProviderKind>(
+    () => createKind ?? availableCreateKinds[0] ?? 'openai'
+  );
+
+  const effectiveCreateKind = createKind ?? internalCreateKind;
+  const activeKind: ProviderKind =
+    mode === 'view-edit' && row ? row.kind : effectiveCreateKind;
+
+  const [prevOpen, setPrevOpen] = useState(open);
+  const [openEpoch, setOpenEpoch] = useState(() => (open ? 1 : 0));
+  const [resetNonce, setResetNonce] = useState(0);
+  if (prevOpen !== open) {
+    setPrevOpen(open);
+    if (open) {
+      setOpenEpoch((n) => n + 1);
+    }
+  }
+
+  const [rowSession, setRowSession] = useState<{
+    token: number;
+    open: boolean;
+    mode: 'view-edit' | 'create';
+    sessionId?: string | number;
+    row: ProviderRow | null;
+  }>(() => ({
+    token: open ? 1 : 0,
+    open,
+    mode,
+    sessionId,
+    row,
+  }));
+
+  const [tabState, setTabState] = useState<{
+    sessionKey: string;
+    tab: ProviderDrawerTab;
+    reanchor?: {
+      openEpoch: number;
+      sessionToken: number;
+      fromRowKey: string | null;
+      kind: ProviderKind;
+      initialTab: ProviderDrawerTab | undefined;
+      tab: ProviderDrawerTab;
+      savedIdentity?: ProviderSavedIdentityHint;
+    };
+  }>(() => ({
+    sessionKey: open ? `${openEpoch}:${open ? 1 : 0}:${mode}:${initialTab ?? ''}` : 'closed',
+    tab: resolveInitialTab(mode, initialTab),
+  }));
+
+  let currentRowSessionToken = rowSession.token;
+  let sessionChanged = false;
+  if (rowSession.open !== open || rowSession.mode !== mode) {
+    sessionChanged = true;
+  } else if (open) {
+    if (sessionId !== undefined) {
+      sessionChanged = rowSession.sessionId !== sessionId;
+    } else if (mode === 'view-edit' && rowSession.row?.key !== row?.key) {
+      const matchesReanchor = Boolean(
+        tabState.reanchor &&
+          tabState.reanchor.openEpoch === openEpoch &&
+          tabState.reanchor.sessionToken === rowSession.token &&
+          row !== null &&
+          rowMatchesSavedAnchor(row, tabState.reanchor.savedIdentity)
+      );
+      const matchesShift = isSameProviderEntryAcrossIndexShift(rowSession.row, row);
+      sessionChanged = !matchesReanchor && !matchesShift;
+    }
+  }
+  if (
+    sessionChanged ||
+    rowSession.open !== open ||
+    rowSession.mode !== mode ||
+    rowSession.sessionId !== sessionId ||
+    rowSession.row !== row
+  ) {
+    const nextToken = sessionChanged ? rowSession.token + 1 : rowSession.token;
+    currentRowSessionToken = nextToken;
+    setRowSession({
+      token: nextToken,
+      open,
+      mode,
+      sessionId,
+      row,
+    });
+  }
+
+  const sessionKey = open
+    ? `${openEpoch}:${currentRowSessionToken}:${mode}:${initialTab ?? ''}`
+    : 'closed';
+  const canPreserveAcrossSave =
+    open &&
+    mode === 'view-edit' &&
+    Boolean(tabState.reanchor) &&
+    tabState.reanchor?.openEpoch === openEpoch &&
+    tabState.reanchor?.sessionToken === currentRowSessionToken &&
+    tabState.reanchor?.kind === activeKind &&
+    (tabState.reanchor?.initialTab ?? '') === (initialTab ?? '') &&
+    (row?.key === tabState.reanchor?.fromRowKey ||
+      (row !== null && rowMatchesSavedAnchor(row, tabState.reanchor?.savedIdentity)));
+  const activeTab =
+    tabState.sessionKey === sessionKey
+      ? tabState.tab
+      : canPreserveAcrossSave && tabState.reanchor
+        ? tabState.reanchor.tab
+        : resolveInitialTab(mode, initialTab);
+
+  if (
+    tabState.reanchor &&
+    open &&
+    mode === 'view-edit' &&
+    tabState.reanchor.openEpoch === openEpoch &&
+    tabState.reanchor.sessionToken === currentRowSessionToken &&
+    row !== null &&
+    row.key !== tabState.reanchor.fromRowKey &&
+    rowMatchesSavedAnchor(row, tabState.reanchor.savedIdentity)
+  ) {
+    setTabState({ sessionKey, tab: activeTab });
+  }
+
+  const handleEditorSaved = useCallback(
+    async (savedKind: ProviderKind, savedIdentity?: ProviderSavedIdentityHint) => {
+      setTabState({
+        sessionKey,
+        tab: activeTab,
+        reanchor: {
+          openEpoch,
+          sessionToken: currentRowSessionToken,
+          fromRowKey: row?.key ?? null,
+          kind: savedKind,
+          initialTab,
+          tab: activeTab,
+          savedIdentity,
+        },
+      });
+      try {
+        return await onSaved(savedKind, savedIdentity);
+      } catch (err) {
+        setTabState((prev) => (prev.reanchor ? { sessionKey: prev.sessionKey, tab: prev.tab } : prev));
+        throw err;
+      }
+    },
+    [activeTab, currentRowSessionToken, initialTab, onSaved, openEpoch, row?.key, sessionKey]
+  );
+
+  const tabsIdPrefix = useId();
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const editor = useProviderDrawerEditor({
+    open,
+    mode,
+    row,
+    activeKind,
+    v8AliasSupported,
+    actionsDisabled,
+    rowDeletedExternally,
+    sessionIdentity: open ? `${openEpoch}:${currentRowSessionToken}:${mode}` : 'closed',
+    onClose,
+    onSaved: handleEditorSaved,
+    runWithMutationLock,
+  });
+
+  const { resetForm: resetEditorForm, setModelDiscoveryOpen } = editor;
+  const isModelsDiscoverySubView =
+    activeTab === 'models' && editor.modelDiscoveryOpen && activeKind !== 'vertex';
+
+  const handleResetForm = useCallback(() => {
+    setModelDiscoveryOpen(false);
+    resetEditorForm();
+    setResetNonce((n) => n + 1);
+  }, [resetEditorForm, setModelDiscoveryOpen]);
+
+  useDrawerSubViewEscape(
+    open && isModelsDiscoverySubView,
+    () => setModelDiscoveryOpen(false),
+    editor.saving
+  );
+
+  const effectiveTheme = useMemo<'light' | 'dark'>(() => {
+    if (resolvedTheme === 'dark') return 'dark';
+    if (resolvedTheme === 'light') return 'light';
+    if (typeof document !== 'undefined') {
+      return document.documentElement?.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+    }
+    return 'light';
+  }, [resolvedTheme]);
+
+  const switchTab = useCallback(
+    (nextTab: ProviderDrawerTab) => {
+      if (nextTab !== 'models') {
+        setModelDiscoveryOpen(false);
+      }
+      setTabState({ sessionKey, tab: nextTab });
+      if (typeof bodyRef.current?.scrollTo === 'function') {
+        bodyRef.current.scrollTo({ top: 0 });
+      }
+    },
+    [sessionKey, setModelDiscoveryOpen]
+  );
+
+  // Keyboard tab roving is provided by DrawerTabBar
+  const requestCloseOrSwitch = useCallback(async () => {
+    const allowed = await editor.confirmDiscardChanges();
+    if (allowed) {
+      setTabState((prev) => (prev.reanchor ? { sessionKey: prev.sessionKey, tab: prev.tab } : prev));
+    }
+    return allowed;
+  }, [editor]);
+
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      requestCloseOrSwitch,
+      isDirty: () => editor.isDirty,
+    }),
+    [editor.isDirty, requestCloseOrSwitch]
+  );
+
+  const handleRequestClose = useCallback(async () => {
+    const allowed = await requestCloseOrSwitch();
+    if (allowed) {
+      onClose();
+    }
+  }, [onClose, requestCloseOrSwitch]);
+
+  const handleSwitchCreateKind = useCallback(
+    async (nextKind: ProviderKind) => {
+      if (nextKind === effectiveCreateKind) return;
+      const confirmed = await editor.confirmDiscardChanges();
+      if (!confirmed) return;
+      setTabState((prev) => (prev.reanchor ? { sessionKey: prev.sessionKey, tab: prev.tab } : prev));
+      setInternalCreateKind(nextKind);
+      onCreateKindChange?.(nextKind);
+    },
+    [editor, effectiveCreateKind, onCreateKindChange]
+  );
+
+  const handleOpenAIKeyCountChange = useCallback(
+    (action: 'add' | 'remove', index?: number) => {
+      editor.setOpenAIKeyStatuses((prev) => {
+        if (action === 'add') {
+          return [...prev, { status: 'idle', message: '' }];
+        }
+        if (typeof index === 'number') {
+          return prev.filter((_, idx) => idx !== index);
+        }
+        return prev;
+      });
+    },
+    [editor]
+  );
+
+  const handleCopyHost = async () => {
+    const copyValue = editor.form.baseUrl.trim() || row?.baseUrl || row?.hostLabel || '';
+    if (!copyValue) return;
+    const copied = await copyToClipboard(copyValue);
+    if (copied) {
+      showNotification(t('common.copied_to_clipboard', { label: 'Base URL' }), 'success');
+    }
+  };
+
+  const kindLabel = PROVIDER_KIND_LABELS[activeKind];
+  const hostDisplay = (() => {
+    if (mode === 'view-edit' && row?.hostLabel) return row.hostLabel;
+    const trimmed = editor.form.baseUrl.trim();
+    if (!trimmed) return '';
+    try {
+      return new URL(trimmed).host || trimmed;
+    } catch {
+      return trimmed;
+    }
+  })();
+  const primaryTitle =
+    mode === 'create'
+      ? t('ai_providers.drawer_create_title', { defaultValue: '添加提供商配置' })
+      : editor.form.name.trim() || row?.label || kindLabel;
+
+  const createKindItems = useMemo<SegmentedTabItem<ProviderKind>[]>(
+    () =>
+      availableCreateKinds.map((kind) => ({
+        id: kind,
+        label: (
+          <span className={styles.kindOptionLabel}>
+            <img src={getProviderKindIcon(kind, effectiveTheme)} alt="" />
+            <span>{PROVIDER_KIND_LABELS[kind]}</span>
+          </span>
+        ),
+      })),
+    [availableCreateKinds, effectiveTheme]
+  );
+  const headerTitleNode = (
+    <DrawerIdentityHeader
+      icon={<img src={getProviderKindIcon(activeKind, effectiveTheme)} alt="" />}
+      title={primaryTitle}
+      metaItems={[
+        <span key="kind">{kindLabel}</span>,
+        mode === 'view-edit' && row ? (
+          <DrawerStatusPill key="status" tone={row.enabled ? 'success' : 'danger'}>
+            {row.enabled
+              ? t('ai_providers.status_enabled', { defaultValue: '已启用' })
+              : t('ai_providers.status_disabled', { defaultValue: '已停用' })}
+          </DrawerStatusPill>
+        ) : null,
+        mode === 'view-edit' && row?.maskedKey ? (
+          <code key="masked-key" className={styles.headerMetaCode}>
+            {row.maskedKey}
+          </code>
+        ) : null,
+        mode === 'view-edit' && row?.v8GroupKeyMeta ? (
+          <span key="v8-group" className={styles.headerGroupMeta}>
+            {t('ai_providers.v8_group_key_pill', {
+              index: row.v8GroupKeyMeta.index,
+              total: row.v8GroupKeyMeta.total,
+              defaultValue: `密钥 ${row.v8GroupKeyMeta.index}/${row.v8GroupKeyMeta.total}`,
+            })}
+          </span>
+        ) : null,
+        hostDisplay ? (
+          <DrawerCopyableMeta
+            key="host"
+            onCopy={handleCopyHost}
+            title={editor.form.baseUrl.trim() || row?.baseUrl || hostDisplay}
+          >
+            {hostDisplay}
+          </DrawerCopyableMeta>
+        ) : null,
+        editor.isDirty ? (
+          <DrawerStatusPill key="dirty" tone="warning">
+            {t('ai_providers.drawer_unsaved_changes', { defaultValue: '未保存更改' })}
+          </DrawerStatusPill>
+        ) : null,
+      ]}
+    />
+  );
+
+  const footerNode = isModelsDiscoverySubView ? (
+    <DrawerActionFooter
+      left={
+        <span className={styles.sectionHint}>
+          {editor.modelDiscoverySelected.size > 0
+            ? t('ai_providers.model_discovery_footer_selected_hint', {
+                count: editor.modelDiscoverySelected.size,
+                defaultValue: '已勾选 {{count}} 个模型，确认后追加至映射列表',
+              })
+            : t('ai_providers.model_discovery_footer_idle_hint', {
+                defaultValue: '勾选需加入映射列表的上游模型',
+              })}
+        </span>
+      }
+      right={
+        <>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setModelDiscoveryOpen(false)}
+            disabled={editor.saving}
+          >
+            {t('common.cancel')}
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={editor.applySelectedDiscoveredModels}
+            disabled={
+              actionsDisabled ||
+              editor.saving ||
+              editor.modelDiscoverySelected.size === 0 ||
+              editor.modelDiscoveryFetching
+            }
+          >
+            {t('ai_providers.apply_selected_models_btn', {
+              defaultValue: '添加所选模型 ({{count}})',
+              count: editor.modelDiscoverySelected.size,
+            })}
+          </Button>
+        </>
+      }
+    />
+  ) : mode === 'create' ? (
+    <DrawerActionFooter
+      right={
+        <>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => void handleRequestClose()}
+            disabled={editor.saving}
+          >
+            {t('common.cancel')}
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => void editor.handleSave()}
+            loading={editor.saving}
+            disabled={!editor.canSave}
+          >
+            {t('ai_providers.drawer_create_submit', { defaultValue: '创建配置' })}
+          </Button>
+        </>
+      }
+    />
+  ) : (
+    <DrawerActionFooter
+      left={
+        <>
+          {onToggleEnabled && row && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => onToggleEnabled(row, !row.enabled)}
+              disabled={
+                editor.isDirty ||
+                actionsDisabled ||
+                toggleDisabled ||
+                editor.saving ||
+                rowDeletedExternally
+              }
+              title={
+                editor.isDirty
+                  ? t('ai_providers.drawer_toggle_disabled_dirty', {
+                      defaultValue: '存在未保存修改，请先保存或重置配置',
+                    })
+                  : undefined
+              }
+            >
+              {row.enabled
+                ? t('ai_providers.action_disable', { defaultValue: '停用' })
+                : t('ai_providers.action_enable', { defaultValue: '启用' })}
+            </Button>
+          )}
+          {onDelete && row && (
+            <DrawerDangerButton
+              onClick={() => onDelete(row)}
+              disabled={actionsDisabled || deleteDisabled || editor.saving || rowDeletedExternally}
+            >
+              {t('common.delete')}
+            </DrawerDangerButton>
+          )}
+        </>
+      }
+      right={
+        editor.isDirty || activeTab === 'config' || activeTab === 'models' ? (
+          <>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleResetForm}
+              disabled={!editor.isDirty || editor.saving || actionsDisabled}
+            >
+              {t('common.reset', { defaultValue: '重置' })}
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => void editor.handleSave()}
+              loading={editor.saving}
+              disabled={
+                !editor.isDirty || !editor.canSave || actionsDisabled || rowDeletedExternally
+              }
+            >
+              {t('ai_providers.drawer_save_config', { defaultValue: '保存配置' })}
+            </Button>
+          </>
+        ) : activeTab === 'connectivity' ? (
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => void handleRequestClose()}
+            disabled={editor.saving}
+          >
+            {t('common.close', { defaultValue: '关闭' })}
+          </Button>
+        ) : (
+          <>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => switchTab('connectivity')}
+              disabled={actionsDisabled}
+            >
+              {t('ai_providers.drawer_tab_connectivity', { defaultValue: '测活诊断' })}
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => switchTab('config')}
+              disabled={actionsDisabled}
+            >
+              {t('ai_providers.drawer_edit_config_btn', { defaultValue: '编辑配置' })}
+            </Button>
+          </>
+        )
+      }
+    />
+  );
+
+  const tabItems: DrawerTabItem<ProviderDrawerTab>[] =
+    mode === 'view-edit'
+      ? [
+          {
+            id: 'overview',
+            label: t('ai_providers.drawer_tab_overview', { defaultValue: '概览' }),
+          },
+          {
+            id: 'config',
+            label: t('ai_providers.drawer_tab_config', { defaultValue: '配置' }),
+            dirty: editor.isConfigDirty,
+          },
+          {
+            id: 'models',
+            label: t('ai_providers.drawer_tab_models', { defaultValue: '模型' }),
+            count: editor.configuredModelCount,
+            dirty: editor.isModelsDirty,
+          },
+          {
+            id: 'connectivity',
+            label: t('ai_providers.drawer_tab_connectivity', { defaultValue: '测活诊断' }),
+          },
+        ]
+      : [
+          {
+            id: 'config',
+            label: t('ai_providers.drawer_tab_create_config', { defaultValue: '基础配置' }),
+            dirty: editor.isConfigDirty,
+          },
+          {
+            id: 'models',
+            label: t('ai_providers.drawer_tab_create_models', { defaultValue: '模型配置' }),
+            count: editor.configuredModelCount,
+            dirty: editor.isModelsDirty,
+          },
+          {
+            id: 'connectivity',
+            label: t('ai_providers.drawer_tab_create_connectivity', { defaultValue: '连通性测试' }),
+          },
+        ];
+
+  return (
+    <Drawer
+      open={open}
+      onClose={onClose}
+      onBeforeClose={requestCloseOrSwitch}
+      closeDisabled={editor.saving}
+      width={DRAWER_WIDTH.LG}
+      title={headerTitleNode}
+      footer={footerNode}
+      bodyRef={bodyRef}
+    >
+      <DrawerBodyShell
+        topSlot={
+          mode === 'create' && availableCreateKinds.length > 1 ? (
+            <SegmentedTabs<ProviderKind>
+              activeTab={effectiveCreateKind}
+              onChange={(nextKind) => void handleSwitchCreateKind(nextKind)}
+              items={createKindItems}
+              size="sm"
+              ariaLabel={t('ai_providers.create_kind_selector_label', {
+                defaultValue: '选择提供商类型',
+              })}
+            />
+          ) : null
+        }
+        tabs={
+          <DrawerTabBar<ProviderDrawerTab>
+            items={tabItems}
+            activeTab={activeTab}
+            onChange={switchTab}
+            idBase={tabsIdPrefix}
+            scrollContainerRef={bodyRef}
+            ariaLabel={t('ai_providers.drawer_tabs_label', { defaultValue: '提供商配置标签页' })}
+          />
+        }
+      >
+        <DrawerViewport>
+          {rowDeletedExternally && (
+            <DrawerNotice
+              tone="danger"
+              role="alert"
+              testId="drawer-deleted-externally-notice"
+              title={t('notification.provider_conflict_refresh')}
+            >
+              {t('ai_providers.drawer_deleted_externally_desc', {
+                defaultValue:
+                  '该提供商配置已在外部被移除，当前未保存的草稿已保留；可复制内容后关闭抽屉。',
+              })}
+            </DrawerNotice>
+          )}
+
+          {editor.error && (
+            <div className={styles.inlineError} role="alert">
+              {editor.error}
+            </div>
+          )}
+          <div
+            role="tabpanel"
+            id={`${tabsIdPrefix}-panel-${activeTab}`}
+            aria-labelledby={`${tabsIdPrefix}-tab-${activeTab}`}
+          >
+            {activeTab === 'overview' && mode === 'view-edit' && row && (
+              <ProviderOverviewTab
+                row={row}
+                form={editor.form}
+                usageByProvider={usageByProvider}
+                actionsDisabled={actionsDisabled}
+                toggleDisabled={toggleDisabled || rowDeletedExternally}
+                isDirty={editor.isDirty}
+                saving={editor.saving}
+                routingStrategy={effectiveRoutingStrategy}
+                globalDisableCooling={effectiveGlobalDisableCooling}
+                onSwitchTab={switchTab}
+                onToggleEnabled={onToggleEnabled}
+              />
+            )}
+
+            {activeTab === 'config' && (
+              <ProviderConfigurationTab
+                mode={mode}
+                activeKind={activeKind}
+                form={editor.form}
+                setForm={editor.setForm}
+                actionsDisabled={actionsDisabled}
+                saving={editor.saving}
+                v8AliasSupported={v8AliasSupported}
+                onOpenAIKeyCountChange={handleOpenAIKeyCountChange}
+              />
+            )}
+
+            {activeTab === 'models' && (
+              <ProviderModelsTab
+                key={`${openEpoch}:${currentRowSessionToken}:${mode}:${activeKind}:${resetNonce}`}
+                mode={mode}
+                activeKind={activeKind}
+                form={editor.form}
+                setForm={editor.setForm}
+                saving={editor.saving}
+                actionsDisabled={actionsDisabled}
+                configuredModelCount={editor.configuredModelCount}
+                modelDiscoveryOpen={editor.modelDiscoveryOpen}
+                setModelDiscoveryOpen={editor.setModelDiscoveryOpen}
+                modelDiscoveryEndpoint={editor.modelDiscoveryEndpoint}
+                discoveredModels={editor.discoveredModels}
+                modelsLoaded={editor.modelsLoaded}
+                modelDiscoveryFetching={editor.modelDiscoveryFetching}
+                modelDiscoveryError={editor.modelDiscoveryError}
+                modelDiscoverySearch={editor.modelDiscoverySearch}
+                setModelDiscoverySearch={editor.setModelDiscoverySearch}
+                modelDiscoverySelected={editor.modelDiscoverySelected}
+                discoveredModelsFiltered={editor.discoveredModelsFiltered}
+                configuredModelNames={editor.configuredModelNames}
+                visibleDiscoverableModelNames={editor.visibleDiscoverableModelNames}
+                allVisibleSelected={editor.allVisibleSelected}
+                toggleModelDiscoverySelection={editor.toggleModelDiscoverySelection}
+                handleSelectVisibleModels={editor.handleSelectVisibleModels}
+                handleClearModelDiscoverySelection={editor.handleClearModelDiscoverySelection}
+                fetchModelDiscovery={editor.fetchModelDiscovery}
+                applySelectedDiscoveredModels={editor.applySelectedDiscoveredModels}
+              />
+            )}
+
+            {activeTab === 'connectivity' && (
+              <ProviderConnectivityTab
+                activeKind={activeKind}
+                row={row}
+                form={editor.form}
+                isDirty={editor.isDirty}
+                actionsDisabled={actionsDisabled}
+                saving={editor.saving}
+                isTesting={editor.isTesting}
+                supportsInferenceProbe={editor.supportsInferenceProbe}
+                connectivityProbeMode={editor.connectivityProbeMode}
+                onConnectivityProbeModeChange={editor.setConnectivityProbeMode}
+                connectivityTestModel={editor.connectivityTestModel}
+                onConnectivityTestModelChange={editor.setConnectivityTestModel}
+                modelSelectOptions={editor.modelSelectOptions}
+                singleTestResult={editor.singleTestResult}
+                openAIAllTestResult={editor.openAIAllTestResult}
+                openAIKeyStatuses={editor.openAIKeyStatuses}
+                onRunSingleTest={editor.runSingleConnectivityTest}
+                onTestSingleOpenAIKey={editor.testSingleOpenAIKey}
+                onTestAllOpenAIKeys={editor.testAllOpenAIKeys}
+              />
+            )}
+          </div>
+        </DrawerViewport>
+      </DrawerBodyShell>
+    </Drawer>
+  );
+}

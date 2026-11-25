@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ChangeEvent,
@@ -8,6 +9,20 @@ import {
 } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
+import {
+  DRAWER_WIDTH,
+  DrawerActionFooter,
+  DrawerBodyShell,
+  DrawerDangerButton,
+  DrawerDefinitionList,
+  DrawerDlRow,
+  DrawerIdentityHeader,
+  DrawerNotice,
+  DrawerSectionCard,
+  DrawerStatusPill,
+  DrawerTabPanel,
+  DrawerViewport,
+} from '@/components/common/WorkspaceDrawer';
 import { Drawer } from '@/components/ui/Drawer';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Modal } from '@/components/ui/Modal';
@@ -16,6 +31,7 @@ import {
   IconDownload,
   IconFileText,
   IconRefreshCw,
+  IconSlidersHorizontal,
 } from '@/components/ui/icons';
 import { SectionActionFooter } from '@/components/common/SectionActionFooter';
 import {
@@ -219,7 +235,7 @@ export function UsageMaintenanceTransferSection({
   }, [loadSessions, shouldPoll]);
 
   const selectedSessionId = drawerMode?.kind === 'session' ? drawerMode.sessionId : null;
-  const sessions = sessionList?.sessions ?? [];
+  const sessions = useMemo(() => sessionList?.sessions ?? [], [sessionList?.sessions]);
   const selectedSession =
     sessions.find((session) => session.id === selectedSessionId) ?? detailSession;
 
@@ -930,222 +946,271 @@ export function UsageMaintenanceTransferSection({
       <Drawer
         open={drawerOpen}
         onClose={() => setDrawerMode(null)}
-        width="min(560px, 100vw)"
+        width={DRAWER_WIDTH.SM}
         title={
-          drawerMode?.kind === 'active'
-            ? t('usage_maintenance.import_file')
-            : t('usage_maintenance.import_details')
+          <DrawerIdentityHeader
+            icon={<IconArrowUpFromLine size={18} />}
+            iconBoxed
+            title={
+              drawerMode?.kind === 'active'
+                ? t('usage_maintenance.import_file')
+                : t('usage_maintenance.import_details')
+            }
+            metaItems={
+              drawerMode?.kind === 'active' && activeProgress
+                ? [
+                    <DrawerStatusPill
+                      key="phase"
+                      tone={
+                        activeProgress.phase === 'completed'
+                          ? 'success'
+                          : activeProgress.phase === 'failed' || Boolean(activeProgress.error)
+                            ? 'danger'
+                            : activeProgress.phase === 'paused' ||
+                                activeProgress.phase === 'cancelled'
+                              ? 'warning'
+                              : 'info'
+                      }
+                      dot
+                    >
+                      {t(`usage_stats.import_phase_${activeProgress.phase}`, {
+                        defaultValue: activeProgress.phase,
+                      })}
+                    </DrawerStatusPill>,
+                    <code key="pct" className={styles.mono}>{`${activeProgress.percent}%`}</code>,
+                    <span key="file">{activeProgress.filename}</span>,
+                  ]
+                : selectedSession
+                  ? [
+                      <DrawerStatusPill
+                        key="status"
+                        tone={
+                          selectedSession.status === 'completed'
+                            ? 'success'
+                            : selectedSession.status === 'failed'
+                              ? 'danger'
+                              : selectedSession.status === 'cancelled'
+                                ? 'neutral'
+                                : 'info'
+                        }
+                        dot
+                      >
+                        {getSessionDisplayStatus(selectedSession)}
+                      </DrawerStatusPill>,
+                      <code key="pct" className={styles.mono}>
+                        {`${importSessionProgressPercent(selectedSession)}%`}
+                      </code>,
+                      <span key="file">{selectedSession.filename}</span>,
+                    ]
+                  : undefined
+            }
+          />
         }
         footer={
-          <div className={styles.rowActions}>
-            {drawerMode?.kind === 'active' && activeProgress ? (
-              <>
-                {activeProgress.sessionId &&
+          drawerMode?.kind === 'active' && activeProgress ? (
+            <DrawerActionFooter
+              left={
+                activeProgress.sessionId &&
                 activeProgress.phase !== 'completed' &&
                 activeProgress.phase !== 'cancelled' ? (
-                  <Button
-                    variant="ghost"
-                    size="sm"
+                  <DrawerDangerButton
                     disabled={cancelBusy}
                     onClick={() => setCancelConfirmOpen(true)}
                   >
                     {t('usage_maintenance.transfer_cancel_session')}
+                  </DrawerDangerButton>
+                ) : undefined
+              }
+              right={
+                <>
+                  {operationBusy ? (
+                    <Button variant="secondary" size="sm" onClick={handlePauseImport}>
+                      {t('usage_maintenance.transfer_pause')}
+                    </Button>
+                  ) : null}
+                  {activeTask &&
+                  (activeProgress.phase === 'paused' ||
+                    (activeProgress.phase === 'failed' && activeProgress.retryable !== false)) ? (
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={() =>
+                        void runImport(activeTask.file, activeProgress.sessionId || undefined)
+                      }
+                    >
+                      {t('usage_maintenance.transfer_resume')}
+                    </Button>
+                  ) : null}
+                  <Button variant="secondary" size="sm" onClick={() => setDrawerMode(null)}>
+                    {activeProgress.phase === 'completed' || activeProgress.phase === 'cancelled'
+                      ? t('usage_maintenance.done')
+                      : t('usage_maintenance.minimize')}
                   </Button>
-                ) : null}
-                {operationBusy ? (
-                  <Button variant="secondary" size="sm" onClick={handlePauseImport}>
-                    {t('usage_maintenance.transfer_pause')}
+                </>
+              }
+            />
+          ) : (
+            <DrawerActionFooter
+              right={
+                <>
+                  {selectedSession && isActionableImportSession(selectedSession) ? (
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      disabled={cancelBusy || operationBusy}
+                      onClick={() => handleSessionAction(selectedSession)}
+                    >
+                      {getSessionActionLabel(selectedSession)}
+                    </Button>
+                  ) : null}
+                  <Button variant="secondary" size="sm" onClick={() => setDrawerMode(null)}>
+                    {t('common.close')}
                   </Button>
-                ) : null}
-                {activeTask &&
-                (activeProgress.phase === 'paused' ||
-                  (activeProgress.phase === 'failed' && activeProgress.retryable !== false)) ? (
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    onClick={() =>
-                      void runImport(activeTask.file, activeProgress.sessionId || undefined)
-                    }
-                  >
-                    {t('usage_maintenance.transfer_resume')}
-                  </Button>
-                ) : null}
-                <Button variant="secondary" size="sm" onClick={() => setDrawerMode(null)}>
-                  {activeProgress.phase === 'completed' || activeProgress.phase === 'cancelled'
-                    ? t('usage_maintenance.done')
-                    : t('usage_maintenance.minimize')}
-                </Button>
-              </>
-            ) : (
-              <>
-                {selectedSession && isActionableImportSession(selectedSession) ? (
-                  <Button
-                    size="sm"
-                    variant="primary"
-                    disabled={cancelBusy || operationBusy}
-                    onClick={() => handleSessionAction(selectedSession)}
-                  >
-                    {getSessionActionLabel(selectedSession)}
-                  </Button>
-                ) : null}
-                <Button variant="secondary" size="sm" onClick={() => setDrawerMode(null)}>
-                  {t('common.close')}
-                </Button>
-              </>
-            )}
-          </div>
+                </>
+              }
+            />
+          )
         }
       >
-        {drawerMode?.kind === 'active' && activeProgress ? (
-          <div className={styles.drawerBody}>
-            <div className={styles.mobileRunHeader}>
-              <strong>{activeProgress.filename}</strong>
-              <span className={styles.mono}>{activeProgress.percent}%</span>
-            </div>
-            <div className={styles.progressTrack}>
-              <div
-                className={styles.progressFill}
-                style={{ width: `${activeProgress.percent}%` }}
-              />
-            </div>
-            <p className={styles.flatRowMeta}>
-              {formatFileSize(activeProgress.uploadedBytes)} /{' '}
-              {formatFileSize(activeProgress.totalBytes)} ·{' '}
-              {t(`usage_stats.import_phase_${activeProgress.phase}`, {
-                defaultValue: activeProgress.phase,
-              })}
-            </p>
-            {activeProgress.error ? (
-              <div className={`${styles.alertBanner} ${styles.alertDanger}`} role="alert">
-                {activeProgress.error}
-              </div>
-            ) : null}
-            {activeProgress.result ? (
-              <p className={styles.flatRowMeta}>{formatResultSummary(activeProgress.result)}</p>
-            ) : null}
-            {activeProgress.result?.warnings?.length ? (
-              <details className={styles.detailsCollapse}>
-                <summary>{t('usage_maintenance.import_warnings')}</summary>
-                <div className={styles.detailsCollapseBody}>
-                  <ul>
-                    {activeProgress.result.warnings.map((warning, idx) => (
-                      <li key={idx}>{warning}</li>
-                    ))}
-                  </ul>
-                </div>
-              </details>
-            ) : null}
-            <p className={styles.flatRowMeta}>{t('usage_maintenance.import_cancel_note')}</p>
-          </div>
-        ) : selectedSession ? (
-          <div className={styles.drawerBody} data-testid="usage-maintenance-import-session-drawer">
-            <div className={styles.mobileRunHeader}>
-              <span
-                className={`${styles.statusPill} ${getSessionToneClass(
-                  selectedSession.status,
-                  selectedSession.result
-                )}`}
-              >
-                <span className={styles.statusDot} aria-hidden="true" />
-                {getSessionDisplayStatus(selectedSession)}
-              </span>
-              <span className={styles.mono}>{importSessionProgressPercent(selectedSession)}%</span>
-            </div>
-            <strong className={styles.flatRowLabel}>{selectedSession.filename}</strong>
-            <div className={styles.progressTrack}>
-              <div
-                className={styles.progressFill}
-                style={{ width: `${importSessionProgressPercent(selectedSession)}%` }}
-              />
-            </div>
-            <p className={styles.flatRowMeta}>
-              {formatFileSize(selectedSession.received_bytes)} /{' '}
-              {formatFileSize(selectedSession.size_bytes)}
-            </p>
-            {selectedSession.status === 'processing' ? (
-              <p className={styles.flatRowMeta}>{t('usage_stats.import_processing_hint')}</p>
-            ) : null}
-            <p className={styles.flatRowMeta}>{formatResultSummary(selectedSession.result)}</p>
-            {selectedSession.result?.warnings?.length ? (
-              <details className={styles.detailsCollapse}>
-                <summary>{t('usage_maintenance.import_warnings')}</summary>
-                <div className={styles.detailsCollapseBody}>
-                  <ul>
-                    {selectedSession.result.warnings.map((warning, idx) => (
-                      <li key={idx}>{warning}</li>
-                    ))}
-                  </ul>
-                </div>
-              </details>
-            ) : null}
-            {selectedSession.status === 'failed' ? (
-              <div className={`${styles.alertBanner} ${styles.alertWarn}`}>
-                {t(
-                  selectedSession.retryable
-                    ? 'usage_maintenance.transfer_retryable'
-                    : 'usage_maintenance.transfer_failed'
-                )}
-              </div>
-            ) : null}
-            <details className={styles.detailsCollapse}>
-              <summary>{t('usage_maintenance.workspace_technical')}</summary>
-              <div className={styles.detailsCollapseBody}>
-                <dl className={styles.drawerKvGrid}>
-                  <div className={`${styles.inlineMetric} ${styles.inlineMetricFull}`}>
-                    <dt className={styles.inlineMetricLabel}>
-                      {t('usage_maintenance.technical_run_id')}
-                    </dt>
-                    <dd className={styles.mono}>{selectedSession.id}</dd>
+        <DrawerBodyShell>
+          <DrawerViewport>
+            {drawerMode?.kind === 'active' && activeProgress ? (
+              <DrawerTabPanel>
+                <DrawerSectionCard
+                  icon={<IconFileText size={15} />}
+                  title={activeProgress.filename}
+                  metaActions={<span className={styles.mono}>{`${activeProgress.percent}%`}</span>}
+                >
+                  <div className={styles.progressTrack}>
+                    <div
+                      className={styles.progressFill}
+                      style={{ width: `${activeProgress.percent}%` }}
+                    />
                   </div>
-                  <div className={styles.inlineMetric}>
-                    <dt className={styles.inlineMetricLabel}>
-                      {t('usage_maintenance.transfer_chunk')}
-                    </dt>
-                    <dd className={styles.inlineMetricValue}>
-                      {formatFileSize(selectedSession.chunk_size_bytes)}
-                    </dd>
-                  </div>
-                  <div className={styles.inlineMetric}>
-                    <dt className={styles.inlineMetricLabel}>
-                      {t('usage_maintenance.transfer_expires')}
-                    </dt>
-                    <dd className={styles.inlineMetricValue}>
-                      {formatDateTime(new Date(selectedSession.expires_at_ms), i18n.language)}
-                    </dd>
-                  </div>
-                  <div className={styles.inlineMetric}>
-                    <dt className={styles.inlineMetricLabel}>
-                      {t('usage_maintenance.transfer_retryable_label')}
-                    </dt>
-                    <dd className={styles.inlineMetricValue}>
-                      {t(selectedSession.retryable ? 'common.yes' : 'common.no')}
-                    </dd>
-                  </div>
-                  {sessionList ? (
-                    <div className={styles.inlineMetric}>
-                      <dt className={styles.inlineMetricLabel}>
-                        {t('usage_maintenance.transfer_expires')} TTL
-                      </dt>
-                      <dd className={styles.inlineMetricValue}>
-                        {formatTTL(sessionList.ttl_seconds, t)}
-                      </dd>
-                    </div>
+                  <p className={styles.flatRowMeta}>
+                    {formatFileSize(activeProgress.uploadedBytes)} /{' '}
+                    {formatFileSize(activeProgress.totalBytes)} ·{' '}
+                    {t(`usage_stats.import_phase_${activeProgress.phase}`, {
+                      defaultValue: activeProgress.phase,
+                    })}
+                  </p>
+                  {activeProgress.error ? (
+                    <DrawerNotice tone="danger" role="alert">
+                      {activeProgress.error}
+                    </DrawerNotice>
                   ) : null}
-                </dl>
-              </div>
-            </details>
-          </div>
-        ) : (
-          <div className={styles.drawerBody}>
-            {detailError ? (
-              <div className={`${styles.alertBanner} ${styles.alertDanger}`} role="alert">
-                {detailError}
-              </div>
+                  {activeProgress.result ? (
+                    <p className={styles.flatRowMeta}>
+                      {formatResultSummary(activeProgress.result)}
+                    </p>
+                  ) : null}
+                </DrawerSectionCard>
+
+                {activeProgress.result?.warnings?.length ? (
+                  <details className={styles.detailsCollapse}>
+                    <summary>{t('usage_maintenance.import_warnings')}</summary>
+                    <div className={styles.detailsCollapseBody}>
+                      <ul>
+                        {activeProgress.result.warnings.map((warning, idx) => (
+                          <li key={idx}>{warning}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  </details>
+                ) : null}
+                <p className={styles.flatRowMeta}>{t('usage_maintenance.import_cancel_note')}</p>
+              </DrawerTabPanel>
+            ) : selectedSession ? (
+              <DrawerTabPanel testId="usage-maintenance-import-session-drawer">
+                <DrawerSectionCard
+                  icon={<IconFileText size={15} />}
+                  title={selectedSession.filename}
+                  metaActions={
+                    <span className={styles.mono}>
+                      {`${importSessionProgressPercent(selectedSession)}%`}
+                    </span>
+                  }
+                >
+                  <div className={styles.progressTrack}>
+                    <div
+                      className={styles.progressFill}
+                      style={{ width: `${importSessionProgressPercent(selectedSession)}%` }}
+                    />
+                  </div>
+                  <p className={styles.flatRowMeta}>
+                    {formatFileSize(selectedSession.received_bytes)} /{' '}
+                    {formatFileSize(selectedSession.size_bytes)}
+                  </p>
+                  {selectedSession.status === 'processing' ? (
+                    <p className={styles.flatRowMeta}>
+                      {t('usage_stats.import_processing_hint')}
+                    </p>
+                  ) : null}
+                  <p className={styles.flatRowMeta}>
+                    {formatResultSummary(selectedSession.result)}
+                  </p>
+                  {selectedSession.status === 'failed' ? (
+                    <DrawerNotice tone="warning">
+                      {t(
+                        selectedSession.retryable
+                          ? 'usage_maintenance.transfer_retryable'
+                          : 'usage_maintenance.transfer_failed'
+                      )}
+                    </DrawerNotice>
+                  ) : null}
+                </DrawerSectionCard>
+
+                {selectedSession.result?.warnings?.length ? (
+                  <details className={styles.detailsCollapse}>
+                    <summary>{t('usage_maintenance.import_warnings')}</summary>
+                    <div className={styles.detailsCollapseBody}>
+                      <ul>
+                        {selectedSession.result.warnings.map((warning, idx) => (
+                          <li key={idx}>{warning}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  </details>
+                ) : null}
+
+                <DrawerSectionCard
+                  icon={<IconSlidersHorizontal size={15} />}
+                  title={t('usage_maintenance.workspace_technical')}
+                >
+                  <DrawerDefinitionList>
+                    <DrawerDlRow label={t('usage_maintenance.technical_run_id')} mono>
+                      {selectedSession.id}
+                    </DrawerDlRow>
+                    <DrawerDlRow label={t('usage_maintenance.transfer_chunk')}>
+                      {formatFileSize(selectedSession.chunk_size_bytes)}
+                    </DrawerDlRow>
+                    <DrawerDlRow label={t('usage_maintenance.transfer_expires')}>
+                      {formatDateTime(new Date(selectedSession.expires_at_ms), i18n.language)}
+                    </DrawerDlRow>
+                    <DrawerDlRow label={t('usage_maintenance.transfer_retryable_label')}>
+                      {t(selectedSession.retryable ? 'common.yes' : 'common.no')}
+                    </DrawerDlRow>
+                    {sessionList ? (
+                      <DrawerDlRow label={`${t('usage_maintenance.transfer_expires')} TTL`}>
+                        {formatTTL(sessionList.ttl_seconds, t)}
+                      </DrawerDlRow>
+                    ) : null}
+                  </DrawerDefinitionList>
+                </DrawerSectionCard>
+              </DrawerTabPanel>
             ) : (
-              <p className={styles.flatRowMeta}>{t('common.loading')}</p>
+              <DrawerTabPanel>
+                {detailError ? (
+                  <DrawerNotice tone="danger" role="alert">
+                    {detailError}
+                  </DrawerNotice>
+                ) : (
+                  <p className={styles.flatRowMeta}>{t('common.loading')}</p>
+                )}
+              </DrawerTabPanel>
             )}
-          </div>
-        )}
+          </DrawerViewport>
+        </DrawerBodyShell>
       </Drawer>
 
       <Modal

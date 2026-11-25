@@ -162,6 +162,14 @@ export function IconTriangleAlert({ size = 20, ...props }: IconProps) {
   );
 }
 
+export function IconActivity({ size = 20, ...props }: IconProps) {
+  return (
+    <svg {...baseSvgProps} width={size} height={size} {...props}>
+      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+    </svg>
+  );
+}
+
 export function IconChartLine({ size = 20, ...props }: IconProps) {
   return (
     <svg {...baseSvgProps} width={size} height={size} {...props}>

@@ -1,7 +1,7 @@
 import type { ReactElement } from 'react';
 import { createElement } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ProviderKeyConfig } from '@/types';
 
 const mocks = vi.hoisted(() => ({
@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   showNotification: vi.fn(),
   showConfirmation: vi.fn(),
   allowNextNavigation: vi.fn(),
+  guardEnabled: { current: false },
   navigate: vi.fn(),
   updateClaudeConfig: vi.fn(),
   createClaudeConfig: vi.fn(),
@@ -36,7 +37,10 @@ vi.mock('react-router-dom', () => ({
 }));
 
 vi.mock('@/hooks/useUnsavedChangesGuard', () => ({
-  useUnsavedChangesGuard: () => ({ allowNextNavigation: mocks.allowNextNavigation }),
+  useUnsavedChangesGuard: (options: { enabled?: boolean }) => {
+    mocks.guardEnabled.current = Boolean(options?.enabled);
+    return { allowNextNavigation: mocks.allowNextNavigation };
+  },
 }));
 
 vi.mock('@/stores', async () => {
@@ -91,11 +95,14 @@ const flush = async () => {
   });
 };
 
+const mountedRenderers: ReactTestRenderer[] = [];
+
 const renderEditor = async () => {
   let renderer: ReactTestRenderer | undefined;
   await act(async () => {
     renderer = create(createElement(AiProvidersClaudeEditLayout) as ReactElement);
   });
+  mountedRenderers.push(renderer!);
   await flush();
   return renderer!;
 };
@@ -120,6 +127,14 @@ const notifications = (type: string) =>
   mocks.showNotification.mock.calls.filter((call) => call[1] === type);
 
 describe('AiProvidersClaudeEditLayout fingerprint save verification', () => {
+  afterEach(async () => {
+    for (const renderer of mountedRenderers.splice(0)) {
+      await act(async () => {
+        renderer.unmount();
+      });
+    }
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     useClaudeEditDraftStore.setState({ drafts: {}, refCounts: {} });
@@ -401,5 +416,180 @@ describe('AiProvidersClaudeEditLayout fingerprint save verification', () => {
     expect(mocks.createClaudeConfig).toHaveBeenCalledTimes(1);
     expect(notifications('warning')).toHaveLength(0);
     expect(notifications('success')).toHaveLength(1);
+  });
+
+  it('force-refreshes claude-api-key on mount so live CPA v8 ETag is always loaded', async () => {
+    await renderEditor();
+    expect(mocks.fetchConfig).toHaveBeenCalledWith('claude-api-key', true);
+  });
+
+  it('tracks dirty state for extended cloak fields (cacheUserId, sensitiveWordsReplace, sensitivePatternsReplace)', async () => {
+    mocks.config = {
+      claudeApiKeys: [
+        {
+          apiKey: 'key',
+          baseUrl: 'https://api.anthropic.com',
+          cloak: {
+            mode: 'auto',
+            strictMode: false,
+            cacheUserId: false,
+            sensitiveWordsReplace: { secret: '[REDACTED]' },
+            sensitivePatternsReplace: [{ pattern: 'foo.*', replacement: 'bar' }],
+          },
+        },
+      ],
+    };
+    mocks.fetchConfig.mockResolvedValue(mocks.config.claudeApiKeys);
+
+    await renderEditor();
+    expect(mocks.guardEnabled.current).toBe(false);
+
+    await patchForm({
+      cloak: {
+        mode: 'auto',
+        strictMode: false,
+        cacheUserId: true,
+        sensitiveWordsReplace: { secret: '[REDACTED]' },
+        sensitivePatternsReplace: [{ pattern: 'foo.*', replacement: 'bar' }],
+      },
+    });
+    expect(mocks.guardEnabled.current).toBe(true);
+
+    await patchForm({
+      cloak: {
+        mode: 'auto',
+        strictMode: false,
+        cacheUserId: false,
+        sensitiveWordsReplace: { secret: '[REDACTED]' },
+        sensitivePatternsReplace: [{ pattern: 'foo.*', replacement: 'bar' }],
+      },
+    });
+    expect(mocks.guardEnabled.current).toBe(false);
+
+    await patchForm({
+      cloak: {
+        mode: 'auto',
+        strictMode: false,
+        cacheUserId: false,
+        sensitiveWordsReplace: { secret: '' },
+        sensitivePatternsReplace: [{ pattern: 'foo.*', replacement: 'bar' }],
+      },
+    });
+    expect(mocks.guardEnabled.current).toBe(true);
+
+    await patchForm({
+      cloak: {
+        mode: 'auto',
+        strictMode: false,
+        cacheUserId: false,
+        sensitiveWordsReplace: { secret: '[REDACTED]' },
+        sensitivePatternsReplace: [{ pattern: 'baz.*', replacement: 'qux' }],
+      },
+    });
+    expect(mocks.guardEnabled.current).toBe(true);
+  });
+
+  it('tracks dirty state for extended Claude model fields (thinking, displayName, maxContextLength, priority, testModel, isCompat)', async () => {
+    mocks.config = {
+      claudeApiKeys: [
+        {
+          apiKey: 'key',
+          baseUrl: 'https://api.anthropic.com',
+          models: [
+            {
+              name: 'claude-sonnet-4',
+              alias: 'sonnet',
+              displayName: 'Sonnet 4',
+              maxContextLength: 200000,
+              priority: 5,
+              testModel: 'claude-sonnet-4',
+              isCompat: false,
+              thinking: { levels: ['low', 'high'] },
+            },
+          ],
+        },
+      ],
+    };
+    mocks.fetchConfig.mockResolvedValue(mocks.config.claudeApiKeys);
+
+    await renderEditor();
+    expect(mocks.guardEnabled.current).toBe(false);
+
+    const baseEntry = {
+      name: 'claude-sonnet-4',
+      alias: 'sonnet',
+      displayName: 'Sonnet 4',
+      maxContextLength: 200000,
+      priority: 5,
+      testModel: 'claude-sonnet-4',
+      isCompat: false,
+      thinking: { levels: ['low', 'high'] },
+    };
+
+    for (const patch of [
+      { displayName: 'Sonnet 4 Custom' },
+      { maxContextLength: 500000 },
+      { priority: 9 },
+      { testModel: 'claude-haiku-4' },
+      { isCompat: true },
+      { thinking: { levels: ['low', 'medium', 'high'] } },
+    ]) {
+      await patchForm({ modelEntries: [{ ...baseEntry, ...patch }] });
+      expect(mocks.guardEnabled.current).toBe(true);
+      await patchForm({ modelEntries: [{ ...baseEntry }] });
+      expect(mocks.guardEnabled.current).toBe(false);
+    }
+  });
+
+  it('keeps loading true until forced mount refresh settles when cache is valid and populates fresh data without re-fetching on language change', async () => {
+    mocks.config = {
+      claudeApiKeys: [{ apiKey: 'stale-key', baseUrl: 'https://stale.example' }],
+    };
+    let resolveFetch!: (value: ProviderKeyConfig[]) => void;
+    mocks.fetchConfig.mockImplementation(
+      () =>
+        new Promise<ProviderKeyConfig[]>((resolve) => {
+          resolveFetch = resolve;
+        })
+    );
+
+    let renderer: ReactTestRenderer | undefined;
+    await act(async () => {
+      renderer = create(createElement(AiProvidersClaudeEditLayout) as ReactElement);
+    });
+    mountedRenderers.push(renderer!);
+
+    const loadingContext = mocks.outletContext.current as (EditorContext & { loading: boolean }) | null;
+    expect(loadingContext?.loading).toBe(true);
+    expect(mocks.fetchConfig).toHaveBeenCalledTimes(1);
+    expect(mocks.fetchConfig).toHaveBeenCalledWith('claude-api-key', true);
+
+    await act(async () => {
+      resolveFetch([{ apiKey: 'fresh-key', baseUrl: 'https://fresh.example' }]);
+    });
+    await flush();
+
+    const loadedContext = mocks.outletContext.current as (EditorContext & { loading: boolean }) | null;
+    expect(loadedContext?.loading).toBe(false);
+    expect(loadedContext?.form.apiKey).toBe('fresh-key');
+    expect(loadedContext?.form.baseUrl).toBe('https://fresh.example');
+
+    // User edits form, then language (`t` reference) changes: must not re-fetch or clobber edits
+    await patchForm({ apiKey: 'user-edited-key' });
+    const previousT = mocks.t;
+    try {
+      mocks.t = (key: string) => `translated:${key}`;
+      await act(async () => {
+        renderer!.update(createElement(AiProvidersClaudeEditLayout) as ReactElement);
+      });
+      await flush();
+    } finally {
+      mocks.t = previousT;
+    }
+
+    expect(mocks.fetchConfig).toHaveBeenCalledTimes(1);
+    expect((mocks.outletContext.current as EditorContext | null)?.form.apiKey).toBe(
+      'user-edited-key'
+    );
   });
 });

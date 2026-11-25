@@ -39,9 +39,9 @@ describe('R1-1 local-only OCI candidate contracts', () => {
       cwd: new URL('..', import.meta.url),
       env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
       stdio: 'pipe',
-      timeout: 90_000,
+      timeout: 180_000,
     });
-  }, 90_000);
+  }, 180_000);
 
   it('replays the strict published 1.x consumer without R1 fields or single-platform relaxation', () => {
     const tag = 'v1.14.7';

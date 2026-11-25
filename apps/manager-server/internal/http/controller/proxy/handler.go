@@ -38,7 +38,8 @@ func (h *Handler) ModelList(w http.ResponseWriter, r *http.Request) {
 	h.App.ProxyService.ProxyModelList(w, r, response.Error, response.MethodNotAllowed)
 }
 
-// V8APIKeysConfig forwards CPA v8 API-key group reads for verified admins only.
+// V8APIKeysConfig forwards CPA v8 API-key group reads (root and whitelisted
+// families) and family PUT writes for verified admins only.
 // Callers' own credentials are never passed through to the v8 management API.
 func (h *Handler) V8APIKeysConfig(w http.ResponseWriter, r *http.Request) {
 	ok, err := h.App.AdminAuthService.VerifyHeader(r.Context(), r.Header.Get("Authorization"))

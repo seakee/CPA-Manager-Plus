@@ -2,12 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { PageControlBar } from '@/components/common/PageControlBar';
 import { usePageTransitionLayer } from '@/components/common/PageTransitionLayer';
-import { PaginationFooter } from '@/components/common/PaginationFooter';
+import { LocalizedPaginationFooter } from '@/components/common/LocalizedPaginationFooter';
 import { Button } from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Input } from '@/components/ui/Input';
 import { SegmentedTabs, type SegmentedTabItem } from '@/components/ui/SegmentedTabs';
 import { IconPencil, IconRefreshCw, IconSearch, IconTrash2, IconX } from '@/components/ui/icons';
+import { useClientPagination } from '@/hooks/list';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import {
@@ -71,8 +72,6 @@ export function ModelPricesPage() {
   const [search, setSearch] = useState(() => initialUiState.current.search);
   const [filter, setFilter] = useState<ModelPriceFilter>(() => initialUiState.current.filter);
   const [syncing, setSyncing] = useState(false);
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState<number>(MODEL_PRICE_DEFAULT_PAGE_SIZE);
   const [saving, setSaving] = useState(false);
   const saveInFlightRef = useRef(false);
   const syncInFlightRef = useRef(false);
@@ -116,15 +115,19 @@ export function ModelPricesPage() {
     }),
     [summary]
   );
-  const totalPages = Math.max(1, Math.ceil(visibleRows.length / pageSize));
-  const currentPage = Math.min(page, totalPages);
-  const paginationStartIndex = visibleRows.length === 0 ? 0 : (currentPage - 1) * pageSize;
-  const paginationStartItem = visibleRows.length === 0 ? 0 : paginationStartIndex + 1;
-  const paginationEndItem = Math.min(visibleRows.length, paginationStartIndex + pageSize);
-  const paginatedRows = useMemo(
-    () => visibleRows.slice(paginationStartIndex, paginationStartIndex + pageSize),
-    [pageSize, paginationStartIndex, visibleRows]
-  );
+  const {
+    page: currentPage,
+    setPage,
+    pageSize,
+    setPageSize,
+    totalPages,
+    startItem: paginationStartItem,
+    endItem: paginationEndItem,
+    pageItems: paginatedRows,
+  } = useClientPagination(visibleRows, {
+    initialPageSize: MODEL_PRICE_DEFAULT_PAGE_SIZE,
+    resetDeps: [modelPricesScopeKey, search, filter],
+  });
 
   const filterTabItems = useMemo<ReadonlyArray<SegmentedTabItem<ModelPriceFilter>>>(
     () =>
@@ -199,7 +202,6 @@ export function ModelPricesPage() {
     setManualEditorOpen(false);
     setSelectedCandidates({});
     setSyncResult(null);
-    setPage(1);
   }, [modelPricesScopeKey]);
 
   const resolveActionErrorMessage = (error: unknown, fallbackMessage: string): string => {
@@ -803,34 +805,17 @@ export function ModelPricesPage() {
               </tbody>
             </table>
                 </div>
-                <PaginationFooter
+                <LocalizedPaginationFooter
                   variant="inset"
                   currentPage={currentPage}
                   totalPages={totalPages}
-                  infoText={t('monitoring.pagination_info', {
-                    current: currentPage,
-                    total: totalPages,
-                    start: paginationStartItem,
-                    end: paginationEndItem,
-                    count: visibleRows.length,
-                  })}
+                  totalCount={visibleRows.length}
+                  startItem={paginationStartItem}
+                  endItem={paginationEndItem}
                   pageSize={pageSize}
                   pageSizeOptions={MODEL_PRICE_PAGE_SIZE_OPTIONS}
-                  pageSizeLabel={t('monitoring.page_size_label')}
-                  pageSizeTitle={t('monitoring.page_size_label')}
-                  pageSizeAriaLabel={t('monitoring.page_size_label')}
-                  formatPageSizeOption={(size) => t('monitoring.page_size_option', { count: size })}
                   onPageChange={setPage}
-                  onPageSizeChange={(nextPageSize) => {
-                    setPageSize(nextPageSize);
-                    setPage(1);
-                  }}
-                  prevLabel={t('monitoring.pagination_prev')}
-                  nextLabel={t('monitoring.pagination_next')}
-                  showPageJump
-                  jumpPrefixLabel={t('monitoring.pagination_jump_prefix')}
-                  jumpSuffixLabel={t('monitoring.pagination_jump_suffix')}
-                  jumpInputAriaLabel={t('monitoring.pagination_jump_label')}
+                  onPageSizeChange={setPageSize}
                 />
               </>
             )}

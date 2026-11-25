@@ -12,6 +12,13 @@ import {
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { IconX } from './icons';
+import {
+  acquireOverlayScrollLock,
+  getOverlayFocusableElements,
+  hasOpenModal,
+  isTopmostDrawer,
+  registerOpenDrawer,
+} from './overlayEscapeStack';
 import styles from './Drawer.module.scss';
 
 interface DrawerProps {
@@ -33,29 +40,6 @@ interface DrawerProps {
 type DrawerPhase = 'closed' | 'entering' | 'closing';
 
 const CLOSE_ANIMATION_DURATION = 280;
-
-let activeDrawerCount = 0;
-const drawerScrollSnapshot = { bodyOverflow: '', htmlOverflow: '' };
-
-const lockScroll = () => {
-  if (typeof document === 'undefined') return;
-  if (activeDrawerCount === 0) {
-    drawerScrollSnapshot.bodyOverflow = document.body.style.overflow;
-    drawerScrollSnapshot.htmlOverflow = document.documentElement.style.overflow;
-    document.body.style.overflow = 'hidden';
-    document.documentElement.style.overflow = 'hidden';
-  }
-  activeDrawerCount += 1;
-};
-
-const unlockScroll = () => {
-  if (typeof document === 'undefined' || activeDrawerCount === 0) return;
-  activeDrawerCount -= 1;
-  if (activeDrawerCount === 0) {
-    document.body.style.overflow = drawerScrollSnapshot.bodyOverflow;
-    document.documentElement.style.overflow = drawerScrollSnapshot.htmlOverflow;
-  }
-};
 
 export function Drawer({
   open,
@@ -90,6 +74,8 @@ export function Drawer({
   const panelRef = useRef<HTMLDivElement | null>(null);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
   const overlayPointerIdsRef = useRef<Set<number>>(new Set());
+
+  const getFocusableElements = useCallback(() => getOverlayFocusableElements(panelRef.current), []);
 
   const startClose = useCallback((notifyParent: boolean) => {
     if (closeTimerRef.current !== null || phaseRef.current === 'closed') return;
@@ -134,7 +120,10 @@ export function Drawer({
         if (cancelled) return;
         setPhase('closed');
       });
-    } else if (phaseRef.current === 'entering') {
+    } else if (
+      phaseRef.current === 'entering' ||
+      (phaseRef.current === 'closing' && closeTimerRef.current === null)
+    ) {
       queueMicrotask(() => {
         if (cancelled) return;
         startClose(false);
@@ -209,47 +198,124 @@ export function Drawer({
 
   const isVisible = phase !== 'closed';
   const isClosing = phase === 'closing';
-  const shouldLockScroll = (open && !isClosing) || (isVisible && !internalCloseCompletedRef.current);
+  const isActive = open || isVisible;
 
   useEffect(() => {
-    if (!shouldLockScroll) return;
-    lockScroll();
-    return () => unlockScroll();
-  }, [shouldLockScroll]);
+    if (!isActive) return;
+    return acquireOverlayScrollLock('drawer');
+  }, [isActive]);
+
+  useEffect(() => {
+    if (!isActive || typeof document === 'undefined') return;
+    previouslyFocusedRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    return () => {
+      const target = previouslyFocusedRef.current;
+      previouslyFocusedRef.current = null;
+      if (typeof target?.focus === 'function') {
+        target.focus();
+      }
+    };
+  }, [isActive]);
 
   useEffect(() => {
     if (!open || typeof document === 'undefined' || typeof window === 'undefined') return;
 
-    previouslyFocusedRef.current =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null;
-
     const focusTimer = globalThis.setTimeout(() => {
-      panelRef.current?.focus();
+      if (typeof panelRef.current?.focus === 'function') {
+        panelRef.current.focus();
+      }
     }, 0);
 
     return () => globalThis.clearTimeout(focusTimer);
   }, [open]);
 
-  useEffect(() => {
-    if (open || isVisible || typeof document === 'undefined') return;
-    previouslyFocusedRef.current?.focus();
-    previouslyFocusedRef.current = null;
-  }, [isVisible, open]);
+  const drawerTokenRef = useRef<symbol | null>(null);
 
   useEffect(() => {
-    if (!open || typeof document === 'undefined') return;
+    if (!isActive || typeof document === 'undefined') return;
+    const unregisterDrawer = registerOpenDrawer();
+    drawerTokenRef.current = unregisterDrawer.token;
+    return () => {
+      drawerTokenRef.current = null;
+      unregisterDrawer();
+    };
+  }, [isActive]);
+
+  useEffect(() => {
+    if (!isActive || typeof document === 'undefined') return;
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
+        const token = drawerTokenRef.current;
+        if (
+          !token ||
+          hasOpenModal() ||
+          event.defaultPrevented ||
+          !isTopmostDrawer(token)
+        ) {
+          return;
+        }
         event.preventDefault();
+        event.stopImmediatePropagation?.();
+        if (isClosing || !open) return;
         void handleClose();
+        return;
+      }
+
+      if (event.key !== 'Tab') return;
+
+      const token = drawerTokenRef.current;
+      if (!token || hasOpenModal() || !isTopmostDrawer(token)) return;
+      if (isClosing || !open) {
+        event.preventDefault();
+        return;
+      }
+
+      const focusableElements = getFocusableElements();
+      if (focusableElements.length === 0) {
+        event.preventDefault();
+        if (typeof panelRef.current?.focus === 'function') {
+          panelRef.current.focus();
+        }
+        return;
+      }
+
+      const firstElement = focusableElements[0];
+      const lastElement = focusableElements[focusableElements.length - 1];
+      const activeElement = document.activeElement as HTMLElement | null;
+      const isInsideDrawer =
+        activeElement !== null &&
+        (activeElement === panelRef.current ||
+          focusableElements.includes(activeElement) ||
+          Boolean(
+            typeof panelRef.current?.contains === 'function' &&
+              panelRef.current.contains(activeElement)
+          ));
+
+      if (event.shiftKey) {
+        if (
+          !isInsideDrawer ||
+          activeElement === firstElement ||
+          activeElement === panelRef.current
+        ) {
+          event.preventDefault();
+          lastElement.focus();
+        }
+        return;
+      }
+
+      if (!isInsideDrawer || activeElement === lastElement) {
+        event.preventDefault();
+        firstElement.focus();
       }
     };
 
     document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [handleClose, open]);
-
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [getFocusableElements, handleClose, isActive, isClosing, open]);
   if (!isVisible) return null;
 
   const overlayClass = [

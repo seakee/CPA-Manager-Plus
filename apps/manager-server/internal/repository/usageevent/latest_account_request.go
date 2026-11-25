@@ -131,10 +131,24 @@ func (r *repository) recentAccountRequestsIndexed(
 			return nil, err
 		}
 		authFileSnapshot := strings.TrimSpace(target.AuthFileSnapshot)
+		authIndex := strings.TrimSpace(target.AuthIndex)
+		provider := normalizeLatestRequestProvider(target.Provider)
 		if authFileSnapshot == "" {
+			if authIndex == "" || provider == "" {
+				continue
+			}
+			byAuthIndex, err := r.recentAccountRequestsByPredicates(
+				ctx,
+				target.RequestIndex,
+				limit,
+				authIndexLatestRequestPredicates(authIndex, provider),
+			)
+			if err != nil {
+				return nil, err
+			}
+			requests = append(requests, mergeRecentAccountRequests(limit, byAuthIndex)...)
 			continue
 		}
-		authIndex := strings.TrimSpace(target.AuthIndex)
 		snapshot, err := r.recentAccountRequestsByPredicates(
 			ctx,
 			target.RequestIndex,
@@ -292,6 +306,50 @@ func snapshotLatestRequestPredicates(authFileSnapshot, authIndex string) []lates
 	)
 }
 
+func authIndexLatestRequestPredicates(authIndex, provider string) []latestRequestPredicate {
+	// Keep e.auth_index equality candidates indexable by idx_usage_events_auth_index
+	// while restricting to rows without an auth_file_snapshot and matching provider.
+	providerFilter := ` and lower(replace(trim(coalesce(nullif(trim(e.auth_provider_snapshot), ''), e.provider, '')), '_', '-'))`
+	var providerSQL string
+	var providerArgs []any
+	if provider == "xai" {
+		providerSQL = providerFilter + ` in ('xai', 'x-ai', 'grok')`
+	} else {
+		providerSQL = providerFilter + ` = ?`
+		providerArgs = []any{provider}
+	}
+	noFileFilter := ` and (e.auth_file_snapshot is null or e.auth_file_snapshot = '')`
+	variants := uniqueAuthIndexVariants(authIndex)
+	predicates := make([]latestRequestPredicate, 0, len(variants))
+	for _, variant := range variants {
+		args := make([]any, 0, 1+len(providerArgs))
+		args = append(args, variant)
+		args = append(args, providerArgs...)
+		predicates = append(predicates, latestRequestPredicate{
+			sql:  `e.auth_index = ?` + noFileFilter + providerSQL,
+			args: args,
+		})
+	}
+	return predicates
+}
+
+func uniqueAuthIndexVariants(authIndex string) []string {
+	trimmed := strings.TrimSpace(authIndex)
+	if trimmed == "" {
+		return nil
+	}
+	lower := strings.ToLower(trimmed)
+	upper := strings.ToUpper(trimmed)
+	variants := []string{trimmed}
+	if lower != trimmed {
+		variants = append(variants, lower)
+	}
+	if upper != trimmed && upper != lower {
+		variants = append(variants, upper)
+	}
+	return variants
+}
+
 func legacyLatestRequestPredicates(authFileSnapshot, authIndex string) []latestRequestPredicate {
 	filePredicates := []latestRequestPredicate{
 		{sql: `e.auth_file_snapshot is null and e.source collate nocase = ?`, args: []any{authFileSnapshot}},
@@ -303,7 +361,6 @@ func legacyLatestRequestPredicates(authFileSnapshot, authIndex string) []latestR
 	}
 	return predicates
 }
-
 func latestRequestPredicates(baseSQL string, baseArgs []any, authIndex string) []latestRequestPredicate {
 	if authIndex != "" {
 		return []latestRequestPredicate{{
@@ -395,13 +452,14 @@ func (r *repository) recentAccountRequestsBatched(
 	args := make([]any, 0, len(targets)*8+1)
 	for _, target := range targets {
 		authFileSnapshot := strings.TrimSpace(target.AuthFileSnapshot)
-		if authFileSnapshot == "" {
+		authIndex := strings.TrimSpace(target.AuthIndex)
+		provider := normalizeLatestRequestProvider(target.Provider)
+		if authFileSnapshot == "" && (authIndex == "" || provider == "") {
 			continue
 		}
-		provider := normalizeLatestRequestProvider(target.Provider)
 		workspaceID, member := "", ""
 		identityMode := 0
-		if provider == "codex" {
+		if provider == "codex" && authFileSnapshot != "" {
 			var identityOK, identityConflict bool
 			workspaceID, member, identityOK, identityConflict = resolveLatestRequestCodexIdentity(target)
 			switch {
@@ -416,7 +474,7 @@ func (r *repository) recentAccountRequestsBatched(
 			args,
 			target.RequestIndex,
 			authFileSnapshot,
-			strings.TrimSpace(target.AuthIndex),
+			authIndex,
 			provider,
 			workspaceID,
 			member,
@@ -446,7 +504,8 @@ func (r *repository) recentAccountRequestsBatched(
 		coalesce(e.header_trace_id, '') as header_trace_id
 	from credential_targets t
 	join usage_events e
-		on e.auth_file_snapshot collate nocase = t.auth_file_snapshot
+		on t.auth_file_snapshot <> ''
+		and e.auth_file_snapshot collate nocase = t.auth_file_snapshot
 		and coalesce(e.auth_index, '') collate nocase = t.auth_index
 		and `+latestRequestBatchedIdentityPredicate("t", "e")+`
 ), legacy_source_candidates as (
@@ -462,14 +521,41 @@ func (r *repository) recentAccountRequestsBatched(
 		coalesce(e.header_trace_id, '') as header_trace_id
 	from credential_targets t
 	join usage_events e
-		on coalesce(e.auth_file_snapshot, '') = ''
+		on t.auth_file_snapshot <> ''
+		and coalesce(e.auth_file_snapshot, '') = ''
 		and e.source collate nocase = t.auth_file_snapshot
 		and coalesce(e.auth_index, '') collate nocase = t.auth_index
 		and `+latestRequestBatchedIdentityPredicate("t", "e")+`
+), auth_index_candidates as (
+	select
+		t.request_index,
+		e.id,
+		e.timestamp_ms,
+		e.failed,
+		e.fail_status_code,
+		coalesce(e.fail_summary, '') as fail_summary,
+		coalesce(e.header_error_kind, '') as header_error_kind,
+		coalesce(e.header_error_code, '') as header_error_code,
+		coalesce(e.header_trace_id, '') as header_trace_id
+	from credential_targets t
+	join usage_events e
+		on t.auth_file_snapshot = ''
+		and t.auth_index <> ''
+		and coalesce(e.auth_file_snapshot, '') = ''
+		and e.auth_index collate nocase = t.auth_index
+		and (
+			case lower(replace(trim(coalesce(nullif(trim(e.auth_provider_snapshot), ''), e.provider, '')), '_', '-'))
+				when 'x-ai' then 'xai'
+				when 'grok' then 'xai'
+				else lower(replace(trim(coalesce(nullif(trim(e.auth_provider_snapshot), ''), e.provider, '')), '_', '-'))
+			end
+		) = t.provider
 ), candidates as (
 	select * from snapshot_candidates
 	union all
 	select * from legacy_source_candidates
+	union all
+	select * from auth_index_candidates
 ), ranked as (
 	select
 		request_index,

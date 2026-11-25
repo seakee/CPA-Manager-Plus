@@ -112,8 +112,25 @@ vi.mock('@/stores', () => ({
   useModelsStore: (selector: (state: typeof mocks.models) => unknown) => selector(mocks.models),
 }));
 
+const apiMocks = vi.hoisted(() => ({
+  headerRefreshCallback: null as (() => Promise<void>) | null,
+  apiKeysList: vi.fn(async () => ['k1', 'k2']),
+  authFilesList: vi.fn(async () => ({ files: [{ name: 'a.json' }] })),
+  loadAllProvidersV8Snapshot: undefined as (() => Promise<unknown>) | undefined,
+  getGeminiKeys: vi.fn(async () => [{}, {}]),
+  getInteractionsKeys: vi.fn(async () => []),
+  getCodexConfigs: vi.fn(async () => [{}]),
+  getXAIConfigs: vi.fn(async () => []),
+  getClaudeConfigs: vi.fn(async () => [{}, {}, {}]),
+  getVertexConfigs: vi.fn(async () => []),
+  getMetaConfigs: vi.fn(async () => []),
+  getOpenAIProviders: vi.fn(async () => []),
+}));
+
 vi.mock('@/hooks/useHeaderRefresh', () => ({
-  useHeaderRefresh: () => undefined,
+  useHeaderRefresh: (cb: () => Promise<void>) => {
+    apiMocks.headerRefreshCallback = cb;
+  },
 }));
 
 vi.mock('@/hooks/usePanelFeatureAvailability', () => ({
@@ -121,14 +138,20 @@ vi.mock('@/hooks/usePanelFeatureAvailability', () => ({
 }));
 
 vi.mock('@/services/api', () => ({
-  apiKeysApi: { list: vi.fn(async () => ['k1', 'k2']) },
-  authFilesApi: { list: vi.fn(async () => ({ files: [{ name: 'a.json' }] })) },
+  apiKeysApi: { list: apiMocks.apiKeysList },
+  authFilesApi: { list: apiMocks.authFilesList },
   providersApi: {
-    getGeminiKeys: vi.fn(async () => [{}, {}]),
-    getCodexConfigs: vi.fn(async () => [{}]),
-    getXAIConfigs: vi.fn(async () => []),
-    getClaudeConfigs: vi.fn(async () => [{}, {}, {}]),
-    getOpenAIProviders: vi.fn(async () => []),
+    get loadAllProvidersV8Snapshot() {
+      return apiMocks.loadAllProvidersV8Snapshot;
+    },
+    getGeminiKeys: apiMocks.getGeminiKeys,
+    getInteractionsKeys: apiMocks.getInteractionsKeys,
+    getCodexConfigs: apiMocks.getCodexConfigs,
+    getXAIConfigs: apiMocks.getXAIConfigs,
+    getClaudeConfigs: apiMocks.getClaudeConfigs,
+    getVertexConfigs: apiMocks.getVertexConfigs,
+    getMetaConfigs: apiMocks.getMetaConfigs,
+    getOpenAIProviders: apiMocks.getOpenAIProviders,
   },
 }));
 
@@ -186,8 +209,19 @@ beforeEach(() => {
   mocks.availability.panelHostMode = 'manager_embedded';
   mocks.availability.modelPricesAvailable = true;
   mocks.auth.sessionMode = 'manager_embedded';
+  apiMocks.headerRefreshCallback = null;
+  apiMocks.loadAllProvidersV8Snapshot = undefined;
+  apiMocks.apiKeysList.mockReset().mockResolvedValue(['k1', 'k2']);
+  apiMocks.authFilesList.mockReset().mockResolvedValue({ files: [{ name: 'a.json' }] });
+  apiMocks.getGeminiKeys.mockReset().mockResolvedValue([{}, {}]);
+  apiMocks.getInteractionsKeys.mockReset().mockResolvedValue([]);
+  apiMocks.getCodexConfigs.mockReset().mockResolvedValue([{}]);
+  apiMocks.getXAIConfigs.mockReset().mockResolvedValue([]);
+  apiMocks.getClaudeConfigs.mockReset().mockResolvedValue([{}, {}, {}]);
+  apiMocks.getVertexConfigs.mockReset().mockResolvedValue([]);
+  apiMocks.getMetaConfigs.mockReset().mockResolvedValue([]);
+  apiMocks.getOpenAIProviders.mockReset().mockResolvedValue([]);
 });
-
 afterEach(async () => {
   if (renderer) {
     await act(async () => {
@@ -254,5 +288,87 @@ describe('DashboardPage P0 + P1 Plan A', () => {
       links.some((link) => link.href === '/accounts' && link.text.includes('dashboard.available_models'))
     ).toBe(true);
     expect(links.some((link) => link.href === '/model-prices')).toBe(false);
+  });
+
+  it('keeps hasProviderStats false without a 0 sublabel during an initial 502 outage and preserves cached meta counts on refresh outage', async () => {
+    const badGateway = () =>
+      Promise.reject(Object.assign(new Error('Bad Gateway'), { status: 502 }));
+
+    apiMocks.loadAllProvidersV8Snapshot = vi.fn(badGateway);
+    apiMocks.apiKeysList.mockImplementation(badGateway);
+    apiMocks.authFilesList.mockImplementation(badGateway);
+    apiMocks.getGeminiKeys.mockImplementation(badGateway);
+    apiMocks.getInteractionsKeys.mockImplementation(badGateway);
+    apiMocks.getCodexConfigs.mockImplementation(badGateway);
+    apiMocks.getXAIConfigs.mockImplementation(badGateway);
+    apiMocks.getClaudeConfigs.mockImplementation(badGateway);
+    apiMocks.getVertexConfigs.mockImplementation(badGateway);
+    apiMocks.getMetaConfigs.mockImplementation(badGateway);
+    apiMocks.getOpenAIProviders.mockImplementation(badGateway);
+
+    await act(async () => {
+      renderer = create(<DashboardPage />);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const initialProvidersLink = renderer!.root
+      .findAllByType('a')
+      .find((link) => link.props.href === '/ai-providers');
+    expect(initialProvidersLink).toBeDefined();
+    const initialSpans = initialProvidersLink!.findAllByType('span').map(textOf);
+    expect(initialSpans).toEqual(['nav.ai_providers', '-']);
+    expect(textOf(renderer!.root)).toContain('notification.refresh_failed');
+
+    await act(async () => {
+      renderer?.unmount();
+    });
+    renderer = null;
+
+    // Now verify cached meta count survives a subsequent total 502 outage during refresh.
+    apiMocks.loadAllProvidersV8Snapshot = vi.fn(async () => ({
+      gemini: [{}, {}],
+      interactions: [],
+      codex: [{}],
+      xai: [],
+      claude: [{}, {}, {}],
+      vertex: [],
+      meta: [{}, {}],
+      openai: [],
+      v8Supported: true,
+    }));
+    apiMocks.apiKeysList.mockResolvedValue(['k1']);
+    apiMocks.authFilesList.mockResolvedValue({ files: [] });
+
+    await act(async () => {
+      renderer = create(<DashboardPage />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const seededProvidersLink = renderer!.root
+      .findAllByType('a')
+      .find((link) => link.props.href === '/ai-providers');
+    expect(seededProvidersLink!.findAllByType('span').map(textOf)).toEqual([
+      'nav.ai_providers',
+      '8',
+      'Gemini 2 · Codex 1 · Claude 3 · Meta 2',
+    ]);
+
+    apiMocks.loadAllProvidersV8Snapshot = vi.fn(badGateway);
+    await act(async () => {
+      await apiMocks.headerRefreshCallback?.();
+    });
+
+    const postOutageProvidersLink = renderer!.root
+      .findAllByType('a')
+      .find((link) => link.props.href === '/ai-providers');
+    expect(postOutageProvidersLink!.findAllByType('span').map(textOf)).toEqual([
+      'nav.ai_providers',
+      '8',
+      'Gemini 2 · Codex 1 · Claude 3 · Meta 2',
+    ]);
+    expect(textOf(renderer!.root)).toContain('notification.refresh_failed');
   });
 });
