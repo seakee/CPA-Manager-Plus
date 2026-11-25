@@ -310,6 +310,49 @@ describe('buildProviderRows', () => {
     expect(rows[0].lastSeenMs).toBe(1_700_000_999_000);
   });
 
+  it('falls back to SQLite recentStatusData when CPA 200-minute live buckets are empty', () => {
+    const historyStatusData = {
+      blocks: Array.from({ length: 10 }, (_, idx) => (idx === 7 ? ('failure' as const) : ('success' as const))),
+      blockDetails: Array.from({ length: 10 }, (_, idx) => ({
+        success: idx === 7 ? 0 : 1,
+        failure: idx === 7 ? 1 : 0,
+        rate: idx === 7 ? 0 : 1,
+        startTime: 1_700_000_000_000 + idx * 60_000,
+        endTime: 1_700_000_000_000 + idx * 60_000,
+      })),
+      successRate: 90,
+      totalSuccess: 9,
+      totalFailure: 1,
+    };
+    const historyByRowKey = new Map([
+      [
+        'claude:sk-ant-1::https://api.anthropic.com::::0',
+        {
+          matched: true,
+          totalRequests: 25,
+          successCalls: 23,
+          failureCalls: 2,
+          totalTokens: 120_000,
+          totalCost: 0.45,
+          successRate: 92,
+          lastSeenMs: 1_700_000_999_000,
+          recentRequests: [],
+          recentStatusData: historyStatusData,
+        },
+      ],
+    ]);
+
+    const rows = buildProviderRows({
+      ...emptyInput,
+      claude: [{ name: 'Claude Official', apiKey: 'sk-ant-1', baseUrl: 'https://api.anthropic.com' }],
+      historyByRowKey,
+    });
+
+    expect(rows[0].statusData).toEqual(historyStatusData);
+    expect(rows[0].recentSuccess).toBe(9);
+    expect(rows[0].recentFailure).toBe(1);
+  });
+
   it('computes displayEndpoint, official endpoint flag, v8 multi-key meta, model aliases, and latestFailure', () => {
     const groupRecord = {
       name: 'Gemini Pool',

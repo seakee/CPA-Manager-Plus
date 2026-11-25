@@ -138,7 +138,8 @@ describe('useProviderAccountHistory helpers', () => {
     expect(rows[0].recentSuccess).toBe(2);
     expect(rows[0].recentFailure).toBe(1);
     expect(rows[0].statusData.blocks).toHaveLength(10);
-    expect(rows[0].statusData.totalSuccess).toBe(0);
+    expect(rows[0].statusData.totalSuccess).toBe(2);
+    expect(rows[0].statusData.totalFailure).toBe(1);
   });
 
   it('pads recent requests to 10 blocks in chronological order', () => {

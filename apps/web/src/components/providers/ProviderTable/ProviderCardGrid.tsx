@@ -394,9 +394,11 @@ export function ProviderCardGrid({
           latestFailure?.isMostRecent && failureSummaryText
             ? [failureStatusPrefix, failureSummaryText].filter(Boolean).join(' · ')
             : null;
-        const recentWindowTotal = row.recentSuccess + row.recentFailure;
+        const recentWindowSuccess = row.statusData.totalSuccess;
+        const recentWindowFailure = row.statusData.totalFailure;
+        const recentWindowTotal = recentWindowSuccess + recentWindowFailure;
         const recentWindowRate =
-          recentWindowTotal > 0 ? Math.round((row.recentSuccess / recentWindowTotal) * 100) : null;
+          recentWindowTotal > 0 ? Math.round((recentWindowSuccess / recentWindowTotal) * 100) : null;
         const recentTrailToneClass = showRecentErrorBadge
           ? styles.recentTrailBad
           : recentWindowRate === null
@@ -709,19 +711,19 @@ export function ProviderCardGrid({
                 <div className={styles.cardRecentCounts}>
                   <span
                     className={styles.recentCountSuccess}
-                    title={`${t('ai_providers.card_recent_success_label', { defaultValue: '近期成功' })}: ${row.recentSuccess}`}
+                    title={`${t('ai_providers.card_recent_success_label', { defaultValue: '近期成功' })}: ${recentWindowSuccess}`}
                   >
                     <span className={styles.metricDot} aria-hidden="true" />
-                    <strong>{row.recentSuccess}</strong>
+                    <strong>{recentWindowSuccess}</strong>
                   </span>
                   <span
                     className={`${styles.recentCountFailure} ${
-                      row.recentFailure > 0 ? styles.recentCountFailureActive : ''
+                      recentWindowFailure > 0 ? styles.recentCountFailureActive : ''
                     }`}
-                    title={`${t('ai_providers.card_recent_failure_label', { defaultValue: '近期失败' })}: ${row.recentFailure}`}
+                    title={`${t('ai_providers.card_recent_failure_label', { defaultValue: '近期失败' })}: ${recentWindowFailure}`}
                   >
                     <span className={styles.metricDot} aria-hidden="true" />
-                    <strong>{row.recentFailure}</strong>
+                    <strong>{recentWindowFailure}</strong>
                   </span>
                 </div>
               </div>

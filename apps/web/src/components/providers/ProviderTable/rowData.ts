@@ -9,11 +9,9 @@ import {
 import {
   getOpenAIProviderKey,
   getOpenAIProviderRecentStatusData,
-  getOpenAIProviderRecentWindowStats,
   getOpenAIProviderTotalStats,
   getProviderConfigKey,
   getProviderRecentStatusData,
-  getProviderRecentWindowStats,
   getProviderTotalStats,
   hasDisableAllModelsRule,
   type ProviderRecentUsageMap,
@@ -309,12 +307,6 @@ function buildKeyConfigRow(
     .filter((entry) => Boolean(entry) && entry !== '*');
   const excludedModelCount = excludedModelNames.length;
   const providerExtra = config as ProviderKeyConfig;
-  const recentWindow = getProviderRecentWindowStats(
-    usageByProvider,
-    kind,
-    config.apiKey,
-    config.baseUrl
-  );
   const cloakMode = providerExtra.cloak
     ? String(providerExtra.cloak.mode ?? 'auto').trim() || 'auto'
     : undefined;
@@ -332,16 +324,22 @@ function buildKeyConfigRow(
   const stats = useHistorySource && history
     ? { success: history.successCalls, failure: history.failureCalls }
     : liveStats;
-  const statusData = compressStatusBarData(
+  const liveStatusData = compressStatusBarData(
     getProviderRecentStatusData(usageByProvider, kind, config.apiKey, config.baseUrl),
     10
   );
-  const effectiveRecentSuccess = useHistorySource && history
-    ? history.recentStatusData.totalSuccess
-    : recentWindow.success;
-  const effectiveRecentFailure = useHistorySource && history
-    ? history.recentStatusData.totalFailure
-    : recentWindow.failure;
+  const hasLiveStatusBlocks = liveStatusData.totalSuccess + liveStatusData.totalFailure > 0;
+  const hasHistoryStatusBlocks = Boolean(
+    useHistorySource &&
+      history &&
+      history.recentStatusData.totalSuccess + history.recentStatusData.totalFailure > 0
+  );
+  const statusData =
+    !hasLiveStatusBlocks && hasHistoryStatusBlocks && history
+      ? history.recentStatusData
+      : liveStatusData;
+  const effectiveRecentSuccess = statusData.totalSuccess;
+  const effectiveRecentFailure = statusData.totalFailure;
   const statsSource: ProviderStatsSource = useHistorySource
     ? 'history'
     : hasLiveStats
@@ -415,7 +413,6 @@ function buildOpenAIRow(
   const prefix = String(provider.prefix ?? '').trim();
   const baseUrl = provider.baseUrl ?? '';
   const hostLabel = extractHostLabel(baseUrl);
-  const recentWindow = getOpenAIProviderRecentWindowStats(provider, usageByProvider);
   const rowKey = `openai:${getOpenAIProviderKey(provider, originalIndex)}`;
   const history = historyByRowKey?.get(rowKey);
   const liveStats = getOpenAIProviderTotalStats(provider, usageByProvider);
@@ -430,16 +427,22 @@ function buildOpenAIRow(
   const stats = useHistorySource && history
     ? { success: history.successCalls, failure: history.failureCalls }
     : liveStats;
-  const statusData = compressStatusBarData(
+  const liveStatusData = compressStatusBarData(
     getOpenAIProviderRecentStatusData(provider, usageByProvider),
     10
   );
-  const effectiveRecentSuccess = useHistorySource && history
-    ? history.recentStatusData.totalSuccess
-    : recentWindow.success;
-  const effectiveRecentFailure = useHistorySource && history
-    ? history.recentStatusData.totalFailure
-    : recentWindow.failure;
+  const hasLiveStatusBlocks = liveStatusData.totalSuccess + liveStatusData.totalFailure > 0;
+  const hasHistoryStatusBlocks = Boolean(
+    useHistorySource &&
+      history &&
+      history.recentStatusData.totalSuccess + history.recentStatusData.totalFailure > 0
+  );
+  const statusData =
+    !hasLiveStatusBlocks && hasHistoryStatusBlocks && history
+      ? history.recentStatusData
+      : liveStatusData;
+  const effectiveRecentSuccess = statusData.totalSuccess;
+  const effectiveRecentFailure = statusData.totalFailure;
   const statsSource: ProviderStatsSource = useHistorySource
     ? 'history'
     : hasLiveStats

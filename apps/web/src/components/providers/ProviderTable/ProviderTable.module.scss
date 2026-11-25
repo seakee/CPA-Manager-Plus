@@ -875,9 +875,8 @@ $table-columns-with-selection:
   align-items: center;
   flex-shrink: 0;
   height: 18px;
-  padding: 0 5px;
+  padding: 0 6px;
   border-radius: var(--app-radius-xs);
-  border: 1px solid var(--data-badge-danger-border);
   background: var(--data-badge-danger-bg);
   color: var(--data-badge-danger-text);
   font-family: var(--font-mono);
@@ -977,31 +976,32 @@ $table-columns-with-selection:
   gap: 2px;
   min-width: 0;
   font-size: 11.5px;
-  color: var(--data-badge-danger-text);
+  color: var(--error-color);
   font-weight: 600;
   white-space: nowrap;
   flex-shrink: 0;
 }
 
 .statRate {
-  min-width: 42px;
+  min-width: 46px;
   font-size: 12px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
   white-space: nowrap;
   flex-shrink: 0;
 }
 
 .statRateHigh {
-  color: var(--data-badge-success-text);
+  color: var(--text-primary);
 }
 
 .statRateMedium {
-  color: var(--data-badge-warning-text);
+  color: var(--text-primary);
 }
 
 .statRateLow {
-  color: var(--data-badge-danger-text);
+  color: var(--error-color);
 }
 .cellActionsHeader {
   padding-left: 20px;
@@ -1111,5 +1111,90 @@ $table-columns-with-selection:
   :global(label) {
     transform: scale(0.9);
     transform-origin: center;
+  }
+}
+
+// 1280px–1380px 笔记本视口（侧边栏展开时可用约 1020px）：同步收紧 6 列最小宽度与间距，避免操作列开关被右缘裁切
+@media (max-width: 1380px) {
+  .table {
+    min-width: 880px;
+    padding: 8px var(--list-panel-gutter-x, 14px) 14px;
+  }
+
+  .headerRow,
+  .row {
+    grid-template-columns:
+      minmax(148px, 1.12fr)
+      minmax(128px, 0.94fr)
+      minmax(142px, 1.08fr)
+      84px
+      minmax(196px, 1.28fr)
+      152px;
+    gap: 8px;
+    padding-inline: 12px;
+  }
+
+  .tableWithSelection {
+    .headerRow,
+    .row {
+      grid-template-columns:
+        30px
+        minmax(148px, 1.12fr)
+        minmax(128px, 0.94fr)
+        minmax(142px, 1.08fr)
+        84px
+        minmax(196px, 1.28fr)
+        152px;
+    }
+  }
+
+  .cellRecent {
+    padding-left: 2px;
+    padding-right: 4px;
+  }
+
+  .recentTopRow {
+    grid-template-columns: minmax(0, 1fr) 68px;
+    gap: 6px;
+  }
+
+  .recentCountsRow {
+    gap: 6px;
+  }
+
+  .recentStatsGroup {
+    gap: 4px;
+  }
+
+  .statRate {
+    min-width: 42px;
+    font-size: 11.5px;
+  }
+
+  .statTotal,
+  .statFailure {
+    font-size: 11px;
+  }
+
+  .recentHistoryMeta {
+    gap: 3px;
+    font-size: 10.5px;
+    overflow: hidden;
+  }
+
+  .cellActionsHeader {
+    padding-left: 14px;
+  }
+
+  .cellActions {
+    padding-left: 14px;
+  }
+
+  .rowActions {
+    gap: 6px;
+  }
+
+  .quickActions {
+    gap: 2px;
   }
 }

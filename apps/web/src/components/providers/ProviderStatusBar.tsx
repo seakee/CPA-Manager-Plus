@@ -87,8 +87,10 @@ export function ProviderStatusBar({
   const renderTooltip = (detail: StatusBlockDetail, idx: number) => {
     const total = detail.success + detail.failure;
     const posClass = getTooltipPositionClass(idx, statusData.blockDetails.length);
-    const timeRange = `${formatTime(detail.startTime)} – ${formatTime(detail.endTime)}`;
-
+    const timeRange =
+      detail.startTime === detail.endTime
+        ? formatTime(detail.startTime)
+        : `${formatTime(detail.startTime)} – ${formatTime(detail.endTime)}`;
     return (
       <div className={`${s.statusTooltip} ${posClass}`}>
         <span className={s.tooltipTime}>{timeRange}</span>

@@ -492,15 +492,15 @@
 }
 
 .historyMetric .metricValueGood {
-  color: var(--status-display-success);
+  color: var(--text-primary);
 }
 
 .historyMetric .metricValueWarn {
-  color: var(--status-display-warning);
+  color: var(--text-primary);
 }
 
 .historyMetric .metricValueBad {
-  color: var(--status-display-danger);
+  color: var(--error-color);
 }
 
 .historyMetric .metricValueMuted {
@@ -626,16 +626,18 @@
   align-items: center;
   gap: 6px;
   min-width: 0;
-  padding: 4px 8px;
+  padding: 5px 8px;
+  border: 1px solid color-mix(in srgb, var(--data-red-base) 28%, var(--border-color));
   border-radius: var(--app-radius-xs);
-  background: var(--data-badge-danger-bg);
-  color: var(--data-badge-danger-text);
+  background: color-mix(in srgb, var(--data-red-base) 7%, var(--bg-primary));
+  color: var(--text-primary);
   font-size: 10.5px;
   line-height: 1.3;
 }
 
 .cardFailureBannerLabel {
   flex-shrink: 0;
+  color: var(--error-color);
   font-weight: 700;
 }
 
