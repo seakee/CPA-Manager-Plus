@@ -110,6 +110,7 @@ export const buildExpectedReleaseAssets = (assetsDir, tag, options = {}) => {
     if (!compose || !pairingRecord) fail('v2 release assets are missing the compose pairing');
     assertV2AssetBindings(info, {
       composeSha256: compose.digest,
+      composeSize: compose.size,
       pairing: JSON.parse(readFileSync(pairingRecord.filePath, 'utf8')),
     });
     return assets;

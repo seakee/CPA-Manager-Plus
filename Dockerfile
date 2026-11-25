@@ -288,6 +288,8 @@ COPY tests/fixtures/r1-embedded-api-transport.json /usr/local/share/cpamp/releas
 COPY --from=slim-evidence /image/usr/local/share/licenses/ /usr/local/share/licenses/
 COPY --from=slim-evidence /image/usr/local/share/cpamp/ /usr/local/share/cpamp/
 COPY docker/runtime/config.v8.default.seed.yaml /usr/local/share/cpamp/runtime/config.seed.yaml
+COPY docker/runtime/seed-lineage.json /usr/local/share/cpamp/runtime/seed-lineage.json
+RUN chmod 0444 /usr/local/share/cpamp/runtime/config.seed.yaml /usr/local/share/cpamp/runtime/seed-lineage.json
 ENV USAGE_DATA_DIR=/data \
     CPA_UPSTREAM_URL=http://127.0.0.1:8317 \
     USAGE_COLLECTOR_MODE=auto \

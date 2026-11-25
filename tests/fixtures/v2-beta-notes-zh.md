@@ -1,21 +1,21 @@
 # CPA Manager Plus v2.0.0-beta.1
 
-首个 v2 Beta：不可变三镜像、Full Web/API 配对与 linux/amd64 Native 包。
-
 <!-- cpamp-update
 {
   "summary": {
-    "zh": "首个 v2 Beta：不可变三镜像、Full Web/API 配对与 linux/amd64 Native 包。",
-    "en": "First v2 Beta: immutable three-image set, Full Web/API pairing, and the linux/amd64 Native package."
+    "zh": "CPA Manager Plus v2.0.0-beta.1 预发布版：单镜像双变体（slim/full）Docker、linux/amd64 Native 与 management.html Lite 面板。",
+    "en": "CPA Manager Plus v2.0.0-beta.1 prerelease: single-image dual-variant (slim/full) Docker, linux/amd64 Native, and management.html Lite panel."
   },
   "update": {
-    "breaking": true,
-    "migration_required": true,
-    "minimum_direct_upgrade_version": "v1.14.10",
-    "upgrade_guide_url": "https://github.com/seakee/CPA-Manager-Plus/releases/tag/v2.0.0-beta.1"
+    "breaking": false,
+    "migration_required": false,
+    "minimum_direct_upgrade_version": "v2.0.0-beta.1",
+    "upgrade_guide_url": "https://cpamp-docs.seakee.dev/next/operations/update.html"
   },
   "compatibility": {
     "minimum_cpa_version": "v8.0.55"
   }
 }
 -->
+
+本版本为 `v2.0.0-beta.1` 预发布版本，仅进入独立的 `update-index-v2.json` Beta 频道，不影响 `1.x` 的 `update-index.json`、`Latest` 或默认安装路径。

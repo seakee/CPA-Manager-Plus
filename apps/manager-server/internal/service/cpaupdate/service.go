@@ -17,10 +17,12 @@ import (
 )
 
 const (
-	discoverySchemaVersion = 1
-	discoveryCooldown      = time.Minute
-	discoveryFreshness     = 7 * time.Hour
-	maxPersistedErrorBytes = 512
+	discoverySchemaVersion       = 1
+	discoveryCooldown            = time.Minute
+	discoveryFreshness           = 7 * time.Hour
+	maxPersistedErrorBytes       = 512
+	maxAppliedActivationReceipts = 64
+	legacyUnsupportedCPAMajorMsg = "CPA hot updates require a v8 release"
 )
 
 type Store interface {
@@ -62,31 +64,55 @@ type Status struct {
 	Actionable        bool              `json:"actionable"`
 }
 
+type appliedActivationReceipt struct {
+	operationID         string
+	runtimeIdentity     model.RuntimeIdentity
+	runtimeGeneration   model.RuntimeGeneration
+	operationGeneration model.RuntimeGeneration
+	previousArtifactID  model.RuntimeArtifactID
+	targetVersion       string
+	appliedArtifactID   model.RuntimeArtifactID
+}
+
+// Service coordinates CPA update discovery and embedded update mutations.
+// Lock order: mutationMu -> mu (never acquire mutationMu while holding mu).
 type Service struct {
-	mu                sync.Mutex
-	store             Store
-	runtime           runtimeservice.RuntimeClient
-	mode              model.RuntimeMode
-	modeResolver      func() model.RuntimeMode
-	source            stableReleaseSource
-	now               func() time.Time
-	loaded            bool
-	persistenceFailed bool
-	state             DiscoveryState
+	mutationMu         sync.Mutex
+	mu                 sync.Mutex
+	store              Store
+	runtime            runtimeservice.RuntimeClient
+	mode               model.RuntimeMode
+	modeResolver       func() model.RuntimeMode
+	isProductComplete  func(context.Context) (bool, error)
+	source             stableReleaseSource
+	now                func() time.Time
+	loaded             bool
+	persistenceFailed  bool
+	state              DiscoveryState
+	appliedActivations     map[string]appliedActivationReceipt
+	appliedActivationOrder []string
 }
 
 func New(store Store, runtimeClient runtimeservice.RuntimeClient, mode model.RuntimeMode) *Service {
 	return &Service{
-		store:   store,
-		runtime: runtimeClient,
-		mode:    mode,
-		source:  newOfficialReleaseSource(),
-		now:     time.Now,
+		store:              store,
+		runtime:            runtimeClient,
+		mode:               mode,
+		source:             newOfficialReleaseSource(),
+		now:                time.Now,
+		appliedActivations: make(map[string]appliedActivationReceipt),
 	}
 }
 
 func (s *Service) WithModeResolver(resolve func() model.RuntimeMode) *Service {
 	s.modeResolver = resolve
+	return s
+}
+
+// WithProductCompleteProbe configures a read-only installation authority. No
+// probe means the service cannot authorize CPA updates.
+func (s *Service) WithProductCompleteProbe(probe func(context.Context) (bool, error)) *Service {
+	s.isProductComplete = probe
 	return s
 }
 
@@ -152,6 +178,11 @@ func (s *Service) load(ctx context.Context) error {
 			return fmt.Errorf("unsupported persisted CPA update discovery state: %w", err)
 		}
 	}
+	// Earlier binaries could cache any stable major. Read those records for
+	// compatibility, but never expose the old target as a recommendation.
+	if _, err := parseSupportedUpdateVersion(state.TargetVersion); errors.Is(err, errUnsupportedCPAMajor) {
+		blockUnsupportedTarget(&state)
+	}
 	s.state = state
 	s.loaded = true
 	return nil
@@ -208,18 +239,27 @@ func (s *Service) checkDiscovery(ctx context.Context) error {
 		return s.save(ctx)
 	}
 	target, err := s.source.LatestStable(ctx)
-	if err != nil {
-		s.state.LastError = boundedError(err)
-	} else {
-		if _, parseErr := parseStableVersion(target); parseErr != nil {
-			s.state.LastError = "official CPA release source returned an invalid stable version"
-		} else {
-			s.state.TargetVersion = target
-			s.state.LastSuccessAt = now
-			s.state.LastError = ""
+	if err == nil {
+		if _, parseErr := parseSupportedUpdateVersion(target); parseErr != nil {
+			err = parseErr
 		}
 	}
+	if errors.Is(err, errUnsupportedCPAMajor) {
+		blockUnsupportedTarget(&s.state)
+	} else if err != nil {
+		s.state.LastError = boundedError(err)
+	} else {
+		s.state.TargetVersion = target
+		s.state.LastSuccessAt = now
+		s.state.LastError = ""
+	}
 	return s.save(ctx)
+}
+
+func blockUnsupportedTarget(state *DiscoveryState) {
+	state.TargetVersion = ""
+	state.LastSuccessAt = time.Time{}
+	state.LastError = errUnsupportedCPAMajor.Error()
 }
 
 func (s *Service) save(ctx context.Context) error {
@@ -294,6 +334,10 @@ func (s *Service) project(ctx context.Context) (Status, error) {
 	}
 	status.CurrentVersion = artifact.Version
 	status.ActiveArtifactID = string(artifact.ArtifactID)
+	if status.LastError == errUnsupportedCPAMajor.Error() || status.LastError == legacyUnsupportedCPAMajorMsg {
+		status.State = StateUnsupported
+		return status, nil
+	}
 	current, err := parseStableVersion(artifact.Version)
 	if err != nil {
 		status.State = StateUnknownVersion
@@ -302,7 +346,7 @@ func (s *Service) project(ctx context.Context) (Status, error) {
 	if s.state.TargetVersion == "" {
 		return status, nil
 	}
-	target, err := parseStableVersion(s.state.TargetVersion)
+	target, err := parseSupportedUpdateVersion(s.state.TargetVersion)
 	if err != nil {
 		return Status{}, errors.New("persisted CPA update target is invalid")
 	}
@@ -313,7 +357,10 @@ func (s *Service) project(ctx context.Context) (Status, error) {
 		status.State = StateUpToDate
 	case 1:
 		status.State = StateUpdateAvailable
-		status.Actionable = !status.Stale && status.PrepareSupported && status.ActivateSupported
+		if !status.Stale && status.PrepareSupported && status.ActivateSupported && s.isProductComplete != nil {
+			complete, probeErr := s.isProductComplete(ctx)
+			status.Actionable = probeErr == nil && complete
+		}
 	}
 	return status, nil
 }
@@ -323,4 +370,29 @@ func discoveryIsStale(state DiscoveryState, now time.Time) bool {
 		return true
 	}
 	return now.Sub(state.LastSuccessAt) > discoveryFreshness
+}
+
+func (s *Service) deleteAppliedActivation(operationID string) {
+	if operationID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.appliedActivations) == 0 {
+		return
+	}
+	if _, ok := s.appliedActivations[operationID]; !ok {
+		return
+	}
+	delete(s.appliedActivations, operationID)
+	filtered := s.appliedActivationOrder[:0]
+	for _, id := range s.appliedActivationOrder {
+		if id != operationID {
+			filtered = append(filtered, id)
+		}
+	}
+	for i := len(filtered); i < len(s.appliedActivationOrder); i++ {
+		s.appliedActivationOrder[i] = ""
+	}
+	s.appliedActivationOrder = filtered
 }

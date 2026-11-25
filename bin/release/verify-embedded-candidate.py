@@ -693,6 +693,13 @@ def verify_archive_anchor(path, role, evidence, pairing, source_commit):
                     isinstance(cpa_artifact.get("artifactId"), str) and
                     SHA.fullmatch(cpa_artifact["artifactId"]) is not None,
                     "OCI archive CPA artifact manifest mismatch for " + role)
+
+
+def _expected_role_tag(version, role):
+    base_tag = version[1:] if version.startswith("v") else version
+    return f"{base_tag}-full" if role == "full" else base_tag
+
+
 def verify_rendered_pairing(evidence, compose_path, pairing_path, archive_paths=None):
     require(type(evidence) is dict and evidence.get("schemaVersion") == 1,
             "invalid candidate evidence for pairing verification")
@@ -762,11 +769,11 @@ def verify_rendered_pairing(evidence, compose_path, pairing_path, archive_paths=
             require(ev_img["sourceCommitClaim"] == source_commit,
                     f"{role} sourceCommitClaim differs from candidate sourceCommitClaim")
         repo = entry.get("repository")
-        tag = entry.get("tag")
+        expected_tag = _expected_role_tag(version, role)
         manifest_digest = entry.get("manifest_digest")
         require(isinstance(repo, str) and "/" in repo and ":" not in repo and "@" not in repo,
                 "invalid pairing repository: " + role)
-        require(tag == version, "pairing image tag mismatch: " + role)
+        require(entry.get("tag") == expected_tag, "pairing image tag mismatch: " + role)
         require(manifest_digest == ev_img["platformManifestDigest"],
                 "pairing manifest_digest mismatch: " + role)
         require(entry.get("image_config_digest") == ev_img["imageConfigDigest"],
@@ -775,7 +782,7 @@ def verify_rendered_pairing(evidence, compose_path, pairing_path, archive_paths=
                 "pairing binary_sha256 mismatch: " + role)
         require(entry.get("release_provenance_sha256") == ev_img["packagedFiles"][image_evidence.PROVENANCE],
                 "pairing release_provenance_sha256 mismatch: " + role)
-        expected_ref = f"{repo}:{tag}@{manifest_digest}"
+        expected_ref = f"{repo}:{expected_tag}@{manifest_digest}"
         require(entry.get("image_ref") == expected_ref, "pairing image_ref mismatch: " + role)
         if role == "full":
             require(service_images["cpa-manager-plus"] == expected_ref,

@@ -55,13 +55,17 @@ func (o *activationObserver) Observation() *artifact.Observation {
 }
 
 type activationSelections struct {
-	events          *[]string
-	candidate       selection.Descriptor
-	resolveErr      error
-	revalidateCalls int
-	revalidateErrAt int
-	commitErr       error
-	committed       bool
+	events             *[]string
+	candidate          selection.Descriptor
+	resolveErr         error
+	revalidateCalls    int
+	revalidateErrAt    int
+	commitErr          error
+	committed          bool
+	persistedSelection selection.Descriptor
+	loadSelectionErr   error
+	activationIntent   selection.ActivationIntent
+	loadIntentErr      error
 }
 
 func (s *activationSelections) ResolveFinalized(version string) (selection.Descriptor, error) {
@@ -87,7 +91,34 @@ func (s *activationSelections) Commit(descriptor selection.Descriptor) error {
 		return s.commitErr
 	}
 	s.committed = true
+	s.persistedSelection = descriptor
 	return nil
+}
+
+func (s *activationSelections) LoadActivationIntent(_, _ string) (selection.ActivationIntent, error) {
+	if s.loadIntentErr != nil {
+		return selection.ActivationIntent{}, s.loadIntentErr
+	}
+	if s.activationIntent.OperationID == "" {
+		return selection.ActivationIntent{}, os.ErrNotExist
+	}
+	return s.activationIntent, nil
+}
+
+func (s *activationSelections) WriteActivationIntent(intent selection.ActivationIntent) error {
+	*s.events = append(*s.events, "record-intent")
+	s.activationIntent = intent
+	return nil
+}
+
+func (s *activationSelections) LoadPersistedSelection() (selection.Descriptor, bool, error) {
+	if s.loadSelectionErr != nil {
+		return selection.Descriptor{}, false, s.loadSelectionErr
+	}
+	if !s.committed {
+		return selection.Descriptor{}, false, nil
+	}
+	return s.persistedSelection, true, nil
 }
 
 type activationReady struct {
@@ -254,14 +285,14 @@ func TestActivateUpdateCommitsOnlyAfterExactReadyAndPostReadyRevalidation(t *tes
 		t.Fatalf("B recovery = %+v", got)
 	}
 	assertOrdered(t, f.events,
-		"resolve", "artifact:"+activationPathA, "resolve-stage:7.3.4", "prepare-stop", "begin", "running",
+		"resolve", "artifact:"+activationPathA, "resolve-stage:7.3.4", "prepare-stop", "record-intent", "begin", "running",
 		"terminate", "revalidate:"+activationPathB, "spawn", "artifact:"+activationPathB,
 		"readiness:"+activationPathB, "revalidate:"+activationPathB, "commit:"+activationPathB, "complete:succeeded")
 
 	beforeStarts, beforeStops, beforeEvents := f.child.starts, f.child.stops, len(f.events)
 	replay, err := f.starter.ActivateUpdate(t.Context(), activateRequest("activate-1", "7.3.4"))
 	if err != nil || !reflect.DeepEqual(replay, result) || f.child.starts != beforeStarts || f.child.stops != beforeStops ||
-		!reflect.DeepEqual(f.events[beforeEvents:], []string{"resolve"}) {
+		!reflect.DeepEqual(f.events[beforeEvents:], []string{"resolve", "artifact:" + activationPathB}) {
 		t.Fatalf("replay=%+v err=%v starts=%d stops=%d events=%v", replay, err, f.child.starts, f.child.stops, f.events[beforeEvents:])
 	}
 	conflict := activateRequest("activate-1", "7.3.5")
@@ -279,6 +310,25 @@ func TestActivateUpdateCommitsOnlyAfterExactReadyAndPostReadyRevalidation(t *tes
 	}
 	if len(f.child.specs) != 3 || f.child.specs[1].Executable != activationPathB || f.child.specs[2].Executable != activationPathB {
 		t.Fatalf("ordinary selected spawns = %+v", f.child.specs)
+	}
+}
+
+func TestActivateUpdateReplayRequiresCommittedTargetDigest(t *testing.T) {
+	f := newActivationFixture(t)
+	request := activateRequest("exact-target", "7.3.4")
+	if _, err := f.starter.ActivateUpdate(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	if f.selections.activationIntent.TargetArtifactID != activeArtifactB {
+		t.Fatalf("wrong intent: %+v", f.selections.activationIntent)
+	}
+	f.starter.active.ArtifactID = artifact.ID("sha256:" + strings.Repeat("c", 64))
+	starts, stops := f.child.starts, f.child.stops
+	if _, err := f.starter.ActivateUpdate(t.Context(), request); !errors.Is(err, ErrActiveArtifactMismatch) {
+		t.Fatalf("replay of a nonmatching digest: %v", err)
+	}
+	if f.child.starts != starts || f.child.stops != stops {
+		t.Fatal("replay changed the running child")
 	}
 }
 
@@ -461,7 +511,12 @@ func TestActivateUpdatePreservesStagedDestinationAcrossActivationAndRestart(t *t
 		t.Fatal(err)
 	}
 
-	f.prior = selection.Bundled(pathA, "")
+	manifest := filepath.Join(dir, "cpa-artifact.json")
+	manifestContent := `{"schemaVersion":1,"engine":"cpa","version":"8.0.55","artifactId":"` + string(idA) + `"}`
+	if err := os.WriteFile(manifest, []byte(manifestContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.prior = selection.Bundled(pathA, manifest)
 	f.prior.ArtifactID = idA
 	f.candidate = selection.Descriptor{
 		Source:         selection.SourceFinalized,
@@ -579,6 +634,11 @@ func TestActivateUpdatePreservesStagedDestinationAcrossActivationAndRestart(t *t
 	})
 	if err != nil || result.State != journal.StateSucceeded {
 		t.Fatalf("ActivateUpdate() = %+v, %v; want succeeded", result, err)
+	}
+	origin, err := selectionStore.LoadProvenance()
+	if err != nil || origin.Origin != selection.OriginUserUpdate || origin.ArtifactID != idB ||
+		origin.BaselineVersionAtCommit != "8.0.55" || origin.OperationID != result.OperationID {
+		t.Fatalf("activation provenance = %+v, %v", origin, err)
 	}
 	if f.child.lastSpec.Executable != pathB || !reflect.DeepEqual(f.child.lastSpec.Args, wantArgs) {
 		t.Fatalf("activated child spec = %+v; want executable %q args %v", f.child.lastSpec, pathB, wantArgs)
@@ -908,5 +968,366 @@ func assertOrdered(t *testing.T, events []string, expected ...string) {
 	}
 	if index != len(expected) {
 		t.Fatalf("events %v do not contain ordered sequence %v (matched %d)", events, expected, index)
+	}
+}
+
+func TestActivationIntentCorruptionFailsClosedAcrossReplayAndObservation(t *testing.T) {
+	f := newActivationFixture(t)
+	dir := t.TempDir()
+
+	bytesA := []byte("bundled-cpa-binary-a")
+	sumA := sha256.Sum256(bytesA)
+	idA := artifact.ID("sha256:" + hex.EncodeToString(sumA[:]))
+	pathA := filepath.Join(dir, "cpa-a")
+	if err := os.WriteFile(pathA, bytesA, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	stageRoot := filepath.Join(dir, "artifacts")
+	stages, err := runtimeupdate.NewStore(stageRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stageDirB := filepath.Join(stageRoot, "8.0.59")
+	if err := os.MkdirAll(stageDirB, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bytesB := []byte("staged-cpa-binary-b")
+	sumB := sha256.Sum256(bytesB)
+	idB := artifact.ID("sha256:" + hex.EncodeToString(sumB[:]))
+	pathB := filepath.Join(stageDirB, "cli-proxy-api")
+	metaB := filepath.Join(stageDirB, "artifact.json")
+	if err := os.WriteFile(pathB, bytesB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metaContent := `{"schemaVersion":1,"engine":"cpa","version":"8.0.59","artifactId":"` + string(idB) + `","sourceArchiveDigest":"sha256:` + strings.Repeat("b", 64) + `"}`
+	if err := os.WriteFile(metaB, []byte(metaContent), 0o444); err != nil {
+		t.Fatal(err)
+	}
+
+	selectionRoot := filepath.Join(dir, "active")
+	selectionStore, err := selection.NewStore(selectionRoot, stages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := filepath.Join(dir, "cpa-artifact.json")
+	if err := os.WriteFile(manifest, []byte(`{"schemaVersion":1,"engine":"cpa","version":"8.0.55","artifactId":"`+string(idA)+`"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	prior := selection.Bundled(pathA, manifest)
+	prior.ArtifactID = idA
+	f.observer.byPath = map[string]artifact.ID{pathA: idA, pathB: idB}
+	if err := f.starter.EnableActivateUpdate(prior, f.observer, selectionStore, f.ready); err != nil {
+		t.Fatal(err)
+	}
+
+	req := ActivateUpdateRequest{
+		OperationID:               "activate-intent-guard",
+		ExpectedRuntimeIdentity:   "runtime-01",
+		ExpectedRuntimeGeneration: 41,
+		ExpectedActiveArtifactID:  idA,
+		TargetVersion:             "8.0.59",
+	}
+	obsReq := ObserveUpdateOperationRequest{
+		OperationID:               req.OperationID,
+		ExpectedRuntimeIdentity:   req.ExpectedRuntimeIdentity,
+		ExpectedRuntimeGeneration: req.ExpectedRuntimeGeneration,
+		OperationType:             UpdateOperationActivate,
+		TargetVersion:             req.TargetVersion,
+	}
+
+	op, err := f.starter.ActivateUpdate(t.Context(), req)
+	if err != nil || op.State != journal.StateSucceeded {
+		t.Fatalf("initial ActivateUpdate() = %+v, %v; want succeeded", op, err)
+	}
+	if got, err := f.starter.ObserveUpdateOperation(t.Context(), obsReq); err != nil || got.State != journal.StateSucceeded {
+		t.Fatalf("ObserveUpdateOperation() with valid intent = %+v, %v; want succeeded", got, err)
+	}
+
+	entries, err := os.ReadDir(selectionRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var intentPath string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "activation-intent-") {
+			intentPath = filepath.Join(selectionRoot, entry.Name())
+			break
+		}
+	}
+	if intentPath == "" {
+		t.Fatal("expected activation-intent sidecar file to exist")
+	}
+	validIntentBytes, err := os.ReadFile(intentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Malformed JSON sidecar fails closed with ErrPersistenceUnavailable on both replay and observation.
+	if err := os.WriteFile(intentPath, []byte("{corrupt-activation-intent\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.starter.ActivateUpdate(t.Context(), req); !errors.Is(err, ErrPersistenceUnavailable) {
+		t.Fatalf("ActivateUpdate() replay with corrupt intent = %v; want ErrPersistenceUnavailable", err)
+	}
+	if _, err := f.starter.ObserveUpdateOperation(t.Context(), obsReq); !errors.Is(err, ErrPersistenceUnavailable) {
+		t.Fatalf("ObserveUpdateOperation() with corrupt intent = %v; want ErrPersistenceUnavailable", err)
+	}
+
+	// 2. Untrusted sidecar permissions (0o644) fail closed with ErrPersistenceUnavailable.
+	if err := os.WriteFile(intentPath, validIntentBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(intentPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.starter.ActivateUpdate(t.Context(), req); !errors.Is(err, ErrPersistenceUnavailable) {
+		t.Fatalf("ActivateUpdate() replay with 0644 intent = %v; want ErrPersistenceUnavailable", err)
+	}
+	if _, err := f.starter.ObserveUpdateOperation(t.Context(), obsReq); !errors.Is(err, ErrPersistenceUnavailable) {
+		t.Fatalf("ObserveUpdateOperation() with 0644 intent = %v; want ErrPersistenceUnavailable", err)
+	}
+
+	// 2b. Swapped sidecar naming a different operation ID fails closed with ErrPersistenceUnavailable.
+	if err := os.Chmod(intentPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mismatchedIntent := []byte(strings.ReplaceAll(string(validIntentBytes), req.OperationID, "other-operation-id"))
+	if err := os.WriteFile(intentPath, mismatchedIntent, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.starter.ActivateUpdate(t.Context(), req); !errors.Is(err, journal.ErrOperationStateConflict) {
+		t.Fatalf("ActivateUpdate() replay with mismatched operationID intent = %v; want ErrOperationStateConflict", err)
+	}
+	if _, err := f.starter.ObserveUpdateOperation(t.Context(), obsReq); !errors.Is(err, ErrPersistenceUnavailable) {
+		t.Fatalf("ObserveUpdateOperation() with mismatched operationID intent = %v; want ErrPersistenceUnavailable", err)
+	}
+
+	// 2c. Sidecar with a different target version fails closed on both replay and observation.
+	mismatchedVersionIntent := []byte(strings.ReplaceAll(string(validIntentBytes), `"8.0.59"`, `"8.0.58"`))
+	if err := os.WriteFile(intentPath, mismatchedVersionIntent, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.starter.ActivateUpdate(t.Context(), req); !errors.Is(err, journal.ErrOperationStateConflict) {
+		t.Fatalf("ActivateUpdate() replay with mismatched targetVersion intent = %v; want ErrOperationStateConflict", err)
+	}
+	if _, err := f.starter.ObserveUpdateOperation(t.Context(), obsReq); !errors.Is(err, ErrPersistenceUnavailable) {
+		t.Fatalf("ObserveUpdateOperation() with mismatched targetVersion intent = %v; want ErrPersistenceUnavailable", err)
+	}
+	// 3. Missing sidecar (os.ErrNotExist) on an activation-enabled Executor fails closed on both replay and observation.
+	if err := os.Remove(intentPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.starter.ActivateUpdate(t.Context(), req); !errors.Is(err, journal.ErrOperationStateConflict) {
+		t.Fatalf("ActivateUpdate() replay with missing intent = %v; want ErrOperationStateConflict", err)
+	}
+	if _, err := f.starter.ObserveUpdateOperation(t.Context(), obsReq); !errors.Is(err, ErrPersistenceUnavailable) {
+		t.Fatalf("ObserveUpdateOperation() with missing intent on activation-enabled executor = %v; want ErrPersistenceUnavailable", err)
+	}
+
+	// 4. Missing executorIntentStores entry while activateConfiguredExecutors is set fails closed.
+	if err := os.WriteFile(intentPath, validIntentBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executorIntentStores.Delete(f.starter)
+	if _, err := f.starter.ObserveUpdateOperation(t.Context(), obsReq); !errors.Is(err, ErrPersistenceUnavailable) {
+		t.Fatalf("ObserveUpdateOperation() without registered intent store = %v; want ErrPersistenceUnavailable", err)
+	}
+
+	// 5. EnableActivateUpdate with a custom activeSelectionStore lacking activationIntentStore fails closed.
+	committedSelected, err := selectionStore.Load(prior)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.starter.EnableActivateUpdate(committedSelected, f.observer, selectionStoreWithoutIntent{activeSelectionStore: selectionStore}, f.ready); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.starter.ActivateUpdate(t.Context(), req); !errors.Is(err, ErrUnsupportedActivation) {
+		t.Fatalf("ActivateUpdate() without activationIntentStore = %v; want ErrUnsupportedActivation", err)
+	}
+	if _, err := f.starter.ObserveUpdateOperation(t.Context(), obsReq); !errors.Is(err, ErrPersistenceUnavailable) {
+		t.Fatalf("ObserveUpdateOperation() with custom selection store lacking activationIntentStore = %v; want ErrPersistenceUnavailable", err)
+	}
+
+	// 6. Invalid TargetArtifactID / PreviousArtifactID in loaded ActivationIntent fails closed.
+	for _, badIntent := range []selection.ActivationIntent{
+		{
+			SchemaVersion:      selection.SchemaVersion,
+			OperationID:        req.OperationID,
+			RuntimeIdentity:    req.ExpectedRuntimeIdentity,
+			TargetVersion:      req.TargetVersion,
+			TargetArtifactID:   "invalid-digest",
+			PreviousArtifactID: idA,
+		},
+		{
+			SchemaVersion:      selection.SchemaVersion,
+			OperationID:        req.OperationID,
+			RuntimeIdentity:    req.ExpectedRuntimeIdentity,
+			TargetVersion:      req.TargetVersion,
+			TargetArtifactID:   idB,
+			PreviousArtifactID: "",
+		},
+	} {
+		customStore := &staticActivationIntentStore{activeSelectionStore: selectionStore, record: badIntent}
+		if err := f.starter.EnableActivateUpdate(committedSelected, f.observer, customStore, f.ready); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.starter.ObserveUpdateOperation(t.Context(), obsReq); !errors.Is(err, ErrPersistenceUnavailable) {
+			t.Fatalf("ObserveUpdateOperation() with invalid intent artifact IDs (%+v) = %v; want ErrPersistenceUnavailable", badIntent, err)
+		}
+	}
+}
+
+type selectionStoreWithoutIntent struct {
+	activeSelectionStore
+}
+
+type staticActivationIntentStore struct {
+	activeSelectionStore
+	record selection.ActivationIntent
+}
+
+func (s *staticActivationIntentStore) LoadActivationIntent(_, _ string) (selection.ActivationIntent, error) {
+	return s.record, nil
+}
+
+func (s *staticActivationIntentStore) WriteActivationIntent(record selection.ActivationIntent) error {
+	s.record = record
+	return nil
+}
+
+func (s *staticActivationIntentStore) LoadPersistedSelection() (selection.Descriptor, bool, error) {
+	if reader, ok := s.activeSelectionStore.(interface {
+		LoadPersistedSelection() (selection.Descriptor, bool, error)
+	}); ok {
+		return reader.LoadPersistedSelection()
+	}
+	return selection.Descriptor{}, false, nil
+}
+
+func TestObserveUpdateOperationEnforcesSelectionDigestMatchesActivationIntent(t *testing.T) {
+	f := newActivationFixture(t)
+	dir := t.TempDir()
+
+	bytesA := []byte("bundled-cpa-binary-8.0.55")
+	sumA := sha256.Sum256(bytesA)
+	idA := artifact.ID("sha256:" + hex.EncodeToString(sumA[:]))
+	pathA := filepath.Join(dir, "cpa-a")
+	if err := os.WriteFile(pathA, bytesA, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	stageRoot := filepath.Join(dir, "artifacts")
+	stages, err := runtimeupdate.NewStore(stageRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seedStage := func(version string, binaryBytes []byte) (artifact.ID, string) {
+		t.Helper()
+		stageDir := filepath.Join(stageRoot, version)
+		if err := os.MkdirAll(stageDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(binaryBytes)
+		id := artifact.ID("sha256:" + hex.EncodeToString(sum[:]))
+		execPath := filepath.Join(stageDir, "cli-proxy-api")
+		metaPath := filepath.Join(stageDir, "artifact.json")
+		if err := os.WriteFile(execPath, binaryBytes, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		meta := `{"schemaVersion":1,"engine":"cpa","version":"` + version + `","artifactId":"` + string(id) + `","sourceArchiveDigest":"sha256:` + strings.Repeat("b", 64) + `"}`
+		if err := os.WriteFile(metaPath, []byte(meta), 0o444); err != nil {
+			t.Fatal(err)
+		}
+		return id, execPath
+	}
+
+	idB, pathB := seedStage("8.1.0", []byte("staged-cpa-binary-8.1.0"))
+	idD, pathD := seedStage("8.2.0", []byte("staged-cpa-binary-8.2.0"))
+	sumC := sha256.Sum256([]byte("alternate-8.1.0-binary-c"))
+	idC := artifact.ID("sha256:" + hex.EncodeToString(sumC[:]))
+
+	selectionRoot := filepath.Join(dir, "active")
+	selectionStore, err := selection.NewStore(selectionRoot, stages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := filepath.Join(dir, "cpa-artifact.json")
+	if err := os.WriteFile(manifest, []byte(`{"schemaVersion":1,"engine":"cpa","version":"8.0.55","artifactId":"`+string(idA)+`"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	prior := selection.Bundled(pathA, manifest)
+	prior.ArtifactID = idA
+	f.observer.byPath = map[string]artifact.ID{pathA: idA, pathB: idB, pathD: idD}
+	if err := f.starter.EnableActivateUpdate(prior, f.observer, selectionStore, f.ready); err != nil {
+		t.Fatal(err)
+	}
+
+	req810 := ActivateUpdateRequest{
+		OperationID:               "activate-8.1.0-selection-check",
+		ExpectedRuntimeIdentity:   "runtime-01",
+		ExpectedRuntimeGeneration: 41,
+		ExpectedActiveArtifactID:  idA,
+		TargetVersion:             "8.1.0",
+	}
+	obs810 := ObserveUpdateOperationRequest{
+		OperationID:               req810.OperationID,
+		ExpectedRuntimeIdentity:   req810.ExpectedRuntimeIdentity,
+		ExpectedRuntimeGeneration: req810.ExpectedRuntimeGeneration,
+		OperationType:             UpdateOperationActivate,
+		TargetVersion:             "8.1.0",
+	}
+	if op, err := f.starter.ActivateUpdate(t.Context(), req810); err != nil || op.State != journal.StateSucceeded {
+		t.Fatalf("ActivateUpdate(8.1.0) = %+v, %v", op, err)
+	}
+	if got, err := f.starter.ObserveUpdateOperation(t.Context(), obs810); err != nil || got.State != journal.StateSucceeded {
+		t.Fatalf("ObserveUpdateOperation(8.1.0) = %+v, %v", got, err)
+	}
+
+	selectionPath := filepath.Join(selectionRoot, "selection.json")
+	validSelectionBytes, err := os.ReadFile(selectionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Overwriting selection.json with a different artifactId for 8.1.0 while ActivationIntent stays intact fails closed with ErrOperationStateConflict.
+	replacedSelection := `{"schemaVersion":1,"engine":"cpa","version":"8.1.0","artifactId":"` + string(idC) + `"}` + "\n"
+	if err := os.WriteFile(selectionPath, []byte(replacedSelection), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.starter.ObserveUpdateOperation(t.Context(), obs810); !errors.Is(err, journal.ErrOperationStateConflict) {
+		t.Fatalf("ObserveUpdateOperation(8.1.0) with mismatched selection.json artifactId = %v; want ErrOperationStateConflict", err)
+	}
+	if _, err := f.starter.ActivateUpdate(t.Context(), req810); !errors.Is(err, journal.ErrOperationStateConflict) {
+		t.Fatalf("ActivateUpdate(8.1.0) replay with mismatched selection.json artifactId = %v; want ErrOperationStateConflict", err)
+	}
+
+	// 2. Missing selection.json in the active generation fails closed with ErrPersistenceUnavailable on observation.
+	if err := os.Remove(selectionPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.starter.ObserveUpdateOperation(t.Context(), obs810); !errors.Is(err, ErrPersistenceUnavailable) {
+		t.Fatalf("ObserveUpdateOperation(8.1.0) with missing selection.json = %v; want ErrPersistenceUnavailable", err)
+	}
+
+	// 3. Restoring valid 8.1.0 selection and then upgrading 8.1.0 -> 8.2.0 keeps historical 8.1.0 observation valid.
+	if err := os.WriteFile(selectionPath, validSelectionBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	req820 := ActivateUpdateRequest{
+		OperationID:               "activate-8.2.0-followup",
+		ExpectedRuntimeIdentity:   "runtime-01",
+		ExpectedRuntimeGeneration: 41,
+		ExpectedActiveArtifactID:  idB,
+		TargetVersion:             "8.2.0",
+	}
+	if op, err := f.starter.ActivateUpdate(t.Context(), req820); err != nil || op.State != journal.StateSucceeded {
+		t.Fatalf("ActivateUpdate(8.2.0) = %+v, %v", op, err)
+	}
+	if got, err := f.starter.ObserveUpdateOperation(t.Context(), obs810); err != nil || got.State != journal.StateSucceeded {
+		t.Fatalf("historical ObserveUpdateOperation(8.1.0) after 8.2.0 upgrade = %+v, %v; want succeeded", got, err)
 	}
 }

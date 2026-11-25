@@ -23,13 +23,20 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/httpapi"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageprojection"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
+	bootstrapservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrapdiscovery"
+	cpaupdateservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaupdate"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/fresh"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
+	setupservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/setup"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
 func TestWriteVersion(t *testing.T) {
@@ -1650,4 +1657,156 @@ func TestAwaitFreshStoreShutdownStopsPollingDrainsHandlerBeforeOpenedClose(t *te
 	t.Run("await.Close", func(t *testing.T) {
 		runCase(t, modeDirectStopAwait)
 	})
+}
+
+func TestServerProductCompleteProbeReflectsLiveSetupAuthority(t *testing.T) {
+	ctx := context.Background()
+
+	if complete, err := newServerProductCompleteProbe(nil)(ctx); err == nil || complete {
+		t.Fatalf("nil serverApp probe = (%v, %v), want (false, err)", complete, err)
+	}
+
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(dataDir, "manager.sqlite")
+	dataKeyPath := filepath.Join(dataDir, "data.key")
+	rawKey, dataKeyCreated, err := security.LoadOrCreateDataKey("", dataKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protector, err := security.NewProtector(rawKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(dbPath, protector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.SaveBootstrapState(ctx, store.BootstrapState{
+		Version:            1,
+		Status:             "needs_setup",
+		AdminReady:         true,
+		ProjectInitialized: false,
+		DataKeyReady:       true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Config{
+		DataDir:      dataDir,
+		DBPath:       dbPath,
+		DataKeyPath:  dataKeyPath,
+		AdminKey:     "cmp_admin_LiveProbeAuthorityTest_987654",
+		Queue:        "cpa:usage:events",
+		PopSide:      "left",
+		BatchSize:    100,
+		PollInterval: 500 * time.Millisecond,
+		QueryLimit:   50000,
+	}
+	bootstrapResult, err := bootstrapservice.Run(ctx, cfg, db, dataKeyCreated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bootstrapResult.State.AdminReady || bootstrapResult.State.ProjectInitialized {
+		t.Fatalf("unexpected initial bootstrap state: %+v", bootstrapResult.State)
+	}
+
+	const activeArtifact = model.RuntimeArtifactID("sha256:1111111111111111111111111111111111111111111111111111111111111111")
+	mockRT := &upgradeCPAUpdateMockRuntime{}
+	mockRT.setStatus(model.RuntimeObservedStatus{
+		Identity:           "runtime-live-probe",
+		Generation:         1,
+		ProtocolVersion:    "v1",
+		State:              model.RuntimeStateReady,
+		CPAObservedVersion: "8.3.3",
+		ActiveGatewayArtifact: &model.ActiveGatewayArtifact{
+			Engine:     "cpa",
+			ArtifactID: activeArtifact,
+			Version:    "8.3.3",
+		},
+		Capabilities: model.RuntimeCapabilities{
+			model.RuntimeCapabilityPrepareUpdate,
+			model.RuntimeCapabilityActivateUpdate,
+		},
+	})
+
+	serverApp := httpapi.New(cfg, db, collector.NewManager(cfg, db))
+	probe := newServerProductCompleteProbe(serverApp)
+	updateSvc := cpaupdateservice.New(db, mockRT, model.RuntimeModeEmbedded).WithProductCompleteProbe(probe)
+	serverApp.AppContext().CPAUpdateService = updateSvc
+
+	now := time.Now().UTC()
+	seedBytes := []byte(`{"schema_version":1,"last_attempt_at":"` + now.Format(time.RFC3339Nano) + `","last_success_at":"` + now.Format(time.RFC3339Nano) + `","target_version":"8.3.7"}`)
+	if err := db.SaveCPAUpdateCheck(ctx, seedBytes); err != nil {
+		t.Fatal(err)
+	}
+
+	infoBefore, err := serverApp.AppContext().SetupService.Info(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !infoBefore.AdminReady || infoBefore.ProjectInitialized || !infoBefore.SetupRequired {
+		t.Fatalf("unexpected pre-setup Info(): %+v", infoBefore)
+	}
+	if complete, err := probe(ctx); err != nil || complete {
+		t.Fatalf("pre-setup probe = (%v, %v), want (false, nil)", complete, err)
+	}
+	statusBefore, err := updateSvc.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if statusBefore.State != cpaupdateservice.StateUpdateAvailable || statusBefore.Actionable {
+		t.Fatalf("pre-setup CPAUpdateService.Status = %+v, want update_available with Actionable=false", statusBefore)
+	}
+	prepReq := cpaupdateservice.MutationRequest{
+		RequestID:                "live-setup-probe-req",
+		TargetVersion:            "8.3.7",
+		ExpectedActiveArtifactID: activeArtifact,
+	}
+	if _, err := updateSvc.Prepare(ctx, prepReq); err == nil {
+		t.Fatal("Prepare succeeded while SetupRequired=true")
+	} else if kind, code, ok := cpaupdateservice.MutationErrorDetails(err); !ok || kind != cpaupdateservice.MutationErrorConflict || code != "product_incomplete" {
+		t.Fatalf("pre-setup Prepare error = (%v, %q, %q), want conflict/product_incomplete", err, kind, code)
+	}
+	if mockRT.prepareCalls.Load() != 0 {
+		t.Fatalf("pre-setup Prepare invoked runtime %d times, want 0", mockRT.prepareCalls.Load())
+	}
+
+	const mgmtKey = "cpa-mgmt-key-live-probe"
+	cpaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v0/management/config" && r.Header.Get("Authorization") == "Bearer "+mgmtKey {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer cpaSrv.Close()
+
+	monitoringDisabled := false
+	if _, err := serverApp.AppContext().SetupService.Setup(ctx, setupservice.Request{
+		CPAUpstreamURL:           cpaSrv.URL,
+		CPAManagementKey:         mgmtKey,
+		RequestMonitoringEnabled: &monitoringDisabled,
+	}, ""); err != nil {
+		t.Fatalf("SetupService.Setup failed: %v", err)
+	}
+
+	if complete, err := probe(ctx); err != nil || !complete {
+		t.Fatalf("post-setup probe = (%v, %v), want (true, nil)", complete, err)
+	}
+	statusAfter, err := updateSvc.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if statusAfter.State != cpaupdateservice.StateUpdateAvailable || !statusAfter.Actionable {
+		t.Fatalf("post-setup CPAUpdateService.Status = %+v, want Actionable=true", statusAfter)
+	}
+	prepRes, err := updateSvc.Prepare(ctx, prepReq)
+	if err != nil || prepRes.State != string(model.RuntimeOperationSucceeded) {
+		t.Fatalf("post-setup Prepare = (%+v, %v), want succeeded", prepRes, err)
+	}
+	if mockRT.prepareCalls.Load() != 1 {
+		t.Fatalf("post-setup Prepare calls = %d, want 1", mockRT.prepareCalls.Load())
+	}
 }

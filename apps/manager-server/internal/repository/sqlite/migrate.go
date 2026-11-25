@@ -10,8 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo"
 	quotasnapshotrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotasnapshot"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageprojection"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/updatecheck"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
@@ -271,7 +273,155 @@ const (
 		)`
 )
 
+// CurrentSchemaGeneration is the newest persisted schema this binary can open.
+const CurrentSchemaGeneration = 1
+
+const minimumCompatibleAppVersion = "v2.0.0-beta.1"
+
+var (
+	ErrIncompatibleNewerSchema   = errors.New("database requires a newer CPA Manager Plus")
+	ErrIncompatibleSchemaVersion = ErrIncompatibleNewerSchema
+)
+
+type schemaCompatibilityQueryer interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// CheckSchemaCompatibility verifies that db does not belong to a newer or
+// corrupt schema generation before any write or migration proceeds.
+func CheckSchemaCompatibility(db *sql.DB) error {
+	_, err := checkSchemaCompatibility(db)
+	return err
+}
+
+// checkSchemaCompatibility is read-only, including on databases predating the fence.
+// The table uses the v2-only upgrade_* namespace so 1.x source preflight never
+// misclassifies a v2 database as an unverified 1.14 store.
+func checkSchemaCompatibility(db *sql.DB) (string, error) {
+	minimum, _, err := checkSchemaCompatibilityOn(context.Background(), db)
+	return minimum, err
+}
+
+func checkSchemaCompatibilityOn(ctx context.Context, q schemaCompatibilityQueryer) (string, int64, error) {
+	var userVersion int64
+	if err := q.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&userVersion); err != nil {
+		return "", 0, fmt.Errorf("read sqlite user_version: %w", err)
+	}
+	if userVersion < 0 || userVersion > CurrentSchemaGeneration {
+		return "", 0, fmt.Errorf("%w: user_version=%d outside supported generation 0..%d (current version %q); use a compatible version or restore a pre-upgrade backup before downgrading", ErrIncompatibleNewerSchema, userVersion, CurrentSchemaGeneration, buildinfo.Version)
+	}
+	var tableMarker int
+	err := q.QueryRowContext(ctx, `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'upgrade_schema_meta'`).Scan(&tableMarker)
+	if errors.Is(err, sql.ErrNoRows) {
+		if userVersion != 0 {
+			return "", 0, fmt.Errorf("%w: user_version=%d is missing upgrade_schema_meta (current version %q); use a compatible version or restore a pre-upgrade backup before downgrading", ErrIncompatibleNewerSchema, userVersion, buildinfo.Version)
+		}
+		return minimumCompatibleAppVersion, userVersion, nil
+	}
+	if err != nil {
+		return "", 0, fmt.Errorf("inspect schema compatibility table: %w", err)
+	}
+	var rowCount int64
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM upgrade_schema_meta`).Scan(&rowCount); err != nil {
+		return "", 0, fmt.Errorf("count schema compatibility metadata: %w", err)
+	}
+	var generation int64
+	var minimum string
+	err = q.QueryRowContext(ctx, `SELECT schema_generation, min_compatible_app_version FROM upgrade_schema_meta WHERE id = 1`).Scan(&generation, &minimum)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", 0, fmt.Errorf("%w: upgrade_schema_meta is missing canonical row id=1 (rows=%d, current version %q); use a compatible version or restore a pre-upgrade backup before downgrading", ErrIncompatibleNewerSchema, rowCount, buildinfo.Version)
+	}
+	if err != nil {
+		return "", 0, fmt.Errorf("read schema compatibility metadata: %w", err)
+	}
+	if rowCount != 1 {
+		return "", 0, fmt.Errorf("%w: upgrade_schema_meta has %d rows, want 1 (current version %q); use a compatible version or restore a pre-upgrade backup before downgrading", ErrIncompatibleNewerSchema, rowCount, buildinfo.Version)
+	}
+	required, requiredErr := parseCompatibleReleaseTag(minimum)
+	floor, _ := updatecheck.ParseVersion(minimumCompatibleAppVersion)
+	current, currentErr := updatecheck.ParseVersion(buildinfo.Version)
+	if generation < 1 || generation > CurrentSchemaGeneration || userVersion != generation || requiredErr != nil ||
+		updatecheck.Compare(required, floor) < 0 ||
+		(currentErr == nil && updatecheck.Compare(current, required) < 0) {
+		return "", 0, fmt.Errorf("%w: user_version=%d, schema_generation=%d, min_compatible_app_version=%q (current version %q); use a compatible version or restore a pre-upgrade backup before downgrading", ErrIncompatibleNewerSchema, userVersion, generation, minimum, buildinfo.Version)
+	}
+	if updatecheck.Compare(required, floor) > 0 {
+		// A development build may open this generation, but must not lower a
+		// minimum that a later release has already recorded.
+		return minimum, userVersion, nil
+	}
+	return minimumCompatibleAppVersion, userVersion, nil
+}
+
+func parseCompatibleReleaseTag(tag string) (updatecheck.Version, error) {
+	if tag == "" || strings.TrimSpace(tag) != tag || !strings.HasPrefix(tag, "v") || strings.Contains(tag, "+") {
+		return updatecheck.Version{}, errors.New("invalid release tag")
+	}
+	return updatecheck.ParseVersion(tag)
+}
+
+func writeSchemaCompatibility(db *sql.DB, _ string) error {
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire schema compatibility connection: %w", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return fmt.Errorf("begin immediate schema compatibility metadata: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(ctx, `ROLLBACK`)
+		}
+	}()
+
+	effectiveMin, userVersion, err := checkSchemaCompatibilityOn(ctx, conn)
+	if err != nil {
+		return err
+	}
+	if userVersion < CurrentSchemaGeneration {
+		if _, err := conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, CurrentSchemaGeneration)); err != nil {
+			return fmt.Errorf("write sqlite user_version: %w", err)
+		}
+	}
+	if _, err := conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS upgrade_schema_meta (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        schema_generation INTEGER NOT NULL,
+        min_compatible_app_version TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )`); err != nil {
+		return fmt.Errorf("create schema compatibility metadata: %w", err)
+	}
+	res, err := conn.ExecContext(ctx, `INSERT INTO upgrade_schema_meta (id, schema_generation, min_compatible_app_version, updated_at)
+        VALUES (1, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET
+        schema_generation = excluded.schema_generation,
+        min_compatible_app_version = excluded.min_compatible_app_version,
+        updated_at = excluded.updated_at
+        WHERE upgrade_schema_meta.schema_generation <= excluded.schema_generation`,
+		CurrentSchemaGeneration, effectiveMin, time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return fmt.Errorf("write schema compatibility metadata: %w", err)
+	}
+	if affected, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("verify schema compatibility metadata write: %w", err)
+	} else if affected != 1 {
+		return fmt.Errorf("%w: schema compatibility metadata write affected %d rows", ErrIncompatibleNewerSchema, affected)
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return fmt.Errorf("commit schema compatibility metadata: %w", err)
+	}
+	committed = true
+	return nil
+}
+
 func Migrate(db *sql.DB) error {
+	minimum, err := checkSchemaCompatibility(db)
+	if err != nil {
+		return err
+	}
 	monitoringSnapshot, err := inspectUsageMonitoringMigrationSnapshot(db)
 	if err != nil {
 		return err
@@ -1429,13 +1579,19 @@ func Migrate(db *sql.DB) error {
 	if err := ensureUpgradeOperationColumns(db); err != nil {
 		return err
 	}
-	return ensureModelPriceColumns(db)
+	if err := ensureModelPriceColumns(db); err != nil {
+		return err
+	}
+	return writeSchemaCompatibility(db, minimum)
 }
 
 // MigrateUpgradeOperations ensures only the upgrade operation state tables and
 // columns exist without inspecting or modifying usage monitoring or pricing
 // tables.
 func MigrateUpgradeOperations(db *sql.DB) error {
+	if _, err := checkSchemaCompatibility(db); err != nil {
+		return err
+	}
 	statements := []string{
 		`pragma journal_mode = WAL`,
 		`pragma synchronous = FULL`,

@@ -23,7 +23,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/testutil"
 )
 
-const cpaUpdateUploadTarget = "/usage-service/runtime/updates/prepare-upload?request_id=web-upload&target_version=7.3.4&expected_active_artifact_id=" + cpaUpdateTestArtifactID
+const cpaUpdateUploadTarget = "/usage-service/runtime/updates/prepare-upload?request_id=web-upload&target_version=8.0.56&expected_active_artifact_id=" + cpaUpdateTestArtifactID
 
 // The fixture exercises the actual Manager-to-Supervisor HTTP transport while
 // keeping status independent of the transport behavior under test.
@@ -104,7 +104,7 @@ func TestCPAUpdateUploadStreamsAndMapsRuntimeRejections(t *testing.T) {
 				q := r.URL.Query()
 				if r.Method != http.MethodPost || r.URL.Path != "/v1/runtime/operations/prepare-update/upload" ||
 					q.Get("expectedRuntimeIdentity") != "runtime-http-test" || q.Get("expectedRuntimeGeneration") != "1" ||
-					q.Get("expectedActiveArtifactId") != cpaUpdateTestArtifactID || q.Get("targetVersion") != "7.3.4" ||
+					q.Get("expectedActiveArtifactId") != cpaUpdateTestArtifactID || q.Get("targetVersion") != "8.0.56" ||
 					r.Header.Get("Authorization") != "Bearer private-runtime-token" || r.Header.Get("Content-Type") != "application/octet-stream" {
 					t.Errorf("invalid upstream request: %s %s", r.Method, r.URL)
 				}

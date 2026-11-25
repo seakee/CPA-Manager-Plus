@@ -21,16 +21,18 @@ Environment="CPAMP_MANAGER_ADDR=127.0.0.1:18319"
 Environment="CPAMP_INGRESS_CONTROL_ADDR=127.0.0.1:18320"
 Environment="CPAMP_RUNTIME_CPA_ADDR=127.0.0.1:8317"
 Environment="CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK=1"
+Environment="CPAMP_DRAIN_TIMEOUT=90s"
 # The launcher stays root so the Runtime Supervisor can drop only CPA. The
 # dedicated CPA identity defaults to cpamp-cpa (10001:10001); cpa-manager-plusctl
 # install rewrites these values with the created user's real UID/GID.
 Environment="CPAMP_RUNTIME_CPA_UID=10001"
 Environment="CPAMP_RUNTIME_CPA_GID=10001"
+Environment="CPAMP_SERVICE_STOP_TIMEOUT_SEC=150"
 EnvironmentFile=-/opt/cpa-manager-plus/cpa-manager-plus.env
 ExecStart=/opt/cpa-manager-plus/bin/cpa-manager-plus-launcher
 KillMode=mixed
 KillSignal=SIGTERM
-TimeoutStopSec=30
+TimeoutStopSec=150
 Restart=on-failure
 RestartSec=5
 UMask=0077

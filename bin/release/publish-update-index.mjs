@@ -7,14 +7,17 @@ import { expectedReleaseAssetNames, verifyLocalReleaseAssets } from './verify-pu
 import {
   validateInfo,
   resolveChannels,
+  resolveV2Channels,
   compareVersions,
   parseVersion,
   assertSupportedVersion,
   validateIndex,
+  validateV2Index,
   assertV2AssetSet,
   assertBooleanOption,
   isV2Version,
   v2EmbeddedComposeFilename,
+  v2UpdateIndexFilename,
   repository,
 } from './update-contract.mjs';
 
@@ -77,26 +80,30 @@ export function verifyImage(inspected, info, options = {}) {
   const configs = Object.values(image || {});
   const platforms = manifest?.manifests || [];
   if (version.core[0] === '2') {
+    const { name, tag: imageTag, role } = options.expectedImage ?? {};
     const record = info.distribution.docker.images.find(
-      ({ digest }) => digest === manifest?.digest
+      (entry) => entry.role === role && entry.name === name && entry.tag === imageTag
     );
-    const matches = platforms.filter(
-      (entry) => entry.platform?.os === 'linux' && entry.platform.architecture === 'amd64'
-    );
+    const roleLabel = manifest?.labels?.['io.cpamp.candidate.role'];
+    // Buildx returns a single image config directly, not a platform-keyed map,
+    // for a linux/amd64 manifest. Accept a single-platform index as well.
+    const config = image?.config ? image : configs[0];
+    const linuxAmd64 = (platform) => platform?.os === 'linux' && platform.architecture === 'amd64';
+    const singlePlatform = manifest?.manifests === undefined
+      ? linuxAmd64(config)
+      : platforms.length === 1 && linuxAmd64(platforms[0].platform);
+    const labels = config?.config?.Labels;
     if (
       !record ||
       !/^sha256:[0-9a-f]{64}$/.test(manifest?.digest) ||
-      configs.length !== 1 ||
-      platforms.length !== 1 ||
-      matches.length !== 1 ||
-      configs.some((config) => {
-        const labels = config.config?.Labels;
-        return (
-          labels?.['org.opencontainers.image.revision'] !== info.release.source_commit ||
-          labels?.['org.opencontainers.image.version'] !== tag.slice(1) ||
-          labels?.['org.opencontainers.image.source'] !== repository
-        );
-      })
+      record.digest !== manifest.digest ||
+      (roleLabel !== undefined && roleLabel !== role) ||
+      (!image?.config && configs.length !== 1) ||
+      !singlePlatform ||
+      labels?.['org.opencontainers.image.revision'] !== info.release.source_commit ||
+      labels?.['org.opencontainers.image.version'] !== tag.slice(1) ||
+      labels?.['org.opencontainers.image.source'] !== repository ||
+      labels?.['io.cpamp.candidate.role'] !== role
     )
       throw new Error('Image does not match verified release: ' + tag);
     return manifest.digest;
@@ -146,15 +153,15 @@ async function readReleaseInfo(response, asset) {
   return JSON.parse(bytes.toString());
 }
 
-// Local pre-publication rehearsal: the v2 Beta release does not exist on GitHub
-// yet, so the candidate asset directory is the source of truth.
+// Verify the complete local asset set before considering a v2 candidate.
 const readCandidateInfo = (assetsDir) => {
   const infoPath = path.join(assetsDir, 'release-info.json');
   if (!existsSync(infoPath))
     throw new Error('Candidate assets directory is missing release-info.json');
-  const info = JSON.parse(readFileSync(infoPath, 'utf8'));
+  const rawBytes = readFileSync(infoPath);
+  const info = JSON.parse(rawBytes.toString('utf8'));
   if (info?.schema_version !== 2)
-    throw new Error('Candidate assets are only supported for the v2 beta dry run');
+    throw new Error('Candidate assets are only supported for v2 Beta');
   const tag = info.release?.version;
   verifyLocalReleaseAssets({
     tag,
@@ -162,7 +169,8 @@ const readCandidateInfo = (assetsDir) => {
     dryRun: true,
     allowV2Beta: true,
   });
-  return info;
+  const digest = 'sha256:' + createHash('sha256').update(rawBytes).digest('hex');
+  return { info, digest };
 };
 
 export async function publishUpdateIndex({
@@ -171,27 +179,23 @@ export async function publishUpdateIndex({
   exec = execFileSync,
   dryRun = env.DRY_RUN === 'true',
   allowV2Beta = false,
+  allowV2BetaDryRun = false,
   candidateAssetsDir,
   candidateInfoPath,
 } = {}) {
   // Explicit booleans only: a truthy string such as 'false' never authorizes.
   const dryRunValue = assertBooleanOption({ dryRun }, 'dryRun');
-  const allowV2BetaValue = assertBooleanOption({ allowV2Beta }, 'allowV2Beta');
-  const v2BetaOptIn = allowV2BetaValue === true && dryRunValue === true;
-  const v2Intent =
-    allowV2BetaValue === true ||
-    candidateAssetsDir !== undefined ||
-    candidateInfoPath !== undefined;
-  // Gate M3: fail closed before any file read or network request. A plain 1.x
-  // enumeration carries no v2 intent, so a remote v2 Beta is skipped in the
-  // release loop instead of breaking the 1.x maintenance job.
-  if (v2Intent && !v2BetaOptIn)
-    throw new Error(
-      'Unqualified v2 Embedded release: v2 rehearsal is fail-closed (Gate M3); the v2 beta DRY_RUN opt-in requires dryRun === true and allowV2Beta === true'
-    );
+  const allowBeta = assertBooleanOption({ allowV2Beta }, 'allowV2Beta');
+  const legacyRehearsal = assertBooleanOption({ allowV2BetaDryRun }, 'allowV2BetaDryRun');
+  if ((candidateAssetsDir !== undefined || candidateInfoPath !== undefined) && !dryRunValue)
+    throw new Error('Candidate release inputs require --dry-run');
+  if (legacyRehearsal && !dryRunValue)
+    throw new Error('--allow-v2-beta-dry-run requires --dry-run');
+  const v2BetaOptIn = allowBeta || legacyRehearsal;
+  if ((candidateAssetsDir !== undefined || candidateInfoPath !== undefined) && !v2BetaOptIn)
+    throw new Error('Candidate release requires --allow-v2-beta or --allow-v2-beta-dry-run');
   if (candidateAssetsDir || candidateInfoPath) {
-    if (!candidateAssetsDir)
-      throw new Error('Candidate release info requires a candidate assets directory');
+    candidateAssetsDir ??= path.dirname(candidateInfoPath);
     if (
       candidateInfoPath &&
       path.resolve(candidateInfoPath) !== path.resolve(candidateAssetsDir, 'release-info.json')
@@ -201,15 +205,14 @@ export async function publishUpdateIndex({
   const withdraw = env.WITHDRAW_RELEASE || '',
     restore = env.RESTORE_RELEASE || '';
   if (withdraw && restore) throw new Error('Choose withdraw or restore');
+  if (v2BetaOptIn && (withdraw || restore))
+    throw new Error('v2 Beta publication must not change withdrawals');
   for (const tag of [withdraw, restore].filter(Boolean)) {
     parseVersion(tag);
-    if (isV2Version(tag) && !v2BetaOptIn)
-      throw new Error(
-        'Unqualified v2 Embedded release: withdrawing a v2 release requires the v2 beta DRY_RUN opt-in'
-      );
+    if (isV2Version(tag)) throw new Error('1.x maintenance cannot change v2 withdrawals');
   }
   // Local files first: a tampered candidate must fail before any GitHub request.
-  const candidateInfo = candidateAssetsDir ? readCandidateInfo(candidateAssetsDir) : null;
+  const candidateRecord = candidateAssetsDir ? readCandidateInfo(candidateAssetsDir) : null;
   if (env.GITHUB_REPOSITORY !== 'seakee/CPA-Manager-Plus') throw new Error('Unexpected repository');
   const token = env.GITHUB_TOKEN;
   if (!token) throw new Error('Missing GitHub token');
@@ -236,23 +239,30 @@ export async function publishUpdateIndex({
     return file ? JSON.parse(Buffer.from(file.content, 'base64').toString()) : fallback;
   };
   const old = await read('update-index.json', null);
-  if (
-    old &&
-    (old.schema_version !== 1 ||
+  if (old) {
+    if (
+      old.schema_version !== 1 ||
       !Number.isSafeInteger(old.revision) ||
       old.revision < 1 ||
-      old.revision >= Number.MAX_SAFE_INTEGER)
-  )
-    throw new Error('Invalid existing update index');
-  if (
-    !v2BetaOptIn &&
-    (old?.channels?.beta?.schema_version === 2 ||
-      /^v2\./.test(old?.channels?.beta?.version || ''))
-  )
-    throw new Error('Existing v2 beta channel requires the v2 beta DRY_RUN opt-in; refusing a 1.x overwrite');
+      old.revision >= Number.MAX_SAFE_INTEGER
+    )
+      throw new Error('Invalid existing update index');
+    validateIndex(old);
+  }
+  if (v2BetaOptIn && !old) throw new Error('v2 Beta publication requires an existing 1.x update index');
+  const oldV2 = await read(v2UpdateIndexFilename, null);
+  if (oldV2) {
+    if (
+      oldV2.schema_version !== 2 ||
+      !Number.isSafeInteger(oldV2.revision) ||
+      oldV2.revision < 1 ||
+      oldV2.revision >= Number.MAX_SAFE_INTEGER
+    )
+      throw new Error('Invalid existing v2 update index');
+    validateV2Index(oldV2, { allowV2Beta: true });
+  }
   const catalog = await read('release-catalog.json', {});
   const withdrawn = await read('withdrawn.json', []);
-  const previousCatalog = JSON.parse(JSON.stringify(catalog));
   const releases = [];
   for (let page = 1; ; page++) {
     const batch = await api('/releases?per_page=100&page=' + page);
@@ -276,14 +286,15 @@ export async function publishUpdateIndex({
     if (i >= 0) withdrawn.splice(i, 1);
   }
   const infos = [];
+  const releaseInfoDigests = new Map();
   for (const release of releases) {
     const tag = release.tag_name;
     // Historical releases lacking this asset are deliberately excluded.
     const asset = release.assets.find((a) => a.name === 'release-info.json');
     if (release.draft || !asset || withdrawn.includes(tag)) continue;
-    // A 1.x maintenance run must keep working while a v2 Beta exists remotely:
-    // skip it before downloading release-info or resolving its commit.
-    if (isV2Version(tag) && !v2BetaOptIn) continue;
+    // Release lines are maintained independently. Never refresh 1.x catalog
+    // entries, targets or aliases as a side effect of a v2 publication.
+    if (isV2Version(tag) !== v2BetaOptIn) continue;
     let info = catalog[tag]?.info;
     if (!info || catalog[tag].digest !== asset.digest) {
       if (!Number.isSafeInteger(asset.size) || asset.size < 1 || asset.size > 256 * 1024)
@@ -298,67 +309,104 @@ export async function publishUpdateIndex({
     const commit = await api('/commits/' + encodeURIComponent(tag));
     verifyCandidate(release, info, commit.sha, { allowV2Beta: v2BetaOptIn });
     catalog[tag] = { info, digest: asset.digest };
+    releaseInfoDigests.set(tag, asset.digest);
     infos.push(info);
   }
-  if (candidateInfo) {
+  if (candidateRecord) {
+    const { info: candidateInfo, digest: candidateDigest } = candidateRecord;
     const tag = candidateInfo.release.version;
-    if (infos.some((existing) => existing.release.version === tag))
-      throw new Error('Candidate release is already published: ' + tag);
-    validateInfo(candidateInfo, tag, { allowV2Beta: v2BetaOptIn });
-    infos.push(candidateInfo);
+    if (withdrawn.includes(tag)) throw new Error('Candidate release is withdrawn: ' + tag);
+    if (releaseInfoDigests.has(tag)) {
+      if (releaseInfoDigests.get(tag) !== candidateDigest)
+        throw new Error('Candidate release-info differs from the published asset: ' + tag);
+    } else {
+      validateInfo(candidateInfo, tag, { allowV2Beta: v2BetaOptIn });
+      catalog[tag] = { info: candidateInfo, digest: candidateDigest };
+      releaseInfoDigests.set(tag, candidateDigest);
+      infos.push(candidateInfo);
+    }
   }
-  const { channels, aliases } = resolveAliases(infos, withdrawn, { allowV2Beta: v2BetaOptIn });
-  if (!infos.length && !withdraw) throw new Error('At least one verified release is required');
-  const v2Tags = new Set(
-    infos
-      .filter((info) => parseVersion(info.release.version).core[0] === '2')
-      .map((info) => info.release.version)
-  );
-  const index = {
-    schema_version: 1,
-    revision: (old?.revision || 0) + 1,
-    generated_at: new Date().toISOString(),
-    channels,
-  };
-  validateIndex(index, { allowV2Beta: v2BetaOptIn });
-  if (v2Tags.size > 0) {
-    // Scope 5/9: a v2 Beta rehearsal may only move `channels.beta`.
-    if (!old) throw new Error('v2 Beta publication requires an existing 1.x update index');
-    if (withdraw || restore) throw new Error('v2 Beta publication must not change withdrawals');
-    if (JSON.stringify(channels.stable) !== JSON.stringify(old.channels?.stable ?? null))
-      throw new Error('v2 Beta must not move the stable channel');
-    if (JSON.stringify(channels.rc) !== JSON.stringify(old.channels?.rc ?? null))
-      throw new Error('v2 Beta must not move the rc channel');
-    if (!channels.beta || !v2Tags.has(channels.beta.version) || channels.beta.schema_version !== 2)
-      throw new Error('v2 Beta must be the schema_version 2 beta channel target');
-    for (const [alias, tag] of Object.entries(aliases))
-      if (parseVersion(tag).core[0] === '2')
-        throw new Error(`v2 Beta must not move the ${alias} image alias`);
-    for (const [tag, entry] of Object.entries(previousCatalog))
-      if (JSON.stringify(catalog[tag]) !== JSON.stringify(entry))
-        throw new Error('v2 Beta must not rewrite 1.x release catalog entries: ' + tag);
-  }
-  const images = ['ghcr.io/seakee/cpa-manager-plus', 'seakee/cpa-manager-plus'];
-  // Validate all precise references first, before any alias mutation.
-  const targets = new Set([
-    ...Object.values(aliases),
-    ...Object.values(channels)
-      .filter(Boolean)
-      .map((target) => target.version),
-  ]);
-  const candidates = new Map(infos.map((info) => [info.release.version, info]));
-  const digests = new Map();
+  const generatedAt = new Date().toISOString();
   const inspect = (reference) =>
     JSON.parse(
       exec('docker', ['buildx', 'imagetools', 'inspect', reference, '--format', '{{json .}}'], {
         encoding: 'utf8',
       })
     );
+  const publishFiles = async (files, baseTree) => {
+    const tree = await api('/git/trees', 'POST', {
+      ...(baseTree ? { base_tree: baseTree } : {}),
+      tree: Object.entries(files).map(([path, content]) => ({
+        path,
+        mode: '100644',
+        type: 'blob',
+        content,
+      })),
+    });
+    const commit = await api('/git/commits', 'POST', {
+      message: 'chore(updates): refresh verified release channels',
+      tree: tree.sha,
+      parents: ref ? [ref.object.sha] : [],
+    });
+    // Non-force ref updates reject concurrent writers.
+    if (ref) await api('/git/refs/heads/update-channel', 'PATCH', { sha: commit.sha, force: false });
+    else await api('/git/refs', 'POST', { ref: 'refs/heads/update-channel', sha: commit.sha });
+  };
+
+  if (v2BetaOptIn) {
+    const index = {
+      schema_version: 2,
+      revision: (oldV2?.revision || 0) + 1,
+      generated_at: generatedAt,
+      channels: resolveV2Channels(infos, withdrawn, { allowV2Beta: true, releaseInfoDigests }),
+    };
+    validateV2Index(index, { allowV2Beta: true, requireReleaseInfoSha256: true });
+    if (!index.channels.beta) throw new Error('At least one verified v2 Beta release is required');
+    for (const info of infos) {
+      // The legacy workflow rehearses local candidates before their images are pushed.
+      if (legacyRehearsal && !allowBeta && candidateRecord?.info === info) continue;
+      for (const { name, tag, role } of info.distribution.docker.images) {
+        verifyImage(inspect(name + ':' + tag), info, {
+          allowV2Beta: true,
+          expectedImage: { name, tag, role },
+        });
+      }
+    }
+    const nextIndex = JSON.stringify(index.channels) === JSON.stringify(oldV2?.channels)
+      ? oldV2
+      : index;
+    if (!dryRunValue) {
+      // Overlay only v2 metadata on the pinned parent tree. Omitting files
+      // without base_tree would delete 1.x metadata from the new commit.
+      const parent = await api('/git/commits/' + ref.object.sha);
+      if (!parent.tree?.sha) throw new Error('Missing update-channel base tree');
+      await publishFiles({
+        'release-catalog.json': JSON.stringify(catalog, null, 2) + '\n',
+        [v2UpdateIndexFilename]: JSON.stringify(nextIndex, null, 2) + '\n',
+      }, parent.tree.sha);
+    }
+    return nextIndex;
+  }
+
+  const { channels, aliases } = resolveAliases(infos, withdrawn);
+  if (!infos.length && !withdraw) throw new Error('At least one verified release is required');
+  const index = {
+    schema_version: 1,
+    revision: (old?.revision || 0) + 1,
+    generated_at: generatedAt,
+    channels,
+  };
+  validateIndex(index);
+  const images = ['ghcr.io/seakee/cpa-manager-plus', 'seakee/cpa-manager-plus'];
+  // Validate all precise references first, before any alias mutation.
+  const targets = new Set([
+    ...Object.values(aliases),
+    ...Object.values(channels).filter(Boolean).map((target) => target.version),
+  ]);
+  const candidates = new Map(infos.map((info) => [info.release.version, info]));
+  const digests = new Map();
   for (const image of images)
     for (const tag of targets) {
-      // v2 Beta images are not pushed before the rehearsal; their digests are
-      // pinned by the verified pairing record in the schema 2 release info.
-      if (v2Tags.has(tag)) continue;
       const digest = verifyImage(inspect(image + ':' + tag), candidates.get(tag));
       if (digests.has(tag) && digests.get(tag) !== digest)
         throw new Error('Registry digest mismatch: ' + tag);
@@ -392,29 +440,14 @@ export async function publishUpdateIndex({
   // Dry-run scope: zero GitHub writes (release, tree, commit, refs, Latest) and
   // zero registry writes (alias creates); only GETs and local Docker inspects ran.
   if (dryRunValue) return index;
-  const files = {
+  await publishFiles({
     'update-index.json': JSON.stringify(index, null, 2) + '\n',
+    ...(oldV2 ? { [v2UpdateIndexFilename]: JSON.stringify(oldV2, null, 2) + '\n' } : {}),
     'release-catalog.json': JSON.stringify(catalog, null, 2) + '\n',
     'withdrawn.json': JSON.stringify(withdrawn, null, 2) + '\n',
     // Minimal projection for POSIX installers without a JSON parser.
     ...(channels.stable ? { 'stable-version.txt': channels.stable.version + '\n' } : {}),
-  };
-  const tree = await api('/git/trees', 'POST', {
-    tree: Object.entries(files).map(([path, content]) => ({
-      path,
-      mode: '100644',
-      type: 'blob',
-      content,
-    })),
   });
-  const commit = await api('/git/commits', 'POST', {
-    message: 'chore(updates): refresh verified release channels',
-    tree: tree.sha,
-    parents: ref ? [ref.object.sha] : [],
-  });
-  // Non-force ref updates reject concurrent writers. Re-run recomputes from current state.
-  if (ref) await api('/git/refs/heads/update-channel', 'PATCH', { sha: commit.sha, force: false });
-  else await api('/git/refs', 'POST', { ref: 'refs/heads/update-channel', sha: commit.sha });
   return index;
 }
 
@@ -423,6 +456,7 @@ const parseCliOptions = (argumentsList) => {
   for (let index = 0; index < argumentsList.length; index += 1) {
     const argument = argumentsList[index];
     if (argument === '--dry-run') options.dryRun = true;
+    else if (argument === '--allow-v2-beta') options.allowV2Beta = true;
     else if (argument === '--allow-v2-beta-dry-run') options.allowV2BetaDryRun = true;
     else if (argument === '--candidate-assets-dir') {
       const value = argumentsList[++index];
@@ -434,6 +468,11 @@ const parseCliOptions = (argumentsList) => {
       options.candidateInfoPath = value;
     } else throw new Error(`Unknown argument: ${argument}`);
   }
+  if (
+    options.dryRun !== true &&
+    (options.candidateAssetsDir !== undefined || options.candidateInfoPath !== undefined)
+  )
+    throw new Error('Candidate release inputs require --dry-run');
   return options;
 };
 
@@ -443,9 +482,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const dryRun = options.dryRun === true || process.env.DRY_RUN === 'true';
     publishUpdateIndex({
       dryRun,
-      // Raw intent: the function itself combines it with dryRun and fails
-      // closed before IO when only one of the two is present.
-      allowV2Beta: options.allowV2BetaDryRun === true,
+      allowV2Beta: options.allowV2Beta,
+      allowV2BetaDryRun: options.allowV2BetaDryRun,
       candidateAssetsDir: options.candidateAssetsDir,
       candidateInfoPath: options.candidateInfoPath,
     })

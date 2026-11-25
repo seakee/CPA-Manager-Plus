@@ -38,6 +38,9 @@ type MutationRequest struct {
 }
 
 func (r MutationRequest) Validate() error {
+	if _, err := parseSupportedUpdateVersion(r.TargetVersion); errors.Is(err, errUnsupportedCPAMajor) {
+		return newMutationError(MutationErrorInvalid, "unsupported_cpa_major")
+	}
 	if err := validateOperationIdentity(r.RequestID, r.TargetVersion); err != nil {
 		return newMutationError(MutationErrorInvalid, "invalid_request")
 	}
@@ -138,6 +141,11 @@ func (s *Service) Activate(ctx context.Context, request MutationRequest) (Mutati
 	if strings.TrimSpace(request.SourceMode) != "" || strings.TrimSpace(request.CDNPrefix) != "" {
 		return MutationResult{}, newMutationError(MutationErrorInvalid, "invalid_request")
 	}
+	if err := request.Validate(); err != nil {
+		return MutationResult{}, err
+	}
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
 	return s.mutate(ctx, MutationPhaseActivate, request, nil, 0)
 }
 
@@ -156,6 +164,16 @@ func (s *Service) mutate(ctx context.Context, phase MutationPhase, request Mutat
 	}
 	if mode != model.RuntimeModeEmbedded {
 		return MutationResult{}, newMutationError(MutationErrorConflict, "managed_externally")
+	}
+	if s.isProductComplete == nil {
+		return MutationResult{}, newMutationError(MutationErrorUnavailable, "product_completion_unavailable")
+	}
+	complete, err := s.isProductComplete(ctx)
+	if err != nil {
+		return MutationResult{}, newMutationError(MutationErrorUnavailable, "product_completion_unavailable")
+	}
+	if !complete {
+		return MutationResult{}, newMutationError(MutationErrorConflict, "product_incomplete")
 	}
 	state, now, err := s.discoverySnapshot(ctx)
 	if err != nil {
@@ -189,27 +207,56 @@ func (s *Service) mutate(ctx context.Context, phase MutationPhase, request Mutat
 	if err != nil {
 		return MutationResult{}, newMutationError(MutationErrorConflict, "current_version_invalid")
 	}
-	targetVersion, err := parseStableVersion(state.TargetVersion)
+	targetVersion, err := parseSupportedUpdateVersion(state.TargetVersion)
 	if err != nil {
 		return MutationResult{}, newMutationError(MutationErrorUnavailable, "recommendation_invalid")
 	}
 
-	if phase == MutationPhaseActivate && artifact.Version == request.TargetVersion &&
-		artifact.ArtifactID != request.ExpectedActiveArtifactID {
-		result.State = string(model.RuntimeOperationSucceeded)
-		result.AlreadyApplied = true
-		return result, nil
+	// A retry is sent with the original active-artifact fence. Fast-path an
+	// activation already confirmed by this Service instance without taking
+	// another write RPC; after a Manager restart, fall back to Supervisor's
+	// persistent activation-intent verification once and cache the receipt.
+	replay := phase == MutationPhaseActivate && artifact.Version == request.TargetVersion &&
+		artifact.ArtifactID != request.ExpectedActiveArtifactID
+	if replay {
+		if receipt, ok := s.matchAppliedActivation(
+			result.RuntimeOperationID,
+			observed.Identity,
+			observed.Generation,
+			request.ExpectedActiveArtifactID,
+			state.TargetVersion,
+			artifact.ArtifactID,
+		); ok {
+			if err := s.verifyObservedActivationOperation(
+				ctx,
+				result.RuntimeOperationID,
+				observed.Identity,
+				observed.Generation,
+				receipt.operationGeneration,
+				state.TargetVersion,
+			); err != nil {
+				s.deleteAppliedActivation(result.RuntimeOperationID)
+				var mutErr *MutationError
+				if errors.As(err, &mutErr) {
+					return MutationResult{}, err
+				}
+				return mutationRuntimeError(err)
+			}
+			result.State = string(model.RuntimeOperationSucceeded)
+			result.AlreadyApplied = true
+			return result, nil
+		}
 	}
-	if artifact.ArtifactID != request.ExpectedActiveArtifactID {
+	if !replay && artifact.ArtifactID != request.ExpectedActiveArtifactID {
 		return MutationResult{}, newMutationError(MutationErrorConflict, "active_artifact_mismatch")
 	}
-	if compareStableVersions(targetVersion, currentVersion) != 1 {
+	if !replay && compareStableVersions(targetVersion, currentVersion) != 1 {
 		return MutationResult{}, newMutationError(MutationErrorConflict, "update_not_actionable")
 	}
 
 	prepareSupported := observed.Capabilities.Supports(model.RuntimeCapabilityPrepareUpdate)
 	activateSupported := observed.Capabilities.Supports(model.RuntimeCapabilityActivateUpdate)
-	if !prepareSupported || !activateSupported {
+	if !replay && (!prepareSupported || !activateSupported) {
 		return MutationResult{}, newMutationError(MutationErrorConflict, "runtime_capability_unavailable")
 	}
 
@@ -244,7 +291,7 @@ func (s *Service) mutate(ctx context.Context, phase MutationPhase, request Mutat
 	} else {
 		operation, err = s.runtime.ActivateUpdate(ctx, model.RuntimeActivateUpdateRequest{
 			RuntimeMutationRequest:   mutationRequest,
-			ExpectedActiveArtifactID: artifact.ArtifactID,
+			ExpectedActiveArtifactID: request.ExpectedActiveArtifactID,
 			TargetVersion:            state.TargetVersion,
 		})
 	}
@@ -260,7 +307,58 @@ func (s *Service) mutate(ctx context.Context, phase MutationPhase, request Mutat
 		if operation.Failure != nil {
 			return MutationResult{}, newMutationError(MutationErrorUnavailable, "runtime_result_unreliable")
 		}
+		if phase == MutationPhaseActivate {
+			appliedID := model.RuntimeArtifactID("")
+			operationGen := model.RuntimeGeneration(0)
+			if replay {
+				if artifact.ArtifactID.IsValid() &&
+					s.verifyObservedActivationOperation(
+						ctx,
+						result.RuntimeOperationID,
+						observed.Identity,
+						observed.Generation,
+						operation.RuntimeGeneration,
+						state.TargetVersion,
+					) == nil {
+					appliedID = artifact.ArtifactID
+					operationGen = operation.RuntimeGeneration
+				}
+			} else if operation.RuntimeGeneration == observed.Generation {
+				if postStatus, postErr := s.runtime.Status(ctx); postErr == nil &&
+					postStatus.Validate() == nil &&
+					postStatus.Identity == observed.Identity &&
+					postStatus.Generation == observed.Generation &&
+					postStatus.State == model.RuntimeStateReady &&
+					postStatus.ActiveGatewayArtifact != nil &&
+					postStatus.ActiveGatewayArtifact.Version == state.TargetVersion &&
+					postStatus.ActiveGatewayArtifact.ArtifactID.IsValid() &&
+					postStatus.ActiveGatewayArtifact.ArtifactID != request.ExpectedActiveArtifactID &&
+					s.verifyObservedActivationOperation(
+						ctx,
+						result.RuntimeOperationID,
+						observed.Identity,
+						observed.Generation,
+						observed.Generation,
+						state.TargetVersion,
+					) == nil {
+					appliedID = postStatus.ActiveGatewayArtifact.ArtifactID
+					operationGen = observed.Generation
+				}
+			}
+			if appliedID != "" {
+				s.recordAppliedActivation(appliedActivationReceipt{
+					operationID:         result.RuntimeOperationID,
+					runtimeIdentity:     observed.Identity,
+					runtimeGeneration:   observed.Generation,
+					operationGeneration: operationGen,
+					previousArtifactID:  request.ExpectedActiveArtifactID,
+					targetVersion:       state.TargetVersion,
+					appliedArtifactID:   appliedID,
+				})
+			}
+		}
 		result.State = string(model.RuntimeOperationSucceeded)
+		result.AlreadyApplied = replay
 		return result, nil
 	case model.RuntimeOperationFailed:
 		if operation.Failure == nil || !validFailureCode(operation.Failure.Code) {
@@ -272,6 +370,112 @@ func (s *Service) mutate(ctx context.Context, phase MutationPhase, request Mutat
 	default:
 		return MutationResult{}, newMutationError(MutationErrorUnavailable, "runtime_result_incomplete")
 	}
+}
+
+func (s *Service) recordAppliedActivation(receipt appliedActivationReceipt) {
+	if receipt.appliedArtifactID == "" || !receipt.appliedArtifactID.IsValid() ||
+		receipt.runtimeGeneration == 0 || receipt.operationGeneration == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.appliedActivations == nil {
+		s.appliedActivations = make(map[string]appliedActivationReceipt)
+	}
+	filtered := s.appliedActivationOrder[:0]
+	for _, opID := range s.appliedActivationOrder {
+		existing, ok := s.appliedActivations[opID]
+		if !ok {
+			continue
+		}
+		if existing.runtimeIdentity != receipt.runtimeIdentity || existing.runtimeGeneration != receipt.runtimeGeneration {
+			delete(s.appliedActivations, opID)
+			continue
+		}
+		if opID == receipt.operationID {
+			continue
+		}
+		filtered = append(filtered, opID)
+	}
+	for i := len(filtered); i < len(s.appliedActivationOrder); i++ {
+		s.appliedActivationOrder[i] = ""
+	}
+	s.appliedActivationOrder = filtered
+	for opID, existing := range s.appliedActivations {
+		if existing.runtimeIdentity != receipt.runtimeIdentity || existing.runtimeGeneration != receipt.runtimeGeneration {
+			delete(s.appliedActivations, opID)
+		}
+	}
+	for len(s.appliedActivationOrder) >= maxAppliedActivationReceipts {
+		oldest := s.appliedActivationOrder[0]
+		delete(s.appliedActivations, oldest)
+		copy(s.appliedActivationOrder, s.appliedActivationOrder[1:])
+		s.appliedActivationOrder[len(s.appliedActivationOrder)-1] = ""
+		s.appliedActivationOrder = s.appliedActivationOrder[:len(s.appliedActivationOrder)-1]
+	}
+	s.appliedActivations[receipt.operationID] = receipt
+	s.appliedActivationOrder = append(s.appliedActivationOrder, receipt.operationID)
+}
+
+func (s *Service) matchAppliedActivation(
+	operationID string,
+	identity model.RuntimeIdentity,
+	generation model.RuntimeGeneration,
+	previousArtifactID model.RuntimeArtifactID,
+	targetVersion string,
+	currentArtifactID model.RuntimeArtifactID,
+) (appliedActivationReceipt, bool) {
+	if currentArtifactID == "" || !currentArtifactID.IsValid() || generation == 0 {
+		return appliedActivationReceipt{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	receipt, ok := s.appliedActivations[operationID]
+	if !ok {
+		return appliedActivationReceipt{}, false
+	}
+	if receipt.runtimeIdentity != identity ||
+		receipt.runtimeGeneration != generation ||
+		receipt.operationGeneration == 0 ||
+		receipt.previousArtifactID != previousArtifactID ||
+		receipt.targetVersion != targetVersion ||
+		receipt.appliedArtifactID == "" ||
+		receipt.appliedArtifactID != currentArtifactID {
+		return appliedActivationReceipt{}, false
+	}
+	return receipt, true
+}
+
+func (s *Service) verifyObservedActivationOperation(
+	ctx context.Context,
+	operationID string,
+	identity model.RuntimeIdentity,
+	currentGeneration model.RuntimeGeneration,
+	wantOperationGeneration model.RuntimeGeneration,
+	targetVersion string,
+) error {
+	obs, err := s.runtime.ObserveUpdateOperation(ctx, model.RuntimeObserveUpdateOperationRequest{
+		RuntimeMutationRequest: model.RuntimeMutationRequest{
+			OperationID:               operationID,
+			ExpectedRuntimeIdentity:   identity,
+			ExpectedRuntimeGeneration: currentGeneration,
+		},
+		OperationType: model.RuntimeOperationActivateUpdate,
+		TargetVersion: targetVersion,
+	})
+	if err != nil {
+		return err
+	}
+	if err := obs.Validate(); err != nil ||
+		obs.OperationID != operationID ||
+		obs.OperationType != model.RuntimeOperationActivateUpdate ||
+		obs.RuntimeIdentity != identity ||
+		obs.RuntimeGeneration != wantOperationGeneration ||
+		obs.State != model.RuntimeOperationSucceeded ||
+		obs.FailureCode != "" {
+		return newMutationError(MutationErrorUnavailable, "runtime_result_unreliable")
+	}
+	return nil
 }
 
 func (s *Service) discoverySnapshot(ctx context.Context) (DiscoveryState, time.Time, error) {

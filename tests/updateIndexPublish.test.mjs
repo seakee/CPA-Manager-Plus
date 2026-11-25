@@ -1,12 +1,14 @@
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { generateReleaseInfo } from '../bin/release/generate-release-info.mjs';
 import { expectedReleaseAssetNames } from '../bin/release/verify-published-release.mjs';
 import { publishUpdateIndex } from '../bin/release/publish-update-index.mjs';
-import { repository, resolveChannels } from '../bin/release/update-contract.mjs';
+import { repository, resolveChannels, v2DockerRoleTag } from '../bin/release/update-contract.mjs';
 
 function scenario({
   tags = ['v1.14.7'],
@@ -85,6 +87,7 @@ function scenario({
       return existing ? response({ object: { sha: 'old-ref' } }) : response({}, 404);
     if (url.includes('/contents/')) {
       const name = new URL(url).pathname.split('/').at(-1);
+      if (!(name in files) || files[name] == null) return response({}, 404);
       return response({ content: Buffer.from(JSON.stringify(files[name])).toString('base64') });
     }
     if (url.includes('/releases?')) return response(candidates.map((c) => c.release));
@@ -162,9 +165,9 @@ describe('update index publication', () => {
     { version: 'v2.0.0-beta.1', schema_version: 2 },
     { version: 'v1.14.7', schema_version: 2 },
     { version: 'v2.0.0-beta.1' },
-  ])('preserves an existing v2 beta target during plain 1.x maintenance: %j', async (existingBeta) => {
+  ])('rejects a 1.x update-index.json polluted with v2 or schema 2 targets before any write: %j', async (existingBeta) => {
     const s = scenario({ existing: true, existingBeta });
-    await expect(s.run()).rejects.toThrow('refusing a 1.x overwrite');
+    await expect(s.run()).rejects.toThrow(/only accepts 1\.x versions|Invalid update index target/);
     expect(s.calls.every((call) => call.method === 'GET')).toBe(true);
     expect(s.calls.some((call) => call.docker)).toBe(false);
   });
@@ -310,17 +313,16 @@ const notesOneX = (tag) =>
     compatibility: { minimum_cpa_version: null },
   }) +
   '\n-->';
-const v2ComposeContent = [
+const v2ImageRef = (tag, role) =>
+  `seakee/cpa-manager-plus:${v2DockerRoleTag(tag, role)}@${sha256Of(`${role}${tag}-manifest`)}`;
+const v2ComposeFor = (tag) => [
+  'name: cpa-manager-plus',
   'services:',
-  '  cpamp-ingress:',
-  '    image: seakee/cpamp-ingress:v2.0.0-beta.1',
-  '  cpamp-manager:',
-  '    image: seakee/cpa-manager-plus:v2.0.0-beta.1',
-  '  cpamp-runtime:',
-  '    image: seakee/cpamp-runtime:v2.0.0-beta.1',
+  '  cpa-manager-plus:',
+  `    image: '${v2ImageRef(tag, 'full')}'`,
   '',
 ].join('\n');
-const v2ComposeDigest = sha256Of(v2ComposeContent);
+const v2ComposeDigest = sha256Of(v2ComposeFor(v2Tag));
 const v2Pairing = (tag) => ({
   schema_version: 1,
   version: tag,
@@ -335,21 +337,19 @@ const v2Pairing = (tag) => ({
   api_contract: { sha256: sha256Of('embedded-api-contract') },
   compose: {
     filename: 'docker-compose.v2-embedded.yml',
-    sha256: v2ComposeDigest,
-    size: v2ComposeContent.length,
+    sha256: sha256Of(v2ComposeFor(tag)),
+    size: Buffer.byteLength(v2ComposeFor(tag), 'utf8'),
   },
   images: Object.fromEntries(
-    Object.entries({
-      manager: 'cpa-manager-plus',
-      ingress: 'cpamp-ingress',
-      runtime: 'cpamp-runtime',
-    }).map(([role, repositoryName]) => [
+    ['slim', 'full'].map((role) => [
       role,
       {
-        repository: `seakee/${repositoryName}`,
-        tag,
+        repository: 'seakee/cpa-manager-plus',
+        tag: v2DockerRoleTag(tag, role),
+        image_ref: v2ImageRef(tag, role),
         manifest_digest: sha256Of(`${role}${tag}-manifest`),
         image_config_digest: sha256Of(`${role}${tag}-config`),
+        binary_sha256: sha256Of(`${role}${tag}-binary`),
         release_provenance_sha256: sha256Of(`${role}${tag}-provenance`),
       },
     ])
@@ -360,10 +360,10 @@ const v2Notes = (tag) =>
   JSON.stringify({
     summary: { zh: '首个 v2 Beta', en: 'First v2 Beta' },
     update: {
-      breaking: true,
-      migration_required: true,
-      minimum_direct_upgrade_version: 'v1.14.10',
-      upgrade_guide_url: repository + '/releases/tag/' + tag,
+      breaking: false,
+      migration_required: false,
+      minimum_direct_upgrade_version: 'v2.0.0-beta.1',
+      upgrade_guide_url: 'https://cpamp-docs.seakee.dev/next/operations/update.html',
     },
     compatibility: { minimum_cpa_version: 'v8.0.55' },
   }) +
@@ -401,7 +401,7 @@ const makeCandidateDirectory = (info) => {
         name === 'embedded-release-pairing.json'
           ? JSON.stringify(v2Pairing(tag))
           : name === 'docker-compose.v2-embedded.yml'
-            ? v2ComposeContent
+            ? v2ComposeFor(tag)
             : `${name}\n`
       );
     }
@@ -409,7 +409,7 @@ const makeCandidateDirectory = (info) => {
       name === 'embedded-release-pairing.json'
         ? JSON.stringify(v2Pairing(tag))
         : name === 'docker-compose.v2-embedded.yml'
-          ? v2ComposeContent
+          ? v2ComposeFor(tag)
           : `${name}\n`
     );
     checksumLines.push(`${sha256Of(content).slice(7)}  ${relativePath}\n`);
@@ -434,13 +434,24 @@ const publishedV2Assets = (tag, payload, composeDigest = v2ComposeDigest) =>
 function v2Scenario({
   dryRun = true,
   allowV2Beta = true,
+  allowV2BetaDryRun = false,
   candidate = true,
   candidateDir,
   existingIndex = true,
+  existingV2Index = null,
   extraRelease,
   extraPayload,
+  publishedCommit = v2Sha,
+  candidateInfoPath,
+  adjustImage = (inspection) => inspection,
 } = {}) {
   const calls = [];
+  const localInfoPath = candidateInfoPath ?? (candidateDir && path.join(candidateDir, 'release-info.json'));
+  const localInfo = localInfoPath
+    ? JSON.parse(readFileSync(localInfoPath, 'utf8'))
+    : candidate ? makeV2Info() : null;
+  const publishedInfo = extraPayload ? JSON.parse(extraPayload) : null;
+  const images = [localInfo, publishedInfo].flatMap((info) => info?.distribution?.docker?.images ?? []);
   const stableTag = 'v1.14.10';
   const sha = 'a'.repeat(40);
   const stableInfo = generateReleaseInfo(stableTag, sha, notesOneX(stableTag));
@@ -471,6 +482,7 @@ function v2Scenario({
   };
   const files = {
     'update-index.json': oldIndex,
+    ...(existingV2Index ? { 'update-index-v2.json': existingV2Index } : {}),
     'release-catalog.json': { [stableTag]: { info: stableInfo, digest: sha256Of(stableData) } },
     'withdrawn.json': [],
   };
@@ -482,6 +494,7 @@ function v2Scenario({
       return existingIndex ? response({ object: { sha: 'old-ref' } }) : response({}, 404);
     if (url.includes('/contents/')) {
       const name = new URL(url).pathname.split('/').at(-1);
+      if (!(name in files) || files[name] == null) return response({}, 404);
       return response({ content: Buffer.from(JSON.stringify(files[name])).toString('base64') });
     }
     if (url.includes('/releases?'))
@@ -493,9 +506,10 @@ function v2Scenario({
         return new Response(extraPayload);
       return new Response(v2StablePayload(tag));
     }
+    if (url.endsWith('/git/commits/old-ref')) return response({ tree: { sha: 'original-tree' } });
     if (url.includes('/commits/')) {
       const tag = decodeURIComponent(new URL(url).pathname.split('/commits/')[1] || '');
-      return response({ sha: extraRelease && tag === extraRelease.tag_name ? v2Sha : sha });
+      return response({ sha: extraRelease && tag === extraRelease.tag_name ? publishedCommit : sha });
     }
     // A plain 1.x maintenance run still advances Latest and commits the index.
     if (url.endsWith('/releases/latest')) return response(stableRelease);
@@ -537,6 +551,22 @@ function v2Scenario({
       return '';
     }
     const reference = args[3];
+    const image = images.find(({ name, tag }) => reference === name + ':' + tag);
+    if (image) {
+      return JSON.stringify(adjustImage({
+        manifest: { digest: image.digest },
+        image: {
+          os: 'linux',
+          architecture: 'amd64',
+          config: { Labels: {
+            'org.opencontainers.image.revision': v2Sha,
+            'org.opencontainers.image.version': image.tag.replace(/-full$/, ''),
+            'org.opencontainers.image.source': repository,
+            'io.cpamp.candidate.role': image.role,
+          } },
+        },
+      }, image, images));
+    }
     if (aliases.has(reference)) return inspectPayload(aliases.get(reference));
     if (!reference.endsWith(':' + stableTag)) throw new Error('Unexpected image: ' + reference);
     return inspectPayload(sha256Of('stable-image'));
@@ -555,37 +585,91 @@ function v2Scenario({
         exec,
         dryRun,
         allowV2Beta,
+        allowV2BetaDryRun,
+        candidateInfoPath,
         candidateAssetsDir:
-          candidateDir ?? (candidate ? makeCandidateDirectory(makeV2Info()) : undefined),
+          candidateDir ?? (candidate && !candidateInfoPath ? makeCandidateDirectory(localInfo) : undefined),
       }),
   };
 }
 
 describe('v2 beta update index rehearsal', () => {
-  it('moves only channels.beta in a dry run and writes nothing', async () => {
-    const s = v2Scenario();
-    const index = await s.run();
-    expect(index).toMatchObject({
-      schema_version: 1,
-      revision: 8,
+  const runCli = (env, ...args) =>
+    spawnSync(process.execPath, [fileURLToPath(new URL('../bin/release/publish-update-index.mjs', import.meta.url)), ...args], {
+      encoding: 'utf8',
+      env: { ...process.env, DRY_RUN: 'false', GITHUB_REPOSITORY: '', ...env },
+    });
+
+  it.each(['--candidate-assets-dir', '--candidate'])(
+    'requires an explicit CLI --dry-run for %s even with v2 opt-in', (flag) => {
+      for (const DRY_RUN of ['false', 'true']) {
+        const result = runCli({ DRY_RUN }, '--allow-v2-beta', flag, 'unused');
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain('Candidate release inputs require --dry-run');
+      }
+    }
+  );
+
+  it.each(['candidateAssetsDir', 'candidateInfoPath'])(
+    'rejects local %s in live v2 mode before GitHub or registry calls', async (input) => {
+      const directory = makeCandidateDirectory(makeV2Info());
+      const s = v2Scenario({
+        dryRun: false,
+        allowV2Beta: true,
+        candidate: false,
+        ...(input === 'candidateAssetsDir'
+          ? { candidateDir: directory }
+          : { candidateInfoPath: path.join(directory, 'release-info.json') }),
+      });
+      await expect(s.run()).rejects.toThrow('Candidate release inputs require --dry-run');
+      expect(s.calls).toEqual([]);
+    }
+  );
+
+  it('emits schema_version 2 update-index-v2.json in a dry run while keeping 1.x untouched and writing nothing', async () => {
+    const candidateDir = makeCandidateDirectory(makeV2Info());
+    const expectedSha = sha256Of(readFileSync(path.join(candidateDir, 'release-info.json')));
+    const s = v2Scenario({ candidateDir });
+    const indexV2 = await s.run();
+    expect(indexV2).toMatchObject({
+      schema_version: 2,
+      revision: 1,
       channels: {
-        stable: { version: 'v1.14.10' },
-        rc: { version: 'v1.14.10' },
-        beta: { version: v2Tag, schema_version: 2 },
+        stable: null,
+        rc: null,
+        beta: {
+          version: v2Tag,
+          schema_version: 2,
+          release_info_path: `releases/download/${v2Tag}/release-info.json`,
+          release_info_sha256: expectedSha,
+        },
       },
     });
-    expect(JSON.stringify(index.channels.stable)).toBe(JSON.stringify({ version: 'v1.14.10' }));
     expect(s.calls.some((call) => call.method && call.method !== 'GET')).toBe(false);
     expect(s.calls.some((call) => call.docker?.includes('create'))).toBe(false);
     expect(s.calls.some((call) => call.url?.includes('/git/trees'))).toBe(false);
     expect(s.calls.some((call) => call.url?.includes('/git/commits'))).toBe(false);
     expect(s.calls.some((call) => call.url?.includes('/git/refs'))).toBe(false);
     expect(s.calls.some((call) => call.url?.endsWith('/releases/latest'))).toBe(false);
-  });
 
-  it('keeps the v2 publication fail-closed without the dry-run opt-in', async () => {
-    await expect(v2Scenario({ dryRun: false }).run()).rejects.toThrow(/DRY_RUN opt-in/);
-    await expect(v2Scenario({ allowV2Beta: false }).run()).rejects.toThrow(/DRY_RUN opt-in/);
+    // Increments revision relative to an existing update-index-v2.json.
+    const bumped = await v2Scenario({
+      candidateDir,
+      existingV2Index: {
+        schema_version: 2,
+        revision: 4,
+        generated_at: '2026-11-20T00:00:00.000Z',
+        channels: { stable: null, rc: null, beta: null },
+      },
+    }).run();
+    expect(bumped.revision).toBe(5);
+  });
+  it('retains the legacy offline rehearsal and requires --dry-run for its flag', async () => {
+    const s = v2Scenario({ allowV2Beta: false, allowV2BetaDryRun: true });
+    expect((await s.run()).channels.beta.version).toBe(v2Tag);
+    expect(s.calls.some((call) => call.docker)).toBe(false);
+    expect(runCli({}, '--allow-v2-beta-dry-run').stderr).toContain('--allow-v2-beta-dry-run requires --dry-run');
+    expect(runCli({}, '--allow-v2-beta').stderr).toContain('Unexpected repository');
   });
 
   it('refuses to rehearse a v2 Beta without an existing 1.x index', async () => {
@@ -760,13 +844,13 @@ describe('v2 beta update index rehearsal', () => {
     ).rejects.toThrow(/v2 Embedded/);
   });
 
-  it('fails closed before any IO when only one gate is present', async () => {
-    const noDryRun = v2Scenario({ dryRun: false, candidate: false });
-    await expect(noDryRun.run()).rejects.toThrow(/DRY_RUN opt-in/);
+  it('fails before IO for legacy opt-in without dry-run or a candidate without opt-in', async () => {
+    const noDryRun = v2Scenario({ dryRun: false, allowV2Beta: false, allowV2BetaDryRun: true, candidate: false });
+    await expect(noDryRun.run()).rejects.toThrow(/requires --dry-run/);
     expect(noDryRun.calls).toEqual([]);
 
     const noOptIn = v2Scenario({ allowV2Beta: false });
-    await expect(noOptIn.run()).rejects.toThrow(/DRY_RUN opt-in/);
+    await expect(noOptIn.run()).rejects.toThrow(/requires --allow-v2-beta/);
     expect(noOptIn.calls).toEqual([]);
 
     // A candidate path is v2 intent by itself: reject before reading it, which
@@ -777,13 +861,125 @@ describe('v2 beta update index rehearsal', () => {
         fetchImpl: async () => {
           throw new Error('no request expected');
         },
+        dryRun: true,
         candidateAssetsDir: '/nonexistent-v2-candidate',
         candidateInfoPath: '/nonexistent-v2-candidate/release-info.json',
       })
-    ).rejects.toThrow(/DRY_RUN opt-in/);
+    ).rejects.toThrow(/requires --allow-v2-beta/);
   });
 
-  it('keeps a plain 1.x run working while a remote v2 Beta exists', async () => {
+  const publishedBeta = (tag = v2Tag) => {
+    const extraPayload = JSON.stringify(makeV2Info(tag));
+    return {
+      extraPayload,
+      extraRelease: {
+        id: 781,
+        tag_name: tag,
+        draft: false,
+        immutable: true,
+        prerelease: true,
+        published_at: '2026-11-06T00:00:00Z',
+        assets: publishedV2Assets(tag, extraPayload, sha256Of(v2ComposeFor(tag))),
+      },
+    };
+  };
+
+  it.each([
+    ['missing', () => undefined, 'At least one verified v2 Beta release is required'],
+    ['draft', (release) => ({ ...release, draft: true }), 'At least one verified v2 Beta release is required'],
+    ['unpublished', (release) => ({ ...release, published_at: null }), 'Unverified release candidate'],
+    ['mutable', (release) => ({ ...release, immutable: false }), 'Unverified release candidate'],
+    ['wrong tag commit', (release) => release, 'Unverified release candidate'],
+    ['unverified asset', (release) => ({
+      ...release,
+      assets: release.assets.map((asset) => ({ ...asset, state: 'new' })),
+    }), 'Unverified release assets'],
+  ])('does not publish the v2 index for a %s prerelease even when its images exist', async (kind, adjustRelease, error) => {
+    // Keep the registry fixtures for both v2 tags independent of the release list.
+    const { extraRelease, extraPayload } = publishedBeta();
+    const s = v2Scenario({
+      dryRun: false,
+      allowV2Beta: true,
+      candidate: false,
+      extraRelease: adjustRelease(extraRelease),
+      extraPayload,
+      publishedCommit: kind === 'wrong tag commit' ? 'b'.repeat(40) : v2Sha,
+    });
+    await expect(s.run()).rejects.toThrow(error);
+    expect(s.calls.every((call) => call.method === 'GET')).toBe(true);
+  });
+
+  it('commits only v2 metadata over the existing tree without touching Latest or Docker aliases', async () => {
+    const published = publishedBeta();
+    const s = v2Scenario({ ...published, dryRun: false, candidate: false });
+    const index = await s.run();
+    expect(index).toMatchObject({
+      schema_version: 2,
+      channels: { stable: null, rc: null, beta: {
+        version: v2Tag, release_info_sha256: sha256Of(published.extraPayload),
+      } },
+    });
+    const info = JSON.parse(published.extraPayload);
+    const dockerCalls = s.calls.filter((call) => call.docker).map((call) => call.docker);
+    expect(dockerCalls.map((args) => [args[2], args[3]])).toEqual(
+      info.distribution.docker.images.map(({ name, tag }) => ['inspect', name + ':' + tag])
+    );
+    const writes = s.calls.filter((call) => ['POST', 'PATCH'].includes(call.method));
+    expect(writes.map((call) => [call.method, new URL(call.url).pathname.split('/repos/seakee/CPA-Manager-Plus')[1]])).toEqual([
+      ['POST', '/git/trees'], ['POST', '/git/commits'], ['PATCH', '/git/refs/heads/update-channel'],
+    ]);
+    const [tree, commit, ref] = writes.map((call) => call.body);
+    expect(tree.base_tree).toBe('original-tree');
+    const files = Object.fromEntries(tree.tree.map((file) => [file.path, JSON.parse(file.content)]));
+    expect(Object.keys(files).sort()).toEqual(['release-catalog.json', 'update-index-v2.json']);
+    expect(files['update-index-v2.json']).toEqual(index);
+    expect(files['release-catalog.json'][v2Tag]).toEqual({ info, digest: sha256Of(published.extraPayload) });
+    expect(files['release-catalog.json']['v1.14.10'].info.release.version).toBe('v1.14.10');
+    expect(commit).toMatchObject({ parents: ['old-ref'], tree: 'tree' });
+    expect(ref).toEqual({ sha: 'commit', force: false });
+    expect(s.calls.some((call) => call.url?.endsWith('/releases/latest'))).toBe(false);
+  });
+
+  it('checks local and published v2 images with the new dry-run flag without any writes', async () => {
+    const candidateDir = makeCandidateDirectory(makeV2Info());
+    const s = v2Scenario({
+      ...publishedBeta('v2.0.0-beta.2'),
+      candidate: false,
+      candidateInfoPath: path.join(candidateDir, 'release-info.json'),
+    });
+    expect((await s.run()).channels.beta.version).toBe('v2.0.0-beta.2');
+    expect(s.calls.filter((call) => call.docker?.[2] === 'inspect')).toHaveLength(8);
+    expect(s.calls.some((call) => call.method && call.method !== 'GET')).toBe(false);
+  });
+
+  it.each(['wrong digest', 'wrong manifest role', 'wrong config role', 'missing config role'])(
+    'rejects the slim tag with %s before publication', async (failure) => {
+      const s = v2Scenario({
+        ...publishedBeta(),
+        dryRun: false,
+        candidate: false,
+        adjustImage: (inspection, record, images) => {
+          if (record.role !== 'slim') return inspection;
+          if (failure === 'wrong digest') {
+            inspection.manifest.digest = images.find(({ role }) => role === 'full').digest;
+          } else if (failure === 'wrong manifest role') {
+            inspection.manifest.labels = { 'io.cpamp.candidate.role': 'full' };
+          } else if (failure === 'missing config role') {
+            inspection.manifest.labels = { 'io.cpamp.candidate.role': record.role };
+            delete inspection.image.config.Labels['io.cpamp.candidate.role'];
+          } else {
+            inspection.image.config.Labels['io.cpamp.candidate.role'] = 'full';
+          }
+          return inspection;
+        },
+      });
+      await expect(s.run()).rejects.toThrow(/Image does not match verified release/);
+      expect(s.calls.some((call) => call.method && call.method !== 'GET')).toBe(false);
+      expect(s.calls.some((call) => call.docker?.[2] === 'create')).toBe(false);
+    }
+  );
+
+  it('keeps a plain 1.x run working and preserves existing update-index-v2.json while a remote v2 Beta exists', async () => {
     const payload = JSON.stringify(makeV2Info());
     const v2BetaRelease = {
       id: 780,
@@ -794,14 +990,31 @@ describe('v2 beta update index rehearsal', () => {
       published_at: '2026-11-06T00:00:00Z',
       assets: publishedV2Assets(v2Tag, payload),
     };
+    const existingV2Index = {
+      schema_version: 2,
+      revision: 2,
+      generated_at: '2026-11-06T00:00:00.000Z',
+      channels: {
+        stable: null,
+        rc: null,
+        beta: {
+          version: v2Tag,
+          schema_version: 2,
+          release_info_path: `releases/download/${v2Tag}/release-info.json`,
+          release_info_sha256: sha256Of(payload),
+        },
+      },
+    };
     const s = v2Scenario({
       dryRun: false,
       allowV2Beta: false,
       candidate: false,
+      existingV2Index,
       extraRelease: v2BetaRelease,
       extraPayload: payload,
     });
     const index = await s.run();
+    expect(index.schema_version).toBe(1);
     expect(index.channels).toEqual({
       stable: { version: 'v1.14.10' },
       rc: { version: 'v1.14.10' },
@@ -816,13 +1029,13 @@ describe('v2 beta update index rehearsal', () => {
     expect(files['release-catalog.json']).not.toContain(v2Tag);
     expect(files['withdrawn.json']).toBe('[]\n');
     expect(files['update-index.json']).not.toContain(v2Tag);
+    expect(JSON.parse(files['update-index-v2.json'])).toEqual(existingV2Index);
     // The 1.x maintenance path still commits its index and alias.
     expect(
       s.calls.some((call) => call.url?.endsWith('/git/commits') && call.method === 'POST')
     ).toBe(true);
     expect(s.calls.some((call) => call.docker?.includes('create'))).toBe(true);
   });
-
   it('rejects truthy non-boolean gate values', async () => {
     const env = { GITHUB_REPOSITORY: 'seakee/CPA-Manager-Plus', GITHUB_TOKEN: 'fixture' };
     const fetchImpl = async () => {

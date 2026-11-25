@@ -4,11 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	quotasnapshotrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotasnapshot"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageaggregate"
@@ -16,6 +19,514 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageprojection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
+
+func TestMigrateSchemaCompatibilityFence(t *testing.T) {
+	original := buildinfo.Version
+	t.Cleanup(func() { buildinfo.Version = original })
+	for _, test := range []struct {
+		name, app, floor string
+		generation       int
+		reject           bool
+	}{
+		{"future generation even in dev", "dev", "v2.0.0-beta.1", 2, true},
+		{"older prerelease", "v2.0.0-beta.1+abc", "v2.0.0-beta.2", 1, true},
+		{"older stable", "1.99.99", "v2.0.0-beta.1", 1, true},
+		{"same prerelease", "2.0.0-beta.1", "v2.0.0-beta.1", 1, false},
+		{"release after prerelease", "v2.0.0", "v2.0.0-beta.2", 1, false},
+		{"CI build retains future floor", "ci", "v2.0.0-beta.2", 1, false},
+		{"unknown build", "unknown", "v2.0.0-beta.1", 1, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db, err := sql.Open("sqlite", ":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			db.SetMaxOpenConns(1)
+			if test.reject {
+				if test.generation == CurrentSchemaGeneration {
+					if _, err := db.Exec(`PRAGMA user_version = 1`); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := db.Exec(`CREATE TABLE upgrade_schema_meta (
+                    id INTEGER PRIMARY KEY, schema_generation INTEGER NOT NULL,
+                    min_compatible_app_version TEXT NOT NULL, updated_at TEXT NOT NULL)`); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := Migrate(db); err != nil {
+				t.Fatal(err)
+			} // First migration creates the fence.
+			if _, err := db.Exec(`INSERT OR REPLACE INTO upgrade_schema_meta VALUES (1, ?, ?, 'unchanged')`,
+				test.generation, test.floor); err != nil {
+				t.Fatal(err)
+			}
+			buildinfo.Version = test.app
+			var before, after int
+			if err := db.QueryRow(`SELECT total_changes()`).Scan(&before); err != nil {
+				t.Fatal(err)
+			}
+			err = Migrate(db)
+			if test.reject {
+				if !errors.Is(err, ErrIncompatibleNewerSchema) || !strings.Contains(err.Error(), test.floor) || !strings.Contains(err.Error(), "restore a pre-upgrade backup") {
+					t.Fatalf("Migrate: %v", err)
+				}
+				if err := db.QueryRow(`SELECT total_changes()`).Scan(&after); err != nil || after != before {
+					t.Fatalf("migration wrote data: before=%d after=%d err=%v", before, after, err)
+				}
+				var tables int
+				if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table'`).Scan(&tables); err != nil || tables != 1 {
+					t.Fatalf("migration changed schema: tables=%d err=%v", tables, err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			var generation int
+			var minimum, updatedAt string
+			if err := db.QueryRow(`SELECT schema_generation, min_compatible_app_version, updated_at FROM upgrade_schema_meta WHERE id = 1`).Scan(&generation, &minimum, &updatedAt); err != nil {
+				t.Fatal(err)
+			}
+			if generation != test.generation || minimum != test.floor || ((updatedAt == "unchanged") != test.reject) {
+				t.Fatalf("metadata = %d, %q, %q", generation, minimum, updatedAt)
+			}
+		})
+	}
+}
+
+func TestSchemaCompatibilityFenceCoversAllWriteEntrypointsAndCorruptMetadata(t *testing.T) {
+	original := buildinfo.Version
+	t.Cleanup(func() { buildinfo.Version = original })
+
+	t.Run("OpenUpgradeOperations rejects incompatible schema without writes", func(t *testing.T) {
+		cases := []struct {
+			name  string
+			app   string
+			setup func(t *testing.T, db *sql.DB)
+		}{
+			{
+				name: "higher schema_generation",
+				app:  "dev",
+				setup: func(t *testing.T, db *sql.DB) {
+					if _, err := db.Exec(`CREATE TABLE upgrade_schema_meta (
+						id INTEGER PRIMARY KEY CHECK (id = 1),
+						schema_generation INTEGER NOT NULL,
+						min_compatible_app_version TEXT NOT NULL,
+						updated_at TEXT NOT NULL
+					)`); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := db.Exec(`INSERT INTO upgrade_schema_meta VALUES (1, 2, 'v2.0.0-beta.1', '2026-11-26T00:00:00Z')`); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+			{
+				name: "higher pragma user_version",
+				app:  "dev",
+				setup: func(t *testing.T, db *sql.DB) {
+					if _, err := db.Exec(`PRAGMA user_version = 2`); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+			{
+				name: "higher min_compatible_app_version",
+				app:  "v2.0.0-beta.1",
+				setup: func(t *testing.T, db *sql.DB) {
+					if _, err := db.Exec(`PRAGMA user_version = 1`); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := db.Exec(`CREATE TABLE upgrade_schema_meta (
+						id INTEGER PRIMARY KEY CHECK (id = 1),
+						schema_generation INTEGER NOT NULL,
+						min_compatible_app_version TEXT NOT NULL,
+						updated_at TEXT NOT NULL
+					)`); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := db.Exec(`INSERT INTO upgrade_schema_meta VALUES (1, 1, 'v2.0.0-beta.2', '2026-11-26T00:00:00Z')`); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+			{
+				name: "user_version 1 with missing upgrade_schema_meta",
+				app:  "dev",
+				setup: func(t *testing.T, db *sql.DB) {
+					if _, err := db.Exec(`PRAGMA user_version = 1`); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+			{
+				name: "user_version 0 with schema_generation 1",
+				app:  "dev",
+				setup: func(t *testing.T, db *sql.DB) {
+					if _, err := db.Exec(`CREATE TABLE upgrade_schema_meta (
+						id INTEGER PRIMARY KEY CHECK (id = 1),
+						schema_generation INTEGER NOT NULL,
+						min_compatible_app_version TEXT NOT NULL,
+						updated_at TEXT NOT NULL
+					)`); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := db.Exec(`INSERT INTO upgrade_schema_meta VALUES (1, 1, 'v2.0.0-beta.1', '2026-11-26T00:00:00Z')`); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				dbPath := filepath.Join(t.TempDir(), "upgrade-ops.sqlite")
+				seedDB, err := sql.Open("sqlite", dbPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				seedDB.SetMaxOpenConns(1)
+				if _, err := seedDB.Exec(`PRAGMA journal_mode = DELETE`); err != nil {
+					_ = seedDB.Close()
+					t.Fatal(err)
+				}
+				if _, err := seedDB.Exec(`CREATE TABLE sentinel (id INTEGER PRIMARY KEY)`); err != nil {
+					_ = seedDB.Close()
+					t.Fatal(err)
+				}
+				tc.setup(t, seedDB)
+				if err := seedDB.Close(); err != nil {
+					t.Fatal(err)
+				}
+				beforeBytes, err := os.ReadFile(dbPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				buildinfo.Version = tc.app
+				opened, err := OpenUpgradeOperations(dbPath)
+				if opened != nil {
+					_ = opened.Close()
+				}
+				if !errors.Is(err, ErrIncompatibleNewerSchema) {
+					t.Fatalf("OpenUpgradeOperations err = %v, want ErrIncompatibleNewerSchema", err)
+				}
+				if _, statErr := os.Lstat(dbPath + "-wal"); !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("OpenUpgradeOperations created WAL file on rejected DB: %v", statErr)
+				}
+				afterBytes, err := os.ReadFile(dbPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(afterBytes) != string(beforeBytes) {
+					t.Fatal("OpenUpgradeOperations modified rejected database bytes")
+				}
+			})
+		}
+	})
+
+	t.Run("CleanupDerivedOffline rejects higher schema_generation without mutation", func(t *testing.T) {
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		db.SetMaxOpenConns(1)
+		if _, err := db.Exec(`CREATE TABLE upgrade_schema_meta (
+			id INTEGER PRIMARY KEY,
+			schema_generation INTEGER NOT NULL,
+			min_compatible_app_version TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO upgrade_schema_meta VALUES (1, 2, 'v2.0.0-beta.1', '2026-11-26T00:00:00Z')`); err != nil {
+			t.Fatal(err)
+		}
+		var beforeChanges int
+		if err := db.QueryRow(`SELECT total_changes()`).Scan(&beforeChanges); err != nil {
+			t.Fatal(err)
+		}
+		buildinfo.Version = "dev"
+		result, err := CleanupDerivedOffline(context.Background(), db)
+		if !errors.Is(err, ErrIncompatibleNewerSchema) {
+			t.Fatalf("CleanupDerivedOffline err = %v, want ErrIncompatibleNewerSchema", err)
+		}
+		if result != (OfflineCleanupResult{}) {
+			t.Fatalf("CleanupDerivedOffline result = %+v, want zero", result)
+		}
+		var afterChanges, tableCount int
+		if err := db.QueryRow(`SELECT total_changes()`).Scan(&afterChanges); err != nil || afterChanges != beforeChanges {
+			t.Fatalf("CleanupDerivedOffline mutated DB: before=%d after=%d err=%v", beforeChanges, afterChanges, err)
+		}
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'`).Scan(&tableCount); err != nil || tableCount != 1 {
+			t.Fatalf("CleanupDerivedOffline created tables: count=%d err=%v", tableCount, err)
+		}
+	})
+
+	t.Run("corrupt metadata and negative user_version fail closed", func(t *testing.T) {
+		cases := []struct {
+			name  string
+			setup func(t *testing.T, db *sql.DB)
+		}{
+			{
+				name: "negative pragma user_version",
+				setup: func(t *testing.T, db *sql.DB) {
+					if _, err := db.Exec(`PRAGMA user_version = -1`); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+			{
+				name: "empty upgrade_schema_meta table",
+				setup: func(t *testing.T, db *sql.DB) {
+					if _, err := db.Exec(`CREATE TABLE upgrade_schema_meta (
+						id INTEGER PRIMARY KEY,
+						schema_generation INTEGER NOT NULL,
+						min_compatible_app_version TEXT NOT NULL,
+						updated_at TEXT NOT NULL
+					)`); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := db.Exec(`INSERT INTO upgrade_schema_meta VALUES (1, 1, 'v2.0.0-beta.1', 'seed')`); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := db.Exec(`DELETE FROM upgrade_schema_meta`); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+			{
+				name: "zero schema_generation",
+				setup: func(t *testing.T, db *sql.DB) {
+					if _, err := db.Exec(`CREATE TABLE upgrade_schema_meta (
+						id INTEGER PRIMARY KEY,
+						schema_generation INTEGER NOT NULL,
+						min_compatible_app_version TEXT NOT NULL,
+						updated_at TEXT NOT NULL
+					)`); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := db.Exec(`INSERT INTO upgrade_schema_meta VALUES (1, 0, 'v2.0.0-beta.1', 'seed')`); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+			{
+				name: "invalid min_compatible_app_version semver",
+				setup: func(t *testing.T, db *sql.DB) {
+					if _, err := db.Exec(`CREATE TABLE upgrade_schema_meta (
+						id INTEGER PRIMARY KEY,
+						schema_generation INTEGER NOT NULL,
+						min_compatible_app_version TEXT NOT NULL,
+						updated_at TEXT NOT NULL
+					)`); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := db.Exec(`INSERT INTO upgrade_schema_meta VALUES (1, 1, 'not-a-semver', 'seed')`); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+			{
+				name: "extra rows in upgrade_schema_meta",
+				setup: func(t *testing.T, db *sql.DB) {
+					if _, err := db.Exec(`CREATE TABLE upgrade_schema_meta (
+						id INTEGER PRIMARY KEY,
+						schema_generation INTEGER NOT NULL,
+						min_compatible_app_version TEXT NOT NULL,
+						updated_at TEXT NOT NULL
+					)`); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := db.Exec(`INSERT INTO upgrade_schema_meta VALUES (1, 1, 'v2.0.0-beta.1', 'seed'), (2, 1, 'v2.0.0-beta.1', 'extra')`); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+			{
+				name: "user_version 1 with missing upgrade_schema_meta",
+				setup: func(t *testing.T, db *sql.DB) {
+					if _, err := db.Exec(`PRAGMA user_version = 1`); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+			{
+				name: "user_version 0 with existing schema_generation 1",
+				setup: func(t *testing.T, db *sql.DB) {
+					if _, err := db.Exec(`CREATE TABLE upgrade_schema_meta (
+						id INTEGER PRIMARY KEY,
+						schema_generation INTEGER NOT NULL,
+						min_compatible_app_version TEXT NOT NULL,
+						updated_at TEXT NOT NULL
+					)`); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := db.Exec(`INSERT INTO upgrade_schema_meta VALUES (1, 1, 'v2.0.0-beta.1', 'seed')`); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				db, err := sql.Open("sqlite", ":memory:")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer db.Close()
+				db.SetMaxOpenConns(1)
+				tc.setup(t, db)
+				buildinfo.Version = "dev"
+				if err := Migrate(db); !errors.Is(err, ErrIncompatibleNewerSchema) {
+					t.Fatalf("Migrate err = %v, want ErrIncompatibleNewerSchema", err)
+				}
+				if err := MigrateUpgradeOperations(db); !errors.Is(err, ErrIncompatibleNewerSchema) {
+					t.Fatalf("MigrateUpgradeOperations err = %v, want ErrIncompatibleNewerSchema", err)
+				}
+				if _, err := CleanupDerivedOffline(context.Background(), db); !errors.Is(err, ErrIncompatibleNewerSchema) {
+					t.Fatalf("CleanupDerivedOffline err = %v, want ErrIncompatibleNewerSchema", err)
+				}
+			})
+		}
+	})
+
+	t.Run("monotonic min_compatible_app_version preserved by dev Migrate and atomic writeSchemaCompatibility", func(t *testing.T) {
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		db.SetMaxOpenConns(1)
+
+		buildinfo.Version = "v2.0.0-beta.2"
+		if err := Migrate(db); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE upgrade_schema_meta SET min_compatible_app_version = 'v2.0.0-beta.2', updated_at = 'seeded' WHERE id = 1`); err != nil {
+			t.Fatal(err)
+		}
+		buildinfo.Version = "dev"
+		if err := Migrate(db); err != nil {
+			t.Fatalf("dev Migrate failed: %v", err)
+		}
+
+		var userVersion, generation int
+		var minVersion, updatedAt string
+		if err := db.QueryRow(`PRAGMA user_version`).Scan(&userVersion); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.QueryRow(`SELECT schema_generation, min_compatible_app_version, updated_at FROM upgrade_schema_meta WHERE id = 1`).Scan(&generation, &minVersion, &updatedAt); err != nil {
+			t.Fatal(err)
+		}
+		if userVersion != CurrentSchemaGeneration || generation != CurrentSchemaGeneration || minVersion != "v2.0.0-beta.2" || updatedAt == "seeded" {
+			t.Fatalf("got user_version=%d generation=%d min=%q updated_at=%q", userVersion, generation, minVersion, updatedAt)
+		}
+
+		// Verify writeSchemaCompatibility re-checks inside BEGIN IMMEDIATE and rolls back on incompatibility.
+		if _, err := db.Exec(`UPDATE upgrade_schema_meta SET updated_at = 'seeded-rollback' WHERE id = 1`); err != nil {
+			t.Fatal(err)
+		}
+		buildinfo.Version = "v2.0.0-beta.1"
+		if err := writeSchemaCompatibility(db, "v2.0.0-beta.1"); !errors.Is(err, ErrIncompatibleNewerSchema) {
+			t.Fatalf("writeSchemaCompatibility err = %v, want ErrIncompatibleNewerSchema", err)
+		}
+		if err := db.QueryRow(`SELECT updated_at FROM upgrade_schema_meta WHERE id = 1`).Scan(&updatedAt); err != nil || updatedAt != "seeded-rollback" {
+			t.Fatalf("rolled-back updated_at = %q, err = %v, want seeded-rollback", updatedAt, err)
+		}
+
+		// Mismatched user_version = 0 with existing upgrade_schema_meta(schema_generation = 1) fails closed even in dev.
+		if _, err := db.Exec(`PRAGMA user_version = 0`); err != nil {
+			t.Fatal(err)
+		}
+		buildinfo.Version = "dev"
+		if err := writeSchemaCompatibility(db, "v2.0.0-beta.2"); !errors.Is(err, ErrIncompatibleNewerSchema) {
+			t.Fatalf("writeSchemaCompatibility on user_version=0 err = %v, want ErrIncompatibleNewerSchema", err)
+		}
+		if err := db.QueryRow(`PRAGMA user_version`).Scan(&userVersion); err != nil || userVersion != 0 {
+			t.Fatalf("user_version after rejected writeSchemaCompatibility = %d, err = %v, want 0", userVersion, err)
+		}
+	})
+
+	t.Run("all four entrypoints reject dropped upgrade_schema_meta at user_version 1 and mismatched user_version 0", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			mutate func(t *testing.T, db *sql.DB)
+		}{
+			{
+				name: "user_version 1 with dropped upgrade_schema_meta",
+				mutate: func(t *testing.T, db *sql.DB) {
+					if _, err := db.Exec(`DROP TABLE upgrade_schema_meta`); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+			{
+				name: "user_version 0 with existing upgrade_schema_meta",
+				mutate: func(t *testing.T, db *sql.DB) {
+					if _, err := db.Exec(`PRAGMA user_version = 0`); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				buildinfo.Version = "v2.0.0-beta.1"
+				dbPath := filepath.Join(t.TempDir(), "all-entrypoints.sqlite")
+				seeded, err := Open(dbPath)
+				if err != nil {
+					t.Fatalf("seed Open: %v", err)
+				}
+				if err := seeded.Close(); err != nil {
+					t.Fatalf("seed Close: %v", err)
+				}
+				rawDB, err := sql.Open("sqlite", maintenanceDataSourceName(dbPath))
+				if err != nil {
+					t.Fatal(err)
+				}
+				rawDB.SetMaxOpenConns(1)
+				tc.mutate(t, rawDB)
+				if _, err := rawDB.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+					_ = rawDB.Close()
+					t.Fatal(err)
+				}
+				if err := rawDB.Close(); err != nil {
+					t.Fatal(err)
+				}
+
+				opened, err := Open(dbPath)
+				if opened != nil {
+					_ = opened.Close()
+				}
+				if !errors.Is(err, ErrIncompatibleNewerSchema) {
+					t.Fatalf("Open err = %v, want ErrIncompatibleNewerSchema", err)
+				}
+
+				opsDB, err := OpenUpgradeOperations(dbPath)
+				if opsDB != nil {
+					_ = opsDB.Close()
+				}
+				if !errors.Is(err, ErrIncompatibleNewerSchema) {
+					t.Fatalf("OpenUpgradeOperations err = %v, want ErrIncompatibleNewerSchema", err)
+				}
+
+				cleanupHandle, err := sql.Open("sqlite", maintenanceDataSourceName(dbPath))
+				if err != nil {
+					t.Fatal(err)
+				}
+				cleanupHandle.SetMaxOpenConns(1)
+				_, cleanupErr := CleanupDerivedOffline(context.Background(), cleanupHandle)
+				_ = cleanupHandle.Close()
+				if !errors.Is(cleanupErr, ErrIncompatibleNewerSchema) {
+					t.Fatalf("CleanupDerivedOffline err = %v, want ErrIncompatibleNewerSchema", cleanupErr)
+				}
+
+				if _, compactErr := CompactUsage(context.Background(), dbPath); !errors.Is(compactErr, ErrIncompatibleNewerSchema) {
+					t.Fatalf("CompactUsage err = %v, want ErrIncompatibleNewerSchema", compactErr)
+				}
+			})
+		}
+	})
+}
 
 func TestUsageDataMigrationInitialStateMatchesExistingUsageData(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usage-data-migration.sqlite")

@@ -3,12 +3,12 @@
   "release": {
     "version": "v2.0.0-beta.1",
     "stage": "beta",
-    "source_commit": "8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc"
+    "source_commit": "23bd1b3536120263ad7fb4b003349f2cfed0e557"
   },
   "content": {
     "summary": {
-      "zh": "首个 v2 Beta：不可变三镜像、Full Web/API 配对与 linux/amd64 Native 包。",
-      "en": "First v2 Beta: immutable three-image set, Full Web/API pairing, and the linux/amd64 Native package."
+      "zh": "首个 v2 Beta：单镜像 Embedded 部署（slim/full 两种变体）、linux/amd64 Native 包与 management.html Lite 面板；v2 更新通道独立于 1.x。",
+      "en": "First v2 Beta: single-image Embedded deployment (slim and full variants), a linux/amd64 Native package, and the management.html Lite panel. The v2 update channel is separate from 1.x."
     },
     "notes": {
       "zh": "https://github.com/seakee/CPA-Manager-Plus/blob/v2.0.0-beta.1/docs/release-notes/v2.0.0-beta.1-zh.md",
@@ -23,73 +23,77 @@
   },
   "distribution": {
     "docker": {
-      "version_tag": "v2.0.0-beta.1",
+      "version_tag": "2.0.0-beta.1",
       "images": [
         {
-          "role": "manager",
+          "role": "slim",
           "name": "seakee/cpa-manager-plus",
-          "tag": "v2.0.0-beta.1",
+          "tag": "2.0.0-beta.1",
           "digest": "sha256:be0dee922347da5e33bf9546bb86447a7afa9973e3bc77a965908a31e43a0258",
-          "platforms": ["linux/amd64"]
+          "platforms": [
+            "linux/amd64"
+          ]
         },
         {
-          "role": "ingress",
-          "name": "seakee/cpamp-ingress",
-          "tag": "v2.0.0-beta.1",
-          "digest": "sha256:ec2d8db9eca2c102a13f05667f01db2bf62c0208bcade582a05a23eedb276c4d",
-          "platforms": ["linux/amd64"]
-        },
-        {
-          "role": "runtime",
-          "name": "seakee/cpamp-runtime",
-          "tag": "v2.0.0-beta.1",
+          "role": "full",
+          "name": "seakee/cpa-manager-plus",
+          "tag": "2.0.0-beta.1-full",
           "digest": "sha256:9e334bf2941c959cf9220f2da126086673eff10fbab4da621a3477c138c967d1",
-          "platforms": ["linux/amd64"]
+          "platforms": [
+            "linux/amd64"
+          ]
         },
         {
-          "role": "manager",
+          "role": "slim",
           "name": "ghcr.io/seakee/cpa-manager-plus",
-          "tag": "v2.0.0-beta.1",
+          "tag": "2.0.0-beta.1",
           "digest": "sha256:be0dee922347da5e33bf9546bb86447a7afa9973e3bc77a965908a31e43a0258",
-          "platforms": ["linux/amd64"]
+          "platforms": [
+            "linux/amd64"
+          ]
         },
         {
-          "role": "ingress",
-          "name": "ghcr.io/seakee/cpamp-ingress",
-          "tag": "v2.0.0-beta.1",
-          "digest": "sha256:ec2d8db9eca2c102a13f05667f01db2bf62c0208bcade582a05a23eedb276c4d",
-          "platforms": ["linux/amd64"]
-        },
-        {
-          "role": "runtime",
-          "name": "ghcr.io/seakee/cpamp-runtime",
-          "tag": "v2.0.0-beta.1",
+          "role": "full",
+          "name": "ghcr.io/seakee/cpa-manager-plus",
+          "tag": "2.0.0-beta.1-full",
           "digest": "sha256:9e334bf2941c959cf9220f2da126086673eff10fbab4da621a3477c138c967d1",
-          "platforms": ["linux/amd64"]
+          "platforms": [
+            "linux/amd64"
+          ]
         }
       ]
     },
     "native": {
-      "assets": ["cpa-manager-plus-native-v2_v2.0.0-beta.1_linux_amd64.tar.gz"]
+      "assets": [
+        "cpa-manager-plus-native-v2_v2.0.0-beta.1_linux_amd64.tar.gz"
+      ]
     },
     "compose": {
       "filename": "docker-compose.v2-embedded.yml",
-      "sha256": "sha256:bace609b570324070429c5360cac229e82585a6396aaf76e9005d2a0bf547b44"
+      "sha256": "sha256:e337d353b288d39baa431293af066e1b5d7226a4acc753aae6324a7423e24cac"
     }
   },
   "compatibility": {
     "minimum_cpa_version": "v8.0.55"
   },
-  "supported_modes": ["docker", "native", "panel-only"],
+  "supported_modes": [
+    "docker",
+    "native",
+    "panel-only"
+  ],
   "supported_platforms": {
-    "docker": ["linux/amd64"],
-    "native": ["linux/amd64"]
+    "docker": [
+      "linux/amd64"
+    ],
+    "native": [
+      "linux/amd64"
+    ]
   },
   "pairing": {
     "filename": "embedded-release-pairing.json",
-    "source_commit": "8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc",
-    "fullweb_manifest_sha256": "sha256:e672356a4516a01619b9b0924c11ad2db9ee1be9b7bf473d5457c248a525350d",
-    "api_contract_sha256": "sha256:3c58e25f608451675f2ab7c68f5dcfcc410680e0d4fcf355de9352d442cbd8d5",
-    "compose_sha256": "sha256:bace609b570324070429c5360cac229e82585a6396aaf76e9005d2a0bf547b44"
+    "source_commit": "23bd1b3536120263ad7fb4b003349f2cfed0e557",
+    "fullweb_manifest_sha256": "sha256:ca7f395bf1abaa9591d4284e84c5c4902ab572c6419db8630cb526c6252bdca8",
+    "api_contract_sha256": "sha256:7523f609030f5557943482242c24075190377a6633e59bc673e2a5c3f17d779d",
+    "compose_sha256": "sha256:e337d353b288d39baa431293af066e1b5d7226a4acc753aae6324a7423e24cac"
   }
 }

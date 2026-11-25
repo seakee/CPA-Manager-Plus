@@ -576,16 +576,69 @@ func TestPrepareNonemptyRuntimeRootWithoutMarkerRefused(t *testing.T) {
 	}
 }
 
-func TestPrepareConfigModifiedVsSeedRefused(t *testing.T) {
+func TestPreparePreservesHistoricalBootstrapSeedAcrossOfficialSeedChange(t *testing.T) {
+	const marker = "/data/runtime/.cpamp-v8-bootstrap"
+	const config = "/data/runtime/gateway/config.yaml"
+	seed, err := os.ReadFile("../../../../docker/runtime/config.v8.default.seed.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineage, err := os.ReadFile("../../../../docker/runtime/seed-lineage.json")
+	if err != nil {
+		t.Fatal(err)
+	}
 	sys := newFakeSystem(t)
+	sys.mustSeedFile(t, DefaultSeedConfigPath, seed, RootUID, RootGID, 0o644)
 	if _, err := prepare(PrepareConfig{}, sys); err != nil {
-		t.Fatalf("initial prepare failed: %v", err)
+		t.Fatal(err)
+	}
+	sys.mustSeedFile(t, DefaultSeedLineagePath, lineage, RootUID, RootGID, 0o444)
+	sys.mustSeedFile(t, DefaultSeedConfigPath, []byte(testSeedYAML+"# new image seed\n"), RootUID, RootGID, 0o444)
+	if _, err := prepare(PrepareConfig{}, sys); err != nil {
+		t.Fatalf("expected unmodified historical bootstrap config to be accepted after seed upgrade, got: %v", err)
+	}
+	if actual, err := sys.ReadFile(config); err != nil || !bytes.Equal(actual, seed) {
+		t.Fatalf("historical bootstrap config changed: %v", err)
+	}
+	if actual, err := sys.ReadFile(marker); err != nil || string(actual) != computeBootstrapIdentity(seed)+"\n" {
+		t.Fatalf("bootstrap marker changed: %q, %v", actual, err)
 	}
 
-	sys.mustSeedFile(t, "/data/runtime/gateway/config.yaml", []byte("port: 9999\n"), 10001, 10001, 0o0600)
-	_, err := prepare(PrepareConfig{}, sys)
-	if err == nil || !strings.Contains(err.Error(), "Default CPA v8 refuses existing or unknown Runtime data: modified or incompatible bootstrap config") {
-		t.Fatalf("expected modified bootstrap config refusal, got: %v", err)
+	tampered := append(bytes.Clone(seed), []byte("\n# unknown edit\n")...)
+	sys.mustSeedFile(t, config, tampered, CPAUID, CPAGID, GatewayConfigMode)
+	if _, err := prepare(PrepareConfig{}, sys); err == nil || !strings.Contains(err.Error(), "modified or incompatible bootstrap config") {
+		t.Fatalf("expected tampered bootstrap config to be refused, got: %v", err)
+	}
+}
+
+func TestPrepareRejectsUntrustedBootstrapConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		content  []byte
+		uid, gid int
+		mode     fs.FileMode
+	}{
+		{"wrong owner", []byte(testSeedYAML), RootUID, CPAGID, GatewayConfigMode},
+		{"wrong group", []byte(testSeedYAML), CPAUID, RootGID, GatewayConfigMode},
+		{"wrong mode", []byte(testSeedYAML), CPAUID, CPAGID, 0o644},
+		{"empty", nil, CPAUID, CPAGID, GatewayConfigMode},
+		{"too large", make([]byte, 64<<10+1), CPAUID, CPAGID, GatewayConfigMode},
+		{"setuid bit", []byte(testSeedYAML), CPAUID, CPAGID, fs.ModeSetuid | GatewayConfigMode},
+		{"setgid bit", []byte(testSeedYAML), CPAUID, CPAGID, fs.ModeSetgid | GatewayConfigMode},
+		{"sticky bit", []byte(testSeedYAML), CPAUID, CPAGID, fs.ModeSticky | GatewayConfigMode},
+		{"unix 04600 setuid", []byte(testSeedYAML), CPAUID, CPAGID, 0o4600},
+		{"unix 01600 sticky", []byte(testSeedYAML), CPAUID, CPAGID, 0o1600},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sys := newFakeSystem(t)
+			if _, err := prepare(PrepareConfig{}, sys); err != nil {
+				t.Fatal(err)
+			}
+			sys.mustSeedFile(t, "/data/runtime/gateway/config.yaml", tc.content, tc.uid, tc.gid, tc.mode)
+			if _, err := prepare(PrepareConfig{}, sys); err == nil || !strings.Contains(err.Error(), "bootstrap config") {
+				t.Fatalf("expected bootstrap config refusal, got %v", err)
+			}
+		})
 	}
 }
 
@@ -754,9 +807,9 @@ func TestPrepareArtifactManifestV8BootstrapSelection(t *testing.T) {
 			t.Fatalf("initial v8 prepare failed: %v", err)
 		}
 		sys.assertNode(t, "/data/runtime/.cpamp-v8-bootstrap", 0, 0, 0o0444, false)
-		sys.mustSeedFile(t, "/data/runtime/gateway/config.yaml", []byte(testSeedYAML+"# modified\n"), 10001, 10001, 0o0600)
-		if _, err := prepare(PrepareConfig{}, sys); err == nil || !strings.Contains(err.Error(), "modified or incompatible bootstrap config") {
-			t.Fatalf("expected v8 manifest to refuse modified config, got: %v", err)
+		sys.mustSeedFile(t, "/data/runtime/gateway/config.yaml", nil, CPAUID, CPAGID, GatewayConfigMode)
+		if _, err := prepare(PrepareConfig{}, sys); err == nil || !strings.Contains(err.Error(), "invalid bootstrap config size") {
+			t.Fatalf("expected v8 manifest to refuse empty config, got: %v", err)
 		}
 	})
 	t.Run("v7 manifest (6.x) skips bootstrap guard and survives modified config across re-prepare", func(t *testing.T) {
@@ -1228,6 +1281,274 @@ func TestWalkGatewayDirFDBindsDescriptorAndEnforcesTypeDeviceAndDepthBounds(t *t
 		depthErr := repairGatewayTreeNoFollowFDWithChown(context.Background(), layout, os.Getuid(), os.Getgid(), fchownGatewayEntryFD)
 		if depthErr == nil || !strings.Contains(depthErr.Error(), "exceeds maximum depth 16") {
 			t.Fatalf("expected depth > 16 refusal, got: %v", depthErr)
+		}
+	})
+}
+
+func TestPrepareCustomPrefixAndStrictBootstrapValidation(t *testing.T) {
+	officialSeed, err := os.ReadFile("../../../../docker/runtime/config.v8.default.seed.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	officialLineage, err := os.ReadFile("../../../../docker/runtime/seed-lineage.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("custom prefix derives sibling seed-lineage.json and honors custom manifest", func(t *testing.T) {
+		const (
+			customRuntimeShare = "/opt/cpa-manager-plus/share/cpamp/runtime"
+			customSeedPath     = customRuntimeShare + "/config.seed.yaml"
+			customLineagePath  = customRuntimeShare + "/seed-lineage.json"
+			customManifestPath = customRuntimeShare + "/cpa-artifact.json"
+		)
+		sys := newFakeSystem(t)
+		manifestBytes, err := sys.ReadFile(DefaultCPAArtifactManifestPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Remove Docker default paths so any hardcoded /usr/local/share lookup fails.
+		if err := sys.Remove(DefaultSeedConfigPath); err != nil {
+			t.Fatal(err)
+		}
+		if err := sys.Remove(DefaultCPAArtifactManifestPath); err != nil {
+			t.Fatal(err)
+		}
+
+		sys.mustSeedFile(t, customSeedPath, officialSeed, RootUID, RootGID, 0o0644)
+		sys.mustSeedFile(t, customManifestPath, manifestBytes, RootUID, RootGID, 0o0644)
+
+		cfg := PrepareConfig{
+			SeedConfigPath:          customSeedPath,
+			CPAArtifactManifestPath: customManifestPath,
+		}
+		if _, err := prepare(cfg, sys); err != nil {
+			t.Fatalf("initial custom-prefix prepare failed: %v", err)
+		}
+
+		// Seed lineage at the derived sibling path and update the seed config.
+		sys.mustSeedFile(t, customLineagePath, officialLineage, RootUID, RootGID, 0o0644)
+		sys.mustSeedFile(t, customSeedPath, []byte(testSeedYAML+"# updated custom prefix seed\n"), RootUID, RootGID, 0o0644)
+		if _, err := prepare(cfg, sys); err != nil {
+			t.Fatalf("custom-prefix prepare across official seed change failed: %v", err)
+		}
+		if got, err := sys.ReadFile("/data/runtime/gateway/config.yaml"); err != nil || !bytes.Equal(got, officialSeed) {
+			t.Fatalf("historical bootstrap config was not preserved: %q, %v", got, err)
+		}
+
+		// Explicit SeedLineagePath overrides sibling derivation.
+		if err := sys.Remove(customLineagePath); err != nil {
+			t.Fatal(err)
+		}
+		const explicitLineagePath = "/opt/cpa-manager-plus/etc/seed-lineage.json"
+		sys.mustSeedFile(t, explicitLineagePath, officialLineage, RootUID, RootGID, 0o0644)
+		cfgExplicit := cfg
+		cfgExplicit.SeedLineagePath = explicitLineagePath
+		if _, err := prepare(cfgExplicit, sys); err != nil {
+			t.Fatalf("prepare with explicit SeedLineagePath failed: %v", err)
+		}
+
+		// Custom-prefix v6/v7 manifest is honored when DefaultCPAArtifactManifestPath is absent.
+		sysV7 := newFakeSystem(t)
+		if err := sysV7.Remove(DefaultSeedConfigPath); err != nil {
+			t.Fatal(err)
+		}
+		if err := sysV7.Remove(DefaultCPAArtifactManifestPath); err != nil {
+			t.Fatal(err)
+		}
+		sysV7.mustSeedFile(t, customSeedPath, []byte(testSeedYAML), RootUID, RootGID, 0o0644)
+		sysV7.mustSeedFile(t, customManifestPath, []byte(`{"schemaVersion":1,"engine":"cpa","version":"6.9.15","artifactId":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}`), RootUID, RootGID, 0o0644)
+		if _, err := prepare(cfg, sysV7); err != nil {
+			t.Fatalf("custom-prefix v6 manifest prepare failed: %v", err)
+		}
+		if _, err := sysV7.Lstat("/data/runtime/.cpamp-v8-bootstrap"); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("expected no v8 bootstrap marker for custom-prefix v6 manifest, got err=%v", err)
+		}
+
+		// Env override CPAMP_CPA_ARTIFACT_MANIFEST still cannot disable v8 bootstrap enforcement.
+		t.Setenv("CPAMP_CPA_ARTIFACT_MANIFEST", customManifestPath)
+		sysEnv := newFakeSystem(t)
+		sysEnv.mustSeedFile(t, customManifestPath, []byte(`{"schemaVersion":1,"engine":"cpa","version":"6.9.15","artifactId":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}`), RootUID, RootGID, 0o0644)
+		sysEnv.mustSeedDir(t, "/data/runtime", 0, 0, 0o0711)
+		sysEnv.mustSeedDir(t, "/data/runtime/unknown", 0, 0, 0o0700)
+		if _, err := prepare(PrepareConfigFromEnv(), sysEnv); err == nil || !strings.Contains(err.Error(), "nonempty volume without v8 bootstrap identity") {
+			t.Fatalf("expected PrepareConfigFromEnv to enforce DefaultCPAArtifactManifestPath, got: %v", err)
+		}
+	})
+
+	t.Run("untrusted or malformed seed-lineage.json fails closed without mutation", func(t *testing.T) {
+		cases := []struct {
+			name  string
+			setup func(*testing.T, *fakeSystem)
+		}{
+			{
+				name: "corrupt JSON",
+				setup: func(t *testing.T, sys *fakeSystem) {
+					sys.mustSeedFile(t, DefaultSeedLineagePath, []byte("{corrupt"), RootUID, RootGID, 0o0644)
+				},
+			},
+			{
+				name: "unsupported schemaVersion",
+				setup: func(t *testing.T, sys *fakeSystem) {
+					sys.mustSeedFile(t, DefaultSeedLineagePath, []byte(`{"schemaVersion":2,"acceptedBootstrapIdentities":[]}`), RootUID, RootGID, 0o0644)
+				},
+			},
+			{
+				name: "trailing JSON content",
+				setup: func(t *testing.T, sys *fakeSystem) {
+					sys.mustSeedFile(t, DefaultSeedLineagePath, append(append([]byte(nil), officialLineage...), []byte(" {}")...), RootUID, RootGID, 0o0644)
+				},
+			},
+			{
+				name: "invalid identity digest",
+				setup: func(t *testing.T, sys *fakeSystem) {
+					sys.mustSeedFile(t, DefaultSeedLineagePath, []byte(`{"schemaVersion":1,"acceptedBootstrapIdentities":["official-cpa-v8-bootstrap:short"]}`), RootUID, RootGID, 0o0644)
+				},
+			},
+			{
+				name: "non-root UID",
+				setup: func(t *testing.T, sys *fakeSystem) {
+					sys.mustSeedFile(t, DefaultSeedLineagePath, officialLineage, 1000, RootGID, 0o0644)
+				},
+			},
+			{
+				name: "non-root GID",
+				setup: func(t *testing.T, sys *fakeSystem) {
+					sys.mustSeedFile(t, DefaultSeedLineagePath, officialLineage, RootUID, 1000, 0o0644)
+				},
+			},
+			{
+				name: "group-writable",
+				setup: func(t *testing.T, sys *fakeSystem) {
+					sys.mustSeedFile(t, DefaultSeedLineagePath, officialLineage, RootUID, RootGID, 0o0664)
+				},
+			},
+			{
+				name: "world-writable",
+				setup: func(t *testing.T, sys *fakeSystem) {
+					sys.mustSeedFile(t, DefaultSeedLineagePath, officialLineage, RootUID, RootGID, 0o0646)
+				},
+			},
+			{
+				name: "setuid bit",
+				setup: func(t *testing.T, sys *fakeSystem) {
+					sys.mustSeedFile(t, DefaultSeedLineagePath, officialLineage, RootUID, RootGID, fs.ModeSetuid|0o0644)
+				},
+			},
+			{
+				name: "sticky bit",
+				setup: func(t *testing.T, sys *fakeSystem) {
+					sys.mustSeedFile(t, DefaultSeedLineagePath, officialLineage, RootUID, RootGID, fs.ModeSticky|0o0644)
+				},
+			},
+			{
+				name: "symlink",
+				setup: func(t *testing.T, sys *fakeSystem) {
+					sys.mustSeedFile(t, "/usr/local/share/cpamp/runtime/real-lineage.json", officialLineage, RootUID, RootGID, 0o0644)
+					sys.mustSeedSymlink(t, "/usr/local/share/cpamp/runtime/real-lineage.json", DefaultSeedLineagePath, RootUID, RootGID)
+				},
+			},
+			{
+				name: "empty file",
+				setup: func(t *testing.T, sys *fakeSystem) {
+					sys.mustSeedFile(t, DefaultSeedLineagePath, nil, RootUID, RootGID, 0o0644)
+				},
+			},
+			{
+				name: "oversized file",
+				setup: func(t *testing.T, sys *fakeSystem) {
+					sys.mustSeedFile(t, DefaultSeedLineagePath, bytes.Repeat([]byte(" "), maxSeedLineageBytes+1), RootUID, RootGID, 0o0644)
+				},
+			},
+			{
+				name: "read error",
+				setup: func(t *testing.T, sys *fakeSystem) {
+					sys.mustSeedFile(t, DefaultSeedLineagePath, officialLineage, RootUID, RootGID, 0o0644)
+					sys.readFileErr = map[string]error{DefaultSeedLineagePath: errors.New("io read failure")}
+				},
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				sys := newFakeSystem(t)
+				sys.mustSeedFile(t, DefaultSeedConfigPath, officialSeed, RootUID, RootGID, 0o0644)
+				if _, err := prepare(PrepareConfig{}, sys); err != nil {
+					t.Fatal(err)
+				}
+				sys.mustSeedFile(t, DefaultSeedConfigPath, []byte(testSeedYAML+"# next seed\n"), RootUID, RootGID, 0o0644)
+				tc.setup(t, sys)
+
+				before := sys.mutations
+				_, err := prepare(PrepareConfig{}, sys)
+				if err == nil || !strings.Contains(err.Error(), "invalid or untrusted seed lineage") {
+					t.Fatalf("expected invalid or untrusted seed lineage refusal for %s, got: %v", tc.name, err)
+				}
+				if sys.mutations != before {
+					t.Fatalf("seed lineage refusal (%s) mutated volume %d times; want 0", tc.name, sys.mutations-before)
+				}
+			})
+		}
+	})
+
+	t.Run("untrusted GatewayDir ownership permissions or special bits fail closed without mutation", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			uid  int
+			gid  int
+			perm fs.FileMode
+		}{
+			{name: "wrong owner", uid: RootUID, gid: CPAGID, perm: GatewayDirMode},
+			{name: "wrong group", uid: CPAUID, gid: RootGID, perm: GatewayDirMode},
+			{name: "wrong mode", uid: CPAUID, gid: CPAGID, perm: 0o0755},
+			{name: "setgid bit", uid: CPAUID, gid: CPAGID, perm: fs.ModeSetgid | GatewayDirMode},
+			{name: "sticky bit", uid: CPAUID, gid: CPAGID, perm: fs.ModeSticky | GatewayDirMode},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				sys := newFakeSystem(t)
+				if _, err := prepare(PrepareConfig{}, sys); err != nil {
+					t.Fatal(err)
+				}
+				sys.meta["/data/runtime/gateway"] = nodeMeta{
+					uid:  tc.uid,
+					gid:  tc.gid,
+					perm: NormalizeUnixPerm(tc.perm),
+				}
+				before := sys.mutations
+				_, err := prepare(PrepareConfig{}, sys)
+				if err == nil || !strings.Contains(err.Error(), "Gateway directory") {
+					t.Fatalf("expected Gateway directory refusal for %s, got: %v", tc.name, err)
+				}
+				if sys.mutations != before {
+					t.Fatalf("GatewayDir refusal (%s) mutated volume %d times; want 0", tc.name, sys.mutations-before)
+				}
+			})
+		}
+	})
+
+	t.Run("osSystem seed lineage single-fd checks missing symlink and non-root", func(t *testing.T) {
+		dir := t.TempDir()
+		missingPath := filepath.Join(dir, "missing-seed-lineage.json")
+		if accepted, err := acceptsHistoricalBootstrap("official-cpa-v8-bootstrap:"+strings.Repeat("0", 64), missingPath, osSystem{}); err != nil || accepted {
+			t.Fatalf("missing osSystem lineage = (%v, %v); want (false, nil)", accepted, err)
+		}
+
+		targetPath := filepath.Join(dir, "target.json")
+		if err := os.WriteFile(targetPath, officialLineage, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		symlinkPath := filepath.Join(dir, "symlink-lineage.json")
+		if err := os.Symlink(targetPath, symlinkPath); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := acceptsHistoricalBootstrap("official-cpa-v8-bootstrap:"+strings.Repeat("0", 64), symlinkPath, osSystem{}); err == nil || !strings.Contains(err.Error(), "invalid or untrusted seed lineage") {
+			t.Fatalf("symlink osSystem lineage = %v; want refusal", err)
+		}
+
+		if os.Getuid() != RootUID {
+			if _, err := acceptsHistoricalBootstrap("official-cpa-v8-bootstrap:"+strings.Repeat("0", 64), targetPath, osSystem{}); err == nil || !strings.Contains(err.Error(), "invalid or untrusted seed lineage") {
+				t.Fatalf("non-root osSystem lineage = %v; want refusal", err)
+			}
 		}
 	})
 }

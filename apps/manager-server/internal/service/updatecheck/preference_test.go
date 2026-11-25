@@ -15,7 +15,7 @@ import (
 func TestPersistChannelPreservesMetadataAndDrivesChecker(t *testing.T) {
 	ctx := context.Background()
 	store := &memoryStore{}
-	s, _, indices := testService(t, "v1.0.0", "v1.1.0", store)
+	s, _, indices := testService(t, "v2.0.0", "v2.1.0", store)
 	if _, err := s.Check(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestPersistChannelPreservesMetadataAndDrivesChecker(t *testing.T) {
 	if err != nil || status.LastError == "" || status.Channel != "beta" {
 		t.Fatalf("checker did not consume preference: %+v %v", status, err)
 	}
-	restarted := New(store, "v1.0.0", "test", false)
+	restarted := New(store, "v2.0.0", "test", false)
 	if channel, err := restarted.SavedChannel(ctx); err != nil || channel != "beta" {
 		t.Fatalf("restart: %s %v", channel, err)
 	}
@@ -101,7 +101,7 @@ func TestUnacknowledgedPreferenceReloadsBeforeNextCheck(t *testing.T) {
 func TestSavedChannelReadsStoreAndFailureDoesNotOverwritePreference(t *testing.T) {
 	ctx := context.Background()
 	store := &memoryStore{}
-	s := New(store, "v1.0.0", "test", false)
+	s := New(store, "v2.0.0", "test", false)
 	if channel, err := s.SavedChannel(ctx); err != nil || channel != "auto" {
 		t.Fatal(channel, err)
 	}
@@ -134,9 +134,9 @@ func TestSavedChannelReadsStoreAndFailureDoesNotOverwritePreference(t *testing.T
 }
 
 func TestConcurrentPreferenceSavesAndChecks(t *testing.T) {
-	s, _, _ := testService(t, "v1.0.0", "v1.1.0", &memoryStore{})
+	s, _, _ := testService(t, "v2.0.0", "v2.1.0", &memoryStore{})
 	var wg sync.WaitGroup
-	for i := 0; i < 12; i++ {
+	for range 12 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

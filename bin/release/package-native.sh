@@ -412,6 +412,8 @@ package_v2_linux_amd64() {
     cp "${repo_root}/docker/runtime/config.v8.default.seed.yaml" "${package_dir}/share/cpamp/runtime/config.seed.yaml"
     chmod 0644 "${package_dir}/share/cpamp/runtime/config.seed.yaml"
   fi
+  cp "${repo_root}/docker/runtime/seed-lineage.json" "${package_dir}/share/cpamp/runtime/seed-lineage.json"
+  chmod 0644 "${package_dir}/share/cpamp/runtime/seed-lineage.json"
 
   # Build the 3 Go binaries (Manager, Ingress, Runtime Supervisor) from source.
   if [ ! -f "${web_html}" ]; then

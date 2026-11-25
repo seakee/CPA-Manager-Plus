@@ -293,22 +293,25 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
     }
   });
 
-  it('renders digest-pinned single-image compose and pairing manifest that pass Runtime 12/18 validation', () => {
+  it.each([
+    ['v2.0.0-beta.1', '2.0.0-beta.1'],
+    ['2.0.0-r1candidate', '2.0.0-r1candidate'],
+  ])('renders digest-pinned single-image compose and pairing for %s', (version, baseTag) => {
     const evidence = makeCandidateEvidence();
     const { composeYaml, composeJson, pairing } = renderEmbeddedReleaseArtifacts(evidence, {
-      version: 'v2.0.0-beta.1',
+      version,
     });
 
     expect(composeYaml).not.toContain(':latest');
     expect(composeYaml).not.toMatch(/^\s*build\s*:/m);
     expect(composeYaml).not.toContain('CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK');
     expect(composeJson.services['cpa-manager-plus'].image).toBe(
-      `seakee/cpa-manager-plus:v2.0.0-beta.1@${evidence.images.full.platformManifestDigest}`
+      `seakee/cpa-manager-plus:${baseTag}-full@${evidence.images.full.platformManifestDigest}`
     );
 
     expect(pairing).toMatchObject({
       schema_version: 1,
-      version: 'v2.0.0-beta.1',
+      version,
       source_commit: sourceCommit,
       platform: 'linux/amd64',
       cpa: {
@@ -329,6 +332,16 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
       compose: {
         filename: COMPOSE_FILENAME,
         size: Buffer.byteLength(composeYaml, 'utf8'),
+      },
+      images: {
+        slim: {
+          tag: baseTag,
+          image_ref: `seakee/cpa-manager-plus:${baseTag}@${evidence.images.slim.platformManifestDigest}`,
+        },
+        full: {
+          tag: `${baseTag}-full`,
+          image_ref: composeJson.services['cpa-manager-plus'].image,
+        },
       },
     });
     expect(pairing.images.slim.image_config_digest).toBe(
@@ -364,10 +377,22 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
       renderEmbeddedReleaseArtifacts(evidence, {
         version: 'v2.0.0-beta.1',
         imageRefs: {
-          slim: 'seakee/cpa-manager-plus:v2.0.0-beta.1',
+          slim: 'seakee/cpa-manager-plus:2.0.0-beta.1',
         },
       })
     ).toThrow(/@sha256/);
+
+    const oldFullRef = pairing.images.full.image_ref.replace(':2.0.0-beta.1-full@', ':v2.0.0-beta.1@');
+    expect(() => renderEmbeddedReleaseArtifacts(evidence, {
+      version: pairing.version,
+      imageRefs: { full: oldFullRef },
+    })).toThrow(/full image reference tag/);
+    const legacyPairing = structuredClone(pairing);
+    legacyPairing.images.full.tag = legacyPairing.version;
+    legacyPairing.images.full.image_ref = oldFullRef;
+    expect(() => verifyEmbeddedReleaseArtifacts({
+      evidence, composeText: composeYaml, pairing: legacyPairing,
+    })).toThrow(/pairing image tag for full/);
 
     // 3. Mismatched explicit digest for any variant
     expect(() =>
@@ -978,7 +1003,7 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
 
   it('keeps template verification independent of deployment host binding', () => {
     const refs = Object.fromEntries(['slim', 'full'].map(role => [role,
-      `seakee/cpa-manager-plus:v2.0.0-beta.1@${makeCandidateEvidence().images[role].platformManifestDigest}`]));
+      `seakee/cpa-manager-plus:2.0.0-beta.1${role === 'full' ? '-full' : ''}@${makeCandidateEvidence().images[role].platformManifestDigest}`]));
     const compose = renderEmbeddedComposeYaml(refs);
     const path = join(fixtureDir, 'port-template.yml');
     writeFileSync(path, compose);

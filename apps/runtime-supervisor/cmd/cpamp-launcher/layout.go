@@ -33,6 +33,7 @@ const (
 	DefaultRuntimeSecretDir         = "/data/runtime-secret"
 	DefaultRuntimeTokenFile         = "/data/runtime-secret/token"
 	DefaultSeedConfigPath           = "/usr/local/share/cpamp/runtime/config.seed.yaml"
+	DefaultSeedLineagePath          = "/usr/local/share/cpamp/runtime/seed-lineage.json"
 	DefaultSupervisorExecutablePath = "/usr/local/bin/cpamp-runtime-supervisor"
 	DefaultManagerExecutablePath    = "/usr/local/bin/cpa-manager-plus"
 	DefaultIngressExecutablePath    = "/usr/local/bin/cpamp-ingress"
@@ -172,6 +173,20 @@ func ResolveRuntimeLayout(dataDir, runtimeRoot, tokenFile string) RuntimeLayout 
 		TokenDir:            filepath.Dir(tokenFile),
 		TokenFile:           tokenFile,
 	}
+}
+
+// ResolveSeedLineagePath returns the explicit seed-lineage path when provided,
+// derives sibling seed-lineage.json when seedConfigPath uses a non-default
+// installation prefix, or falls back to DefaultSeedLineagePath.
+func ResolveSeedLineagePath(seedConfigPath, seedLineagePath string) string {
+	if trimmed := strings.TrimSpace(seedLineagePath); trimmed != "" {
+		return trimmed
+	}
+	trimmedSeed := strings.TrimSpace(seedConfigPath)
+	if trimmedSeed != "" && trimmedSeed != DefaultSeedConfigPath {
+		return filepath.Join(filepath.Dir(trimmedSeed), "seed-lineage.json")
+	}
+	return DefaultSeedLineagePath
 }
 
 // SelectRuntimeRoot parses Linux /proc/self/mountinfo content and returns

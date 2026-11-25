@@ -317,6 +317,13 @@ describe('v2 beta release content continuity', () => {
     expect(validateReleaseContent({ tag: v2Tag, dryRun: true, allowV2Beta: true })).toMatchObject({
       paths: { telegram: `docs/release-posts/${v2Tag}-telegram.html` },
     });
+    // The first Beta must still direct 1.x users to migration, not an in-place update.
+    const notes = readFileSync(new URL(`../docs/release-notes/${v2Tag}-zh.md`, import.meta.url), 'utf8');
+    const metadata = JSON.parse(notes.match(/<!-- cpamp-update\n([\s\S]*?)-->/)[1]);
+    expect(metadata.update).toMatchObject({
+      migration_required: true,
+      minimum_direct_upgrade_version: 'v1.14.10',
+    });
     for (const options of [{}, { dryRun: true }, { allowV2Beta: true }]) {
       expect(() => validateReleaseContent({ tag: v2Tag, ...options })).toThrow(/fail-closed/);
     }
@@ -362,17 +369,77 @@ describe('v2 beta release content continuity', () => {
     const changedFiles = [`docs/release-notes/${v2Tag}-zh.md`, `docs/release-notes/${v2Tag}-en.md`, `docs/release-posts/${v2Tag}-telegram.html`];
     expect(() => validateChangedReleaseContent({ changedFiles })).toThrow(/fail-closed/);
     expect(validateChangedReleaseContent({ changedFiles, dryRun: true, allowV2Beta: true }).tags).toEqual([v2Tag]);
+    const original = readFileSync(new URL(`../docs/release-notes/${v2Tag}-zh.md`, import.meta.url), 'utf8');
+    const baseMetadata = JSON.parse(/<!-- cpamp-update\s*([\s\S]*?)-->/.exec(original)[1]);
+
+    const validDocsMetadata = structuredClone(baseMetadata);
+    validDocsMetadata.update = {
+      breaking: false,
+      migration_required: false,
+      minimum_direct_upgrade_version: null,
+      upgrade_guide_url: 'https://cpamp-docs.seakee.dev/next/operations/update.html',
+    };
+    expect(() =>
+      validateReleaseContent({
+        tag: v2Tag,
+        dryRun: true,
+        allowV2Beta: true,
+        readFile: (filePath) =>
+          filePath.endsWith('-zh.md')
+            ? original.replace(
+                /<!-- cpamp-update[\s\S]*?-->/,
+                `<!-- cpamp-update\n${JSON.stringify(validDocsMetadata)}\n-->`
+              )
+            : readFileSync(filePath, 'utf8'),
+      })
+    ).not.toThrow();
+
     for (const [field, value] of [
       ['summary', { zh: '', en: 'Beta' }],
-      ['update', { breaking: true, migration_required: false, minimum_direct_upgrade_version: 'v1.14.10', upgrade_guide_url: 'https://github.com/seakee/CPA-Manager-Plus/releases/tag/' + v2Tag }],
+      [
+        'update',
+        {
+          breaking: true,
+          migration_required: 'no',
+          minimum_direct_upgrade_version: 'v1.14.10',
+          upgrade_guide_url: 'https://github.com/seakee/CPA-Manager-Plus/releases/tag/' + v2Tag,
+        },
+      ],
+      [
+        'update',
+        {
+          breaking: false,
+          migration_required: false,
+          upgrade_guide_url: 'https://cpamp-docs.seakee.dev/next/operations/update.html',
+        },
+      ],
+      [
+        'update',
+        {
+          breaking: false,
+          migration_required: false,
+          minimum_direct_upgrade_version: 'v2.0.0-beta.1',
+          upgrade_guide_url: 'http://cpamp-docs.seakee.dev/next/operations/update.html',
+        },
+      ],
       ['compatibility', { minimum_cpa_version: 'v7.0.0' }],
     ]) {
-      const original = readFileSync(new URL(`../docs/release-notes/${v2Tag}-zh.md`, import.meta.url), 'utf8');
-      const metadata = JSON.parse(/<!-- cpamp-update\s*([\s\S]*?)-->/.exec(original)[1]);
+      const metadata = structuredClone(baseMetadata);
       metadata[field] = value;
-      expect(() => validateReleaseContent({ tag: v2Tag, dryRun: true, allowV2Beta: true,
-        readFile: (filePath) => filePath.endsWith('-zh.md') ? original.replace(/<!-- cpamp-update[\s\S]*?-->/, `<!-- cpamp-update\n${JSON.stringify(metadata)}\n-->`) : readFileSync(filePath, 'utf8'),
-      })).toThrow();
+      expect(() =>
+        validateReleaseContent({
+          tag: v2Tag,
+          dryRun: true,
+          allowV2Beta: true,
+          readFile: (filePath) =>
+            filePath.endsWith('-zh.md')
+              ? original.replace(
+                  /<!-- cpamp-update[\s\S]*?-->/,
+                  `<!-- cpamp-update\n${JSON.stringify(metadata)}\n-->`
+                )
+              : readFileSync(filePath, 'utf8'),
+        })
+      ).toThrow();
     }
   });
 

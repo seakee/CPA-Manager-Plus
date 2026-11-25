@@ -12,16 +12,44 @@ import (
 )
 
 const Repository = "https://github.com/seakee/CPA-Manager-Plus"
-const IndexURL = "https://raw.githubusercontent.com/seakee/CPA-Manager-Plus/update-channel/update-index.json"
+const DocsBaseURL = "https://cpamp-docs.seakee.dev"
+const IndexURL = "https://raw.githubusercontent.com/seakee/CPA-Manager-Plus/update-channel/update-index-v2.json"
+
+var (
+	sha256Pattern       = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	sourceCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	nativeAssetPattern  = regexp.MustCompile(`^cpa-manager-plus-native-v2_(.+)_(darwin|linux|windows)_(amd64|arm64)\.(?:tar\.gz|zip)$`)
+)
 
 type Target struct {
-	Version string `json:"version"`
+	Version           string `json:"version"`
+	SchemaVersion     int    `json:"schema_version"`
+	ReleaseInfoPath   string `json:"release_info_path"`
+	ReleaseInfoSHA256 string `json:"release_info_sha256,omitempty"`
 }
 type Index struct {
 	SchemaVersion int                `json:"schema_version"`
 	Revision      int64              `json:"revision"`
 	GeneratedAt   time.Time          `json:"generated_at"`
 	Channels      map[string]*Target `json:"channels"`
+}
+type DockerImage struct {
+	Role      string   `json:"role"`
+	Name      string   `json:"name"`
+	Tag       string   `json:"tag"`
+	Digest    string   `json:"digest"`
+	Platforms []string `json:"platforms"`
+}
+type ComposeDistribution struct {
+	Filename string `json:"filename"`
+	SHA256   string `json:"sha256"`
+}
+type ReleasePairing struct {
+	Filename              string `json:"filename"`
+	SourceCommit          string `json:"source_commit"`
+	FullWebManifestSHA256 string `json:"fullweb_manifest_sha256"`
+	APIContractSHA256     string `json:"api_contract_sha256"`
+	ComposeSHA256         string `json:"compose_sha256"`
 }
 type ReleaseInfo struct {
 	SchemaVersion int `json:"schema_version"`
@@ -42,16 +70,20 @@ type ReleaseInfo struct {
 	} `json:"update"`
 	Distribution struct {
 		Docker struct {
-			Image      string `json:"image"`
-			VersionTag string `json:"version_tag"`
+			VersionTag string        `json:"version_tag"`
+			Images     []DockerImage `json:"images"`
 		} `json:"docker"`
 		Native struct {
 			Assets []string `json:"assets"`
 		} `json:"native"`
+		Compose *ComposeDistribution `json:"compose,omitempty"`
 	} `json:"distribution"`
 	Compatibility struct {
 		MinimumCPAVersion *string `json:"minimum_cpa_version"`
 	} `json:"compatibility"`
+	SupportedModes     []string            `json:"supported_modes,omitempty"`
+	SupportedPlatforms map[string][]string `json:"supported_platforms,omitempty"`
+	Pairing            *ReleasePairing     `json:"pairing,omitempty"`
 }
 
 // Require explicit compatibility and migration decisions; JSON null must not
@@ -91,8 +123,26 @@ func (info *ReleaseInfo) UnmarshalJSON(data []byte) error {
 	*info = ReleaseInfo(decoded)
 	return nil
 }
+func isV2OrNewer(v Version) bool {
+	return len(v.core) == 3 && v.core[0] != "0" && v.core[0] != "1"
+}
+func isSafeFilename(name string) bool {
+	return name != "" &&
+		strings.TrimSpace(name) == name &&
+		name != "." &&
+		name != ".." &&
+		!strings.ContainsAny(name, `/\`)
+}
+func hasDotPathSegment(rawPath string) bool {
+	for _, seg := range strings.Split(rawPath, "/") {
+		if seg == "." || seg == ".." {
+			return true
+		}
+	}
+	return false
+}
 func (idx Index) Validate() error {
-	if idx.SchemaVersion != 1 || idx.Revision < 1 || idx.GeneratedAt.IsZero() {
+	if idx.SchemaVersion != 2 || idx.Revision < 1 || idx.GeneratedAt.IsZero() {
 		return errors.New("invalid update index")
 	}
 	for _, ch := range []string{"stable", "rc", "beta"} {
@@ -104,23 +154,57 @@ func (idx Index) Validate() error {
 			continue
 		}
 		v, err := ParseVersion(t.Version)
-		if err != nil || !strings.HasPrefix(t.Version, "v") || strings.Contains(t.Version, "+") || !allowed(ch, v.Stage) {
+		if err != nil || !strings.HasPrefix(t.Version, "v") || strings.Contains(t.Version, "+") || !isV2OrNewer(v) || !allowed(ch, v.Stage) {
 			return errors.New("invalid channel target")
+		}
+		if t.SchemaVersion != 2 {
+			return errors.New("invalid channel target schema")
+		}
+		if t.ReleaseInfoPath != "releases/download/"+t.Version+"/release-info.json" {
+			return errors.New("invalid channel target path")
+		}
+		if t.ReleaseInfoSHA256 == "" || !sha256Pattern.MatchString(t.ReleaseInfoSHA256) {
+			return errors.New("invalid channel target digest")
 		}
 	}
 	return nil
 }
-func safeLink(raw string) bool {
+func safeUpgradeGuideURL(raw string) bool {
+	if raw == "" || strings.TrimSpace(raw) != raw {
+		return false
+	}
+	if strings.ContainsAny(raw, `\#?`+"\r\n\t ") {
+		return false
+	}
 	u, err := url.Parse(raw)
-	return err == nil && u.Scheme == "https" && u.Host == "github.com" && u.User == nil && !strings.Contains(u.Path, `\`) && strings.HasPrefix(path.Clean(u.Path), "/seakee/CPA-Manager-Plus/")
+	if err != nil || u.Scheme != "https" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.RawFragment != "" {
+		return false
+	}
+	lowerRawPath := strings.ToLower(u.RawPath)
+	if strings.Contains(lowerRawPath, "%2e") || strings.Contains(lowerRawPath, "%2f") || hasDotPathSegment(u.Path) {
+		return false
+	}
+	cleanPath := path.Clean(u.Path)
+	switch u.Host {
+	case "github.com":
+		return strings.HasPrefix(cleanPath, "/seakee/CPA-Manager-Plus/") && len(cleanPath) > len("/seakee/CPA-Manager-Plus/")
+	case "cpamp-docs.seakee.dev":
+		return strings.HasPrefix(cleanPath, "/") && cleanPath != "/"
+	default:
+		return false
+	}
 }
 func (info ReleaseInfo) Validate(tag string) error {
 	v, err := ParseVersion(tag)
-	if err != nil || v.Stage == "" || !strings.HasPrefix(tag, "v") || strings.Contains(tag, "+") || info.SchemaVersion != 1 || info.Release.Version != tag || info.Release.Stage != v.Stage || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(info.Release.SourceCommit) {
+	if err != nil || v.Stage == "" || !strings.HasPrefix(tag, "v") || strings.Contains(tag, "+") || !isV2OrNewer(v) ||
+		info.SchemaVersion != 2 || info.Release.Version != tag || info.Release.Stage != v.Stage ||
+		(info.Release.Stage != "beta" && info.Release.Stage != "rc" && info.Release.Stage != "stable") ||
+		!sourceCommitPattern.MatchString(info.Release.SourceCommit) {
 		return errors.New("invalid release identity")
 	}
 	for _, lang := range []string{"zh", "en"} {
-		if strings.TrimSpace(info.Content.Summary[lang]) == "" || len(info.Content.Summary[lang]) > 4096 || info.Content.Notes[lang] != Repository+"/blob/"+tag+"/docs/release-notes/"+tag+"-"+lang+".md" {
+		if strings.TrimSpace(info.Content.Summary[lang]) == "" || len(info.Content.Summary[lang]) > 4096 ||
+			info.Content.Notes[lang] != Repository+"/blob/"+tag+"/docs/release-notes/"+tag+"-"+lang+".md" {
 			return errors.New("invalid release content")
 		}
 	}
@@ -129,37 +213,119 @@ func (info ReleaseInfo) Validate(tag string) error {
 			return e
 		}
 	}
-	if !safeLink(info.Update.UpgradeGuideURL) {
+	if !safeUpgradeGuideURL(info.Update.UpgradeGuideURL) {
 		return errors.New("invalid upgrade guide")
 	}
-	if info.Distribution.Docker.Image != "seakee/cpa-manager-plus" || info.Distribution.Docker.VersionTag != tag {
+	expectedDockerTag := strings.TrimPrefix(tag, "v")
+	if info.Distribution.Docker.VersionTag != expectedDockerTag {
 		return errors.New("invalid docker distribution")
 	}
-	if len(info.Distribution.Native.Assets) != 6 {
+	if len(info.Distribution.Docker.Images) != 4 {
+		return errors.New("invalid docker image set")
+	}
+	seenImages := map[string]bool{}
+	roleDigests := map[string]string{}
+	for _, img := range info.Distribution.Docker.Images {
+		var expectedTag string
+		switch img.Role {
+		case "slim":
+			expectedTag = expectedDockerTag
+		case "full":
+			expectedTag = expectedDockerTag + "-full"
+		default:
+			return errors.New("invalid docker image role")
+		}
+		if img.Name != "seakee/cpa-manager-plus" && img.Name != "ghcr.io/seakee/cpa-manager-plus" {
+			return errors.New("invalid docker image repository")
+		}
+		if img.Tag != expectedTag {
+			return errors.New("invalid docker image tag")
+		}
+		if !sha256Pattern.MatchString(img.Digest) {
+			return errors.New("invalid docker image digest")
+		}
+		if len(img.Platforms) == 0 {
+			return errors.New("missing docker image platforms")
+		}
+		seenPlatforms := map[string]bool{}
+		for _, p := range img.Platforms {
+			parts := strings.Split(p, "/")
+			if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" || seenPlatforms[p] {
+				return errors.New("invalid docker image platform")
+			}
+			seenPlatforms[p] = true
+		}
+		key := img.Role + "\x00" + img.Name
+		if seenImages[key] {
+			return errors.New("duplicate docker image entry")
+		}
+		seenImages[key] = true
+		if prev, ok := roleDigests[img.Role]; ok && prev != img.Digest {
+			return errors.New("docker registry digest mismatch")
+		}
+		roleDigests[img.Role] = img.Digest
+	}
+	if len(roleDigests) != 2 || roleDigests["slim"] == "" || roleDigests["full"] == "" || roleDigests["slim"] == roleDigests["full"] {
+		return errors.New("invalid docker variant digests")
+	}
+	if len(info.Distribution.Native.Assets) < 1 {
 		return errors.New("invalid native distribution")
 	}
-	seen := map[string]bool{}
+	seenAssets := map[string]bool{}
 	for _, asset := range info.Distribution.Native.Assets {
-		valid := false
-		for _, os := range []string{"darwin", "linux", "windows"} {
-			for _, arch := range []string{"amd64", "arm64"} {
-				ext := ".tar.gz"
-				if os == "windows" {
-					ext = ".zip"
-				}
-				if asset == "cpa-manager-plus_"+tag+"_"+os+"_"+arch+ext {
-					valid = true
-				}
-			}
-		}
-		if !valid || seen[asset] {
+		m := nativeAssetPattern.FindStringSubmatch(asset)
+		if m == nil || m[1] != tag || seenAssets[asset] {
 			return errors.New("invalid native asset")
 		}
-		seen[asset] = true
+		seenAssets[asset] = true
+	}
+	if info.Distribution.Compose != nil {
+		if !isSafeFilename(info.Distribution.Compose.Filename) || !sha256Pattern.MatchString(info.Distribution.Compose.SHA256) {
+			return errors.New("invalid compose distribution")
+		}
 	}
 	if info.Compatibility.MinimumCPAVersion != nil {
 		if _, e := ParseVersion(*info.Compatibility.MinimumCPAVersion); e != nil {
 			return e
+		}
+	}
+	if info.SupportedModes != nil {
+		if len(info.SupportedModes) == 0 {
+			return errors.New("empty supported modes")
+		}
+		seenModes := map[string]bool{}
+		for _, mode := range info.SupportedModes {
+			if strings.TrimSpace(mode) == "" || seenModes[mode] {
+				return errors.New("invalid supported mode")
+			}
+			seenModes[mode] = true
+		}
+	}
+	if info.SupportedPlatforms != nil {
+		for kind, plats := range info.SupportedPlatforms {
+			if strings.TrimSpace(kind) == "" || len(plats) == 0 {
+				return errors.New("invalid supported platforms")
+			}
+			seenPlats := map[string]bool{}
+			for _, p := range plats {
+				parts := strings.Split(p, "/")
+				if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" || seenPlats[p] {
+					return errors.New("invalid supported platform")
+				}
+				seenPlats[p] = true
+			}
+		}
+	}
+	if info.Pairing != nil {
+		if !isSafeFilename(info.Pairing.Filename) ||
+			info.Pairing.SourceCommit != info.Release.SourceCommit ||
+			!sha256Pattern.MatchString(info.Pairing.FullWebManifestSHA256) ||
+			!sha256Pattern.MatchString(info.Pairing.APIContractSHA256) ||
+			!sha256Pattern.MatchString(info.Pairing.ComposeSHA256) {
+			return errors.New("invalid release pairing")
+		}
+		if info.Distribution.Compose != nil && info.Pairing.ComposeSHA256 != info.Distribution.Compose.SHA256 {
+			return errors.New("release pairing compose digest mismatch")
 		}
 	}
 	return nil

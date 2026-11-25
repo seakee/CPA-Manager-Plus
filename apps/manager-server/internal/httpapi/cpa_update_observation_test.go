@@ -20,7 +20,7 @@ import (
 )
 
 func cpaUpdateObservationTarget(phase string) string {
-	return "/usage-service/runtime/updates/operations/" + phase + "?request_id=web-recover&target_version=7.3.4"
+	return "/usage-service/runtime/updates/operations/" + phase + "?request_id=web-recover&target_version=8.0.56"
 }
 
 func cpaUpdateObservationStatus() model.RuntimeObservedStatus {
@@ -52,7 +52,7 @@ func TestCPAUpdateObservationEndpointsAuthenticateAndReturnDurableEvidence(t *te
 					wantID := fmt.Sprintf("manager-cpa-update/v1:%s:%x", phase, digest)
 					if request.OperationID != wantID || string(request.OperationType) != phase+"_update" ||
 						request.ExpectedRuntimeIdentity != "runtime-http-test" || request.ExpectedRuntimeGeneration != 42 ||
-						request.TargetVersion != "7.3.4" {
+						request.TargetVersion != "8.0.56" {
 						t.Fatalf("typed Runtime request = %+v", request)
 					}
 					return cpaUpdateObservedOperation(request), nil
@@ -74,7 +74,7 @@ func TestCPAUpdateObservationEndpointsAuthenticateAndReturnDurableEvidence(t *te
 				t.Fatal(err)
 			}
 			if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" ||
-				string(got.Phase) != phase || got.RequestID != "web-recover" || got.TargetVersion != "7.3.4" ||
+				string(got.Phase) != phase || got.RequestID != "web-recover" || got.TargetVersion != "8.0.56" ||
 				got.State != cpaupdateservice.ObservationStateFailed || got.FailureCode != "activation_readiness_failed" ||
 				got.CreatedAt == nil || got.UpdatedAt == nil || got.CompletedAt == nil {
 				t.Fatalf("normalized observation = %d %+v", response.Code, got)
@@ -91,16 +91,16 @@ func TestCPAUpdateObservationStrictQueryAndEmptyBody(t *testing.T) {
 	base := cpaUpdateObservationTarget("prepare")
 	tests := map[string]struct{ target, body, method string }{
 		"missing request":        {target: strings.Replace(base, "request_id=web-recover&", "", 1)},
-		"missing target":         {target: strings.Replace(base, "&target_version=7.3.4", "", 1)},
+		"missing target":         {target: strings.Replace(base, "&target_version=8.0.56", "", 1)},
 		"duplicate request":      {target: base + "&request_id=other"},
-		"duplicate target":       {target: base + "&target_version=7.3.5"},
+		"duplicate target":       {target: base + "&target_version=8.0.57"},
 		"raw operation ID":       {target: base + "&operationId=raw-op"},
 		"raw Runtime generation": {target: base + "&expectedRuntimeGeneration=42"},
 		"artifact guard":         {target: base + "&expected_active_artifact_id=" + cpaUpdateTestArtifactID},
 		"bad escape":             {target: base + "&extra=%zz"},
 		"invalid ID":             {target: strings.Replace(base, "web-recover", url.QueryEscape("foo/bar"), 1)},
 		"oversized ID":           {target: strings.Replace(base, "web-recover", strings.Repeat("a", 65), 1)},
-		"invalid version":        {target: strings.Replace(base, "7.3.4", "latest", 1)},
+		"invalid version":        {target: strings.Replace(base, "8.0.56", "latest", 1)},
 		"non-empty body":         {target: base, body: "{}"},
 		"POST":                   {target: base, method: http.MethodPost},
 	}
@@ -195,7 +195,7 @@ func TestCPAUpdateObservationUsesEmbeddedGETAndHidesRuntimeMessage(t *testing.T)
 			return
 		}
 		if r.URL.Path != "/v1/runtime/operations/update" || r.URL.Query().Get("expectedRuntimeGeneration") != "7" ||
-			r.URL.Query().Get("operationType") != "activate_update" || r.URL.Query().Get("targetVersion") != "7.3.4" {
+			r.URL.Query().Get("operationType") != "activate_update" || r.URL.Query().Get("targetVersion") != "8.0.56" {
 			t.Errorf("unexpected Runtime operation request: %s", r.URL)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{

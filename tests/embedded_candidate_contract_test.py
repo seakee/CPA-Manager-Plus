@@ -14,10 +14,16 @@ import re
 import subprocess
 import sys
 from unittest.mock import patch
-from embedded_renderer_fixture import stage_renderer, redirect_fixture_node
 from pathlib import Path
 
-from image_evidence_fixtures import SOURCE_BYTES, make_evidence
+if __package__:
+    from .embedded_renderer_fixture import stage_renderer, redirect_fixture_node
+    from .image_evidence_fixtures import SOURCE_BYTES, make_evidence
+else:
+    from embedded_renderer_fixture import stage_renderer, redirect_fixture_node
+    from image_evidence_fixtures import SOURCE_BYTES, make_evidence
+
+
 VERIFIER = Path(__file__).resolve().parents[1] / "bin/release/verify-embedded-candidate.py"
 spec = importlib.util.spec_from_file_location("embedded_candidate", VERIFIER)
 subject = importlib.util.module_from_spec(spec)
@@ -679,6 +685,15 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                 verified = subject.verify_rendered_pairing(
                     receipt_for_node, compose_path, pairing_path, test_archives)
             self.assertEqual(verified["compose"]["filename"], "docker-compose.v2-embedded.yml")
+            version = receipt_for_node["candidateVersionClaim"]
+            self.assertEqual(verified["version"], version)
+            base_tag = version.removeprefix("v")
+            for role, tag in (("slim", base_tag), ("full", f"{base_tag}-full")):
+                image = verified["images"][role]
+                self.assertEqual(image["tag"], tag)
+                digest = receipt_for_node["images"][role]["platformManifestDigest"]
+                self.assertEqual(image["image_ref"], f"seakee/cpa-manager-plus:{tag}@{digest}")
+            self.assertIn(verified["images"]["full"]["image_ref"], compose_path.read_text(encoding="utf-8"))
 
             # Node's documented archive/topology checks do not certify Go metadata.
             # Python certification must reject a role binary from a different Go module,
@@ -782,6 +797,13 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                 bad_pairing["images"]["full"]["manifest_digest"] = "sha256:" + "f" * 64
                 pairing_path.write_text(json.dumps(bad_pairing), encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, "pairing manifest_digest mismatch"):
+                    subject.verify_rendered_pairing(
+                        receipt_for_node, compose_path, pairing_path, test_archives)
+
+                wrong_role_tag = json.loads(json.dumps(original_pairing))
+                wrong_role_tag["images"]["full"]["tag"] = base_tag
+                pairing_path.write_text(json.dumps(wrong_role_tag), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "pairing image tag mismatch: full"):
                     subject.verify_rendered_pairing(
                         receipt_for_node, compose_path, pairing_path, test_archives)
 

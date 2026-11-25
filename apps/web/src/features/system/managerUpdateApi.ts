@@ -2,8 +2,19 @@ import axios from 'axios';
 import { normalizeUsageServiceBase } from '@/services/api/usageService';
 
 export type UpdateChannel = 'auto' | 'stable' | 'rc' | 'beta';
+export type DeploymentVariant = 'docker-full' | 'docker-slim' | 'native' | 'unknown';
+export type DockerImageRole = 'full' | 'slim';
+
+export interface DockerImageSpec {
+  role: DockerImageRole;
+  name: string;
+  tag: string;
+  digest: string;
+  platforms: string[];
+}
+
 export interface ReleaseInfo {
-  schema_version: 1;
+  schema_version: 2;
   release: { version: string; stage: string; source_commit: string };
   content: { summary: Record<string, string>; notes: Record<string, string> };
   update: {
@@ -12,12 +23,30 @@ export interface ReleaseInfo {
     minimum_direct_upgrade_version: string | null;
     upgrade_guide_url: string;
   };
-  distribution: { docker: { image: string; version_tag: string }; native: { assets: string[] } };
+  distribution: {
+    docker: {
+      version_tag: string;
+      images: DockerImageSpec[];
+    };
+    native: { assets: string[] };
+    compose?: { filename: string; sha256: string };
+  };
   compatibility: { minimum_cpa_version: string | null };
+  supported_modes?: string[];
+  supported_platforms?: Record<string, string[]>;
+  pairing?: {
+    filename: string;
+    source_commit: string;
+    fullweb_manifest_sha256: string;
+    api_contract_sha256: string;
+    compose_sha256: string;
+  };
 }
+
 export interface UpdateStatus {
   current_version: string;
   source_commit: string;
+  deployment_variant?: DeploymentVariant;
   channel_preference: UpdateChannel;
   channel: string;
   automatic: boolean;

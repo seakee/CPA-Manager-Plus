@@ -428,6 +428,11 @@ export function validateVersionTag(version) {
   return version;
 }
 
+function expectedRoleTag(version, role) {
+  const baseTag = version.startsWith('v') ? version.slice(1) : version;
+  return role === 'full' ? `${baseTag}-full` : baseTag;
+}
+
 export function validateRegistryPrefix(registryPrefix) {
   if (typeof registryPrefix !== 'string') {
     fail('registryPrefix must be a string');
@@ -1340,8 +1345,9 @@ export function verifyEmbeddedReleaseArtifacts({
     if (typeof imgEntry.repository !== 'string' || !imgEntry.repository.includes('/')) {
       fail(`invalid repository for ${role} in pairing`);
     }
-    if (imgEntry.tag !== version) {
-      fail(`pairing image tag for ${role} (${String(imgEntry.tag)}) must match version (${version})`);
+    const roleTag = expectedRoleTag(version, role);
+    if (imgEntry.tag !== roleTag) {
+      fail(`pairing image tag for ${role} (${String(imgEntry.tag)}) must match ${roleTag}`);
     }
     if (!SHA256_DIGEST_RE.test(imgEntry.manifest_digest ?? '')) {
       fail(`invalid manifest_digest for ${role} in pairing`);
@@ -1365,7 +1371,7 @@ export function verifyEmbeddedReleaseArtifacts({
       fail(`release_provenance_sha256 mismatch for ${role} in pairing`);
     }
 
-    const expectedImageRef = `${imgEntry.repository}:${imgEntry.tag}@${imgEntry.manifest_digest}`;
+    const expectedImageRef = `${imgEntry.repository}:${roleTag}@${imgEntry.manifest_digest}`;
     if (typeof imgEntry.image_ref !== 'string' || imgEntry.image_ref !== expectedImageRef) {
       fail(`image_ref missing or mismatched for ${role} in pairing`);
     }
@@ -1398,18 +1404,15 @@ export function renderEmbeddedReleaseArtifacts(evidence, options = {}) {
   for (const role of ROLES) {
     const evImg = evidence.images[role];
     let repository = `${registryPrefix}/${DEFAULT_REPOSITORIES[role]}`;
-    let tag = version;
+    const tag = expectedRoleTag(version, role);
     let manifestDigest = evImg.platformManifestDigest;
 
     if (options.imageRefs?.[role] !== undefined) {
       const parsed = parsePinnedImageReference(options.imageRefs[role], role);
       repository = parsed.repository;
-      tag = parsed.tag;
       manifestDigest = parsed.manifestDigest;
-      if (tag !== version) {
-        fail(
-          `${role} image reference tag (${tag}) differs from target release version (${version})`
-        );
+      if (parsed.tag !== tag) {
+        fail(`${role} image reference tag (${parsed.tag}) must match ${tag}`);
       }
     }
 

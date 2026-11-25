@@ -33,9 +33,12 @@ function Consumer() {
   }, [value, go]);
   return null;
 }
-const info = (tag: string) =>
-  ({
-    schema_version: 1,
+const info = (tag: string) => {
+  const versionTag = tag.replace(/^v/, '');
+  const slimDigest = 'sha256:' + '1'.repeat(64);
+  const fullDigest = 'sha256:' + '2'.repeat(64);
+  return {
+    schema_version: 2,
     release: { version: tag, stage: 'stable', source_commit: 'a'.repeat(40) },
     content: { summary: { en: tag, zh: tag }, notes: {} },
     update: {
@@ -45,11 +48,44 @@ const info = (tag: string) =>
       upgrade_guide_url: 'https://github.com/seakee/CPA-Manager-Plus/releases/tag/' + tag,
     },
     distribution: {
-      docker: { image: 'seakee/cpa-manager-plus', version_tag: tag },
-      native: { assets: [] },
+      docker: {
+        version_tag: versionTag,
+        images: [
+          {
+            role: 'slim',
+            name: 'seakee/cpa-manager-plus',
+            tag: versionTag,
+            digest: slimDigest,
+            platforms: ['linux/amd64'],
+          },
+          {
+            role: 'full',
+            name: 'seakee/cpa-manager-plus',
+            tag: versionTag + '-full',
+            digest: fullDigest,
+            platforms: ['linux/amd64'],
+          },
+          {
+            role: 'slim',
+            name: 'ghcr.io/seakee/cpa-manager-plus',
+            tag: versionTag,
+            digest: slimDigest,
+            platforms: ['linux/amd64'],
+          },
+          {
+            role: 'full',
+            name: 'ghcr.io/seakee/cpa-manager-plus',
+            tag: versionTag + '-full',
+            digest: fullDigest,
+            platforms: ['linux/amd64'],
+          },
+        ],
+      },
+      native: { assets: ['cpa-manager-plus-native-v2_' + tag + '_linux_amd64.tar.gz'] },
     },
     compatibility: { minimum_cpa_version: null },
-  }) as ReleaseInfo;
+  } as ReleaseInfo;
+};
 let target: ReleaseInfo;
 let claimed: Set<string>;
 beforeEach(() => {
