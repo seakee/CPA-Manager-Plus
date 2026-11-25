@@ -821,6 +821,10 @@ func checkV8Bootstrap(layout RuntimeLayout, identity, seedLineagePath string, sy
 		if cfgStat.Size <= 0 || cfgStat.Size > maxBootstrapConfigBytes {
 			return v8BootstrapReady, v8Refuse("invalid bootstrap config size")
 		}
+		cfgBytes, err := sys.ReadFile(layout.GatewayConfigPath)
+		if err != nil || computeBootstrapIdentity(cfgBytes) != markerContent {
+			return v8BootstrapReady, v8Refuse("modified or incompatible bootstrap config")
+		}
 		return v8BootstrapReady, nil
 	}
 

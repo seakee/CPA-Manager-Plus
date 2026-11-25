@@ -576,7 +576,7 @@ func TestPrepareNonemptyRuntimeRootWithoutMarkerRefused(t *testing.T) {
 	}
 }
 
-func TestPreparePreservesModifiedConfigAcrossOfficialSeedChange(t *testing.T) {
+func TestPreparePreservesHistoricalBootstrapSeedAcrossOfficialSeedChange(t *testing.T) {
 	const marker = "/data/runtime/.cpamp-v8-bootstrap"
 	const config = "/data/runtime/gateway/config.yaml"
 	seed, err := os.ReadFile("../../../../docker/runtime/config.v8.default.seed.yaml")
@@ -592,18 +592,22 @@ func TestPreparePreservesModifiedConfigAcrossOfficialSeedChange(t *testing.T) {
 	if _, err := prepare(PrepareConfig{}, sys); err != nil {
 		t.Fatal(err)
 	}
-	sys.mustSeedFile(t, DefaultSeedLineagePath, lineage, RootUID, RootGID, 0o644)
-	sys.mustSeedFile(t, DefaultSeedConfigPath, []byte(testSeedYAML+"# new image seed\n"), RootUID, RootGID, 0o644)
-	liveConfig := []byte(testSeedYAML + "# live config\n")
-	sys.mustSeedFile(t, config, liveConfig, CPAUID, CPAGID, GatewayConfigMode)
+	sys.mustSeedFile(t, DefaultSeedLineagePath, lineage, RootUID, RootGID, 0o444)
+	sys.mustSeedFile(t, DefaultSeedConfigPath, []byte(testSeedYAML+"# new image seed\n"), RootUID, RootGID, 0o444)
 	if _, err := prepare(PrepareConfig{}, sys); err != nil {
-		t.Fatal(err)
+		t.Fatalf("expected unmodified historical bootstrap config to be accepted after seed upgrade, got: %v", err)
 	}
-	if actual, err := sys.ReadFile(config); err != nil || !bytes.Equal(actual, liveConfig) {
-		t.Fatalf("live config changed: %v", err)
+	if actual, err := sys.ReadFile(config); err != nil || !bytes.Equal(actual, seed) {
+		t.Fatalf("historical bootstrap config changed: %v", err)
 	}
 	if actual, err := sys.ReadFile(marker); err != nil || string(actual) != computeBootstrapIdentity(seed)+"\n" {
 		t.Fatalf("bootstrap marker changed: %q, %v", actual, err)
+	}
+
+	tampered := append(bytes.Clone(seed), []byte("\n# unknown edit\n")...)
+	sys.mustSeedFile(t, config, tampered, CPAUID, CPAGID, GatewayConfigMode)
+	if _, err := prepare(PrepareConfig{}, sys); err == nil || !strings.Contains(err.Error(), "modified or incompatible bootstrap config") {
+		t.Fatalf("expected tampered bootstrap config to be refused, got: %v", err)
 	}
 }
 
@@ -1325,14 +1329,11 @@ func TestPrepareCustomPrefixAndStrictBootstrapValidation(t *testing.T) {
 		// Seed lineage at the derived sibling path and update the seed config.
 		sys.mustSeedFile(t, customLineagePath, officialLineage, RootUID, RootGID, 0o0644)
 		sys.mustSeedFile(t, customSeedPath, []byte(testSeedYAML+"# updated custom prefix seed\n"), RootUID, RootGID, 0o0644)
-		liveConfig := []byte(testSeedYAML + "# preserved custom prefix live config\n")
-		sys.mustSeedFile(t, "/data/runtime/gateway/config.yaml", liveConfig, CPAUID, CPAGID, GatewayConfigMode)
-
 		if _, err := prepare(cfg, sys); err != nil {
 			t.Fatalf("custom-prefix prepare across official seed change failed: %v", err)
 		}
-		if got, err := sys.ReadFile("/data/runtime/gateway/config.yaml"); err != nil || !bytes.Equal(got, liveConfig) {
-			t.Fatalf("live config was not preserved: %q, %v", got, err)
+		if got, err := sys.ReadFile("/data/runtime/gateway/config.yaml"); err != nil || !bytes.Equal(got, officialSeed) {
+			t.Fatalf("historical bootstrap config was not preserved: %q, %v", got, err)
 		}
 
 		// Explicit SeedLineagePath overrides sibling derivation.

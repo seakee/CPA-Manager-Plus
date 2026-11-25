@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,7 +16,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/artifact"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/journal"
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/selection"
+	runtimeupdate "github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/update"
 )
 
 func TestRuntimeObservesRetainedUpdatesAcrossSupervisorRestart(t *testing.T) {
@@ -60,6 +65,39 @@ func TestRuntimeObservesRetainedUpdatesAcrossSupervisorRestart(t *testing.T) {
 		}
 	}
 	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	supervisorRoot := filepath.Dir(cfg.journalPath)
+	stageStore, err := runtimeupdate.NewStore(filepath.Join(supervisorRoot, "artifacts", "cpa"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	selectionStore, err := selection.NewStore(filepath.Join(supervisorRoot, "active", "cpa"), stageStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stagedBinary := []byte("#!/bin/sh\necho cpa-7.3.4\n")
+	stagedSum := sha256.Sum256(stagedBinary)
+	stagedID := artifact.ID("sha256:" + hex.EncodeToString(stagedSum[:]))
+	stagedArchive := buildRouteTarGzip(t, stagedBinary, []byte("MIT License\n"))
+	if _, err := stageStore.Acquire(t.Context(), "7.3.4", stagedID, runtimeupdate.CopyUploadArchive(bytes.NewReader(stagedArchive), int64(len(stagedArchive))), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	selectedStage, err := selectionStore.ResolveFinalized("7.3.4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := selectionStore.Commit(selectedStage); err != nil {
+		t.Fatal(err)
+	}
+	if err := selectionStore.WriteActivationIntent(selection.ActivationIntent{
+		SchemaVersion:      selection.SchemaVersion,
+		OperationID:        "activate_update-succeeded",
+		RuntimeIdentity:    cfg.runtimeIdentity,
+		TargetVersion:      "7.3.4",
+		PreviousArtifactID: artifact.ID("sha256:" + strings.Repeat("1", 64)),
+		TargetArtifactID:   stagedID,
+	}); err != nil {
 		t.Fatal(err)
 	}
 
