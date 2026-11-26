@@ -34,6 +34,7 @@ import (
 	legacypreflightcommand "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/legacypreflight"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/managerdatabundle"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/managerdatasnapshot"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/restorepremigrate"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/runtimeconfig"
 	upgradecommand "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/upgrade"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/usagecompact"
@@ -47,6 +48,7 @@ import (
 	bootstrapservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrapdiscovery"
 	collectorservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/collector"
+	codexinspectionservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/codexinspection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
 	cpaupdateservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaupdate"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
@@ -143,6 +145,17 @@ func main() {
 		case "manager-data-snapshot":
 			if err := runManagerDataSnapshotCommand(os.Args[2:], os.Stdout, os.Stderr); err != nil {
 				log.Printf("manage Manager data snapshot: %v", err)
+				os.Exit(1)
+			}
+			return
+		case "restore-pre-migrate":
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			if err := restorepremigrate.Run(ctx, os.Args[2:], os.Stdout, os.Stderr); err != nil {
+				if restorepremigrate.IsHelp(err) {
+					return
+				}
+				log.Printf("restore pre-migrate snapshot: %v", err)
 				os.Exit(1)
 			}
 			return
@@ -247,13 +260,15 @@ func runServerWithOptions(options legacypreflight.Options) {
 	// inventory for Fresh/partial sources, or a bounded rollback-mode SQLite
 	// read snapshot for an existing database.
 	startupHandler := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+	trialHoldHandler, releaseTrialHoldProcessGate := newTrialHoldServerHandler(startupHandler)
+	defer releaseTrialHoldProcessGate()
 	listener, err := net.Listen("tcp", cfg.HTTPAddr)
 	if err != nil {
 		log.Fatalf("http listen: %v", err)
 	}
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           startupHandler,
+		Handler:           trialHoldHandler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	defer func() { _ = server.Close() }()
@@ -420,11 +435,17 @@ func runServerWithOptions(options legacypreflight.Options) {
 	serverApp.AppContext().DatabaseMaintenance = walMaintenance
 	runtimeMode := model.RuntimeModeExternal
 	var runtimeClient runtimeservice.RuntimeClient
+	var artifactClient *runtimeservice.ArtifactClient
 	if cfg.EmbeddedRuntimeConfigured() {
 		runtimeMode = model.RuntimeModeEmbedded
+		tokenSource := runtimeservice.NewFileRuntimeTokenSource(cfg.RuntimeTokenFile)
 		runtimeClient = runtimeservice.NewEmbeddedClientWithTokenSource(
 			cfg.RuntimeURL,
-			runtimeservice.NewFileRuntimeTokenSource(cfg.RuntimeTokenFile),
+			tokenSource,
+		)
+		artifactClient = runtimeservice.NewArtifactClientWithTokenSource(
+			cfg.RuntimeURL,
+			tokenSource,
 		)
 	} else {
 		managerConfigService := serverApp.AppContext().ManagerConfigService
@@ -439,9 +460,10 @@ func runServerWithOptions(options legacypreflight.Options) {
 		)
 	}
 	serverApp.AppContext().CPAUpdateService = cpaupdateservice.New(db, runtimeClient, runtimeMode).
+		WithArtifactClient(artifactClient).
 		WithProductCompleteProbe(newServerProductCompleteProbe(serverApp))
 	recoveryCtx, cancelRecovery := context.WithTimeout(context.Background(), 10*time.Second)
-	if err := serverApp.AppContext().CodexInspectionService.Recover(recoveryCtx); err != nil {
+	if err := serverApp.AppContext().CodexInspectionService.Recover(recoveryCtx); err != nil && !errors.Is(err, codexinspectionservice.ErrTrialHoldActive) {
 		log.Printf("recover codex inspection runs: %v", err)
 	}
 	cancelRecovery()
@@ -961,7 +983,7 @@ func shutdownHTTPServer(server *http.Server, timeout time.Duration) {
 	if server == nil {
 		return
 	}
-	if sh, ok := server.Handler.(*startupHTTPHandler); ok {
+	if sh, ok := server.Handler.(interface{ BeginShutdown() }); ok {
 		sh.BeginShutdown()
 	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)

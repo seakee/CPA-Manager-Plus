@@ -3,6 +3,7 @@ package cpaupdate
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -32,5 +33,28 @@ func TestHasValidUploadContentType(t *testing.T) {
 				t.Fatalf("hasValidUploadContentType(%v) = %v, want %v", tc.values, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestDecodeAdoptBaselineRequiresOneExactArtifactFence(t *testing.T) {
+	id := "sha256:" + strings.Repeat("a", 64)
+	valid := `{"expected_active_artifact_id":"` + id + `"}`
+	for _, body := range []string{
+		valid, `{}`, `null`, valid + `{}`,
+		`{"expected_active_artifact_id":"` + id + `","expected_active_artifact_id":"` + id + `"}`,
+		`{"expectedActiveArtifactId":"` + id + `"}`,
+		`{"expected_active_artifact_id":"sha256:short"}`,
+		`{"expected_active_artifact_id":"` + id + `","target_version":"8.0.56"}`,
+		valid + strings.Repeat(" ", maxMutationBodyBytes),
+	} {
+		r := httptest.NewRequest(http.MethodPost, routePrefix+"/adopt-baseline", strings.NewReader(body))
+		got, err := decodeAdoptBaselineRequest(httptest.NewRecorder(), r)
+		if body == valid {
+			if err != nil || string(got) != id {
+				t.Fatalf("valid request = %s, %v", got, err)
+			}
+		} else if err == nil {
+			t.Errorf("accepted invalid adoption request %q", body)
+		}
 	}
 }

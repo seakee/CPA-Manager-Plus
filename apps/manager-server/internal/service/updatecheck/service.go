@@ -11,9 +11,14 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"os"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 )
 
 type Store interface {
@@ -33,18 +38,21 @@ type State struct {
 	ReleaseDigests map[string]string      `json:"release_digests,omitempty"`
 }
 type Status struct {
-	CurrentVersion    string       `json:"current_version"`
-	SourceCommit      string       `json:"source_commit"`
-	DeploymentVariant string       `json:"deployment_variant"`
-	ChannelPreference string       `json:"channel_preference"`
-	Channel           string       `json:"channel"`
-	Automatic         bool         `json:"automatic"`
-	State             string       `json:"state"`
-	LastSuccess       time.Time    `json:"last_success_at"`
-	LastError         string       `json:"last_error,omitempty"`
-	Stale             bool         `json:"stale"`
-	Target            *ReleaseInfo `json:"target,omitempty"`
-	UpgradeAction     string       `json:"upgrade_action,omitempty"`
+	CurrentVersion    string            `json:"current_version"`
+	SourceCommit      string            `json:"source_commit"`
+	DeploymentVariant string            `json:"deployment_variant"`
+	BaseImageVersion  string            `json:"base_image_version,omitempty"`
+	ActiveSlot        string            `json:"active_slot,omitempty"`
+	ChannelPreference string            `json:"channel_preference"`
+	Channel           string            `json:"channel"`
+	Automatic         bool              `json:"automatic"`
+	State             string            `json:"state"`
+	LastSuccess       time.Time         `json:"last_success_at"`
+	LastError         string            `json:"last_error,omitempty"`
+	Stale             bool              `json:"stale"`
+	Target            *ReleaseInfo      `json:"target,omitempty"`
+	UpgradeAction     string            `json:"upgrade_action,omitempty"`
+	SelfUpdate        *SelfUpdateStatus `json:"self_update,omitempty"`
 }
 type Service struct {
 	mu                sync.Mutex
@@ -60,19 +68,38 @@ type Service struct {
 	releaseURL        func(string) string
 	detectDeployment  func() string
 	now               func() time.Time
+	baseImageVersion  string
+	activeSlot        string
+	launcher          *LauncherClient
+	preActivateFence  PreActivateFenceFunc
+	preSlotSnapshot   PreSlotSnapshotFunc
+	activating        atomic.Bool
+	currentSchemaGen  int
+	slotArch          string
+	activateTimeout   time.Duration
 }
 
 func New(store Store, current, commit string, automatic bool) *Service {
+	launcher, err := NewLauncherClientFromEnv()
+	if err != nil {
+		launcher = nil
+	}
 	return &Service{
-		store:          store,
-		current:        current,
-		commit:         commit,
-		automatic:      automatic,
-		state:          State{SchemaVersion: 1, Preference: "auto", Releases: map[string]ReleaseInfo{}, ReleaseDigests: map[string]string{}},
-		now:            time.Now,
-		indexURL:       IndexURL,
-		releaseBaseURL: Repository,
+		store:            store,
+		current:          current,
+		commit:           commit,
+		automatic:        automatic,
+		state:            State{SchemaVersion: 1, Preference: "auto", Releases: map[string]ReleaseInfo{}, ReleaseDigests: map[string]string{}},
+		now:              time.Now,
+		indexURL:         IndexURL,
+		releaseBaseURL:   Repository,
 		detectDeployment: DetectDeploymentVariant,
+		baseImageVersion: strings.TrimSpace(os.Getenv(BaseVersionEnv)),
+		activeSlot:       strings.TrimSpace(os.Getenv(RunningSlotEnv)),
+		launcher:         launcher,
+		currentSchemaGen: 1,
+		slotArch:         runtime.GOARCH,
+		activateTimeout:  DefaultSlotActivateTimeout,
 		client: &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			h := req.URL.Host
 			if len(via) >= 5 || req.URL.Scheme != "https" || req.URL.User != nil || (h != "github.com" && h != "release-assets.githubusercontent.com" && h != "objects.githubusercontent.com" && h != "raw.githubusercontent.com") {
@@ -169,7 +196,25 @@ func (s *Service) SavedChannel(ctx context.Context) (string, error) {
 	st, err := s.readState(ctx)
 	return st.Preference, err
 }
-func (s *Service) save(ctx context.Context) error {
+func newTrialHoldSelfUpdateError() *SelfUpdateError {
+	return &SelfUpdateError{
+		HTTPStatus:        http.StatusServiceUnavailable,
+		Code:              middleware.TrialHoldErrorCode,
+		Message:           "upgrade trial verification is holding writes",
+		DefiniteRejection: true,
+	}
+}
+
+func (s *Service) saveBackgroundCache(ctx context.Context) error {
+	done, blocked := middleware.BeginBackgroundMutation()
+	if blocked {
+		return nil
+	}
+	defer done()
+	return s.saveDirectLocked(ctx)
+}
+
+func (s *Service) saveDirectLocked(ctx context.Context) error {
 	data, err := json.Marshal(s.state)
 	if err == nil {
 		err = s.store.SaveUpdateCheck(ctx, data)
@@ -250,22 +295,36 @@ func (s *Service) snapshot() Status {
 }
 func (s *Service) Status(ctx context.Context) (Status, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err := s.load(ctx); err != nil {
+		s.mu.Unlock()
 		return Status{}, err
 	}
-	return s.snapshot(), nil
+	out := s.snapshot()
+	s.mu.Unlock()
+	return s.attachSelfUpdateStatus(ctx, out), nil
 }
 func (s *Service) SetChannel(ctx context.Context, p string) (Status, error) {
 	if !validPreference(p) {
 		return Status{}, errors.New("invalid channel")
 	}
+	done, blocked := middleware.BeginBackgroundMutation()
+	if blocked {
+		return Status{}, newTrialHoldSelfUpdateError()
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.persistChannelLocked(ctx, p); err != nil {
+	if err := s.persistChannelDirectLocked(ctx, p); err != nil {
+		s.loaded = false
+		s.mu.Unlock()
+		done()
 		return Status{}, err
 	}
-	return s.checkLocked(ctx, true)
+	done()
+	out, err := s.checkLocked(ctx, true)
+	s.mu.Unlock()
+	if err != nil {
+		return s.attachSelfUpdateStatus(ctx, out), err
+	}
+	return s.attachSelfUpdateStatus(ctx, out), nil
 }
 
 // PersistChannel saves only the preference. A successful result acknowledges
@@ -275,24 +334,32 @@ func (s *Service) PersistChannel(ctx context.Context, p string) (Status, error) 
 	if !validPreference(p) {
 		return Status{}, errors.New("invalid channel")
 	}
+	done, blocked := middleware.BeginBackgroundMutation()
+	if blocked {
+		return Status{}, newTrialHoldSelfUpdateError()
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.persistChannelLocked(ctx, p); err != nil {
+	if err := s.persistChannelDirectLocked(ctx, p); err != nil {
 		// Resolve even an uncertain SQLite acknowledgement from the store
 		// before another save/check can publish a cached preference.
 		s.loaded = false
+		s.mu.Unlock()
+		done()
 		return Status{}, err
 	}
-	return s.snapshot(), nil
+	out := s.snapshot()
+	s.mu.Unlock()
+	done()
+	return s.attachSelfUpdateStatus(ctx, out), nil
 }
 
-func (s *Service) persistChannelLocked(ctx context.Context, p string) error {
+func (s *Service) persistChannelDirectLocked(ctx context.Context, p string) error {
 	if err := s.load(ctx); err != nil {
 		return err
 	}
 	old := s.state.Preference
 	s.state.Preference = p
-	if err := s.save(ctx); err != nil {
+	if err := s.saveDirectLocked(ctx); err != nil {
 		s.state.Preference = old
 		return err
 	}
@@ -343,18 +410,20 @@ func (s *Service) fetchVerified(ctx context.Context, raw, expectedSHA256 string,
 // cooldown; channel changes force an immediate check. Failed persistence retains downloaded data in memory.
 func (s *Service) Check(ctx context.Context) (Status, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err := s.load(ctx); err != nil {
+		s.mu.Unlock()
 		return Status{}, err
 	}
-	return s.checkLocked(ctx, false)
+	out, err := s.checkLocked(ctx, false)
+	s.mu.Unlock()
+	return s.attachSelfUpdateStatus(ctx, out), err
 }
 
 func (s *Service) checkLocked(ctx context.Context, force bool) (Status, error) {
 	now := s.now()
 	if !force && !s.state.LastAttempt.IsZero() && now.Sub(s.state.LastAttempt) < time.Minute {
 		if s.persistenceFailed {
-			if err := s.save(ctx); err != nil {
+			if err := s.saveBackgroundCache(ctx); err != nil {
 				return s.snapshot(), err
 			}
 		}
@@ -368,7 +437,7 @@ func (s *Service) checkLocked(ctx context.Context, force bool) (Status, error) {
 		s.state.LastSuccess = s.now()
 		s.state.LastError = ""
 	}
-	if e := s.save(ctx); e != nil {
+	if e := s.saveBackgroundCache(ctx); e != nil {
 		return s.snapshot(), e
 	}
 	return s.snapshot(), nil
@@ -450,6 +519,11 @@ func (s *Service) cachedRelease(target *Target) (ReleaseInfo, bool) {
 	return info, true
 }
 func (s *Service) Claim(ctx context.Context) (*ReleaseInfo, error) {
+	done, blocked := middleware.BeginBackgroundMutation()
+	if blocked {
+		return nil, newTrialHoldSelfUpdateError()
+	}
+	defer done()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.load(ctx); err != nil {
@@ -460,7 +534,7 @@ func (s *Service) Claim(ctx context.Context) (*ReleaseInfo, error) {
 		return nil, nil
 	}
 	// Persist downloaded metadata before exposing a notification.
-	if err := s.save(ctx); err != nil {
+	if err := s.saveDirectLocked(ctx); err != nil {
 		return nil, err
 	}
 	ok, err := s.store.ClaimUpdateNotification(ctx, st.Target.Release.Version)
@@ -473,6 +547,11 @@ func (s *Service) Dismiss(ctx context.Context, tag string) error {
 	if _, err := ParseVersion(tag); err != nil {
 		return err
 	}
+	done, blocked := middleware.BeginBackgroundMutation()
+	if blocked {
+		return newTrialHoldSelfUpdateError()
+	}
+	defer done()
 	return s.store.DismissUpdateNotification(ctx, tag)
 }
 func (s *Service) Run(ctx context.Context) {

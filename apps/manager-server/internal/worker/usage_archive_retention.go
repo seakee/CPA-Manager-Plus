@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	usagearchive "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagearchive"
 	usageservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/usage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
@@ -150,6 +151,11 @@ func (w *UsageArchiveRetentionWorker) runOnce(ctx context.Context) bool {
 	if w == nil || w.service == nil {
 		return false
 	}
+	done, blocked := middleware.BeginBackgroundMutation()
+	if blocked {
+		return ctx.Err() == nil
+	}
+	defer done()
 	retentionDays := w.retentionDays
 	if w.settingsResolver != nil {
 		enabled, resolvedDays, resolveErr := w.settingsResolver(ctx)

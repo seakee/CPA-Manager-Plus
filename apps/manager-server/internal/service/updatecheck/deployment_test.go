@@ -182,3 +182,73 @@ func TestStatusJSONIncludesDeploymentVariant(t *testing.T) {
 		})
 	}
 }
+
+func TestDetectDeploymentVariantBaseInstallRootPrecedence(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Base install root has docker-slim provenance.
+	baseRoot := filepath.Join(tmp, "base-usr-local")
+	baseProv := filepath.Join(baseRoot, "share", "cpamp", "provenance.json")
+	if err := os.MkdirAll(filepath.Dir(baseProv), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(baseProv, []byte(`{"schemaVersion":1,"role":"cpamp","cpaBundled":false}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Running slot binary lives under <slots>/v2.0.0-beta.2/bin/cpa-manager-plus;
+	// even if a conflicting file existed next to the slot or at dockerProvenancePath,
+	// CPAMP_BASE_INSTALL_ROOT must win first.
+	slotRoot := filepath.Join(tmp, "slots", "v2.0.0-beta.2")
+	slotBin := filepath.Join(slotRoot, "bin", "cpa-manager-plus")
+	slotProv := filepath.Join(slotRoot, "share", "cpamp", "provenance.json")
+	if err := os.MkdirAll(filepath.Dir(slotBin), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(slotProv), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(slotBin, []byte("bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(slotProv, []byte(`{"schemaVersion":1,"role":"native"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dockerFallbackProv := filepath.Join(tmp, "fallback", "provenance.json")
+	if err := os.MkdirAll(filepath.Dir(dockerFallbackProv), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dockerFallbackProv, []byte(`{"schemaVersion":1,"role":"cpamp","cpaBundled":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv(BaseInstallRootEnv, baseRoot)
+	if got := detectDeploymentVariantFrom(dockerFallbackProv, func() (string, error) {
+		return slotBin, nil
+	}); got != DeploymentVariantDockerSlim {
+		t.Fatalf("CPAMP_BASE_INSTALL_ROOT variant = %q, want docker-slim", got)
+	}
+
+	// Native install running from a slot directory that omits share/cpamp/provenance.json.
+	nativeBase := filepath.Join(tmp, "native-home")
+	nativeProv := filepath.Join(nativeBase, "share", "cpamp", "provenance.json")
+	if err := os.MkdirAll(filepath.Dir(nativeProv), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nativeProv, []byte(`{"schemaVersion":1,"role":"native"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cleanSlotBin := filepath.Join(tmp, "slots", "v2.0.0-beta.3", "bin", "cpa-manager-plus")
+	if err := os.MkdirAll(filepath.Dir(cleanSlotBin), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cleanSlotBin, []byte("bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(BaseInstallRootEnv, nativeBase)
+	if got := detectDeploymentVariantFrom(filepath.Join(tmp, "missing-docker-prov.json"), func() (string, error) {
+		return cleanSlotBin, nil
+	}); got != DeploymentVariantNative {
+		t.Fatalf("native slot CPAMP_BASE_INSTALL_ROOT variant = %q, want native", got)
+	}
+}

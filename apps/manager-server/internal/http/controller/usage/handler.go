@@ -329,6 +329,16 @@ func writeArchiveRequestError(w http.ResponseWriter, err error) {
 }
 
 func writeArchiveError(w http.ResponseWriter, err error) {
+	if errors.Is(err, usagesvc.ErrArchiveTrialHoldActive) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Retry-After", "5")
+		response.JSON(w, http.StatusServiceUnavailable, map[string]any{
+			"error":   middleware.TrialHoldErrorMessage,
+			"message": middleware.TrialHoldErrorMessage,
+			"code":    middleware.TrialHoldErrorCode,
+		})
+		return
+	}
 	status := http.StatusInternalServerError
 	switch {
 	case errors.Is(err, usagesvc.ErrArchiveInvalidID), errors.Is(err, usagesvc.ErrArchiveInvalidRequest):
@@ -601,6 +611,9 @@ func writeImportSessionError(w http.ResponseWriter, err error) {
 	var sessionErr *usagesvc.ImportSessionError
 	if errors.As(err, &sessionErr) {
 		code = sessionErr.Code
+		if sessionErr.HTTPStatus >= 400 && sessionErr.HTTPStatus <= 599 {
+			status = sessionErr.HTTPStatus
+		}
 		switch sessionErr.Code {
 		case usagesvc.ImportSessionErrorInvalidRequest:
 			status = http.StatusBadRequest
@@ -616,6 +629,20 @@ func writeImportSessionError(w http.ResponseWriter, err error) {
 			status = http.StatusTooManyRequests
 		case usagesvc.ImportSessionErrorFileMismatch:
 			status = http.StatusConflict
+		case usagesvc.ImportSessionErrorTrialHoldActive:
+			status = http.StatusServiceUnavailable
+			message = sessionErr.Message
+			if message == "" {
+				message = middleware.TrialHoldErrorMessage
+			}
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Retry-After", "5")
+			response.JSON(w, status, map[string]any{
+				"error":   message,
+				"message": message,
+				"code":    code,
+			})
+			return
 		}
 		if status < http.StatusInternalServerError {
 			message = sessionErr.Message
@@ -656,6 +683,18 @@ func (w *countingWriter) Write(data []byte) (int, error) {
 }
 
 func (h *Handler) Import(w http.ResponseWriter, r *http.Request) {
+	done, blocked := middleware.BeginBackgroundMutation()
+	if blocked {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Retry-After", "5")
+		response.JSON(w, http.StatusServiceUnavailable, map[string]any{
+			"error":   middleware.TrialHoldErrorMessage,
+			"message": middleware.TrialHoldErrorMessage,
+			"code":    middleware.TrialHoldErrorCode,
+		})
+		return
+	}
+	defer done()
 	if r.ContentLength > maxUsageImportBytes {
 		response.Error(w, http.StatusRequestEntityTooLarge, errors.New("http: request body too large"))
 		return

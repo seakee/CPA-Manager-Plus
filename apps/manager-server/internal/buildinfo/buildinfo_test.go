@@ -56,4 +56,59 @@ func TestStartupLine(t *testing.T) {
 			t.Fatalf("StartupLine() = %q, want %q", got, want)
 		}
 	})
+
+	t.Run("active slot appends dual-version banner", func(t *testing.T) {
+		Version = "v2.0.0-beta.2"
+		SourceCommit = "72ea1eb9f452e9d9b02d161d33f5736d4cba4d88"
+		BuildDate = "2026-11-26T00:00:00Z"
+		t.Setenv("CPAMP_BASE_VERSION", "v2.0.0-beta.1")
+		t.Setenv("CPAMP_RUNNING_SLOT", "v2.0.0-beta.2")
+		want := "CPA Manager Plus Version: v2.0.0-beta.2, Commit: 72ea1eb9, BuiltAt: 2026-11-26T00:00:00Z, BaseVersion: v2.0.0-beta.1, ActiveSlot: v2.0.0-beta.2"
+		if got := StartupLine(); got != want {
+			t.Fatalf("StartupLine() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("base version without active slot preserves legacy startup banner", func(t *testing.T) {
+		Version = "v2.0.0-beta.1"
+		SourceCommit = "72ea1eb9f452e9d9b02d161d33f5736d4cba4d88"
+		BuildDate = "2026-11-26T00:00:00Z"
+		t.Setenv("CPAMP_BASE_VERSION", "v2.0.0-beta.1")
+		t.Setenv("CPAMP_RUNNING_SLOT", "")
+		want := "CPA Manager Plus Version: v2.0.0-beta.1, Commit: 72ea1eb9, BuiltAt: 2026-11-26T00:00:00Z"
+		if got := StartupLine(); got != want {
+			t.Fatalf("StartupLine() = %q, want %q", got, want)
+		}
+	})
+}
+
+func TestDualVersionAccessors(t *testing.T) {
+	origVersion := Version
+	t.Cleanup(func() { Version = origVersion })
+
+	Version = "v2.0.0-beta.1"
+	t.Setenv("CPAMP_BASE_VERSION", "")
+	t.Setenv("CPAMP_RUNNING_SLOT", "")
+	if got := BaseImageVersion(); got != "v2.0.0-beta.1" {
+		t.Fatalf("BaseImageVersion() fallback = %q, want v2.0.0-beta.1", got)
+	}
+	if got := ActiveSlot(); got != "" {
+		t.Fatalf("ActiveSlot() = %q, want empty", got)
+	}
+	if got := EffectiveVersion(); got != "v2.0.0-beta.1" {
+		t.Fatalf("EffectiveVersion() = %q, want v2.0.0-beta.1", got)
+	}
+
+	t.Setenv("CPAMP_BASE_VERSION", "  v2.0.0-beta.1 ")
+	t.Setenv("CPAMP_RUNNING_SLOT", " v2.0.0-beta.2 ")
+	Version = "dev"
+	if got := BaseImageVersion(); got != "v2.0.0-beta.1" {
+		t.Fatalf("BaseImageVersion() = %q, want v2.0.0-beta.1", got)
+	}
+	if got := ActiveSlot(); got != "v2.0.0-beta.2" {
+		t.Fatalf("ActiveSlot() = %q, want v2.0.0-beta.2", got)
+	}
+	if got := EffectiveVersion(); got != "v2.0.0-beta.2" {
+		t.Fatalf("EffectiveVersion() dev slot fallback = %q, want v2.0.0-beta.2", got)
+	}
 }

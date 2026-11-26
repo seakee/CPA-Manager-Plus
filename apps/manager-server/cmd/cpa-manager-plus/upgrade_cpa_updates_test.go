@@ -349,6 +349,45 @@ func TestUpgradeManagedCPAUpdateAuthorityIdentityLifecycleAndRecovery(t *testing
 			},
 		}
 		rt := &upgradeCPAUpdateMockRuntime{status: readyStatus}
+		var adoptionCalls atomic.Int32
+		const supervisorToken = "runtime-token-baseline-test"
+		bundledStatus := runtimeservice.ArtifactStatus{
+			SchemaVersion:    1,
+			Pinned:           runtimeservice.ArtifactPinned{Version: "8.0.56", ArtifactID: string(updatedArtifact)},
+			Active:           &runtimeservice.ArtifactActive{ArtifactID: string(qualifiedArtifact), Origin: "acquired"},
+			BundledAvailable: true, AdoptBaselineAvailable: true,
+		}
+		supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "Bearer "+supervisorToken {
+				t.Error("missing private Runtime authorization")
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			switch r.Method + " " + r.URL.Path {
+			case "GET /v1/runtime/artifact":
+				_ = json.NewEncoder(w).Encode(bundledStatus)
+			case "POST /v1/runtime/artifact/adopt-baseline":
+				adoptionCalls.Add(1)
+				var request map[string]string
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request["expectedActiveArtifactId"] != string(qualifiedArtifact) {
+					t.Errorf("unexpected adoption request: %v, %v", request, err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				result := bundledStatus
+				result.AdoptBaselineAvailable = false
+				result.Active = &runtimeservice.ArtifactActive{ArtifactID: string(updatedArtifact), Origin: "bundled"}
+				_ = json.NewEncoder(w).Encode(result)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer supervisor.Close()
+		cfg.RuntimeURL = supervisor.URL
+		cfg.RuntimeTokenFile = filepath.Join(t.TempDir(), "runtime-token")
+		if err := os.WriteFile(cfg.RuntimeTokenFile, []byte(supervisorToken+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 
 		var desiredStore runtimeservice.DesiredStateStore
 		serverApp := httpapi.New(cfg, st, nil)
@@ -417,6 +456,18 @@ func TestUpgradeManagedCPAUpdateAuthorityIdentityLifecycleAndRecovery(t *testing
 				!gotStatus.Actionable {
 				t.Fatalf("%s %s status = %+v", checkCall.method, checkCall.suffix, gotStatus)
 			}
+			if baseline := gotStatus.Baseline; baseline == nil || baseline.PinnedVersion != "8.0.56" || baseline.PinnedArtifactID != string(updatedArtifact) || !baseline.BundledAvailable || !baseline.AdoptBaselineAvailable || baseline.BaselineUpgradeAvailable {
+				t.Fatalf("canonical baseline status = %+v", baseline)
+			}
+		}
+		adoptRequest, err := json.Marshal(map[string]string{"expected_active_artifact_id": string(qualifiedArtifact)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		code, raw := callRoute(http.MethodPost, "/adopt-baseline", "application/json", adoptRequest)
+		var adopted cpaupdateservice.AdoptBaselineResult
+		if code != http.StatusOK || json.Unmarshal(raw, &adopted) != nil || adopted.ActiveArtifactID != string(updatedArtifact) || adopted.Baseline.AdoptBaselineAvailable || adoptionCalls.Load() != 1 {
+			t.Fatalf("canonical adoption = HTTP %d, %s, RPCs=%d", code, raw, adoptionCalls.Load())
 		}
 
 		// 2. Prepare and PrepareUpload forward verified ExpectedRuntimeIdentity; progress observations do not block behind prepare.

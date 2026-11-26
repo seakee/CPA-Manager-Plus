@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/resp"
 	monitoringsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/monitoring"
 	quotasnapshotsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/quotasnapshot"
@@ -1708,4 +1709,203 @@ func TestManagerRunningHandlerRetriesBoundedPollsUntilProvenAndFencesStaleRun(t 
 	if err := manager.StopAndWait(context.Background()); err != nil {
 		t.Fatalf("StopAndWait: %v", err)
 	}
+}
+
+func TestCollectorDoesNotPopUnderTrialHoldAndQuiescesInflightBatch(t *testing.T) {
+	t.Cleanup(func() {
+		middleware.SetProcessTrialHoldGate(nil)
+		middleware.ReleaseProcessTrialHold()
+	})
+
+	t.Run("HTTP queue skips Pop while trial hold is active and resumes on release", func(t *testing.T) {
+		middleware.EngageProcessTrialHold()
+		defer middleware.ReleaseProcessTrialHold()
+
+		var popHits atomic.Int32
+		var delivered atomic.Bool
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v0/management/usage-queue" {
+				popHits.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				if delivered.CompareAndSwap(false, true) {
+					_, _ = io.WriteString(w, `[{"request_id":"trial-hold-http-1","timestamp":"2026-11-26T00:00:01Z","provider":"codex","model":"gpt-test","endpoint":"POST /v1/chat/completions","input_tokens":3,"output_tokens":4}]`)
+					return
+				}
+				_, _ = io.WriteString(w, `[]`)
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		t.Cleanup(upstream.Close)
+
+		st := newTestStore(t)
+		cfg := testConfig(t, "http")
+		cfg.PollInterval = 20 * time.Millisecond
+		manager := NewManager(cfg, st)
+		ctx, cancel := context.WithCancel(context.Background())
+		manager.Start(ctx, RuntimeConfig{
+			CPAUpstreamURL: upstream.URL,
+			ManagementKey:  "management-key",
+			CollectorMode:  "http",
+			PollInterval:   20 * time.Millisecond,
+		})
+		t.Cleanup(func() {
+			cancel()
+			_ = manager.StopAndWait(context.Background())
+		})
+		time.Sleep(250 * time.Millisecond)
+		if got := popHits.Load(); got != 0 {
+			t.Fatalf("expected 0 HTTP queue Pop calls under TrialHoldGate, got %d", got)
+		}
+
+		middleware.ReleaseProcessTrialHold()
+		waitFor(t, func() bool {
+			return popHits.Load() >= 1 && manager.Status().TotalInserted == 1
+		})
+	})
+
+	t.Run("RESP queue skips Pop while trial hold is active and resumes on release", func(t *testing.T) {
+		middleware.EngageProcessTrialHold()
+		defer middleware.ReleaseProcessTrialHold()
+
+		var respPopHits atomic.Int32
+		var delivered atomic.Bool
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+		go func() {
+			for {
+				conn, acceptErr := ln.Accept()
+				if acceptErr != nil {
+					return
+				}
+				go func(c net.Conn) {
+					defer c.Close()
+					reader := bufio.NewReader(c)
+					for {
+						cmd, cmdErr := readRESPCommand(reader)
+						if cmdErr != nil {
+							return
+						}
+						upper := strings.ToUpper(cmd)
+						switch {
+						case strings.HasPrefix(upper, "AUTH "):
+							_, _ = io.WriteString(c, "+OK\r\n")
+						case strings.HasPrefix(upper, "LPOP ") || strings.HasPrefix(upper, "RPOP "):
+							respPopHits.Add(1)
+							if delivered.CompareAndSwap(false, true) {
+								payload := `{"request_id":"trial-hold-resp-1","timestamp":"2026-11-26T00:00:02Z","provider":"codex","model":"gpt-test","endpoint":"POST /v1/chat/completions","input_tokens":5,"output_tokens":6}`
+								_, _ = fmt.Fprintf(c, "*1\r\n$%d\r\n%s\r\n", len(payload), payload)
+							} else {
+								_, _ = io.WriteString(c, "$-1\r\n")
+							}
+						default:
+							_, _ = io.WriteString(c, "+OK\r\n")
+						}
+					}
+				}(conn)
+			}
+		}()
+
+		st := newTestStore(t)
+		cfg := testConfig(t, "resp")
+		cfg.PollInterval = 20 * time.Millisecond
+		manager := NewManager(cfg, st)
+		ctx, cancel := context.WithCancel(context.Background())
+		manager.Start(ctx, RuntimeConfig{
+			CPAUpstreamURL: "http://" + ln.Addr().String(),
+			ManagementKey:  "management-key",
+			CollectorMode:  "resp",
+			PollInterval:   20 * time.Millisecond,
+		})
+		t.Cleanup(func() {
+			cancel()
+			_ = manager.StopAndWait(context.Background())
+		})
+		time.Sleep(250 * time.Millisecond)
+		if got := respPopHits.Load(); got != 0 {
+			t.Fatalf("expected 0 RESP Pop calls under TrialHoldGate, got %d", got)
+		}
+
+		middleware.ReleaseProcessTrialHold()
+		waitFor(t, func() bool {
+			return respPopHits.Load() >= 1 && manager.Status().TotalInserted == 1
+		})
+	})
+
+	t.Run("QuiesceForTrialHold waits for in-flight batch and fences subsequent pops", func(t *testing.T) {
+		middleware.ReleaseProcessTrialHold()
+		defer middleware.ReleaseProcessTrialHold()
+
+		var popHits atomic.Int32
+		var batchDelivered atomic.Bool
+		enteredBatch := make(chan struct{})
+		var enteredOnce sync.Once
+		allowBatchFinish := make(chan struct{})
+		var batchCompleted atomic.Bool
+
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v0/management/usage-queue" {
+				popHits.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				if batchDelivered.CompareAndSwap(false, true) {
+					_, _ = io.WriteString(w, `[{"request_id":"quiesce-inflight-1","timestamp":"2026-11-26T00:00:03Z","provider":"codex","model":"gpt-test","endpoint":"POST /v1/chat/completions","input_tokens":1,"output_tokens":2}]`)
+					return
+				}
+				_, _ = io.WriteString(w, `[]`)
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		t.Cleanup(upstream.Close)
+
+		st := newTestStore(t)
+		cfg := testConfig(t, "http")
+		cfg.PollInterval = 15 * time.Millisecond
+		manager := NewManager(cfg, st)
+		manager.SetUsageEventHandler(UsageEventHandlerFunc(func(_ context.Context, _ RuntimeConfig, _ []usage.Event) {
+			enteredOnce.Do(func() { close(enteredBatch) })
+			<-allowBatchFinish
+			batchCompleted.Store(true)
+		}))
+
+		ctx, cancel := context.WithCancel(context.Background())
+		manager.Start(ctx, RuntimeConfig{
+			CPAUpstreamURL: upstream.URL,
+			ManagementKey:  "management-key",
+			CollectorMode:  "http",
+			PollInterval:   15 * time.Millisecond,
+		})
+		t.Cleanup(func() {
+			cancel()
+			_ = manager.StopAndWait(context.Background())
+		})
+		<-enteredBatch
+		middleware.EngageProcessTrialHold()
+
+		quiesceDone := make(chan error, 1)
+		go func() {
+			quiesceDone <- manager.QuiesceForTrialHold(context.Background())
+		}()
+		select {
+		case err := <-quiesceDone:
+			t.Fatalf("QuiesceForTrialHold returned before in-flight batch finished: %v", err)
+		case <-time.After(30 * time.Millisecond):
+		}
+
+		close(allowBatchFinish)
+		if err := <-quiesceDone; err != nil {
+			t.Fatalf("QuiesceForTrialHold failed: %v", err)
+		}
+		if !batchCompleted.Load() {
+			t.Fatal("QuiesceForTrialHold returned before UsageEventHandler completed")
+		}
+		popsAfterQuiesce := popHits.Load()
+		time.Sleep(150 * time.Millisecond)
+		if got := popHits.Load(); got != popsAfterQuiesce {
+			t.Fatalf("expected zero Pop calls after QuiesceForTrialHold, got %d -> %d", popsAfterQuiesce, got)
+		}
+	})
 }

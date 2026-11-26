@@ -14,6 +14,8 @@ const (
 	DeploymentVariantNative     = "native"
 	DeploymentVariantUnknown    = "unknown"
 
+	BaseInstallRootEnv = "CPAMP_BASE_INSTALL_ROOT"
+
 	defaultDockerProvenancePath = "/usr/local/share/cpamp/provenance.json"
 )
 
@@ -50,6 +52,9 @@ func provenanceCandidatePaths(dockerProvenancePath string, executableFn func() (
 			seen[clean] = true
 			paths = append(paths, clean)
 		}
+	}
+	if baseRoot := strings.TrimSpace(os.Getenv(BaseInstallRootEnv)); baseRoot != "" {
+		add(filepath.Join(baseRoot, "share", "cpamp", "provenance.json"))
 	}
 	if executableFn != nil {
 		if exe, err := executableFn(); err == nil && strings.TrimSpace(exe) != "" {

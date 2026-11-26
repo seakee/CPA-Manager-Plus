@@ -12,6 +12,7 @@ import (
 	"hash"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -19,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 )
 
 type ImportSessionStatus string
@@ -35,20 +38,30 @@ const (
 type ImportSessionErrorCode string
 
 const (
-	ImportSessionErrorInvalidRequest ImportSessionErrorCode = "usage_import_session_invalid_request"
-	ImportSessionErrorNotFound       ImportSessionErrorCode = "usage_import_session_not_found"
-	ImportSessionErrorConflict       ImportSessionErrorCode = "usage_import_session_conflict"
-	ImportSessionErrorTooLarge       ImportSessionErrorCode = "usage_import_session_too_large"
-	ImportSessionErrorQuotaExceeded  ImportSessionErrorCode = "usage_import_session_quota_exceeded"
-	ImportSessionErrorLimitExceeded  ImportSessionErrorCode = "usage_import_session_limit_exceeded"
-	ImportSessionErrorFileMismatch   ImportSessionErrorCode = "usage_import_session_file_mismatch"
-	ImportSessionErrorUnavailable    ImportSessionErrorCode = "usage_import_session_unavailable"
+	ImportSessionErrorInvalidRequest  ImportSessionErrorCode = "usage_import_session_invalid_request"
+	ImportSessionErrorNotFound        ImportSessionErrorCode = "usage_import_session_not_found"
+	ImportSessionErrorConflict        ImportSessionErrorCode = "usage_import_session_conflict"
+	ImportSessionErrorTooLarge        ImportSessionErrorCode = "usage_import_session_too_large"
+	ImportSessionErrorQuotaExceeded   ImportSessionErrorCode = "usage_import_session_quota_exceeded"
+	ImportSessionErrorLimitExceeded   ImportSessionErrorCode = "usage_import_session_limit_exceeded"
+	ImportSessionErrorFileMismatch    ImportSessionErrorCode = "usage_import_session_file_mismatch"
+	ImportSessionErrorUnavailable     ImportSessionErrorCode = "usage_import_session_unavailable"
+	ImportSessionErrorTrialHoldActive ImportSessionErrorCode = ImportSessionErrorCode(middleware.TrialHoldErrorCode)
 )
 
 type ImportSessionError struct {
-	Code    ImportSessionErrorCode
-	Message string
-	err     error
+	Code       ImportSessionErrorCode
+	Message    string
+	HTTPStatus int
+	err        error
+}
+
+func newImportSessionTrialHoldError() error {
+	return &ImportSessionError{
+		Code:       ImportSessionErrorTrialHoldActive,
+		Message:    middleware.TrialHoldErrorMessage,
+		HTTPStatus: http.StatusServiceUnavailable,
+	}
 }
 
 func (e *ImportSessionError) Error() string {
@@ -330,6 +343,11 @@ func (m *importSessionManager) Create(
 	if err := ctx.Err(); err != nil {
 		return ImportSession{}, err
 	}
+	done, blocked := middleware.BeginBackgroundMutation()
+	if blocked {
+		return ImportSession{}, newImportSessionTrialHoldError()
+	}
+	defer done()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.checkAcceptingLocked(); err != nil {
@@ -447,12 +465,39 @@ func (m *importSessionManager) Get(ctx context.Context, id string) (ImportSessio
 	if err := ctx.Err(); err != nil {
 		return ImportSession{}, err
 	}
+	done, blocked := middleware.BeginBackgroundMutation()
+	if !blocked {
+		defer done()
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	nowMS := m.nowMS()
+	if blocked {
+		sessions, err := m.snapshotSessionsReadOnlyLocked(nowMS)
+		if err != nil {
+			return ImportSession{}, err
+		}
+		if !validImportSessionID(id) {
+			return ImportSession{}, newImportSessionError(
+				ImportSessionErrorNotFound,
+				"usage import session not found",
+				nil,
+			)
+		}
+		session, ok := sessions[id]
+		if !ok {
+			return ImportSession{}, newImportSessionError(
+				ImportSessionErrorNotFound,
+				"usage import session not found",
+				nil,
+			)
+		}
+		return cloneImportSession(session), nil
+	}
 	if err := m.ensureInitializedLocked(); err != nil {
 		return ImportSession{}, err
 	}
-	m.cleanupExpiredForRequestLocked(m.nowMS())
+	m.cleanupExpiredForRequestLocked(nowMS)
 	state, err := m.findSessionLocked(id)
 	if err != nil {
 		return ImportSession{}, err
@@ -476,6 +521,11 @@ func (m *importSessionManager) ValidatePrefix(ctx context.Context, id, prefixSHA
 			nil,
 		)
 	}
+	done, blocked := middleware.BeginBackgroundMutation()
+	if blocked {
+		return ImportSession{}, newImportSessionTrialHoldError()
+	}
+	defer done()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.ensureInitializedLocked(); err != nil {
@@ -564,20 +614,54 @@ func (m *importSessionManager) List(ctx context.Context, options ImportSessionLi
 		return ImportSessionList{}, err
 	}
 
+	done, blocked := middleware.BeginBackgroundMutation()
+	if !blocked {
+		defer done()
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.ensureInitializedLocked(); err != nil {
-		return ImportSessionList{}, err
-	}
-	m.cleanupExpiredForRequestLocked(m.nowMS())
+	nowMS := m.nowMS()
 	all := make([]ImportSession, 0, len(m.sessions))
 	statusCounts := make(map[ImportSessionStatus]int)
-	for _, state := range m.sessions {
-		statusCounts[state.session.Status]++
-		if status != "" && state.session.Status != status {
-			continue
+	activeCount := 0
+	if blocked {
+		sessions, err := m.snapshotSessionsReadOnlyLocked(nowMS)
+		if err != nil {
+			return ImportSessionList{}, err
 		}
-		all = append(all, cloneImportSession(state.session))
+		if m.initialized {
+			for _, state := range m.sessions {
+				if state == nil || importSessionStateExpired(state, nowMS) {
+					continue
+				}
+				if state.chunkInProgress || state.cancel != nil || state.cancelRequested || sessionReservesDisk(state.session) {
+					activeCount++
+				}
+			}
+		}
+		for _, session := range sessions {
+			if !m.initialized && (session.cancelRequested || sessionReservesDisk(session)) {
+				activeCount++
+			}
+			statusCounts[session.Status]++
+			if status != "" && session.Status != status {
+				continue
+			}
+			all = append(all, cloneImportSession(session))
+		}
+	} else {
+		if err := m.ensureInitializedLocked(); err != nil {
+			return ImportSessionList{}, err
+		}
+		m.cleanupExpiredForRequestLocked(nowMS)
+		activeCount = m.activeSessionCountLocked()
+		for _, state := range m.sessions {
+			statusCounts[state.session.Status]++
+			if status != "" && state.session.Status != status {
+				continue
+			}
+			all = append(all, cloneImportSession(state.session))
+		}
 	}
 	sort.Slice(all, func(i, j int) bool {
 		if all[i].UpdatedAtMS != all[j].UpdatedAtMS {
@@ -612,7 +696,7 @@ func (m *importSessionManager) List(ctx context.Context, options ImportSessionLi
 		Total:          total,
 		StatusCounts:   statusCounts,
 		NextCursor:     nextCursor,
-		ActiveSessions: m.activeSessionCountLocked(),
+		ActiveSessions: activeCount,
 		MaxSessions:    m.config.MaxSessions,
 		ChunkSizeBytes: m.config.ChunkSizeBytes,
 		DiskQuotaBytes: m.config.DiskQuotaBytes,
@@ -675,6 +759,11 @@ func (m *importSessionManager) WriteChunk(
 	if err := ctx.Err(); err != nil {
 		return ImportSession{}, err
 	}
+	done, blocked := middleware.BeginBackgroundMutation()
+	if blocked {
+		return ImportSession{}, newImportSessionTrialHoldError()
+	}
+	defer done()
 	m.mu.Lock()
 	if err := m.checkAcceptingLocked(); err != nil {
 		m.mu.Unlock()
@@ -931,6 +1020,16 @@ func (m *importSessionManager) Complete(
 	if err := ctx.Err(); err != nil {
 		return ImportSession{}, err
 	}
+	bgDone, blocked := middleware.BeginBackgroundMutation()
+	if blocked {
+		return ImportSession{}, newImportSessionTrialHoldError()
+	}
+	transferred := false
+	defer func() {
+		if !transferred {
+			bgDone()
+		}
+	}()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.checkAcceptingLocked(); err != nil {
@@ -1029,7 +1128,9 @@ func (m *importSessionManager) Complete(
 	state.cancel = cancel
 	state.cancelRequested = false
 	m.wg.Add(1)
+	transferred = true
 	go func() {
+		defer bgDone()
 		defer m.wg.Done()
 		defer stopAfter()
 		m.runImport(id, dataPath, processingCtx, importer)
@@ -1041,6 +1142,11 @@ func (m *importSessionManager) Cancel(ctx context.Context, id string) (ImportSes
 	if err := ctx.Err(); err != nil {
 		return ImportSession{}, err
 	}
+	done, blocked := middleware.BeginBackgroundMutation()
+	if blocked {
+		return ImportSession{}, newImportSessionTrialHoldError()
+	}
+	defer done()
 	m.mu.Lock()
 	if err := m.ensureInitializedLocked(); err != nil {
 		m.mu.Unlock()
@@ -1134,6 +1240,11 @@ func (m *importSessionManager) CleanupExpired(ctx context.Context) (int, error) 
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
+	done, blocked := middleware.BeginBackgroundMutation()
+	if blocked {
+		return 0, nil
+	}
+	defer done()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.ensureInitializedLocked(); err != nil {
@@ -1490,8 +1601,7 @@ func (m *importSessionManager) cleanupExpiredLocked(nowMS int64) (int, error) {
 		delete(m.cleanupPending, id)
 	}
 	for id, state := range m.sessions {
-		if state.chunkInProgress || state.cancel != nil || state.session.Status == ImportSessionStatusProcessing ||
-			state.session.ExpiresAtMS <= 0 || nowMS < state.session.ExpiresAtMS {
+		if !importSessionStateExpired(state, nowMS) {
 			continue
 		}
 		if err := m.removeSessionFiles(id, true); err != nil {
@@ -1512,9 +1622,106 @@ func (m *importSessionManager) cleanupExpiredLocked(nowMS int64) (int, error) {
 }
 
 func (m *importSessionManager) cleanupExpiredForRequestLocked(nowMS int64) {
+	// Callers (Create, ValidatePrefix, WriteChunk, Complete, Cancel, and unblocked Get/List)
+	// already hold a BeginBackgroundMutation lease through completion.
 	if _, err := m.cleanupExpiredLocked(nowMS); err != nil {
 		log.Printf("cleanup usage import sessions during request: %v", err)
 	}
+}
+func importSessionStateExpired(state *importSessionState, nowMS int64) bool {
+	if state == nil || state.chunkInProgress || state.cancel != nil || state.session.Status == ImportSessionStatusProcessing {
+		return false
+	}
+	return state.session.ExpiresAtMS > 0 && nowMS >= state.session.ExpiresAtMS
+}
+
+
+func (m *importSessionManager) snapshotSessionsReadOnlyLocked(nowMS int64) (map[string]ImportSession, error) {
+	if m.initialized {
+		if m.initErr != nil {
+			return nil, m.initErr
+		}
+		out := make(map[string]ImportSession, len(m.sessions))
+		for id, state := range m.sessions {
+			if state == nil || importSessionStateExpired(state, nowMS) {
+				continue
+			}
+			out[id] = cloneImportSession(state.session)
+		}
+		return out, nil
+	}
+	if strings.TrimSpace(m.config.Directory) == "" || m.config.ChunkSizeBytes <= 0 ||
+		m.config.DiskQuotaBytes <= 0 || m.config.MaxSessions <= 0 || m.config.TTL <= 0 {
+		return nil, newImportSessionError(
+			ImportSessionErrorUnavailable,
+			"usage import session configuration is invalid",
+			nil,
+		)
+	}
+	directoryInfo, err := os.Lstat(m.config.Directory)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]ImportSession{}, nil
+		}
+		return nil, newImportSessionError(
+			ImportSessionErrorUnavailable,
+			"validate usage import session directory",
+			err,
+		)
+	}
+	if directoryInfo.Mode()&os.ModeSymlink != 0 || !directoryInfo.IsDir() {
+		return nil, newImportSessionError(
+			ImportSessionErrorUnavailable,
+			"validate usage import session directory",
+			errors.New("path is not a directory"),
+		)
+	}
+	entries, err := os.ReadDir(m.config.Directory)
+	if err != nil {
+		return nil, newImportSessionError(
+			ImportSessionErrorUnavailable,
+			"read usage import session directory",
+			err,
+		)
+	}
+	out := make(map[string]ImportSession)
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		id := strings.TrimSuffix(name, ".json")
+		if !validImportSessionID(id) {
+			continue
+		}
+		metadataPath := filepath.Join(m.config.Directory, name)
+		info, statErr := os.Lstat(metadataPath)
+		if statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			continue
+		}
+		data, readErr := os.ReadFile(metadataPath)
+		var metadata importSessionMetadata
+		if readErr != nil || json.Unmarshal(data, &metadata) != nil {
+			continue
+		}
+		session := metadata.ImportSession
+		session.resumeKey = strings.TrimSpace(metadata.ResumeKey)
+		session.cancelRequested = metadata.CancelRequested
+		if session.ID != id ||
+			session.SizeBytes <= 0 || session.ReceivedBytes < 0 || session.ReceivedBytes > session.SizeBytes ||
+			!validImportSessionStatus(session.Status) ||
+			(session.resumeKey != "" && !validImportSessionToken(session.resumeKey)) {
+			continue
+		}
+		if session.ExpiresAtMS > 0 && nowMS >= session.ExpiresAtMS && session.Status != ImportSessionStatusProcessing {
+			continue
+		}
+		if session.cancelRequested && session.Status != ImportSessionStatusProcessing {
+			continue
+		}
+		out[id] = cloneImportSession(session)
+	}
+	return out, nil
 }
 
 func (m *importSessionManager) finishChunkLocked(state *importSessionState) {

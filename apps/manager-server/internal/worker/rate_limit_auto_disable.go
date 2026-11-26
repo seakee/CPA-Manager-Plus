@@ -14,6 +14,7 @@ import (
 	"time"
 
 	collectorpkg "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	quotacooldownrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotacooldown"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
@@ -193,15 +194,42 @@ func (w *RateLimitAutoDisableWorker) run(ctx context.Context) {
 
 	w.enableDue(ctx, time.Now())
 	for {
+		if middleware.IsProcessTrialHoldActive() {
+			if !waitWorkerTrialHoldRelease(ctx) {
+				return
+			}
+			w.enableDue(ctx, time.Now())
+			continue
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case candidate := <-w.jobs:
-			w.handleCandidate(ctx, candidate)
+			for !w.processCandidate(ctx, candidate) {
+				if !waitWorkerTrialHoldRelease(ctx) {
+					return
+				}
+			}
 		case <-ticker.C:
 			w.enableDue(ctx, time.Now())
 		}
 	}
+}
+
+func waitWorkerTrialHoldRelease(ctx context.Context) bool {
+	for middleware.IsProcessTrialHoldActive() {
+		if ctx.Err() != nil {
+			return false
+		}
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+	}
+	return ctx.Err() == nil
 }
 
 func (w *RateLimitAutoDisableWorker) setRuntimeConfig(baseURL string, managementKey string) bool {
@@ -222,12 +250,22 @@ func (w *RateLimitAutoDisableWorker) runtimeConfig() (string, string) {
 }
 
 func (w *RateLimitAutoDisableWorker) handleCandidate(ctx context.Context, candidate quotaAutoDisableCandidate) {
+	_ = w.processCandidate(ctx, candidate)
+}
+
+func (w *RateLimitAutoDisableWorker) processCandidate(ctx context.Context, candidate quotaAutoDisableCandidate) bool {
 	if w == nil {
-		return
+		return true
 	}
+	done, blocked := middleware.BeginBackgroundMutation()
+	if blocked {
+		return false
+	}
+	defer done()
 	w.operationMu.Lock()
 	defer w.operationMu.Unlock()
 	w.handleCandidateLocked(ctx, candidate)
+	return true
 }
 
 func (w *RateLimitAutoDisableWorker) handleCandidateLocked(ctx context.Context, candidate quotaAutoDisableCandidate) {
@@ -607,8 +645,16 @@ func (w *RateLimitAutoDisableWorker) enableDue(ctx context.Context, now time.Tim
 	if w == nil {
 		return
 	}
+	done, blocked := middleware.BeginBackgroundMutation()
+	if blocked {
+		return
+	}
+	defer done()
 	w.operationMu.Lock()
 	defer w.operationMu.Unlock()
+	if middleware.IsProcessTrialHoldActive() {
+		return
+	}
 	w.enableDueLocked(ctx, now)
 }
 
@@ -626,6 +672,9 @@ func (w *RateLimitAutoDisableWorker) enableDueLocked(ctx context.Context, now ti
 		return
 	}
 	for _, item := range due {
+		if middleware.IsProcessTrialHoldActive() {
+			return
+		}
 		_, _ = w.recoverCooldown(ctx, baseURL, managementKey, item, now)
 	}
 }

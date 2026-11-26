@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	ports "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/ports/identityprojection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
@@ -147,23 +148,34 @@ func (w *Worker) catchUp(ctx context.Context) bool {
 	defer atomic.StoreInt32(&w.running, 0)
 
 	pending := false
-	for batch := 0; batch < w.maxBatches; batch++ {
+	for range w.maxBatches {
 		if ctx.Err() != nil {
 			return false
 		}
-		nowMS := time.Now().UnixMilli()
-		result, err := w.repo.CatchUp(ctx, w.batchLimit, nowMS)
-		if err != nil {
-			log.Printf("[canonical-projection] catch-up error: %v", err)
-			if recErr := w.repo.RecordFailure(ctx, err, nowMS); recErr != nil && ctx.Err() == nil {
-				log.Printf("[canonical-projection] record failure error: %v", recErr)
+		done, blocked := middleware.BeginBackgroundMutation()
+		if blocked {
+			return true
+		}
+		stopLoop, morePending := func() (bool, bool) {
+			defer done()
+			nowMS := time.Now().UnixMilli()
+			result, err := w.repo.CatchUp(ctx, w.batchLimit, nowMS)
+			if err != nil {
+				log.Printf("[canonical-projection] catch-up error: %v", err)
+				if recErr := w.repo.RecordFailure(ctx, err, nowMS); recErr != nil && ctx.Err() == nil {
+					log.Printf("[canonical-projection] record failure error: %v", recErr)
+				}
+				return true, false
 			}
+			if !result.Pending {
+				return true, false
+			}
+			return false, true
+		}()
+		if stopLoop {
 			return false
 		}
-		if !result.Pending {
-			return false
-		}
-		pending = result.Pending
+		pending = morePending
 	}
 	return pending
 }

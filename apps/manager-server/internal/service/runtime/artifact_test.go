@@ -275,3 +275,74 @@ func TestArtifactStatusReadyMirrorsSlimWizardGate(t *testing.T) {
 		})
 	}
 }
+
+func TestArtifactClientBaselineRPCs(t *testing.T) {
+	otherID := "sha256:" + strings.Repeat("b", 64)
+	status := ArtifactStatus{
+		SchemaVersion: 1, Pinned: ArtifactPinned{Version: "8.0.56", ArtifactID: otherID},
+		Active: &ArtifactActive{Origin: "acquired", ArtifactID: testArtifactID}, BundledAvailable: true, AdoptBaselineAvailable: true,
+	}
+	op := ArtifactOperationEnvelope{Operation: ArtifactOperation{ID: "op-1", Source: "upload", Phase: "succeeded"}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer "+testRuntimeToken {
+			t.Errorf("Authorization = %q", got)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		switch r.Method + " " + r.URL.Path {
+		case "GET " + artifactStatusPath:
+			_ = json.NewEncoder(w).Encode(status)
+		case "POST " + artifactAdoptBaselinePath:
+			var body map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body) != 1 || body["expectedActiveArtifactId"] == "" {
+				t.Errorf("adoption body = %v, %v", body, err)
+			}
+			if body["expectedActiveArtifactId"] != testArtifactID {
+				w.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(w).Encode(map[string]string{"code": ArtifactCodeArtifactConflict})
+				return
+			}
+			result := status
+			result.Active = &ArtifactActive{Origin: "bundled", ArtifactID: otherID}
+			result.AdoptBaselineAvailable = false
+			_ = json.NewEncoder(w).Encode(result)
+		case "POST " + artifactAcquirePath:
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["allowBaselineUpgrade"] != true || body["source"] != "github" {
+				t.Errorf("acquisition body = %v, %v", body, err)
+			}
+			result := op
+			result.Operation.Source = "github"
+			_ = json.NewEncoder(w).Encode(result)
+		case "PUT " + artifactUploadPath:
+			data, err := io.ReadAll(r.Body)
+			if err != nil || string(data) != "gzip data" || r.URL.RawQuery != "allow_baseline_upgrade=1" {
+				t.Errorf("upload = %q, query=%q, err=%v", data, r.URL.RawQuery, err)
+			}
+			_ = json.NewEncoder(w).Encode(op)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client := NewArtifactClient(server.URL, testRuntimeToken)
+	if got, err := client.Status(t.Context()); err != nil || !got.AdoptBaselineAvailable || !got.BundledAvailable {
+		t.Fatalf("baseline availability = %+v, %v", got, err)
+	}
+	if got, err := client.AdoptBundledBaseline(t.Context(), testArtifactID); err != nil || !got.Ready() || got.Active.Origin != "bundled" {
+		t.Fatalf("adopt baseline = %+v, %v", got, err)
+	}
+	if _, err := client.AdoptBundledBaseline(t.Context(), otherID); err == nil {
+		t.Fatal("adoption ignored artifact conflict")
+	} else if code, status, ok := ArtifactErrorCode(err); code != ArtifactCodeArtifactConflict || status != http.StatusConflict || !ok {
+		t.Fatalf("artifact conflict = %v", err)
+	}
+	opts := ArtifactAcquisitionOptions{AllowBaselineUpgrade: true}
+	if _, err := client.AcquireArtifact(t.Context(), "github", "", opts); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.UploadArtifact(t.Context(), strings.NewReader("gzip data"), 9, opts); err != nil {
+		t.Fatal(err)
+	}
+}

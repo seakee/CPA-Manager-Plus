@@ -62,6 +62,7 @@ type Status struct {
 	PrepareSupported  bool              `json:"prepare_supported"`
 	ActivateSupported bool              `json:"activate_supported"`
 	Actionable        bool              `json:"actionable"`
+	Baseline          *BaselineStatus   `json:"baseline,omitempty"`
 }
 
 type appliedActivationReceipt struct {
@@ -77,18 +78,19 @@ type appliedActivationReceipt struct {
 // Service coordinates CPA update discovery and embedded update mutations.
 // Lock order: mutationMu -> mu (never acquire mutationMu while holding mu).
 type Service struct {
-	mutationMu         sync.Mutex
-	mu                 sync.Mutex
-	store              Store
-	runtime            runtimeservice.RuntimeClient
-	mode               model.RuntimeMode
-	modeResolver       func() model.RuntimeMode
-	isProductComplete  func(context.Context) (bool, error)
-	source             stableReleaseSource
-	now                func() time.Time
-	loaded             bool
-	persistenceFailed  bool
-	state              DiscoveryState
+	mutationMu             sync.Mutex
+	mu                     sync.Mutex
+	store                  Store
+	runtime                runtimeservice.RuntimeClient
+	artifact               baselineArtifactClient
+	mode                   model.RuntimeMode
+	modeResolver           func() model.RuntimeMode
+	isProductComplete      func(context.Context) (bool, error)
+	source                 stableReleaseSource
+	now                    func() time.Time
+	loaded                 bool
+	persistenceFailed      bool
+	state                  DiscoveryState
 	appliedActivations     map[string]appliedActivationReceipt
 	appliedActivationOrder []string
 }
@@ -113,6 +115,16 @@ func (s *Service) WithModeResolver(resolve func() model.RuntimeMode) *Service {
 // probe means the service cannot authorize CPA updates.
 func (s *Service) WithProductCompleteProbe(probe func(context.Context) (bool, error)) *Service {
 	s.isProductComplete = probe
+	return s
+}
+
+// WithArtifactClient adds Supervisor baseline support to Embedded installations.
+func (s *Service) WithArtifactClient(client *runtimeservice.ArtifactClient) *Service {
+	if client != nil {
+		s.artifact = client
+	} else {
+		s.artifact = nil
+	}
 	return s
 }
 
@@ -322,6 +334,12 @@ func (s *Service) project(ctx context.Context) (Status, error) {
 		return status, nil
 	}
 
+	if s.artifact != nil {
+		if current, err := s.artifact.Status(ctx); err == nil {
+			baseline := projectBaseline(current)
+			status.Baseline = &baseline
+		}
+	}
 	status.PrepareSupported = observed.Capabilities.Supports(model.RuntimeCapabilityPrepareUpdate)
 	status.ActivateSupported = observed.Capabilities.Supports(model.RuntimeCapabilityActivateUpdate)
 	artifact := observed.ActiveGatewayArtifact

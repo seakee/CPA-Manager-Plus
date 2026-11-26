@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	codexinspectionservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/codexinspection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
@@ -99,10 +100,23 @@ func (w *CodexInspectionWorker) run(ctx context.Context) {
 }
 
 func (w *CodexInspectionWorker) tick(ctx context.Context) {
+	w.processNext(ctx)
+}
+
+func (w *CodexInspectionWorker) processNext(ctx context.Context) {
+	if w == nil || w.service == nil {
+		return
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if middleware.IsProcessTrialHoldActive() {
+		return
+	}
 	if err := w.service.Recover(ctx); err != nil {
+		if errors.Is(err, codexinspectionservice.ErrTrialHoldActive) {
+			return
+		}
 		if ctx.Err() == nil {
 			log.Printf("recover stale codex inspection runs: %v", err)
 		}
@@ -136,13 +150,15 @@ func (w *CodexInspectionWorker) tick(ctx context.Context) {
 	if err := ctx.Err(); err != nil {
 		return
 	}
-	// Start already owns the long-running execution goroutine. Keeping lease
-	// acquisition in the worker loop means StopAndWait can account for every
-	// scheduler start attempt before SQLite is closed.
-	if _, err := w.service.Start(ctx, codexinspectionservice.RunRequest{
+	// Start acquires and transfers its own BeginBackgroundMutation lease inside
+	// startRun -> runTask through the final SQLite write, fencing both manual
+	// HTTP runs and scheduled worker runs uniformly without double-counting.
+	_, err = w.service.Start(ctx, codexinspectionservice.RunRequest{
 		TriggerType: model.CodexInspectionTriggerScheduled,
 		TriggerKey:  triggerKey,
-	}); err != nil &&
+	})
+	if err != nil &&
+		!errors.Is(err, codexinspectionservice.ErrTrialHoldActive) &&
 		!errors.Is(err, codexinspectionservice.ErrRunAlreadyActive) &&
 		!errors.Is(err, codexinspectionservice.ErrTriggerAlreadyExists) &&
 		!errors.Is(err, codexinspectionservice.ErrScheduledRunDisabled) &&

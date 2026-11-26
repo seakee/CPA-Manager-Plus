@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/testutil"
 )
 
@@ -1463,4 +1464,357 @@ func TestImportSessionStopAndWaitCancelsAndDrainsActiveImport(t *testing.T) {
 	if stopErr := <-stopDone; stopErr != nil {
 		t.Fatalf("StopAndWait: %v", stopErr)
 	}
+}
+
+func TestImportSessionTrialHoldFencesCompleteAndRejectsMutationsWhileHeld(t *testing.T) {
+	t.Cleanup(func() {
+		middleware.SetProcessTrialHoldGate(nil)
+		middleware.ReleaseProcessTrialHold()
+	})
+	gate := middleware.NewTrialHoldGate(false, "")
+	middleware.SetProcessTrialHoldGate(gate)
+
+	dir := filepath.Join(t.TempDir(), "imports")
+	nowMS := int64(1_000_000)
+	var nowMu sync.Mutex
+	manager := newImportSessionManager(ImportSessionConfig{
+		Directory:      dir,
+		ChunkSizeBytes: 64,
+		DiskQuotaBytes: 1024 * 1024,
+		MaxSessions:    8,
+		TTL:            time.Minute,
+		Now: func() time.Time {
+			nowMu.Lock()
+			defer nowMu.Unlock()
+			return time.UnixMilli(nowMS)
+		},
+	})
+	rootCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := manager.Start(rootCtx); err != nil {
+		t.Fatalf("start manager: %v", err)
+	}
+	defer func() { _ = manager.StopAndWait(context.Background()) }()
+
+	prepareReady := func(filename, content string) ImportSession {
+		t.Helper()
+		sess, err := manager.Create(context.Background(), filename, int64(len(content)), "")
+		if err != nil {
+			t.Fatalf("create %s: %v", filename, err)
+		}
+		sess, err = manager.WriteChunk(context.Background(), sess.ID, 0, int64(len(content)), strings.NewReader(content))
+		if err != nil {
+			t.Fatalf("write chunk %s: %v", filename, err)
+		}
+		if sess.Status != ImportSessionStatusReady {
+			t.Fatalf("expected ready session, got %+v", sess)
+		}
+		return sess
+	}
+
+	inFlightSess := prepareReady("inflight.jsonl", "{\"ok\":1}\n")
+	heldReadySess := prepareReady("held-ready.jsonl", "{\"ok\":2}\n")
+	uploadingSess, err := manager.Create(context.Background(), "uploading.jsonl", 8, "")
+	if err != nil {
+		t.Fatalf("create uploading session: %v", err)
+	}
+
+	enteredImporter := make(chan struct{})
+	releaseImporter := make(chan struct{})
+	processing, err := manager.Complete(context.Background(), inFlightSess.ID, func(ctx context.Context, r io.Reader) (ImportResult, error) {
+		_, _ = io.ReadAll(r)
+		close(enteredImporter)
+		<-releaseImporter
+		return ImportResult{Added: 1, Total: 1}, nil
+	})
+	if err != nil || processing.Status != ImportSessionStatusProcessing {
+		t.Fatalf("Complete inFlightSess = %+v err=%v", processing, err)
+	}
+	<-enteredImporter
+
+	// Engage TrialHold while Complete's background goroutine is mid-import.
+	middleware.EngageProcessTrialHold()
+	drainDone := make(chan error, 1)
+	go func() {
+		drainDone <- middleware.WaitOtherInflightMutations(context.Background())
+	}()
+
+	select {
+	case err := <-drainDone:
+		t.Fatalf("WaitOtherInflightMutations returned while background Complete import was still running: %v", err)
+	case <-time.After(40 * time.Millisecond):
+	}
+
+	// While TrialHold is active, Create, WriteChunk, Complete, Cancel fail closed with 503 upgrade_trial_verifying
+	// WITHOUT mutating session metadata or upload files, and CleanupExpired skips deletion!
+	_, createErr := manager.Create(context.Background(), "blocked.jsonl", 4, "")
+	requireImportSessionErrorCode(t, createErr, ImportSessionErrorTrialHoldActive)
+
+	_, chunkErr := manager.WriteChunk(context.Background(), uploadingSess.ID, 0, 4, strings.NewReader("1234"))
+	requireImportSessionErrorCode(t, chunkErr, ImportSessionErrorTrialHoldActive)
+
+	heldBeforeMetaPath := filepath.Join(dir, heldReadySess.ID+".json")
+	heldBeforeMeta, err := os.ReadFile(heldBeforeMetaPath)
+	if err != nil {
+		t.Fatalf("read held-ready metadata before Complete: %v", err)
+	}
+	_, completeErr := manager.Complete(context.Background(), heldReadySess.ID, func(ctx context.Context, r io.Reader) (ImportResult, error) {
+		t.Error("importer must not run when Complete is blocked by TrialHold")
+		return ImportResult{}, nil
+	})
+	requireImportSessionErrorCode(t, completeErr, ImportSessionErrorTrialHoldActive)
+	var sessionErr *ImportSessionError
+	if !errors.As(completeErr, &sessionErr) || sessionErr.HTTPStatus != 503 {
+		t.Fatalf("expected HTTPStatus=503 on ImportSessionError, got %+v", completeErr)
+	}
+	heldAfterMeta, err := os.ReadFile(heldBeforeMetaPath)
+	if err != nil || !bytes.Equal(heldBeforeMeta, heldAfterMeta) {
+		t.Fatalf("expected held-ready metadata untouched when Complete blocked, err=%v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, heldReadySess.ID+".part")); statErr != nil {
+		t.Fatalf("expected held-ready upload file untouched, statErr=%v", statErr)
+	}
+
+	_, cancelErr := manager.Cancel(context.Background(), heldReadySess.ID)
+	requireImportSessionErrorCode(t, cancelErr, ImportSessionErrorTrialHoldActive)
+
+	nowMu.Lock()
+	nowMS += int64(2 * time.Hour / time.Millisecond)
+	nowMu.Unlock()
+	if removed, cleanErr := manager.CleanupExpired(context.Background()); cleanErr != nil || removed != 0 {
+		t.Fatalf("expected CleanupExpired to skip while TrialHold active, got removed=%d err=%v", removed, cleanErr)
+	}
+	if _, statErr := os.Stat(heldBeforeMetaPath); statErr != nil {
+		t.Fatalf("expected expired session metadata preserved during TrialHold, statErr=%v", statErr)
+	}
+
+	// Unblock in-flight importer: WaitOtherInflightMutations MUST wait until final metadata
+	// persistence AND temporary upload file deletion have both completed!
+	close(releaseImporter)
+	if err := <-drainDone; err != nil {
+		t.Fatalf("WaitOtherInflightMutations failed: %v", err)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(dir, inFlightSess.ID+".part")); !os.IsNotExist(statErr) {
+		t.Fatalf("expected upload .part file deleted BEFORE WaitOtherInflightMutations returned, statErr=%v", statErr)
+	}
+	rawFinalMeta, err := os.ReadFile(filepath.Join(dir, inFlightSess.ID+".json"))
+	if err != nil {
+		t.Fatalf("read final metadata after drain: %v", err)
+	}
+	var finalMeta importSessionMetadata
+	if err := json.Unmarshal(rawFinalMeta, &finalMeta); err != nil {
+		t.Fatalf("unmarshal final metadata: %v", err)
+	}
+	if finalMeta.Status != ImportSessionStatusCompleted {
+		t.Fatalf("expected final metadata status=completed BEFORE WaitOtherInflightMutations returned, got %q", finalMeta.Status)
+	}
+}
+
+func TestImportSessionReadsDoNotMutateDiskDuringTrialHoldAndRecoverAfterRelease(t *testing.T) {
+	t.Cleanup(func() {
+		middleware.SetProcessTrialHoldGate(nil)
+		middleware.ReleaseProcessTrialHold()
+	})
+	gate := middleware.NewTrialHoldGate(false, "launcher-secret-token")
+	middleware.SetProcessTrialHoldGate(gate)
+
+	dir := filepath.Join(t.TempDir(), "import-sessions")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir import-sessions: %v", err)
+	}
+
+	var nowMS int64 = 1_700_000_000_000
+	nowFn := func() time.Time { return time.UnixMilli(nowMS) }
+	seedMgr := newImportSessionManager(ImportSessionConfig{
+		Directory:      dir,
+		ChunkSizeBytes: 64,
+		MaxSessions:    4,
+		DiskQuotaBytes: 4096,
+		TTL:            time.Hour,
+		Now:            nowFn,
+	})
+
+	activeSess, err := seedMgr.Create(context.Background(), "active.jsonl", 5, "")
+	if err != nil {
+		t.Fatalf("create active session: %v", err)
+	}
+	expiredSess, err := seedMgr.Create(context.Background(), "expired.jsonl", 5, "")
+	if err != nil {
+		t.Fatalf("create expired session: %v", err)
+	}
+	orphanPartPath := filepath.Join(dir, "0123456789abcdef0123456789abcdef.part")
+	if err := os.WriteFile(orphanPartPath, []byte("orphan"), 0o600); err != nil {
+		t.Fatalf("write orphan part: %v", err)
+	}
+
+	expiredMetaPath := filepath.Join(dir, expiredSess.ID+".json")
+	rawExp, err := os.ReadFile(expiredMetaPath)
+	if err != nil {
+		t.Fatalf("read expired metadata: %v", err)
+	}
+	var expMeta importSessionMetadata
+	if err := json.Unmarshal(rawExp, &expMeta); err != nil {
+		t.Fatalf("unmarshal expired metadata: %v", err)
+	}
+	expMeta.ExpiresAtMS = nowMS - 1000
+	rewrittenExp, _ := json.Marshal(expMeta)
+	if err := os.WriteFile(expiredMetaPath, rewrittenExp, 0o600); err != nil {
+		t.Fatalf("write expired metadata: %v", err)
+	}
+
+	// Engage TrialHold BEFORE Fresh lazy initialization on a brand-new manager!
+	middleware.EngageProcessTrialHold()
+	lazyMgr := newImportSessionManager(ImportSessionConfig{
+		Directory:      dir,
+		ChunkSizeBytes: 64,
+		MaxSessions:    4,
+		DiskQuotaBytes: 4096,
+		TTL:            time.Hour,
+		Now:            nowFn,
+	})
+
+	got, err := lazyMgr.Get(context.Background(), activeSess.ID)
+	if err != nil || got.ID != activeSess.ID {
+		t.Fatalf("expected Get(active) to succeed read-only during hold, got=%+v err=%v", got, err)
+	}
+	if _, expGetErr := lazyMgr.Get(context.Background(), expiredSess.ID); expGetErr == nil {
+		t.Fatalf("expected expired session hidden from Get during hold")
+	}
+	listed, err := lazyMgr.List(context.Background(), ImportSessionListOptions{Limit: 10})
+	if err != nil || len(listed.Sessions) != 1 || listed.Sessions[0].ID != activeSess.ID || listed.ActiveSessions != 1 {
+		t.Fatalf("expected List to return only 1 active session during hold, got=%+v err=%v", listed, err)
+	}
+
+	// Verify ZERO disk deletions happened during held Get/List!
+	if _, err := os.Stat(expiredMetaPath); err != nil {
+		t.Fatalf("expected expired metadata NOT deleted during held read, err=%v", err)
+	}
+	if _, err := os.Stat(orphanPartPath); err != nil {
+		t.Fatalf("expected orphan .part NOT deleted during held read, err=%v", err)
+	}
+
+	// Release hold: next List performs full leased initialization + expiry sweep!
+	middleware.ReleaseProcessTrialHold()
+	listedAfter, err := lazyMgr.List(context.Background(), ImportSessionListOptions{Limit: 10})
+	if err != nil || len(listedAfter.Sessions) != 1 || listedAfter.Sessions[0].ID != activeSess.ID {
+		t.Fatalf("expected List after release to return active session, got=%+v err=%v", listedAfter, err)
+	}
+	if _, err := os.Stat(expiredMetaPath); !os.IsNotExist(err) {
+		t.Fatalf("expected expired metadata swept after hold release, statErr=%v", err)
+	}
+	if _, err := os.Stat(orphanPartPath); !os.IsNotExist(err) {
+		t.Fatalf("expected orphan .part swept after hold release, statErr=%v", err)
+	}
+}
+
+func TestImportSessionInFlightChunkRemainsVisibleAcrossTTLDuringTrialHoldWithoutDiskMutation(t *testing.T) {
+	t.Cleanup(func() {
+		middleware.SetProcessTrialHoldGate(nil)
+		middleware.ReleaseProcessTrialHold()
+	})
+	gate := middleware.NewTrialHoldGate(false, "launcher-secret-token")
+	middleware.SetProcessTrialHoldGate(gate)
+
+	dir := filepath.Join(t.TempDir(), "import-inflight-ttl")
+	var nowMu sync.Mutex
+	var nowMS int64 = 1_700_000_000_000
+	getNow := func() time.Time {
+		nowMu.Lock()
+		defer nowMu.Unlock()
+		return time.UnixMilli(nowMS)
+	}
+	advanceNow := func(delta time.Duration) {
+		nowMu.Lock()
+		nowMS += delta.Milliseconds()
+		nowMu.Unlock()
+	}
+
+	mgr := newImportSessionManager(ImportSessionConfig{
+		Directory:      dir,
+		ChunkSizeBytes: 64,
+		MaxSessions:    4,
+		DiskQuotaBytes: 4096,
+		TTL:            time.Minute,
+		Now:            getNow,
+	})
+
+	inFlightChunkSess, err := mgr.Create(context.Background(), "streaming.jsonl", 8, "")
+	if err != nil {
+		t.Fatalf("create streaming session: %v", err)
+	}
+	idleExpiringSess, err := mgr.Create(context.Background(), "idle.jsonl", 5, "")
+	if err != nil {
+		t.Fatalf("create idle session: %v", err)
+	}
+	idleMetaPath := filepath.Join(dir, idleExpiringSess.ID+".json")
+
+	// Start WriteChunk before TTL expires, using a pipe so chunkInProgress=true while body read blocks.
+	pr, pw := io.Pipe()
+	chunkStarted := make(chan struct{})
+	chunkDone := make(chan error, 1)
+	go func() {
+		_, writeErr := mgr.WriteChunk(context.Background(), inFlightChunkSess.ID, 0, 8, &notifyingFirstReadReader{
+			r:        pr,
+			notified: chunkStarted,
+		})
+		chunkDone <- writeErr
+	}()
+
+	// Send 4 bytes so WriteChunk enters reading body after setting chunkInProgress=true and unlocking m.mu.
+	go func() {
+		_, _ = pw.Write([]byte("{\"a\""))
+	}()
+	select {
+	case <-chunkStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for WriteChunk to begin reading body")
+	}
+
+	// Engage TrialHold and advance clock past TTL while chunkInProgress is still true!
+	middleware.EngageProcessTrialHold()
+	advanceNow(2 * time.Minute)
+
+	// In-flight uploading session MUST remain visible in Get and List across TTL,
+	// while idle expired session is hidden AND its disk metadata is NOT deleted during hold!
+	gotInFlight, err := mgr.Get(context.Background(), inFlightChunkSess.ID)
+	if err != nil || gotInFlight.ID != inFlightChunkSess.ID {
+		t.Fatalf("expected in-flight chunk session visible via Get across TTL during hold, got=%+v err=%v", gotInFlight, err)
+	}
+	if _, err := mgr.Get(context.Background(), idleExpiringSess.ID); err == nil {
+		t.Fatalf("expected idle expired session hidden from Get during hold")
+	}
+	listed, err := mgr.List(context.Background(), ImportSessionListOptions{Limit: 10})
+	if err != nil || len(listed.Sessions) != 1 || listed.Sessions[0].ID != inFlightChunkSess.ID || listed.ActiveSessions != 1 {
+		t.Fatalf("expected List during hold to include 1 active in-flight chunk session across TTL, got=%+v err=%v", listed, err)
+	}
+	if _, err := os.Stat(idleMetaPath); err != nil {
+		t.Fatalf("expected idle expired session metadata NOT deleted on disk during held Get/List, err=%v", err)
+	}
+
+	// Finish the remaining 4 bytes of the chunk so WriteChunk completes and releases its lease.
+	_, _ = pw.Write([]byte(":1}\n"))
+	_ = pw.Close()
+	if writeErr := <-chunkDone; writeErr != nil {
+		t.Fatalf("expected in-flight WriteChunk to finish cleanly, got %v", writeErr)
+	}
+
+	middleware.ReleaseProcessTrialHold()
+	if _, err := mgr.List(context.Background(), ImportSessionListOptions{Limit: 10}); err != nil {
+		t.Fatalf("list after release: %v", err)
+	}
+	if _, err := os.Stat(idleMetaPath); !os.IsNotExist(err) {
+		t.Fatalf("expected idle expired session swept from disk after hold release, statErr=%v", err)
+	}
+}
+
+type notifyingFirstReadReader struct {
+	r        io.Reader
+	once     sync.Once
+	notified chan struct{}
+}
+
+func (n *notifyingFirstReadReader) Read(p []byte) (int, error) {
+	n.once.Do(func() { close(n.notified) })
+	return n.r.Read(p)
 }

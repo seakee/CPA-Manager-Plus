@@ -18,6 +18,7 @@ import (
 	adaptersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/adapters/sqlite/identitystore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/identityreconcile"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/ports/identityinventory"
 	ports "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/ports/identitystore"
@@ -1098,4 +1099,94 @@ func TestReconcileOnce_MalformedAPIKeyInventory_NeverBecomesNegativeEvidence(t *
 func sha256Hex(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
+}
+
+type blockingApplyIdentityRepo struct {
+	recordingIdentityRepo
+	enteredApply chan struct{}
+	allowApply   chan struct{}
+}
+
+func (b *blockingApplyIdentityRepo) ApplyPassiveSnapshot(ctx context.Context, params ports.ReconcileSnapshotParams) (ports.ReconcileSnapshotResult, error) {
+	if b.enteredApply != nil {
+		close(b.enteredApply)
+	}
+	if b.allowApply != nil {
+		<-b.allowApply
+	}
+	return b.recordingIdentityRepo.ApplyPassiveSnapshot(ctx, params)
+}
+
+func TestReconcileOnce_FencedUnderTrialHold(t *testing.T) {
+	t.Cleanup(func() {
+		middleware.SetProcessTrialHoldGate(nil)
+		middleware.ReleaseProcessTrialHold()
+	})
+	gate := middleware.NewTrialHoldGate(false, "")
+	middleware.SetProcessTrialHoldGate(gate)
+
+	observer := &sequenceRuntimeObserver{
+		statuses: []func() (model.RuntimeObservedStatus, error){
+			func() (model.RuntimeObservedStatus, error) { return validReadyStatus(), nil },
+			func() (model.RuntimeObservedStatus, error) { return validReadyStatus(), nil },
+		},
+	}
+	repo := &blockingApplyIdentityRepo{
+		recordingIdentityRepo: recordingIdentityRepo{
+			applyResult: ports.ReconcileSnapshotResult{APIKeysCreated: 1},
+		},
+		enteredApply: make(chan struct{}),
+		allowApply:   make(chan struct{}),
+	}
+	inv := &fakeInventoryClient{
+		apiKeys: []identityinventory.APIKeyObservation{{KeyHash: strings.Repeat("a", 64)}},
+	}
+	svc, err := identityreconcile.NewService(identityreconcile.Config{
+		RuntimeObserver:    observer,
+		ConnectionResolver: staticConnectionResolver("http://127.0.0.1:8317", "secret"),
+		InventoryClient:    inv,
+		IdentityRepo:       repo,
+		TimeSource:         func() int64 { return 12345 },
+	})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	recDone := make(chan error, 1)
+	go func() {
+		_, err := svc.ReconcileOnce(context.Background())
+		recDone <- err
+	}()
+	<-repo.enteredApply
+
+	middleware.EngageProcessTrialHold()
+	drainDone := make(chan error, 1)
+	go func() {
+		drainDone <- middleware.WaitOtherInflightMutations(context.Background())
+	}()
+
+	select {
+	case err := <-drainDone:
+		t.Fatalf("WaitOtherInflightMutations returned while ReconcileOnce ApplyPassiveSnapshot was mid-flight: %v", err)
+	case <-time.After(40 * time.Millisecond):
+	}
+
+	close(repo.allowApply)
+	if err := <-recDone; err != nil {
+		t.Fatalf("in-flight ReconcileOnce failed: %v", err)
+	}
+	if err := <-drainDone; err != nil {
+		t.Fatalf("WaitOtherInflightMutations failed: %v", err)
+	}
+	if len(repo.applyCalls) != 1 {
+		t.Fatalf("expected 1 ApplyPassiveSnapshot call from in-flight ReconcileOnce, got %d", len(repo.applyCalls))
+	}
+
+	// Subsequent ReconcileOnce while TrialHold is active returns cleanly without observing or writing.
+	res, err := svc.ReconcileOnce(context.Background())
+	if err != nil || res != (ports.ReconcileSnapshotResult{}) {
+		t.Fatalf("expected zero no-op result while TrialHold active, got res=%+v err=%v", res, err)
+	}
+	if len(repo.applyCalls) != 1 {
+		t.Fatalf("expected zero new ApplyPassiveSnapshot calls under TrialHold, got %d", len(repo.applyCalls))
+	}
 }

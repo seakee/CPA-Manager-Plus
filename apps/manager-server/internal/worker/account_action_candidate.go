@@ -12,6 +12,7 @@ import (
 	"time"
 
 	collectorpkg "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/credentialpolicy"
@@ -138,22 +139,41 @@ func (w *AccountActionCandidateWorker) HandleUsageEvents(ctx context.Context, cf
 
 func (w *AccountActionCandidateWorker) run(ctx context.Context) {
 	for {
+		if middleware.IsProcessTrialHoldActive() {
+			if !waitWorkerTrialHoldRelease(ctx) {
+				return
+			}
+			continue
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case candidate := <-w.jobs:
-			w.handleCandidate(ctx, candidate)
+			for !w.processCandidate(ctx, candidate) {
+				if !waitWorkerTrialHoldRelease(ctx) {
+					return
+				}
+			}
 		}
 	}
 }
 
 func (w *AccountActionCandidateWorker) handleCandidate(ctx context.Context, candidate accountActionCandidate) {
+	_ = w.processCandidate(ctx, candidate)
+}
+
+func (w *AccountActionCandidateWorker) processCandidate(ctx context.Context, candidate accountActionCandidate) bool {
+	done, blocked := middleware.BeginBackgroundMutation()
+	if blocked {
+		return false
+	}
+	defer done()
 	if candidate.FileName == "" {
-		return
+		return true
 	}
 	if w == nil || w.store == nil || w.store.AccountActions == nil {
 		log.Printf("[account-action] store is not configured, skip auth file %q", candidate.FileName)
-		return
+		return true
 	}
 	item, err := w.store.UpsertAccountActionCandidate(ctx, model.AccountActionCandidateUpsert{
 		ActionType:          candidate.ActionType,
@@ -171,10 +191,11 @@ func (w *AccountActionCandidateWorker) handleCandidate(ctx context.Context, cand
 	})
 	if err != nil {
 		log.Printf("[account-action] failed to upsert pending candidate for auth file %q: %v", candidate.FileName, err)
-		return
+		return true
 	}
 	log.Printf("[account-action] saved pending %s candidate %d for auth file %q authIndex=%q provider=%q hitCount=%d", candidate.ActionType, item.ID, candidate.FileName, item.AuthIndex, item.Provider, item.HitCount)
 	w.maybeAutoDisable(ctx, item, candidate)
+	return true
 }
 
 func (w *AccountActionCandidateWorker) maybeAutoDisable(ctx context.Context, item model.AccountActionCandidate, candidate accountActionCandidate) {
