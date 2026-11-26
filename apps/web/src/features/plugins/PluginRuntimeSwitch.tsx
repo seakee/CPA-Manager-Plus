@@ -16,6 +16,9 @@ import { createPublicApiClient, PublicApiError, type PublicApiClient } from '@/f
 import styles from './PluginRuntimeSwitch.module.scss';
 
 const defaultClient = createPublicApiClient();
+const SUCCESS_NOTICE_AUTO_HIDE_MS = 4_000;
+
+type PluginNoticeTone = 'success' | 'warning' | 'error';
 
 /** The switch as the Manager's document carries it. */
 interface PluginSwitchState {
@@ -64,16 +67,42 @@ export function PluginRuntimeSwitch({
   const [busy, setBusy] = useState(false);
   const [reconciling, setReconciling] = useState(false);
   const [notice, setNotice] = useState('');
+  const [noticeTone, setNoticeTone] = useState<PluginNoticeTone>('warning');
   const mounted = useRef(true);
   const requestSeq = useRef(0);
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearNoticeTimer = useCallback(() => {
+    if (noticeTimerRef.current !== null) {
+      clearTimeout(noticeTimerRef.current);
+      noticeTimerRef.current = null;
+    }
+  }, []);
+
+  const showNotice = useCallback(
+    (message: string, tone: PluginNoticeTone, autoHide = false) => {
+      clearNoticeTimer();
+      setNotice(message);
+      setNoticeTone(tone);
+      if (autoHide && message) {
+        noticeTimerRef.current = setTimeout(() => {
+          noticeTimerRef.current = null;
+          if (mounted.current) {
+            setNotice('');
+          }
+        }, SUCCESS_NOTICE_AUTO_HIDE_MS);
+      }
+    },
+    [clearNoticeTimer]
+  );
 
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
+      clearNoticeTimer();
     };
-  }, []);
-
+  }, [clearNoticeTimer]);
   const load = useCallback(async () => {
     if (!adminCredential) return null;
     const seq = ++requestSeq.current;
@@ -111,46 +140,57 @@ export function PluginRuntimeSwitch({
           { kind: 'admin', value: adminCredential },
           requestId
         );
+        if (result.operation.state === 'persisted') {
+          onApplied?.();
+        }
         const next = await load();
         if (!mounted.current) return;
         if (result.operation.state === 'persisted') {
-          setNotice(t('plugin_management.runtime_reconciled'));
-          onApplied?.();
+          if (result.operation.code === 'superseded') {
+            showNotice(t('plugin_management.runtime_superseded'), 'warning');
+          } else {
+            showNotice(t('plugin_management.runtime_reconciled'), 'success', true);
+          }
         } else if (result.operation.state === 'failed') {
-          setNotice(t('plugin_management.runtime_not_applied'));
+          showNotice(t('plugin_management.runtime_not_applied'), 'warning');
         } else if (next) {
-          setNotice(t('plugin_management.runtime_pending'));
+          showNotice(t('plugin_management.runtime_pending'), 'warning');
         }
       } catch (error) {
-        setNotice(
+        showNotice(
           error instanceof PublicApiError && error.kind === 'routing_unavailable'
             ? ''
-            : t('plugin_management.runtime_pending')
+            : t('plugin_management.runtime_pending'),
+          'warning'
         );
       } finally {
         if (mounted.current) setReconciling(false);
       }
     },
-    [adminCredential, client, load, onApplied, t]
+    [adminCredential, client, load, onApplied, showNotice, t]
   );
 
   const apply = async (enabled: boolean) => {
     if (!view || !group || busy || reconciling) return;
     setBusy(true);
-    setNotice('');
+    showNotice('', 'success');
     const requestId = newPluginRequestId();
     try {
-      await savePluginEnabled(
+      const saved = await savePluginEnabled(
         client,
         { kind: 'admin', value: adminCredential },
         { requestId, generation: view.generation, baseline: group.baseline, enabled }
       );
+      onApplied?.();
       await load();
       if (!mounted.current) return;
-      // A save is persisted evidence: the effective value stays unknown until CPA
-      // reloads, and this page never claims it.
-      setNotice(t('plugin_management.runtime_saved_effect_unknown'));
-      onApplied?.();
+      if (saved.operation.code === 'superseded') {
+        showNotice(t('plugin_management.runtime_superseded'), 'warning');
+      } else {
+        // CPA triggers an asynchronous hot reload on config write; show a brief
+        // non-alarming confirmation while the persisted readout reflects the write.
+        showNotice(t('plugin_management.runtime_saved_effect_unknown'), 'success', true);
+      }
     } catch (error) {
       // Nothing proves the document is unchanged, so the journaled operation is
       // the only way forward: re-read and settle it through read-back.
@@ -163,11 +203,11 @@ export function PluginRuntimeSwitch({
       if (!mounted.current) return;
       const code = error instanceof PublicApiError ? error.code ?? '' : '';
       if (code === 'source_or_operation_conflict' || code === 'generation_mismatch') {
-        setNotice(t('plugin_management.runtime_conflict'));
+        showNotice(t('plugin_management.runtime_conflict'), 'warning');
       } else if (code === 'plugin_switch_requires_managed_install') {
-        setNotice(t('plugin_management.runtime_refused'));
+        showNotice(t('plugin_management.runtime_refused'), 'warning');
       } else {
-        setNotice(t('plugin_management.runtime_save_failed'));
+        showNotice(t('plugin_management.runtime_save_failed'), 'error');
       }
     } finally {
       if (mounted.current) setBusy(false);
@@ -198,7 +238,12 @@ export function PluginRuntimeSwitch({
         </div>
         <p className={styles.switchDescription}>{t('plugin_management.runtime_description')}</p>
         {notice ? (
-          <p className={styles.switchNotice} data-testid="plugin-runtime-notice">
+          <p
+            className={styles.switchNotice}
+            data-tone={noticeTone}
+            data-testid="plugin-runtime-notice"
+            role={noticeTone === 'error' ? 'alert' : 'status'}
+          >
             {notice}
           </p>
         ) : null}

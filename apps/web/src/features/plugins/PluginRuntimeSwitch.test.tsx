@@ -226,6 +226,97 @@ describe('Plugin runtime switch', () => {
 
     expect(post).toHaveBeenCalledTimes(1);
     expect(noticeText()).toBe(i18n.t('plugin_management.runtime_conflict'));
+    expect(
+      renderer!.root.findByProps({ 'data-testid': 'plugin-runtime-notice' }).props['data-tone']
+    ).toBe('warning');
     expect(onApplied).not.toHaveBeenCalled();
+  });
+
+  it('uses success tone and auto-hides the saved confirmation after 4s while keeping errors persistent', async () => {
+    vi.useFakeTimers();
+    try {
+      const get = vi
+        .fn()
+        .mockResolvedValueOnce(managedView())
+        .mockResolvedValueOnce(managedView({ enabled: true }))
+        .mockResolvedValueOnce(managedView({ enabled: true }));
+      const post = vi
+        .fn()
+        .mockResolvedValueOnce(savedReply('request-auto-hide'))
+        .mockRejectedValueOnce(new PublicApiError('http', 500, undefined, 'write_failed'));
+      await mount(client(get, post));
+
+      await act(async () => {
+        switchInput().props.onChange({ target: { checked: true } });
+      });
+
+      const successNotice = renderer!.root.findByProps({ 'data-testid': 'plugin-runtime-notice' });
+      expect(successNotice.props['data-tone']).toBe('success');
+      expect(text(successNotice)).toBe(i18n.t('plugin_management.runtime_saved_effect_unknown'));
+
+      await act(async () => {
+        vi.advanceTimersByTime(4_000);
+      });
+      expect(noticeText()).toBeUndefined();
+
+      await act(async () => {
+        switchInput().props.onChange({ target: { checked: false } });
+      });
+      const errorNotice = renderer!.root.findByProps({ 'data-testid': 'plugin-runtime-notice' });
+      expect(errorNotice.props['data-tone']).toBe('error');
+      await act(async () => {
+        vi.advanceTimersByTime(10_000);
+      });
+      expect(noticeText()).toBe(i18n.t('plugin_management.runtime_save_failed'));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('invokes onApplied immediately after persistence even if unmounted before read-back settles', async () => {
+    let resolveReload!: (value: ReturnType<typeof managedView>) => void;
+    const pendingReload = new Promise<ReturnType<typeof managedView>>((resolve) => {
+      resolveReload = resolve;
+    });
+    const onApplied = vi.fn();
+    const get = vi.fn().mockResolvedValueOnce(managedView()).mockReturnValueOnce(pendingReload);
+    const post = vi.fn().mockResolvedValueOnce(savedReply('request-unmount-before-load'));
+    await mount(client(get, post), onApplied);
+
+    await act(async () => {
+      switchInput().props.onChange({ target: { checked: true } });
+      await Promise.resolve();
+    });
+
+    expect(onApplied).toHaveBeenCalledTimes(1);
+    expect(get).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      renderer?.unmount();
+      renderer = undefined;
+      resolveReload(managedView({ enabled: true }));
+      await Promise.resolve();
+    });
+  });
+
+  it('shows warning superseded notice instead of claiming automatic apply when operation is superseded', async () => {
+    const get = vi.fn().mockResolvedValue(managedView({ enabled: false }));
+    const post = vi.fn().mockResolvedValueOnce({
+      operation: {
+        requestId: 'request-superseded',
+        state: 'persisted',
+        code: 'superseded',
+      },
+      effective: 'unknown',
+    });
+    await mount(client(get, post));
+
+    await act(async () => {
+      switchInput().props.onChange({ target: { checked: true } });
+    });
+
+    const notice = renderer!.root.findByProps({ 'data-testid': 'plugin-runtime-notice' });
+    expect(notice.props['data-tone']).toBe('warning');
+    expect(text(notice)).toBe(i18n.t('plugin_management.runtime_superseded'));
   });
 });

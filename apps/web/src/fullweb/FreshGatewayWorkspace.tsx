@@ -17,7 +17,12 @@ import { FloatingActionDock } from '@/components/common/FloatingActionDock';
 import { PageControlBar } from '@/components/common/PageControlBar';
 import { SectionActionFooter } from '@/components/common/SectionActionFooter';
 import { PluginRuntimeSwitch } from '@/features/plugins/PluginRuntimeSwitch';
+import {
+  PLUGIN_RESOURCES_SETTLE_REFRESH_DELAY_MS,
+  notifyPluginResourcesChanged,
+} from '@/features/plugins/pluginResources';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
+import { useConfigStore } from '@/stores';
 import { isRecord } from '../utils/helpers';
 import { Modal } from '../components/ui/Modal';
 import { SegmentedTabs, type SegmentedTabItem } from '../components/ui/SegmentedTabs';
@@ -2802,7 +2807,20 @@ export function FreshGatewayWorkspace({
         (Boolean(query) &&
           !changedOnly &&
           /plugin|插件|外掛|плагин/i.test(query)) ? (
-          <PluginRuntimeSwitch client={client} credential={credential} />
+          <PluginRuntimeSwitch
+            client={client}
+            credential={credential}
+            onApplied={() => {
+              const cfgStore = useConfigStore.getState();
+              if (cfgStore.config) {
+                void cfgStore.fetchConfig(undefined, true).catch(() => {});
+              } else {
+                cfgStore.clearCache();
+              }
+              notifyPluginResourcesChanged();
+              notifyPluginResourcesChanged({ delayMs: PLUGIN_RESOURCES_SETTLE_REFRESH_DELAY_MS });
+            }}
+          />
         ) : null}
         {visibleGroups.map((group) => renderGroupCard(group))}
         {currentTab === 'upstream' && !isFiltering && activeUpstreamProvider === 'codex' ? (

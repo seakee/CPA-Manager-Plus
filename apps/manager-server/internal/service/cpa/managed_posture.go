@@ -3,6 +3,9 @@ package cpa
 import (
 	"bytes"
 	"encoding/json"
+	"math"
+	"strconv"
+	"strings"
 )
 
 // managedRequiredRoots are the Supervisor-staged sections that every New
@@ -31,6 +34,43 @@ var managedOptionalObjectRoots = map[string]bool{
 	"quota-exceeded": true, // Allowed: CPA v8 quota-exceeded fallback switches.
 }
 
+// disallowedLegacyRootKeys are pre-v8 or misplaced root keys that must never
+// appear at the top level of a canonical CPA v8 document, even under forward-
+// compatible v8.x minor-release validation.
+var disallowedLegacyRootKeys = map[string]bool{
+	"host":                      true,
+	"port":                      true,
+	"tls":                       true,
+	"unix-socket":               true,
+	"discovery":                 true,
+	"kv-store":                  true,
+	"shutdown-timeout":          true,
+	"commercial-mode":           true,
+	"remote-management":         true,
+	"disable-control-panel":     true,
+	"secret-key":                true,
+	"auth-dir":                  true,
+	"pprof":                     true,
+	"logging":                   true,
+	"logging-to-file":           true,
+	"debug":                     true,
+	"request-log":               true,
+	"usage-statistics-enabled":  true,
+	"gemini-api-key":            true,
+	"interactions-api-key":      true,
+	"vertex-api-key":            true,
+	"codex-api-key":             true,
+	"claude-api-key":            true,
+	"xai-api-key":               true,
+	"meta-api-key":              true,
+	"openai-compatibility":      true,
+	"credential-concurrency":    true,
+	"credential-in-flight":      true,
+	"ampcode":                   true,
+	"oauth-model-alias":         true,
+	"oauth-excluded-models":     true,
+}
+
 var managedAllowedOAuthKeys = map[string]bool{
 	"auth-dir":                  true,
 	"auth-auto-refresh-workers": true,
@@ -57,7 +97,8 @@ var managedAllowedObservabilityUsageKeys = map[string]bool{
 // matchesManaged validates a New Managed embedded CPA document (with
 // access.api-keys blanked by KeySnapshot, or prior to initial key install).
 // Security- and Supervisor-owned invariants remain pinned to the destination
-// seed template while operator-editable v8 sections are permitted.
+// seed template while operator-editable v8 sections and benign CPA v8.x
+// minor-release additions are permitted.
 func (p proofPosture) matchesManaged(data []byte) bool {
 	var root map[string]json.RawMessage
 	if json.Unmarshal(data, &root) != nil || root == nil {
@@ -74,7 +115,10 @@ func (p proofPosture) matchesManaged(data []byte) bool {
 		if requiredSet[name] {
 			continue
 		}
-		if !managedOptionalObjectRoots[name] || !isJSONObject(raw) {
+		if disallowedLegacyRootKeys[strings.ToLower(name)] || !isJSONObject(raw) {
+			return false
+		}
+		if !managedOptionalObjectRoots[name] && (isUnsafeExtensionKey(name) || !safeExtensionObject(raw)) {
 			return false
 		}
 	}
@@ -107,7 +151,7 @@ func (p proofPosture) matchesManaged(data []byte) bool {
 
 func (p proofPosture) matchesManagedManagement(raw json.RawMessage, boundHost string) bool {
 	var management map[string]json.RawMessage
-	if json.Unmarshal(raw, &management) != nil || len(management) != 4 {
+	if json.Unmarshal(raw, &management) != nil || len(management) < 4 {
 		return false
 	}
 	allowRemote, ok := parseExactJSONBool(management["allow-remote"])
@@ -119,7 +163,19 @@ func (p proofPosture) matchesManagedManagement(raw json.RawMessage, boundHost st
 		return false
 	}
 	var secret string
-	return json.Unmarshal(management["secret-key"], &secret) == nil && looksLikeBcrypt(secret)
+	if json.Unmarshal(management["secret-key"], &secret) != nil || !looksLikeBcrypt(secret) {
+		return false
+	}
+	for key, val := range management {
+		switch key {
+		case "allow-remote", "secret-key", "disable-control-panel", "disable-auto-update-panel":
+		default:
+			if isUnsafeExtensionKey(key) || !safeExtensionValue(val, 0) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (p proofPosture) matchesManagedOAuth(raw json.RawMessage) bool {
@@ -127,8 +183,11 @@ func (p proofPosture) matchesManagedOAuth(raw json.RawMessage) bool {
 	if json.Unmarshal(raw, &oauth) != nil || oauth == nil {
 		return false
 	}
-	for key := range oauth {
-		if !managedAllowedOAuthKeys[key] {
+	for key, val := range oauth {
+		if managedAllowedOAuthKeys[key] {
+			continue
+		}
+		if isUnsafeExtensionKey(key) || !safeExtensionValue(val, 0) {
 			return false
 		}
 	}
@@ -201,7 +260,9 @@ func (p proofPosture) matchesManagedObservability(raw json.RawMessage) bool {
 				return false
 			}
 		default:
-			return false
+			if isUnsafeExtensionKey(key) || !safeExtensionObject(val) {
+				return false
+			}
 		}
 	}
 
@@ -209,8 +270,11 @@ func (p proofPosture) matchesManagedObservability(raw json.RawMessage) bool {
 	if json.Unmarshal(logsRaw, &logs) != nil || logs == nil {
 		return false
 	}
-	for key := range logs {
-		if !managedAllowedObservabilityLogKeys[key] {
+	for key, val := range logs {
+		if managedAllowedObservabilityLogKeys[key] {
+			continue
+		}
+		if isUnsafeExtensionKey(key) || !safeExtensionValue(val, 0) {
 			return false
 		}
 	}
@@ -225,8 +289,11 @@ func (p proofPosture) matchesManagedObservability(raw json.RawMessage) bool {
 	if json.Unmarshal(usageRaw, &usage) != nil || usage == nil {
 		return false
 	}
-	for key := range usage {
-		if !managedAllowedObservabilityUsageKeys[key] {
+	for key, val := range usage {
+		if managedAllowedObservabilityUsageKeys[key] {
+			continue
+		}
+		if isUnsafeExtensionKey(key) || !safeExtensionValue(val, 0) {
 			return false
 		}
 	}
@@ -250,7 +317,9 @@ func matchesDisabledPprof(raw json.RawMessage) bool {
 				return false
 			}
 		default:
-			return false
+			if isUnsafeExtensionKey(key) || !safeExtensionValue(val, 0) {
+				return false
+			}
 		}
 	}
 	return true
@@ -267,10 +336,14 @@ var managedAllowedDiscoveryKeys = map[string]bool{
 }
 
 // matchesManagedServer enforces Supervisor's bound host and port 8317 while
-// permitting disabled defaults (such as server.discovery metadata with mDNS
-// advertising off) materialized when CPA's SaveConfigPreserveComments rewrites
-// config.yaml.
+// permitting safe operator-editable `server.*` leaves, CPA 8.1+ deployment
+// identity (`server-id`), disabled defaults (`discovery`, `tls`, confined
+// `kv-store`), and benign future CPA v8.x non-path/non-listener server knobs.
 func matchesManagedServer(raw json.RawMessage) (string, bool) {
+	return matchesSupervisorServer(raw, false)
+}
+
+func matchesSupervisorServer(raw json.RawMessage, allowSourceGitHubToken bool) (string, bool) {
 	var server map[string]json.RawMessage
 	if json.Unmarshal(raw, &server) != nil || server == nil {
 		return "", false
@@ -282,6 +355,26 @@ func matchesManagedServer(raw json.RawMessage) (string, bool) {
 	for key, val := range server {
 		switch key {
 		case "host", "port":
+		case "server-id":
+			if !matchesValidServerID(val) {
+				return "", false
+			}
+		case "shutdown-timeout", "max-request-body-bytes":
+			if !exactJSONNonNegativeInt64(val) {
+				return "", false
+			}
+		case "commercial-mode":
+			if _, ok := parseExactJSONBool(val); !ok {
+				return "", false
+			}
+		case "trusted-proxies":
+			if !isStringSlice(val) {
+				return "", false
+			}
+		case "response-compression":
+			if !matchesResponseCompression(val) {
+				return "", false
+			}
 		case "discovery":
 			if !matchesDisabledDiscovery(val) {
 				return "", false
@@ -290,11 +383,53 @@ func matchesManagedServer(raw json.RawMessage) (string, bool) {
 			if !matchesDisabledTLS(val) {
 				return "", false
 			}
+		case "kv-store":
+			if !matchesAdoptKVStore(val) {
+				return "", false
+			}
+		case "github-token":
+			if !allowSourceGitHubToken {
+				return "", false
+			}
+			var token string
+			if json.Unmarshal(val, &token) != nil {
+				return "", false
+			}
 		default:
-			return "", false
+			if isUnsafeExtensionKey(key) || !safeExtensionValue(val, 0) {
+				return "", false
+			}
 		}
 	}
 	return boundHost, true
+}
+
+func matchesValidServerID(raw json.RawMessage) bool {
+	var id string
+	if json.Unmarshal(raw, &id) != nil || len(id) != 36 {
+		return false
+	}
+	nonZero := false
+	for i := range len(id) {
+		ch := id[i]
+		switch i {
+		case 8, 13, 18, 23:
+			if ch != '-' {
+				return false
+			}
+		default:
+			isDigit := ch >= '0' && ch <= '9'
+			isLowerHex := ch >= 'a' && ch <= 'f'
+			isUpperHex := ch >= 'A' && ch <= 'F'
+			if !isDigit && !isLowerHex && !isUpperHex {
+				return false
+			}
+			if ch != '0' {
+				nonZero = true
+			}
+		}
+	}
+	return nonZero
 }
 
 func matchesDisabledDiscovery(raw json.RawMessage) bool {
@@ -303,10 +438,16 @@ func matchesDisabledDiscovery(raw json.RawMessage) bool {
 		return false
 	}
 	for key, val := range discovery {
-		if !managedAllowedDiscoveryKeys[key] {
-			return false
+		if key == "enabled" {
+			if !exactJSONBool(val, false) {
+				return false
+			}
+			continue
 		}
-		if key == "enabled" && !exactJSONBool(val, false) {
+		if managedAllowedDiscoveryKeys[key] {
+			continue
+		}
+		if isUnsafeExtensionKey(key) || !safeExtensionValue(val, 0) {
 			return false
 		}
 	}
@@ -330,12 +471,153 @@ func matchesDisabledTLS(raw json.RawMessage) bool {
 				return false
 			}
 		default:
+			if isUnsafeExtensionKey(key) || !safeExtensionValue(val, 0) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+var unsafeExtensionKeySegments = map[string]bool{
+	// Filesystem / socket / mount confinement
+	"dir": true, "dirs": true, "directory": true,
+	"path": true, "paths": true, "file": true, "files": true,
+	"root": true, "roots": true, "socket": true, "sock": true,
+	"unix": true, "mount": true,
+	// Listener / bind / endpoint / control-plane hijack
+	"listen": true, "listener": true, "bind": true,
+	"port": true, "ports": true, "host": true, "hosts": true,
+	"addr": true, "address": true, "endpoint": true, "endpoints": true,
+	"url": true, "urls": true, "uri": true, "tls": true, "cert": true,
+	"panel": true, "remote": true, "pprof": true,
+	// Auth / secret / bypass hijack (note: "token" alone is not blocked by
+	// segment so LLM/OAuth knobs like "token-refresh-skew" or "max-tokens" stay
+	// forward-compatible; credential token keys are caught by suffix/exact match).
+	"secret": true, "secrets": true,
+	"password": true, "passwd": true,
+	"bypass": true, "anonymous": true, "insecure": true,
+}
+
+var unsafeExtensionExactKeys = map[string]bool{
+	"key":            true,
+	"keys":           true,
+	"token":          true,
+	"auth":           true,
+	"credential":     true,
+	"credentials":    true,
+	"github-token":   true,
+	"access-token":   true,
+	"refresh-token":  true,
+	"bearer-token":   true,
+	"auth-token":     true,
+	"id-token":       true,
+	"api-token":      true,
+}
+
+var unsafeExtensionKeySuffixes = []string{
+	"-key", "_key", "-keys", "_keys",
+	"-auth", "_auth",
+}
+
+func isUnsafeExtensionKey(key string) bool {
+	trimmed := strings.TrimSpace(strings.ToLower(key))
+	if trimmed == "" || unsafeExtensionExactKeys[trimmed] {
+		return true
+	}
+	for _, suffix := range unsafeExtensionKeySuffixes {
+		if strings.HasSuffix(trimmed, suffix) {
+			return true
+		}
+	}
+	for _, seg := range strings.FieldsFunc(trimmed, func(r rune) bool {
+		return r == '-' || r == '_' || r == '.' || r == '/'
+	}) {
+		if unsafeExtensionKeySegments[seg] {
+			return true
+		}
+	}
+	return false
+}
+
+func safeExtensionObject(raw json.RawMessage) bool {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil || obj == nil {
+		return false
+	}
+	for key, val := range obj {
+		if isUnsafeExtensionKey(key) || !safeExtensionValue(val, 1) {
 			return false
 		}
 	}
 	return true
 }
 
+func safeExtensionValue(raw json.RawMessage, depth int) bool {
+	if depth > 6 {
+		return false
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return false
+	}
+	switch trimmed[0] {
+	case 'n':
+		return false
+	case 't', 'f':
+		_, ok := parseExactJSONBool(trimmed)
+		return ok
+	case '"':
+		var s string
+		if json.Unmarshal(trimmed, &s) != nil {
+			return false
+		}
+		lower := strings.ToLower(strings.TrimSpace(s))
+		if strings.HasPrefix(lower, "/") ||
+			strings.HasPrefix(lower, "~/") ||
+			strings.Contains(lower, "\\") ||
+			(len(lower) >= 2 && lower[0] >= 'a' && lower[0] <= 'z' && lower[1] == ':') ||
+			strings.Contains(lower, "..") ||
+			strings.Contains(lower, "://") {
+			return false
+		}
+		return true
+	case '{':
+		var obj map[string]json.RawMessage
+		if json.Unmarshal(trimmed, &obj) != nil || obj == nil {
+			return false
+		}
+		for key, val := range obj {
+			if isUnsafeExtensionKey(key) || !safeExtensionValue(val, depth+1) {
+				return false
+			}
+		}
+		return true
+	case '[':
+		var arr []json.RawMessage
+		if json.Unmarshal(trimmed, &arr) != nil || arr == nil {
+			return false
+		}
+		for _, elem := range arr {
+			if !safeExtensionValue(elem, depth+1) {
+				return false
+			}
+		}
+		return true
+	default:
+		if trimmed[0] != '-' && (trimmed[0] < '0' || trimmed[0] > '9') {
+			return false
+		}
+		var num json.Number
+		dec := json.NewDecoder(bytes.NewReader(trimmed))
+		dec.UseNumber()
+		if dec.Decode(&num) != nil || dec.More() {
+			return false
+		}
+		f, err := strconv.ParseFloat(string(num), 64)
+		return err == nil && !math.IsInf(f, 0) && !math.IsNaN(f)
+	}
+}
 func isJSONObject(raw json.RawMessage) bool {
 	var m map[string]json.RawMessage
 	return json.Unmarshal(raw, &m) == nil && m != nil

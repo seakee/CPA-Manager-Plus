@@ -16,11 +16,19 @@ export {
 export const PLUGIN_RESOURCES_REFRESH_EVENT = 'plugin-resources-refresh';
 export const PLUGIN_RESOURCES_SETTLE_REFRESH_DELAY_MS = 1600;
 
+let pendingDelayedNotifyTimer: ReturnType<typeof setTimeout> | null = null;
+
 export const notifyPluginResourcesChanged = (options?: { delayMs?: number }) => {
   const dispatch = () => window.dispatchEvent(new Event(PLUGIN_RESOURCES_REFRESH_EVENT));
   const delayMs = options?.delayMs ?? 0;
   if (delayMs > 0) {
-    window.setTimeout(dispatch, delayMs);
+    if (pendingDelayedNotifyTimer !== null) {
+      globalThis.clearTimeout(pendingDelayedNotifyTimer);
+    }
+    pendingDelayedNotifyTimer = globalThis.setTimeout(() => {
+      pendingDelayedNotifyTimer = null;
+      dispatch();
+    }, delayMs);
     return;
   }
   dispatch();

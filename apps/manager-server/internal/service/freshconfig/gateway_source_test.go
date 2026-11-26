@@ -264,6 +264,7 @@ func TestSourceModeEnforcesCPAV8ProtectedRootsAndServerSubtrees(t *testing.T) {
 			"server": map[string]any{
 				"host":                   "127.0.0.1",
 				"port":                   json.Number("8317"),
+				"server-id":              "65788ebc-f409-4e5c-be25-e02a43497741",
 				"discovery":              map[string]any{"enabled": true},
 				"tls":                    map[string]any{"enable": true},
 				"unix-socket":            "/run/cpa.sock",
@@ -287,6 +288,7 @@ func TestSourceModeEnforcesCPAV8ProtectedRootsAndServerSubtrees(t *testing.T) {
 		"github-token", "ghp-secret-token",
 		"kv-store", "/var/lib/cpa/kv.db",
 		"unix-socket", "discovery", "tls", "127.0.0.1", "8317",
+		"server-id", "65788ebc-f409-4e5c-be25-e02a43497741",
 	} {
 		if strings.Contains(view.YAML, forbidden) {
 			t.Fatalf("ReadSource leaked protected CPA v8 token %q in YAML:\n%s", forbidden, view.YAML)
@@ -307,6 +309,7 @@ func TestSourceModeEnforcesCPAV8ProtectedRootsAndServerSubtrees(t *testing.T) {
 		"server:\n  discovery:\n    enabled: true\n",
 		"server:\n  tls:\n    enable: true\n",
 		"server:\n  unix-socket: /tmp/cpa.sock\n",
+		"server:\n  server-id: 65788ebc-f409-4e5c-be25-e02a43497741\n",
 	}
 	for i, rawYAML := range blockedSubmissions {
 		req := SourceRequest{

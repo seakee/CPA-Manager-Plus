@@ -1805,6 +1805,7 @@ var upgradeProtectedSourceSubtrees = map[string]map[string]bool{
 	"server": {
 		"host":         true,
 		"port":         true,
+		"server-id":    true,
 		"discovery":    true,
 		"tls":          true,
 		"unix-socket":  true,
