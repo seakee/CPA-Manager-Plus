@@ -65,8 +65,10 @@ interface Snapshot {
   busy: boolean;
   storageError: CPAUpdateStorageError['kind'] | null;
   failureCode?: string;
+  baselineBusy?: boolean;
+  baselineErrorCode?: string | null;
+  baselineAdoptedVersion?: string | null;
 }
-
 const initialSnapshot = (): Snapshot => ({
   status: null,
   statusError: false,
@@ -163,8 +165,8 @@ interface Actions {
   activate: (expected: CPAUpdateIntent) => Promise<void>;
   retry: (expected: CPAUpdateIntent) => Promise<void>;
   forget: (expected: CPAUpdateRecordSnapshot) => Promise<void>;
+  adoptBaseline: () => Promise<void>;
 }
-
 export function useCPAUpdateFlow() {
   const authenticated = useAuthStore((state) => state.isAuthenticated);
   const key = useAuthStore((state) => state.managementKey);
@@ -754,6 +756,34 @@ export function useCPAUpdateFlow() {
             blockStorage(error);
           }
         }),
+      adoptBaseline: async () => {
+        const expectedArtifact = view.status?.active_artifact_id;
+        if (!expectedArtifact || !view.status?.baseline?.adopt_baseline_available) return;
+        await run(async () => {
+          publish({ baselineBusy: true, baselineErrorCode: null, baselineAdoptedVersion: null });
+          try {
+            const res = await cpaUpdateApi.adoptBaseline(
+              connection,
+              expectedArtifact,
+              waiting.signal
+            );
+            if (!alive) return;
+            await readStatus();
+            if (!alive) return;
+            publish({
+              baselineBusy: false,
+              baselineErrorCode: null,
+              baselineAdoptedVersion: res.baseline.pinned_version,
+            });
+          } catch (error) {
+            if (!alive) return;
+            const code =
+              error instanceof CPAUpdateAPIError ? error.code : 'observation_unavailable';
+            publish({ baselineBusy: false, baselineErrorCode: code });
+            await readStatus();
+          }
+        });
+      },
     };
     if (!context.available) {
       publish({ initialized: true });
@@ -849,6 +879,7 @@ export function useCPAUpdateFlow() {
     activate: (intent: CPAUpdateIntent) => invoke('activate', intent),
     retry: (intent: CPAUpdateIntent) => invoke('retry', intent),
     forget: (expected: CPAUpdateRecordSnapshot) => invoke('forget', expected),
+    adoptBaseline: () => invoke('adoptBaseline'),
   };
 }
 

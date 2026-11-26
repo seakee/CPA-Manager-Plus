@@ -147,6 +147,17 @@ beforeEach(() => {
       );
     } else if (suffix === '/prepare-upload') {
       data = await uploadMutate(config.params as CPAUpdateRequest, config.data as Blob, config);
+    } else if (suffix === '/adopt-baseline') {
+      data = {
+        active_artifact_id: replacementArtifact,
+        baseline: {
+          pinned_version: '6.9.26',
+          pinned_artifact_id: replacementArtifact,
+          bundled_available: true,
+          adopt_baseline_available: false,
+          baseline_upgrade_available: false,
+        },
+      };
     } else throw new Error('Unexpected CPA request: ' + suffix);
     return { data } as AxiosResponse;
   });
@@ -1399,5 +1410,37 @@ describe('CPA recovery context boundaries', () => {
     expect(flow.intent?.unrecorded_context_changed).toBe(true);
     expect(queries()).toHaveLength(queriesBeforeMutate);
     setItemSpy.mockRestore();
+  });
+
+  it('adopts bundled CPA baseline via POST /adopt-baseline and refreshes status', async () => {
+    status = updateStatus({
+      baseline: {
+        pinned_version: '6.9.26',
+        pinned_artifact_id: replacementArtifact,
+        bundled_available: true,
+        adopt_baseline_available: true,
+        baseline_upgrade_available: true,
+      },
+    });
+    await mount();
+    status = updateStatus({
+      active_artifact_id: replacementArtifact,
+      baseline: {
+        pinned_version: '6.9.26',
+        pinned_artifact_id: replacementArtifact,
+        bundled_available: true,
+        adopt_baseline_available: false,
+        baseline_upgrade_available: false,
+      },
+    });
+
+    await act(async () => {
+      await flow.adoptBaseline();
+    });
+
+    expect(calls('/adopt-baseline')).toHaveLength(1);
+    expect(flow.baselineErrorCode).toBeNull();
+    expect(flow.baselineAdoptedVersion).toBe('6.9.26');
+    expect(flow.status?.active_artifact_id).toBe(replacementArtifact);
   });
 });

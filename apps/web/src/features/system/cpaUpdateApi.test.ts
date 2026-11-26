@@ -418,4 +418,34 @@ describe('accepted CPA update HTTP contract', () => {
       code: 'invalid_request',
     });
   });
+
+  it('parses optional baseline status and invokes POST /adopt-baseline', async () => {
+    const baseline = {
+      pinned_version: '6.9.26',
+      pinned_artifact_id: 'sha256:' + 'f'.repeat(64),
+      bundled_available: true,
+      adopt_baseline_available: true,
+      baseline_upgrade_available: false,
+    };
+    request.mockResolvedValueOnce(response(updateStatus({ baseline })));
+    const parsed = await cpaUpdateApi.status(connection);
+    expect(parsed.baseline).toEqual(baseline);
+
+    const nextArtifact = 'sha256:' + 'f'.repeat(64);
+    request.mockResolvedValueOnce(response({ active_artifact_id: nextArtifact, baseline }));
+    const adopted = await cpaUpdateApi.adoptBaseline(connection, 'sha256:' + 'a'.repeat(64));
+    expect(adopted.active_artifact_id).toBe(nextArtifact);
+    expect(request).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        method: 'POST',
+        url: 'https://manager.test/usage-service/runtime/updates/adopt-baseline',
+        data: { expected_active_artifact_id: 'sha256:' + 'a'.repeat(64) },
+      })
+    );
+
+    await expect(cpaUpdateApi.adoptBaseline(connection, 'bad-id')).rejects.toMatchObject({
+      kind: 'rejected',
+      code: 'invalid_request',
+    });
+  });
 });
