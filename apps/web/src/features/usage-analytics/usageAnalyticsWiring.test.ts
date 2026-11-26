@@ -308,6 +308,8 @@ const usageAnalyticsKeys = [
   'usage_analytics.weekday_thu',
   'usage_analytics.weekday_fri',
   'usage_analytics.weekday_sat',
+  'usage_analytics.monitoring_paused_title',
+  'usage_analytics.monitoring_paused_body',
 ];
 
 const usageAnalyticsPageImport = `import { UsageAnalyticsPage } from '${[
@@ -326,7 +328,7 @@ describe('usage analytics app wiring', () => {
     );
 
     expect(usageRouteIndex).toBeGreaterThanOrEqual(0);
-    expect(usageRouteSource).toContain('<FeatureGate feature="requestMonitoring">');
+    expect(usageRouteSource).toContain('<MonitoringGate>');
     expect(usageRouteSource).toContain('<UsageAnalyticsPage />');
     expect(routesSource.indexOf("path: '/usage-analytics'")).toBeLessThan(
       routesSource.indexOf("path: '/monitoring'")
@@ -372,6 +374,23 @@ describe('usage analytics app wiring', () => {
     expect(observe!.items.find((item) => item.path === '/usage-analytics')?.label).toBe(
       'nav.usage_analytics'
     );
+
+    const paused = buildCanonicalNavModel({
+      t: stubT,
+      icons: stubIcons,
+      featureAvailability: {
+        requestMonitoringAvailable: false,
+        modelPricesAvailable: true,
+        reason: 'monitoring_disabled',
+      },
+      hasHostRoutes: true,
+      pluginControlMenuVisible: false,
+      pluginResources: [],
+      apiBase: '',
+      renderPluginIcon: () => null,
+    });
+    expect(paused.canonicalItems.map((item) => item.path)).toContain('/monitoring');
+    expect(paused.canonicalItems.map((item) => item.path)).toContain('/usage-analytics');
 
     const disabled = buildCanonicalNavModel({
       t: stubT,

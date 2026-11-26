@@ -21,7 +21,8 @@
 .detailPanel,
 .overviewCard,
 .anomalyPanel,
-.alertPanel {
+.alertPanel,
+.pausedNoticePanel {
   border: 1px solid var(--border-color);
   border-radius: var(--app-radius-lg);
   background: var(--bg-primary);
@@ -2155,6 +2156,47 @@
   }
 }
 
+.pausedNoticePanel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 16px;
+  padding: 14px 18px;
+  border-color: var(--data-badge-warning-border);
+  background: var(--data-badge-warning-bg);
+}
+
+.pausedNoticeLead {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+  color: var(--data-badge-warning-text);
+
+  svg {
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+}
+
+.pausedNoticeText {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+
+  strong {
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 700;
+  }
+
+  span {
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+}
 
 @media (max-width: 1400px) {
 

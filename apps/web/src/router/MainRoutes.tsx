@@ -37,6 +37,7 @@ import { pluginsApi } from '@/services/api';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import { ensureRouteBasePathname } from '@/router/routeBase';
 import { useAuthStore, useConfigStore } from '@/stores';
+import { isConfigRequestSupersededError } from '@/stores/useConfigStore';
 
 type FeatureKey = 'requestMonitoring' | 'modelPrices';
 
@@ -247,18 +248,29 @@ export function MonitoringGate({
   return <Navigate to={unavailablePath ?? '/config'} replace />;
 }
 
-function LogsGate({ children }: { children: ReactElement }) {
+export function LogsGate({ children }: { children: ReactElement }) {
   const config = useConfigStore((state) => state.config);
   const fetchConfig = useConfigStore((state) => state.fetchConfig);
-  const requestedRef = useRef(false);
+  const [retryToken, setRetryToken] = useState(0);
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
-    if (config || requestedRef.current) return;
-    requestedRef.current = true;
-    fetchConfig().catch(() => setFailed(true));
-  }, [config, fetchConfig]);
-
+    if (config || failed) return;
+    let active = true;
+    fetchConfig().catch((err) => {
+      if (!active) return;
+      if (isConfigRequestSupersededError(err)) {
+        if (!useConfigStore.getState().config) {
+          setRetryToken((n) => n + 1);
+        }
+        return;
+      }
+      setFailed(true);
+    });
+    return () => {
+      active = false;
+    };
+  }, [config, failed, fetchConfig, retryToken]);
   if (!config && !failed) {
     return <SplashScreen variant="content" />;
   }
@@ -316,9 +328,9 @@ const mainRoutes: RouteObject[] = [
   {
     path: '/usage-analytics',
     element: (
-      <FeatureGate feature="requestMonitoring">
+      <MonitoringGate>
         <UsageAnalyticsPage />
-      </FeatureGate>
+      </MonitoringGate>
     ),
   },
   {

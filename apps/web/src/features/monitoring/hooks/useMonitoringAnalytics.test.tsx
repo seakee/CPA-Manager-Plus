@@ -16,15 +16,18 @@ const connection = vi.hoisted(() => ({
   apiBase: 'http://cpa.local',
   managementKey: 'admin-key',
   serviceBase: 'http://manager.local',
+  available: true,
+  managerServiceAvailable: true,
+  reason: '' as '' | 'monitoring_disabled' | 'service_not_configured' | 'service_unavailable',
 }));
 vi.mock('@/hooks/useRequestMonitoringAvailability', () => ({
   useRequestMonitoringAvailability: () => ({
     checking: false,
-    available: true,
-    managerServiceAvailable: true,
+    available: connection.available,
+    managerServiceAvailable: connection.managerServiceAvailable,
     modelPricesAvailable: true,
     serviceBase: connection.serviceBase,
-    reason: '',
+    reason: connection.reason,
   }),
 }));
 
@@ -54,6 +57,7 @@ interface HarnessProps {
   searchQuery?: string;
   filters?: MonitoringAnalyticsFilters;
   include?: MonitoringAnalyticsInclude;
+  allowWhenDisabled?: boolean;
 }
 
 const flushPromises = async () => {
@@ -103,6 +107,9 @@ describe('useMonitoringAnalytics', () => {
     connection.apiBase = 'http://cpa.local';
     connection.managementKey = 'admin-key';
     connection.serviceBase = 'http://manager.local';
+    connection.available = true;
+    connection.managerServiceAvailable = true;
+    connection.reason = '';
   });
 
   function Harness({
@@ -113,6 +120,7 @@ describe('useMonitoringAnalytics', () => {
     searchQuery,
     filters,
     include = { summary: true },
+    allowWhenDisabled,
   }: HarnessProps) {
     const result = useMonitoringAnalytics({
       fromMs,
@@ -123,6 +131,7 @@ describe('useMonitoringAnalytics', () => {
       filters,
       include,
       throttleMs: 0,
+      allowWhenDisabled,
     });
     useEffect(() => {
       latestResult = result;
@@ -355,5 +364,34 @@ describe('useMonitoringAnalytics', () => {
 
     expect(latestResult?.loading).toBe(false);
     expect(latestResult?.data?.generated_at_ms).toBe(2);
+  });
+
+  it('reads historical analytics when monitoring is disabled only if allowWhenDisabled is enabled', async () => {
+    connection.available = false;
+    connection.managerServiceAvailable = true;
+    connection.reason = 'monitoring_disabled';
+    const requests = installDeferredAnalyticsMock();
+
+    await act(async () => {
+      renderer = create(<Harness dataScopeKey="range:paused-default" />);
+      await flushPromises();
+    });
+    expect(getAnalyticsMock).toHaveBeenCalledTimes(0);
+    expect(latestResult?.enabled).toBe(false);
+    expect(latestResult?.unavailableReason).toBe('monitoring_disabled');
+
+    await act(async () => {
+      renderer?.update(<Harness dataScopeKey="range:paused-history" allowWhenDisabled />);
+      await flushPromises();
+    });
+    expect(getAnalyticsMock).toHaveBeenCalledTimes(1);
+    expect(latestResult?.enabled).toBe(true);
+    expect(latestResult?.unavailableReason).toBe('monitoring_disabled');
+
+    await act(async () => {
+      requests[0]?.resolve(createResponse(99));
+      await flushPromises();
+    });
+    expect(latestResult?.data?.generated_at_ms).toBe(99);
   });
 });
