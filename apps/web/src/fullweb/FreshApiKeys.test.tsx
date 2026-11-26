@@ -687,7 +687,7 @@ describe('Fresh client key persistence UI', () => {
       ).toHaveLength(0);
       expect(
         renderer.root.findByProps({ 'data-testid': 'key-row-' + key.id }).findAllByType('td')
-      ).toHaveLength(5);
+      ).toHaveLength(6);
 
       await click(t('refresh'));
       expect(
@@ -757,18 +757,21 @@ describe('Fresh client key persistence UI', () => {
     await act(async () => searchInput.props.onChange({ target: { value: 'Alpha' } }));
     const cardsBtn = renderer.root.findByProps({ 'data-testid': 'key-view-cards' });
     await act(async () => cardsBtn.props.onClick());
-    expect(renderer.root.findByType('table').props.className).toContain('is-cards-view');
-    expect(renderer.root.findByType('tbody').findAllByType('tr')).toHaveLength(1);
+    expect(renderer.root.findAllByType('table')).toHaveLength(0);
+    const cardGrid = renderer.root.findByProps({ 'data-testid': 'key-card-grid' });
+    expect(cardGrid.findAllByType('article')).toHaveLength(1);
+    renderer.root.findByProps({ 'data-testid': 'key-card-' + activeA.id });
 
-    // Open details and return: filter, search, and cards view remain intact
+    // Open details and return: filter, search, and dedicated cards view remain intact
     await act(async () =>
       renderer.root.findByProps({ 'data-testid': 'open-key-' + activeA.id }).props.onClick()
     );
     await click(t('keysCloseDetails'));
     expect(renderer.root.findByProps({ type: 'search' }).props.value).toBe('Alpha');
-    expect(renderer.root.findByType('table').props.className).toContain('is-cards-view');
-    expect(renderer.root.findByType('tbody').findAllByType('tr')).toHaveLength(1);
-
+    expect(renderer.root.findAllByType('table')).toHaveLength(0);
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'key-card-grid' }).findAllByType('article')
+    ).toHaveLength(1);
     // Quick regenerate opens FreshKeyRegenerate targeted at activeA
     await act(async () =>
       renderer.root
@@ -816,14 +819,28 @@ describe('Fresh client key persistence UI', () => {
     renderer.root.findByProps({ 'data-testid': 'key-usage-' + key.id });
     expect(view()).toContain('—');
     expect(view()).toContain(k('usageStateUnavailable'));
-    expect(view()).toContain(k('usageLastUsed'));
+    expect(view()).toContain(k('timeActiveShort'));
   });
 
-  it('renders models, success/failure stats, cost, and 10-slot status timeline without key-resource-icon in rows', async () => {
+  it('renders 6-column table with models breakdown, credential-style 4-metric usage, liveness time, and 1x4 card tiles', async () => {
     const lastUsedAtMs = Date.UTC(2026, 0, 2, 3, 4);
+    const adoptedRotatedKey = {
+      ...key,
+      id: 'b'.repeat(32),
+      requestId: 'c'.repeat(32),
+      origin: 'adopted' as const,
+      maskedPreview: '…7f2d',
+      lastRotatedAtMs: Date.UTC(2026, 0, 2, 1, 0),
+    };
     const keysOnly = () =>
       vi.fn<typeof fetch>().mockImplementation(() =>
-        Promise.resolve(Response.json({ keys: [key], gatewayPending: true, revocationAvailable: false }))
+        Promise.resolve(
+          Response.json({
+            keys: [key, adoptedRotatedKey],
+            gatewayPending: true,
+            revocationAvailable: false,
+          })
+        )
       );
     await mount(keysOnly(), vi.fn(), {
       fromMs: 1,
@@ -835,22 +852,32 @@ describe('Fresh client key persistence UI', () => {
           calls: 18,
           success: 16,
           failure: 2,
-          totalTokens: 24500,
+          inputTokens: 20_000,
+          outputTokens: 4_500,
+          cachedTokens: 12_000,
+          totalTokens: 24_500,
           estimatedCostUsd: 1.42,
           topModels: [
-            { model: 'claude-sonnet-4-5', calls: 12 },
-            { model: 'gemini-2.5-pro', calls: 6 },
+            { model: 'claude-sonnet-4-5', calls: 12, totalTokens: 18_000, estimatedCostUsd: 1.1 },
+            { model: 'gemini-2.5-pro', calls: 6, totalTokens: 6_500, estimatedCostUsd: 0.32 },
           ],
           modelCount: 3,
-          recentRequests: [
-            { timestampMs: lastUsedAtMs - 120_000, failed: false, model: 'claude-sonnet-4-5' },
-            { timestampMs: lastUsedAtMs, failed: true, statusCode: 429, model: 'gemini-2.5-pro' },
-          ],
           lastUsedAtMs,
+          coverage: { state: 'complete', reason: 'observed' },
+        },
+        {
+          keyId: adoptedRotatedKey.id,
+          calls: 0,
+          success: 0,
+          failure: 0,
+          lastUsedAtMs: null,
           coverage: { state: 'complete', reason: 'observed' },
         },
       ],
     });
+    const tableNode = renderer.root.findByProps({ 'data-testid': 'key-table' });
+    expect(tableNode.findAllByType('th')).toHaveLength(6);
+
     const rowNode = renderer.root.findByProps({ 'data-testid': 'key-row-' + key.id });
     expect(
       rowNode.findAll(
@@ -860,38 +887,97 @@ describe('Fresh client key persistence UI', () => {
       )
     ).toHaveLength(0);
     expect(view()).toContain(k('modelsColumn'));
+    expect(view()).toContain(k('usageShortColumn'));
+    expect(view()).toContain(k('timeColumn'));
+    expect(
+      rowNode.findAll((node) => node.props?.className === 'key-origin-pill')
+    ).toHaveLength(0);
     expect(view()).toContain('claude-sonnet-4-5');
-    expect(readText(rowNode)).toContain('+2');
-    expect(readText(rowNode)).toContain('12 calls · gemini-2.5-pro (6)');
+    expect(readText(rowNode)).toContain('+1');
+    expect(readText(rowNode)).toContain('3 models');
+    expect(readText(rowNode)).not.toContain('12 / 6');
+    expect(readText(rowNode)).toContain('gemini-2.5-pro');
 
+    // Hovering models trigger opens breakdown popover with calls, share %, and per-model cost
+    await act(async () =>
+      renderer.root
+        .findByProps({ 'data-testid': `key-models-trigger-${key.id}` })
+        .props.onMouseEnter({ currentTarget: null })
+    );
+    const modelsPopover = renderer.root.findByProps({
+      'data-testid': `key-models-popover-${key.id}`,
+    });
+    expect(readText(modelsPopover)).toContain('12 calls');
+    expect(readText(modelsPopover)).toContain('$1.10');
+    expect(readText(modelsPopover)).toContain('6 calls');
+
+    // Usage cell renders credential-style 2x2 history metrics (requests, tokens, cost, success rate)
     const usageNode = renderer.root.findByProps({ 'data-testid': 'key-usage-' + key.id });
-    expect(readText(usageNode.findByProps({ className: 'key-stat-total' }))).toBe('18 calls');
-    expect(readText(usageNode.findByProps({ className: 'key-stat-success' }))).toBe('16');
-    expect(readText(usageNode.findByProps({ className: 'key-stat-failure' }))).toBe('2');
-    expect(readText(usageNode)).toContain('88.9%');
-    expect(readText(usageNode)).toContain('24.5K tok');
+    expect(readText(usageNode.findByProps({ className: 'key-stat-total' }))).toBe('18');
+    expect(readText(usageNode)).toContain('24.5K');
     expect(readText(usageNode)).toContain('$1.42');
+    expect(readText(usageNode)).toContain('88.9%');
+    // Hovering usage cell reveals input/output/cache token breakdown and OK/Failed counts
+    await act(async () =>
+      renderer.root
+        .findByProps({ 'data-testid': `open-key-usage-${key.id}` })
+        .props.onMouseEnter({ currentTarget: null })
+    );
+    const usagePopover = renderer.root.findByProps({
+      'data-testid': `key-usage-popover-${key.id}`,
+    });
+    expect(readText(usagePopover)).toContain('20,000');
+    expect(readText(usagePopover)).toContain('4,500');
+    expect(readText(usagePopover)).toContain('12,000');
+    expect(readText(usagePopover)).toContain(`${k('usageSuccessShort')} 16`);
+    expect(readText(usagePopover)).toContain(`${k('usageFailureShort')} 2`);
+
+    // Time column elevates last-active time to primary line and keeps lifecycle time on secondary line
+    const timeNode = renderer.root.findByProps({ 'data-testid': 'key-time-' + key.id });
+    expect(readText(timeNode)).toContain(k('timeActiveShort'));
+    expect(readText(timeNode)).toContain(k('timeCreatedShort'));
+
+    const adoptedRowNode = renderer.root.findByProps({
+      'data-testid': 'key-row-' + adoptedRotatedKey.id,
+    });
     expect(
-      usageNode.findAll(
-        (node) =>
-          typeof node.props?.className === 'string' &&
-          node.props.className.includes('key-recent-block')
-      )
-    ).toHaveLength(10);
-    expect(
-      usageNode.findAll(
-        (node) =>
-          typeof node.props?.className === 'string' &&
-          node.props.className.includes('key-recent-block is-success')
-      )
+      adoptedRowNode.findAll((node) => node.props?.className === 'key-origin-pill')
     ).toHaveLength(1);
     expect(
-      usageNode.findAll(
-        (node) =>
-          typeof node.props?.className === 'string' &&
-          node.props.className.includes('key-recent-block is-failure')
+      readText(
+        renderer.root.findByProps({ 'data-testid': 'key-last-used-' + adoptedRotatedKey.id })
       )
-    ).toHaveLength(1);
+    ).toBe(k('neverUsedShort'));
+    expect(
+      readText(
+        renderer.root.findByProps({ 'data-testid': 'key-rotated-at-' + adoptedRotatedKey.id })
+      )
+    ).toContain(k('timeRotatedShort'));
+
+    // Switch to Cards view and verify 1x4 credential-style usage tiles + Active/Never used header meta
+    await act(async () =>
+      renderer.root.findByProps({ 'data-testid': 'key-view-cards' }).props.onClick()
+    );
+    const cardNode = renderer.root.findByProps({ 'data-testid': 'key-card-' + key.id });
+    const cardText = readText(cardNode);
+    expect(cardText).toContain('18');
+    expect(cardText).toContain('24.5K');
+    expect(cardText).toContain('$1.42');
+    expect(cardText).toContain('88.9%');
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'key-card-recent-status-' + key.id })
+    ).toBeDefined();
+    const cardModelsText = readText(
+      renderer.root.findByProps({ 'data-testid': 'key-card-models-' + key.id })
+    );
+    expect(cardModelsText).toContain(k('cardTopModelsTitle'));
+    expect(cardModelsText).toContain('%');
+    const adoptedCardNode = renderer.root.findByProps({
+      'data-testid': 'key-card-' + adoptedRotatedKey.id,
+    });
+    expect(readText(adoptedCardNode)).toContain(k('adoptedOriginInline'));
+    expect(readText(adoptedCardNode)).toContain(k('neverUsedShort'));
+    expect(readText(adoptedCardNode)).toContain(k('timeRotatedShort'));
   });
   it('keeps the key list usable when the usage read fails and avoids duplicate Unavailable pills', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json({
@@ -1807,7 +1893,7 @@ describe('Fresh client key persistence UI', () => {
     expect(view()).toContain('Gateway Alpha');
     // 3. Table carries explicit ARIA roles for accessibility.
     expect(renderer.root.findByType('table').props.role).toBe('table');
-    expect(renderer.root.findAllByProps({ role: 'columnheader' }).length).toBe(5);
+    expect(renderer.root.findAllByProps({ role: 'columnheader' }).length).toBe(6);
 
     // 4. Switching to Revoked tab hides runtime filter select and renders emptyRevokedTab.
     await act(async () =>
@@ -3520,7 +3606,12 @@ describe('Fresh client key persistence UI', () => {
         (node) => typeof node.props?.className === 'string' && node.props.className.includes('key-state-pill')
       )
     ).toHaveLength(0);
-    expect(readText(usageCellNode.findByProps({ className: 'key-stat-success' }))).toBe('15');
+    expect(readText(usageCellNode.findByProps({ className: 'key-stat-total' }))).toBe('15');
+    expect(
+      renderer.root.findAllByProps({
+        'data-testid': `key-recent-status-${activeKey.id}`,
+      })
+    ).toHaveLength(0);
     const detailBtn = renderer.root.findByProps({ 'data-testid': `open-key-${activeKey.id}` });
     expect(readText(detailBtn)).toBe(k('rowDetails'));
     expect(detailBtn.findAllByType('svg')).toHaveLength(0);
@@ -3781,11 +3872,13 @@ describe('Fresh client key persistence UI', () => {
       await Promise.resolve();
     });
     expect(usageCalls).toBe(2);
+    expect(
+      readText(renderer.root.findByProps({ 'data-testid': `key-last-used-${created.id}` }))
+    ).toBe(k('neverUsedShort'));
     const createdUsageCell = renderer.root.findByProps({
       'data-testid': `key-usage-${created.id}`,
     });
-    expect(readText(createdUsageCell)).toContain(k('noUsageInWindow'));
-    expect(readText(createdUsageCell)).toContain(k('usageLastUsed'));
+    expect(readText(createdUsageCell)).toBe('----');
     expect(
       createdUsageCell.findAll(
         (node) =>
@@ -3868,7 +3961,10 @@ describe('Fresh client key persistence UI', () => {
     expect(usageCalls).toBe(1);
 
     await act(async () => {
-      renderer.root.findByProps({ 'data-testid': `row-regenerate-${key.id}` }).props.onClick();
+      renderer.root
+        .findByType(DropdownMenu)
+        .props.items.find((item: { key: string }) => item.key === 'regenerate')
+        .onClick();
     });
     await act(async () => {
       await renderer.root
@@ -3954,5 +4050,793 @@ describe('Fresh client key persistence UI', () => {
     expect(
       pendingBanners[0].findAllByProps({ 'data-testid': 'keys-presence-unverified' })
     ).toHaveLength(1);
+  });
+
+  it('switches usage summary window (24h / 7d / 30d) and sorts keys by estimated cost and total tokens', async () => {
+    const keyLow = {
+      ...key,
+      id: '1'.repeat(32),
+      requestId: '2'.repeat(32),
+      name: 'Low Cost High Tokens',
+      createdAtMs: 3_000,
+    };
+    const keyHigh = {
+      ...key,
+      id: '3'.repeat(32),
+      requestId: '4'.repeat(32),
+      name: 'High Cost Low Tokens',
+      createdAtMs: 2_000,
+    };
+    const requestedUrls: string[] = [];
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (url.includes('/api-keys/usage-summary?from_ms=')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1_000,
+            toMs: 9_000,
+            coverage: { state: 'complete', reason: 'observed' },
+            items: [
+              {
+                keyId: keyLow.id,
+                calls: 50,
+                totalTokens: 900_000,
+                estimatedCostUsd: 0.45,
+                lastUsedAtMs: 5_000,
+                coverage: { state: 'complete', reason: 'observed' },
+              },
+              {
+                keyId: keyHigh.id,
+                calls: 12,
+                totalTokens: 80_000,
+                estimatedCostUsd: 8.75,
+                lastUsedAtMs: 6_000,
+                coverage: { state: 'complete', reason: 'observed' },
+              },
+            ],
+          })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: 8_000,
+            toMs: 9_000,
+            coverage: { state: 'complete', reason: 'observed' },
+            items: [
+              {
+                keyId: keyLow.id,
+                calls: 5,
+                totalTokens: 90_000,
+                estimatedCostUsd: 0.05,
+                lastUsedAtMs: 5_000,
+                coverage: { state: 'complete', reason: 'observed' },
+              },
+              {
+                keyId: keyHigh.id,
+                calls: 2,
+                totalTokens: 10_000,
+                estimatedCostUsd: 1.25,
+                lastUsedAtMs: 6_000,
+                coverage: { state: 'complete', reason: 'observed' },
+              },
+            ],
+          })
+        );
+      }
+      if (url.endsWith('/api-keys')) {
+        return Promise.resolve(
+          Response.json({
+            keys: [keyLow, keyHigh],
+            gatewayPending: false,
+            revocationAvailable: true,
+          })
+        );
+      }
+      return Promise.resolve(Response.json({}));
+    });
+
+    await mount(fetchMock);
+    expect(view()).toContain('Usage (24h)');
+
+    // Switch to 7d window -> requests bounded from_ms/to_ms query and updates header + values
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'key-list-usage-window-7d' }).props.onClick();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(requestedUrls.some((u) => /\/api-keys\/usage-summary\?from_ms=\d+&to_ms=\d+$/.test(u))).toBe(
+      true
+    );
+    expect(view()).toContain('Usage (7d)');
+    expect(
+      readText(renderer.root.findByProps({ 'data-testid': `key-usage-${keyHigh.id}` }))
+    ).toContain('$8.75');
+
+    // Sort by Estimated cost descending -> keyHigh ($8.75) moves ahead of keyLow ($0.45)
+    await act(async () => {
+      renderer.root
+        .findByProps({ 'aria-label': `${k('sortLabel')}: ${k('sortFieldCreated')}` })
+        .props.onClick();
+    });
+    await act(async () => {
+      renderer.root
+        .findAllByType('button')
+        .find((node) => node.props.children === k('sortFieldCost'))!
+        .props.onClick();
+    });
+    const rowsAfterCostSort = renderer.root
+      .findByProps({ 'data-testid': 'key-table' })
+      .findByType('tbody')
+      .findAllByType('tr');
+    expect(rowsAfterCostSort[0]?.props['data-testid']).toBe(`key-row-${keyHigh.id}`);
+    expect(rowsAfterCostSort[1]?.props['data-testid']).toBe(`key-row-${keyLow.id}`);
+
+    // Sort by Total tokens descending -> keyLow (900K) moves ahead of keyHigh (80K)
+    await act(async () => {
+      renderer.root
+        .findByProps({ 'aria-label': `${k('sortLabel')}: ${k('sortFieldCost')}` })
+        .props.onClick();
+    });
+    await act(async () => {
+      renderer.root
+        .findAllByType('button')
+        .find((node) => node.props.children === k('sortFieldTokens'))!
+        .props.onClick();
+    });
+    const rowsAfterTokensSort = renderer.root
+      .findByProps({ 'data-testid': 'key-table' })
+      .findByType('tbody')
+      .findAllByType('tr');
+    expect(rowsAfterTokensSort[0]?.props['data-testid']).toBe(`key-row-${keyLow.id}`);
+    expect(rowsAfterTokensSort[1]?.props['data-testid']).toBe(`key-row-${keyHigh.id}`);
+  });
+
+  it('clears stale metrics on window switch and failure, clamps to_ms to server clock, and updates sort label', async () => {
+    const trackedKey = {
+      ...key,
+      id: '5'.repeat(32),
+      requestId: '6'.repeat(32),
+      name: 'Window Switch Key',
+      runtimeState: 'effective_observed' as const,
+      createdAtMs: 3_000,
+    };
+    const serverAheadToMs = Date.now() + 600_000;
+    let resolveSevenDay!: (res: Response) => void;
+    const sevenDayPending = new Promise<Response>((resolve) => {
+      resolveSevenDay = resolve;
+    });
+    let failThirtyDay = false;
+    const requestedUrls: string[] = [];
+
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (url.includes('/api-keys/usage-summary?from_ms=')) {
+        if (failThirtyDay) {
+          return Promise.resolve(new Response('backend unavailable', { status: 503 }));
+        }
+        return sevenDayPending;
+      }
+      if (url.endsWith('/api-keys')) {
+        return Promise.resolve(
+          Response.json({
+            keys: [trackedKey],
+            gatewayPending: false,
+            revocationAvailable: true,
+          })
+        );
+      }
+      return Promise.resolve(Response.json({}));
+    });
+
+    await mount(fetchMock, vi.fn(), {
+      fromMs: serverAheadToMs - 86_400_000,
+      toMs: serverAheadToMs,
+      coverage: { state: 'complete', reason: 'observed' },
+      items: [
+        {
+          keyId: trackedKey.id,
+          calls: 4,
+          success: 4,
+          failure: 0,
+          totalTokens: 12_000,
+          estimatedCostUsd: 1.25,
+          lastUsedAtMs: serverAheadToMs - 1_000,
+          coverage: { state: 'complete', reason: 'observed' },
+        },
+      ],
+    });
+    expect(
+      readText(renderer.root.findByProps({ 'data-testid': `key-usage-${trackedKey.id}` }))
+    ).toContain('$1.25');
+
+    // Switch 24h -> 7d: stale 24h metric must clear immediately while 7d request is in flight.
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'key-list-usage-window-7d' }).props.onClick();
+    });
+    expect(view()).toContain('Usage (7d)');
+    expect(
+      readText(renderer.root.findByProps({ 'data-testid': `key-usage-${trackedKey.id}` }))
+    ).not.toContain('$1.25');
+
+    // Requested 7d to_ms must respect latest server toMs to avoid client clock skew truncation.
+    const sevenDayUrl = requestedUrls.find((u) => u.includes('/api-keys/usage-summary?from_ms='))!;
+    const sevenDayToMs = Number(new URL(sevenDayUrl, 'https://manager.example').searchParams.get('to_ms'));
+    expect(sevenDayToMs).toBeGreaterThanOrEqual(serverAheadToMs);
+
+    // Sort dropdown label reflects active 7d window instead of hardcoded 24h.
+    await act(async () => {
+      renderer.root
+        .findByProps({ 'aria-label': `${k('sortLabel')}: ${k('sortFieldCreated')}` })
+        .props.onClick();
+    });
+    const sortOptions = renderer.root
+      .findAllByProps({ role: 'option' })
+      .map((node) => node.props.children);
+    expect(sortOptions).toContain('Calls (7d)');
+    expect(sortOptions).not.toContain('Calls (24h)');
+
+    // Resolve 7d summary and confirm new metrics appear.
+    await act(async () => {
+      resolveSevenDay(
+        Response.json({
+          fromMs: serverAheadToMs - 7 * 86_400_000,
+          toMs: serverAheadToMs,
+          coverage: { state: 'complete', reason: 'observed' },
+          items: [
+            {
+              keyId: trackedKey.id,
+              calls: 28,
+              success: 28,
+              failure: 0,
+              totalTokens: 90_000,
+              estimatedCostUsd: 8.75,
+              lastUsedAtMs: serverAheadToMs - 1_000,
+              coverage: { state: 'complete', reason: 'observed' },
+            },
+          ],
+        })
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(
+      readText(renderer.root.findByProps({ 'data-testid': `key-usage-${trackedKey.id}` }))
+    ).toContain('$8.75');
+
+    // Switch 7d -> 30d with failing fetch: stale 7d metric must stay cleared.
+    failThirtyDay = true;
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'key-list-usage-window-30d' }).props.onClick();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(view()).toContain('Usage (30d)');
+    expect(
+      readText(renderer.root.findByProps({ 'data-testid': `key-usage-${trackedKey.id}` }))
+    ).not.toContain('$8.75');
+  });
+
+  it('passes active 7d window to details drawer from table and card usage clicks without DOM id collision', async () => {
+    const activeKey = {
+      ...key,
+      id: '7'.repeat(32),
+      requestId: '8'.repeat(32),
+      name: 'Drawer Window Parity Key',
+      runtimeState: 'effective_observed' as const,
+      createdAtMs: 4_000,
+    };
+    const now = Date.now();
+    const detailUsageUrls: string[] = [];
+
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.includes(`/api-keys/${activeKey.id}/usage`)) {
+        detailUsageUrls.push(url);
+        return Promise.resolve(
+          Response.json({
+            keyId: activeKey.id,
+            fromMs: now - 7 * 86_400_000,
+            toMs: now,
+            bucketMs: 86_400_000,
+            coverage: {
+              state: 'complete',
+              reason: 'observed',
+              collectingSinceMs: now - 30 * 86_400_000,
+              lastProcessedEventId: 10,
+              targetEventId: 10,
+            },
+            totals: {
+              calls: 15,
+              success: 15,
+              failure: 0,
+              inputTokens: 10_000,
+              outputTokens: 5_000,
+              totalTokens: 15_000,
+              estimatedCostUsd: 2.5,
+              lastUsedAtMs: now - 5_000,
+            },
+            series: [],
+          })
+        );
+      }
+      if (url.endsWith(`/api-keys/${activeKey.id}`)) {
+        return Promise.resolve(Response.json(activeKey));
+      }
+      if (url.includes('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: now - 7 * 86_400_000,
+            toMs: now,
+            coverage: { state: 'complete', reason: 'observed' },
+            items: [
+              {
+                keyId: activeKey.id,
+                calls: 15,
+                success: 15,
+                failure: 0,
+                totalTokens: 15_000,
+                estimatedCostUsd: 2.5,
+                lastUsedAtMs: now - 5_000,
+                coverage: { state: 'complete', reason: 'observed' },
+              },
+            ],
+          })
+        );
+      }
+      if (url.endsWith('/api-keys')) {
+        return Promise.resolve(
+          Response.json({
+            keys: [activeKey],
+            gatewayPending: false,
+            revocationAvailable: true,
+          })
+        );
+      }
+      return Promise.resolve(Response.json({}));
+    });
+
+    await mount(fetchMock, vi.fn(), {
+      fromMs: now - 86_400_000,
+      toMs: now,
+      coverage: { state: 'complete', reason: 'observed' },
+      items: [
+        {
+          keyId: activeKey.id,
+          calls: 15,
+          success: 15,
+          failure: 0,
+          totalTokens: 15_000,
+          estimatedCostUsd: 2.5,
+          lastUsedAtMs: now - 5_000,
+          coverage: { state: 'complete', reason: 'observed' },
+        },
+      ],
+    });
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'key-list-usage-window-7d' }).props.onClick();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Click usage cell in table view -> opens details drawer on Usage tab with 7d window.
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': `open-key-usage-${activeKey.id}` }).props.onClick();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'key-detail-panel-usage' }).props.hidden
+    ).toBe(false);
+    expect(renderer.root.findAllByProps({ id: 'key-usage-window-7d' })).toHaveLength(1);
+    expect(renderer.root.findAllByProps({ id: 'key-list-usage-window-7d' })).toHaveLength(1);
+    expect(
+      renderer.root.findByProps({ id: 'key-usage-window-7d' }).props['aria-selected']
+    ).toBe(true);
+    expect(detailUsageUrls.some((u) => u.includes('/usage?from_ms='))).toBe(true);
+
+    // Close drawer, switch to cards view, and click card usage tile -> also opens 7d usage tab.
+    detailUsageUrls.length = 0;
+    await act(async () => {
+      renderer.root
+        .findByProps({ 'aria-label': t('keysCloseDetails') })
+        .props.onClick();
+    });
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'key-view-cards' }).props.onClick();
+    });
+    await act(async () => {
+      renderer.root
+        .findByProps({ 'data-testid': `open-card-usage-${activeKey.id}` })
+        .props.onClick();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'key-detail-panel-usage' }).props.hidden
+    ).toBe(false);
+    expect(
+      renderer.root.findByProps({ id: 'key-usage-window-7d' }).props['aria-selected']
+    ).toBe(true);
+    expect(detailUsageUrls.some((u) => u.includes('/usage?from_ms='))).toBe(true);
+  });
+
+  it('left-pads partial card recentSlots, avoids fabricating missing slots, and keeps status pill parity for operationId and revoked_observed', async () => {
+    const noSlotsSyncingKey = {
+      ...key,
+      id: '9'.repeat(32),
+      requestId: 'a'.repeat(32),
+      name: 'Syncing Without Slots',
+      runtimeState: 'effective_observed' as const,
+      operationId: 'f'.repeat(32),
+      createdAtMs: 5_000,
+    };
+    const partialSlotsRevokedKey = {
+      ...key,
+      id: 'b'.repeat(32),
+      requestId: 'c'.repeat(32),
+      name: 'Revoked Observed With Short Slots',
+      runtimeState: 'revoked_observed' as const,
+      createdAtMs: 4_000,
+    };
+    const now = Date.now();
+
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys')) {
+        return Promise.resolve(
+          Response.json({
+            keys: [noSlotsSyncingKey, partialSlotsRevokedKey],
+            gatewayPending: false,
+            revocationAvailable: true,
+          })
+        );
+      }
+      return Promise.resolve(Response.json({}));
+    });
+
+    await mount(fetchMock, vi.fn(), {
+      fromMs: now - 86_400_000,
+      toMs: now,
+      coverage: { state: 'complete', reason: 'observed' },
+      items: [
+        {
+          keyId: noSlotsSyncingKey.id,
+          calls: 15,
+          success: 12,
+          failure: 3,
+          totalTokens: 10_000,
+          estimatedCostUsd: 0,
+          lastUsedAtMs: now - 1_000,
+          coverage: { state: 'complete', reason: 'observed' },
+        },
+        {
+          keyId: partialSlotsRevokedKey.id,
+          calls: 35,
+          success: 34,
+          failure: 1,
+          totalTokens: 50_000,
+          estimatedCostUsd: 0,
+          modelCount: 4,
+          topModels: [
+            { model: 'model-a', calls: 10, estimatedCostUsd: 10 },
+            { model: 'model-b', calls: 10, estimatedCostUsd: 10 },
+            { model: 'model-c', calls: 10, estimatedCostUsd: 10 },
+          ],
+          recentSlots: [
+            { startMs: now - 3_000, endMs: now - 2_000, success: 5, failure: 0 },
+            { startMs: now - 2_000, endMs: now - 1_000, success: 0, failure: 0 },
+            { startMs: now - 1_000, endMs: now, success: 29, failure: 1 },
+          ],
+          lastUsedAtMs: now - 500,
+          coverage: { state: 'partial', reason: 'window_partial' },
+        },
+      ],
+    });
+    // Table view status pill parity: operationId -> statusSyncing, revoked_observed -> statusRevoked (is-muted)
+    const tableSyncPill = renderer.root.findByProps({
+      'data-testid': `key-status-${noSlotsSyncingKey.id}`,
+    });
+    expect(tableSyncPill.props.children).toBe(k('statusSyncing'));
+    expect(tableSyncPill.props.className).toBe('key-state-pill is-pending');
+
+    const tableRevokedPill = renderer.root.findByProps({
+      'data-testid': `key-status-${partialSlotsRevokedKey.id}`,
+    });
+    expect(tableRevokedPill.props.children).toBe(k('statusRevoked'));
+    expect(tableRevokedPill.props.className).toBe('key-state-pill is-muted');
+
+    // Table view cost parity: complete $0.00 shown, partial 0 shown as '—' (not '$0.00').
+    expect(
+      readText(renderer.root.findByProps({ 'data-testid': `key-usage-${noSlotsSyncingKey.id}` }))
+    ).toContain('$0.00');
+    expect(
+      readText(
+        renderer.root.findByProps({ 'data-testid': `key-usage-${partialSlotsRevokedKey.id}` })
+      )
+    ).not.toContain('$0.00');
+
+    // Table view models trigger is a semantic <button aria-expanded> that toggles popover on click.
+    const modelsBtn = renderer.root.findByProps({
+      'data-testid': `key-models-trigger-${partialSlotsRevokedKey.id}`,
+    });
+    expect(modelsBtn.type).toBe('button');
+    expect(modelsBtn.props['aria-expanded']).toBe(false);
+    await act(async () => {
+      modelsBtn.props.onClick({ stopPropagation: vi.fn(), currentTarget: null });
+    });
+    expect(
+      renderer.root.findByProps({
+        'data-testid': `key-models-trigger-${partialSlotsRevokedKey.id}`,
+      }).props['aria-expanded']
+    ).toBe(true);
+    expect(
+      renderer.root.findByProps({
+        'data-testid': `key-models-popover-${partialSlotsRevokedKey.id}`,
+      })
+    ).toBeDefined();
+
+    // Switch to card view and verify status pill parity, recentSlots rules, and model mix rounding.
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'key-view-cards' }).props.onClick();
+    });
+
+    const cardSyncPill = renderer.root.findByProps({
+      'data-testid': `key-status-${noSlotsSyncingKey.id}`,
+    });
+    expect(cardSyncPill.props.children).toBe(k('statusSyncing'));
+    expect(cardSyncPill.props.className).toBe('key-card-status-badge is-pending');
+
+    const cardRevokedPill = renderer.root.findByProps({
+      'data-testid': `key-status-${partialSlotsRevokedKey.id}`,
+    });
+    expect(cardRevokedPill.props.children).toBe(k('statusRevoked'));
+    expect(cardRevokedPill.props.className).toBe('key-card-status-badge is-muted');
+
+    // Absent recentSlots must NOT fabricate a 20th active slot: all 20 blocks remain idle.
+    const noSlotBlocks = renderer.root
+      .findByProps({ 'data-testid': `key-card-recent-status-${noSlotsSyncingKey.id}` })
+      .findAll((node) => typeof node.props?.className === 'string' && node.props.className.startsWith('key-status-block '));
+    // Also match exact 'key-status-block' (active) + 'key-status-block is-idle'
+    const allNoSlotBlocks = renderer.root
+      .findByProps({ 'data-testid': `key-card-recent-status-${noSlotsSyncingKey.id}` })
+      .findAll(
+        (node) =>
+          node.type === 'div' &&
+          typeof node.props?.className === 'string' &&
+          (node.props.className === 'key-status-block' ||
+            node.props.className === 'key-status-block is-idle')
+      );
+    expect(noSlotBlocks).toHaveLength(20);
+    expect(allNoSlotBlocks).toHaveLength(20);
+    expect(allNoSlotBlocks.every((node) => node.props.className === 'key-status-block is-idle')).toBe(
+      true
+    );
+
+    // Partial recentSlots (length 3) must left-pad 17 idle slots on the oldest edge.
+    const shortSlotBlocks = renderer.root
+      .findByProps({ 'data-testid': `key-card-recent-status-${partialSlotsRevokedKey.id}` })
+      .findAll(
+        (node) =>
+          node.type === 'div' &&
+          typeof node.props?.className === 'string' &&
+          (node.props.className === 'key-status-block' ||
+            node.props.className === 'key-status-block is-idle')
+      );
+    expect(shortSlotBlocks).toHaveLength(20);
+    expect(
+      shortSlotBlocks.slice(0, 17).every((node) => node.props.className === 'key-status-block is-idle')
+    ).toBe(true);
+    expect(shortSlotBlocks[17]?.props.className).toBe('key-status-block');
+    expect(shortSlotBlocks[18]?.props.className).toBe('key-status-block is-idle');
+    expect(shortSlotBlocks[19]?.props.className).toBe('key-status-block');
+
+    // Card model mix uses largest-remainder rounding (34% + 33% + 33% = 100%) and shows call count for unpriced 1 other model.
+    const cardModelsSection = renderer.root.findByProps({
+      'data-testid': `key-card-models-${partialSlotsRevokedKey.id}`,
+    });
+    const pctNodes = cardModelsSection.findAllByProps({ className: 'key-model-mix-pct' });
+    const pcts = pctNodes.map((node) => Number(readText(node).replace('%', '')));
+    expect(pcts).toEqual([34, 33, 33]);
+    expect(pcts.reduce((sum, n) => sum + n, 0)).toBeLessThanOrEqual(100);
+    const cardModelsText = readText(cardModelsSection);
+    expect(cardModelsText).toContain('1 other model · ≥5 calls');
+    expect(cardModelsText).not.toContain('(0%)');
+  });
+
+  it('preserves active 7d usage summary when an earlier 24h refresh() fetch rejects afterwards', async () => {
+    const trackedKey = {
+      ...key,
+      id: '9'.repeat(32),
+      requestId: 'a'.repeat(32),
+      name: 'Stale 24h Reject Key',
+      runtimeState: 'effective_observed' as const,
+      createdAtMs: 5_000,
+    };
+    const now = Date.now();
+    let rejectInitial24h!: (reason?: unknown) => void;
+    let initial24hCalls = 0;
+
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys/usage-summary')) {
+        initial24hCalls += 1;
+        return new Promise<Response>((_, reject) => {
+          rejectInitial24h = reject;
+        });
+      }
+      if (url.includes('/api-keys/usage-summary?from_ms=')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: now - 7 * 86_400_000,
+            toMs: now,
+            coverage: { state: 'complete', reason: 'observed' },
+            items: [
+              {
+                keyId: trackedKey.id,
+                calls: 28,
+                success: 28,
+                failure: 0,
+                totalTokens: 90_000,
+                estimatedCostUsd: 8.75,
+                lastUsedAtMs: now - 1_000,
+                coverage: { state: 'complete', reason: 'observed' },
+              },
+            ],
+          })
+        );
+      }
+      if (url.endsWith('/api-keys/access-info')) {
+        return Promise.resolve(
+          Response.json({
+            mode: 'new_managed',
+            managementBasePath: '/console',
+            inferenceBasePath: '/api',
+            protocols: [],
+            ready: true,
+          })
+        );
+      }
+      if (url.endsWith('/api-keys')) {
+        return Promise.resolve(
+          Response.json({
+            keys: [trackedKey],
+            gatewayPending: false,
+            revocationAvailable: true,
+          })
+        );
+      }
+      return Promise.resolve(Response.json({}));
+    });
+
+    await act(async () => {
+      renderer = create(
+        <FreshApiKeys
+          client={createPublicApiClient(() => context, fetchMock)}
+          credential="admin-test-only"
+          onUnauthorized={unauthorized}
+          onCreationPending={vi.fn()}
+        />
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(initial24hCalls).toBe(1);
+
+    // Switch to 7d before initial 24h refresh settles and let 7d resolve.
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'key-list-usage-window-7d' }).props.onClick();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(
+      readText(renderer.root.findByProps({ 'data-testid': `key-usage-${trackedKey.id}` }))
+    ).toContain('$8.75');
+
+    // Earlier 24h refresh() fetch rejects now -> 7d summary must stay intact!
+    await act(async () => {
+      rejectInitial24h(new Error('initial 24h summary failed'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(
+      readText(renderer.root.findByProps({ 'data-testid': `key-usage-${trackedKey.id}` }))
+    ).toContain('$8.75');
+    expect(
+      readText(renderer.root.findByProps({ 'data-testid': `key-usage-${trackedKey.id}` }))
+    ).toContain('28');
+  });
+
+  it('opens card-view models popover on pointerDown+focus+click without immediate close and clamps float drift in otherCost', async () => {
+    const cardKey = {
+      ...key,
+      id: 'c'.repeat(32),
+      requestId: 'd'.repeat(32),
+      name: 'Card Models Popover Key',
+      runtimeState: 'effective_observed' as const,
+      createdAtMs: 6_000,
+    };
+    const now = Date.now();
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys')) {
+        return Promise.resolve(
+          Response.json({
+            keys: [cardKey],
+            gatewayPending: false,
+            revocationAvailable: true,
+          })
+        );
+      }
+      return Promise.resolve(Response.json({}));
+    });
+
+    // 0.1 + 0.2 + 0.3 produces 0.6000000000000001 whereas sorted sum 0.3 + 0.2 + 0.1 === 0.6;
+    // the 1e-16 drift must clamp to 0 instead of rendering "<$0.01 (0%)".
+    await mount(fetchMock, vi.fn(), {
+      fromMs: now - 86_400_000,
+      toMs: now,
+      coverage: { state: 'complete', reason: 'observed' },
+      items: [
+        {
+          keyId: cardKey.id,
+          calls: 35,
+          success: 35,
+          failure: 0,
+          totalTokens: 40_000,
+          estimatedCostUsd: 0.1 + 0.2 + 0.3,
+          modelCount: 4,
+          topModels: [
+            { model: 'model-top', calls: 10, estimatedCostUsd: 0.3 },
+            { model: 'model-mid', calls: 10, estimatedCostUsd: 0.2 },
+            { model: 'model-low', calls: 10, estimatedCostUsd: 0.1 },
+          ],
+          lastUsedAtMs: now - 500,
+          coverage: { state: 'complete', reason: 'observed' },
+        },
+      ],
+    });
+
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'key-view-cards' }).props.onClick();
+    });
+
+    const cardModelsSection = renderer.root.findByProps({
+      'data-testid': `key-card-models-${cardKey.id}`,
+    });
+    const cardModelsText = readText(cardModelsSection);
+    expect(cardModelsText).toContain('1 other model · 5 calls');
+    expect(cardModelsText).not.toContain('<$0.01');
+    expect(cardModelsText).not.toContain('(0%)');
+
+    const cardModelsTrigger = () =>
+      renderer.root.findByProps({
+        'data-testid': `key-models-trigger-${cardKey.id}`,
+      });
+    expect(cardModelsTrigger().props['aria-expanded']).toBe(false);
+
+    // Pointer click sequence fires pointerDown -> focus -> click: popover must stay open.
+    await act(async () => {
+      cardModelsTrigger().props.onPointerDown();
+      cardModelsTrigger().props.onFocus({ currentTarget: null });
+      cardModelsTrigger().props.onClick({ stopPropagation: vi.fn(), currentTarget: null });
+    });
+    expect(cardModelsTrigger().props['aria-expanded']).toBe(true);
+    expect(
+      renderer.root.findByProps({ 'data-testid': `key-models-popover-${cardKey.id}` })
+    ).toBeDefined();
+
+    // Second click closes it cleanly.
+    await act(async () => {
+      cardModelsTrigger().props.onPointerDown();
+      cardModelsTrigger().props.onFocus({ currentTarget: null });
+      cardModelsTrigger().props.onClick({ stopPropagation: vi.fn(), currentTarget: null });
+    });
+    expect(cardModelsTrigger().props['aria-expanded']).toBe(false);
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': `key-models-popover-${cardKey.id}` })
+    ).toHaveLength(0);
   });
 });

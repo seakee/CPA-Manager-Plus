@@ -507,5 +507,96 @@ describe('FreshAccessInfo', () => {
       byID('access-info-not-ready').findByProps({ className: 'alert-title' }).children.join('')
     ).toBe(accessInfoText('notReadyUpgradeOperationInvalidTitle', 'en'));
   });
+  it('handles onCopyAuthHeader outcomes, ignores stale copy completions across reloads, and respects authHeaderCopyDisabled', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    const fetchMock = vi.fn<typeof fetch>();
+
+    let resolvePending!: (outcome: 'copied' | 'failed' | 'ignored') => void;
+    const onCopyAuthHeader = vi
+      .fn<(prefix: string) => Promise<'copied' | 'failed' | 'ignored'>>()
+      .mockResolvedValueOnce('ignored')
+      .mockResolvedValueOnce('failed')
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolvePending = resolve;
+        })
+      );
+
+    await mount(
+      fetchMock,
+      { kind: 'admin', value: 'k1' },
+      {
+        info: managedInfo,
+        clientOnly: true,
+        drawerEmbed: true,
+        maskedKeyPreview: 'cpamp_sk_…1234',
+        onCopyAuthHeader,
+      }
+    );
+
+    // 1. 'ignored' must NOT display red copyFailed feedback
+    await act(async () => {
+      await byID('access-info-copy-header-openai').props.onClick();
+    });
+    expect(hasID('access-info-copy-feedback')).toBe(false);
+
+    // 2. 'failed' displays copyFailed without falling back to template header
+    await act(async () => {
+      await byID('access-info-copy-header-openai').props.onClick();
+    });
+    expect(byID('access-info-copy-feedback').props.children).toBe(
+      accessInfoText('copyFailed', 'en')
+    );
+    expect(writeText).not.toHaveBeenCalled();
+
+    // 3. Stale async completion after reloadToken change is discarded
+    act(() => {
+      void byID('access-info-copy-header-openai').props.onClick();
+    });
+    await act(async () => {
+      renderer.update(
+        <AccessInfoSummary
+          client={createPublicApiClient(() => context, fetchMock)}
+          auth={{ kind: 'admin', value: 'k1' }}
+          info={managedInfo}
+          reloadToken={1}
+          clientOnly
+          drawerEmbed
+          maskedKeyPreview="cpamp_sk_…1234"
+          onCopyAuthHeader={onCopyAuthHeader}
+        />
+      );
+    });
+    await act(async () => {
+      resolvePending('copied');
+      await Promise.resolve();
+    });
+    expect(hasID('access-info-copy-feedback')).toBe(false);
+
+    // 4. authHeaderCopyDisabled blocks onCopyAuthHeader cleanly without copyFailed
+    await act(async () => {
+      renderer.update(
+        <AccessInfoSummary
+          client={createPublicApiClient(() => context, fetchMock)}
+          auth={{ kind: 'admin', value: 'k1' }}
+          info={managedInfo}
+          reloadToken={1}
+          clientOnly
+          drawerEmbed
+          maskedKeyPreview="cpamp_sk_…1234"
+          onCopyAuthHeader={onCopyAuthHeader}
+          authHeaderCopyDisabled
+        />
+      );
+    });
+    const callsBeforeDisabled = onCopyAuthHeader.mock.calls.length;
+    await act(async () => {
+      await byID('access-info-copy-header-openai').props.onClick();
+    });
+    expect(onCopyAuthHeader).toHaveBeenCalledTimes(callsBeforeDisabled);
+    expect(hasID('access-info-copy-feedback')).toBe(false);
+  });
+
 
 });

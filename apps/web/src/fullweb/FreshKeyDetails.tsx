@@ -1,20 +1,25 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
 import { useHref, useInRouterContext, useLocation, useNavigate } from 'react-router-dom';
+import type { EChartsCoreOption } from 'echarts/core';
 import { fullWebLanguage, fullWebText as t } from '../i18n/fullweb';
-import { keyWorkspaceText as k } from '../i18n/freshKeyWorkspace';
+import { formatKeyModelsSummaryLine, keyWorkspaceText as k } from '../i18n/freshKeyWorkspace';
 import { externalWorkspaceText as x } from '../i18n/freshExternal';
 import { prefixRouteBase } from '../router/routeBase';
 import { readRoutingContext } from './routingContext';
+import { useFullWebLanguage } from './useFullWebLanguage';
 import { FullWebIcon } from './FullWebIcon';
+import { IconBinary, IconBot } from '../components/ui/icons';
 import './freshKeys.css';
 import { blockerOf } from './externalState';
 import { PublicApiError, type PublicApiClient } from './publicApi';
 import {
   parseKeyUsage,
+  usageCompactNumberText,
+  usageCompactTimeText,
+  usageCompactUsdText,
   usageCountText,
   usageReasonText,
   usageStateText,
-  usageTimeText,
   type KeyUsage,
   type UsageState,
 } from './freshKeyUsage';
@@ -40,6 +45,9 @@ import { Modal } from '../components/ui/Modal';
 import { SegmentedTabs } from '../components/ui/SegmentedTabs';
 import { Button } from '../components/ui/Button';
 import { MetricSummaryGrid } from '../components/common/MetricSummaryCard';
+import { EChartsView } from '../components/charts/EChartsView';
+import { useThemeStore } from '../stores';
+import { getDataPalette, hexToRgba, type DataPalette } from '../utils/dataPalette';
 import {
   DRAWER_WIDTH,
   DrawerActionFooter,
@@ -60,6 +68,303 @@ import {
 } from '../components/common/WorkspaceDrawer';
 
 type UsageWindow = '24h' | '7d' | '30d';
+
+interface DisplayUsageBucket {
+  bucketMs: number;
+  calls: number;
+  failure: number;
+  totalTokens: number;
+}
+
+function escapeTooltipHtml(raw: string): string {
+  return raw
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function buildKeySummaryKpiCards(
+  totals: KeyUsage['totals'] | null | undefined,
+  state: UsageState
+) {
+  const proven = (state === 'complete' || state === 'partial') && Boolean(totals);
+  const calls = totals?.calls;
+  const success = totals?.success ?? 0;
+  const failure = totals?.failure ?? 0;
+  const totalTokens = totals?.totalTokens;
+  const estimatedCostUsd = totals?.estimatedCostUsd;
+  const successRate = proven && (calls ?? 0) > 0 ? success / (calls ?? 1) : null;
+  const lastUsedCompact =
+    proven && totals?.lastUsedAtMs
+      ? (usageCompactTimeText(totals.lastUsedAtMs, 'recent') ?? '—')
+      : null;
+  const callsMeta = lastUsedCompact
+    ? `${k('usageLastUsed')} ${lastUsedCompact}`
+    : proven
+      ? k('noUsageInWindow')
+      : '—';
+  const successMeta = proven
+    ? `${k('usageSuccessShort')} ${usageCountText(success, state)} · ${k('usageFailureShort')} ${usageCountText(failure, state)}`
+    : '—';
+  const avgTokensMeta =
+    proven && (calls ?? 0) > 0 && totalTokens !== undefined
+      ? `${k('usageAvgPerCall')} ${usageCompactNumberText(Math.round(totalTokens / (calls ?? 1)), 'complete')} / ${k('callsUnit')}`
+      : '—';
+  const avgCostMeta =
+    proven && estimatedCostUsd !== undefined && (calls ?? 0) > 0
+      ? `${k('usageAvgPerCall')} ${usageCompactUsdText(estimatedCostUsd / (calls ?? 1), 'complete')} / ${k('callsUnit')}`
+      : '—';
+
+  return [
+    {
+      label: k('usageCalls'),
+      value: usageCompactNumberText(calls, state),
+      valueTitle: usageCountText(calls, state),
+      meta: callsMeta,
+      icon: 'calls' as const,
+      accent: 'blue' as const,
+    },
+    {
+      label: k('cardMetricSuccessRate'),
+      value:
+        successRate !== null
+          ? successRate >= 0.9995
+            ? '100%'
+            : `${(successRate * 100).toFixed(1)}%`
+          : '—',
+      tone:
+        successRate !== null
+          ? successRate >= 0.95
+            ? ('good' as const)
+            : successRate >= 0.85
+              ? ('warn' as const)
+              : ('bad' as const)
+          : undefined,
+      meta: successMeta,
+      icon: 'success' as const,
+      accent: 'green' as const,
+    },
+    {
+      label: k('usageTotalTokens'),
+      value: usageCompactNumberText(totalTokens, state),
+      valueTitle: usageCountText(totalTokens, state),
+      meta: avgTokensMeta,
+      icon: 'tokens' as const,
+      accent: 'indigo' as const,
+    },
+    {
+      label: k('sortFieldCost'),
+      value:
+        proven && estimatedCostUsd !== undefined
+          ? usageCompactUsdText(estimatedCostUsd, state)
+          : '—',
+      meta: avgCostMeta,
+      icon: 'cost' as const,
+      accent: 'amber' as const,
+    },
+  ];
+}
+
+function formatTrendAxisBucket(bucketMs: number, spanMs: number): string {
+  const d = new Date(bucketMs);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const HOUR_MS = 3_600_000;
+  const DAY_MS = 86_400_000;
+  if (spanMs <= 30 * HOUR_MS) {
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+  if (spanMs <= 8 * DAY_MS) {
+    return `${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:00`;
+  }
+  return `${pad(d.getMonth() + 1)}/${pad(d.getDate())}`;
+}
+
+function buildKeyUsageTrendOption({
+  series,
+  spanMs,
+  state,
+  dataPalette,
+  language,
+}: {
+  series: DisplayUsageBucket[];
+  spanMs: number;
+  state: UsageState;
+  dataPalette: DataPalette;
+  language: string;
+}): EChartsCoreOption {
+  const labels = series.map((pt) => formatTrendAxisBucket(pt.bucketMs, spanMs));
+  const labelStep = Math.max(0, Math.ceil(series.length / 6) - 1);
+  const successLabel = k('usageSuccess');
+  const failureLabel = k('usageFailure');
+  const tokensLabel = k('cardMetricTokens');
+
+  return {
+    animationDuration: 220,
+    backgroundColor: 'transparent',
+    grid: {
+      top: 14,
+      right: 6,
+      bottom: 4,
+      left: 4,
+      containLabel: true,
+    },
+    legend: { show: false },
+    tooltip: {
+      trigger: 'axis',
+      appendToBody: true,
+      backgroundColor: dataPalette.surface.tooltipBackground,
+      borderColor: dataPalette.surface.tooltipBorder,
+      borderWidth: 1,
+      padding: [8, 10],
+      textStyle: {
+        color: dataPalette.surface.tooltipText,
+        fontSize: 12,
+      },
+      axisPointer: {
+        type: 'shadow',
+      },
+      formatter: (params: unknown) => {
+        const list = Array.isArray(params) ? params : [];
+        const first = list[0] as { dataIndex?: number } | undefined;
+        const idx = typeof first?.dataIndex === 'number' ? first.dataIndex : -1;
+        const pt = idx >= 0 ? series[idx] : undefined;
+        if (!pt) return '';
+        const fail = Math.min(pt.failure, pt.calls);
+        const ok = Math.max(0, pt.calls - fail);
+        const bucketDate = new Date(pt.bucketMs);
+        const timeText = escapeTooltipHtml(
+          Number.isFinite(bucketDate.getTime())
+            ? bucketDate.toLocaleString(language, {
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+              })
+            : ''
+        );
+        const okText = escapeTooltipHtml(usageCountText(ok, state));
+        const failText = escapeTooltipHtml(usageCountText(fail, state));
+        const tokText = escapeTooltipHtml(usageCountText(pt.totalTokens, state));
+        return [
+          `<div style="font-weight:600;margin-bottom:4px;">${timeText}</div>`,
+          `<div style="display:flex;align-items:center;justify-content:space-between;gap:14px;"><span><span style="display:inline-block;width:7px;height:7px;border-radius:999px;background:${dataPalette.blue};margin-right:6px;"></span>${escapeTooltipHtml(successLabel)}</span><strong>${okText}</strong></div>`,
+          `<div style="display:flex;align-items:center;justify-content:space-between;gap:14px;"><span><span style="display:inline-block;width:7px;height:7px;border-radius:999px;background:${dataPalette.red};margin-right:6px;"></span>${escapeTooltipHtml(failureLabel)}</span><strong>${failText}</strong></div>`,
+          `<div style="display:flex;align-items:center;justify-content:space-between;gap:14px;"><span><span style="display:inline-block;width:7px;height:7px;border-radius:999px;background:${dataPalette.emerald};margin-right:6px;"></span>${escapeTooltipHtml(tokensLabel)}</span><strong>${tokText}</strong></div>`,
+        ].join('');
+      },
+    },
+    xAxis: {
+      type: 'category',
+      data: labels,
+      axisTick: { show: false },
+      axisLine: { lineStyle: { color: dataPalette.surface.axisLine } },
+      axisLabel: {
+        color: dataPalette.surface.axisLabel,
+        fontSize: 10,
+        interval: labelStep,
+        hideOverlap: true,
+      },
+    },
+    yAxis: [
+      {
+        type: 'value',
+        min: 0,
+        minInterval: 1,
+        splitNumber: 3,
+        axisLabel: {
+          color: dataPalette.surface.axisLabel,
+          fontSize: 10,
+          formatter: (v: number) => usageCompactNumberText(v, 'complete'),
+        },
+        splitLine: {
+          lineStyle: { color: dataPalette.surface.splitLine, type: 'dashed' },
+        },
+      },
+      {
+        type: 'value',
+        position: 'right',
+        min: 0,
+        splitNumber: 3,
+        axisLabel: {
+          color: dataPalette.emerald,
+          fontSize: 10,
+          formatter: (v: number) => usageCompactNumberText(v, 'complete'),
+        },
+        splitLine: { show: false },
+      },
+    ],
+    series: [
+      {
+        name: successLabel,
+        type: 'bar',
+        stack: 'calls',
+        yAxisIndex: 0,
+        barMaxWidth: 14,
+        data: series.map((pt) => {
+          const fail = Math.min(pt.failure, pt.calls);
+          const ok = Math.max(0, pt.calls - fail);
+          return {
+            value: ok,
+            itemStyle: {
+              color: dataPalette.blue,
+              borderRadius: fail > 0 ? [0, 0, 0, 0] : [3, 3, 0, 0],
+            },
+          };
+        }),
+      },
+      {
+        name: failureLabel,
+        type: 'bar',
+        stack: 'calls',
+        yAxisIndex: 0,
+        barMaxWidth: 14,
+        data: series.map((pt) => {
+          const fail = Math.min(pt.failure, pt.calls);
+          return {
+            value: fail,
+            itemStyle: {
+              color: dataPalette.red,
+              borderRadius: [3, 3, 0, 0],
+            },
+          };
+        }),
+      },
+      {
+        name: tokensLabel,
+        type: 'line',
+        yAxisIndex: 1,
+        smooth: 0.24,
+        showSymbol: series.length <= 14,
+        symbol: 'circle',
+        symbolSize: 4,
+        lineStyle: {
+          color: dataPalette.emerald,
+          width: 2,
+        },
+        itemStyle: {
+          color: dataPalette.emerald,
+        },
+        areaStyle: {
+          color: {
+            type: 'linear',
+            x: 0,
+            y: 0,
+            x2: 0,
+            y2: 1,
+            colorStops: [
+              { offset: 0, color: hexToRgba(dataPalette.emerald, 0.16) },
+              { offset: 1, color: hexToRgba(dataPalette.emerald, 0) },
+            ],
+          },
+        },
+        data: series.map((pt) => pt.totalTokens),
+      },
+    ],
+  };
+}
 
 function statusPillTone(pillClass: string): DrawerStatusTone {
   switch (pillClass) {
@@ -614,6 +919,7 @@ export function FreshKeyDetails({
   reloadToken = 0,
   initialTab = 'overview',
   initialAction,
+  initialWindow = '24h',
 }: {
   id: string;
   client: PublicApiClient;
@@ -633,6 +939,7 @@ export function FreshKeyDetails({
   reloadToken?: number;
   initialTab?: 'overview' | 'usage';
   initialAction?: 'rename';
+  initialWindow?: UsageWindow;
 }) {
   const [record, setRecord] = useState<Key | null>(null);
   const [usage, setUsage] = useState<KeyUsage | null>(null);
@@ -641,7 +948,7 @@ export function FreshKeyDetails({
   const [usageWindowState, setUsageWindowState] = useState<{
     forId: string;
     window: UsageWindow;
-  }>({ forId: id, window: '24h' });
+  }>({ forId: id, window: initialWindow });
   const [busy, setBusy] = useState(false);
   const [applyPending, setApplyPending] = useState(false);
   const [applyUnknown, setApplyUnknown] = useState(false);
@@ -667,6 +974,11 @@ export function FreshKeyDetails({
   const active = useRef(true);
   const ownerEpoch = useRef(0);
   const usageSeq = useRef(0);
+  const usage24hSeq = useRef(0);
+  const usageRef = useRef<KeyUsage | null>(null);
+  const usage24hRef = useRef<KeyUsage | null>(null);
+  const latestServerToMsRef = useRef(0);
+  const prevInitialWindowRef = useRef(initialWindow);
   const detailDrawerBodyRef = useRef<HTMLDivElement | null>(null);
   const auth = { kind: 'admin' as const, value: credential };
   const onPendingRef = useRef(onPending);
@@ -681,13 +993,14 @@ export function FreshKeyDetails({
   }, []);
   const resource = 'api-keys/' + id;
   const activeUsageWindow: UsageWindow =
-    usageWindowState.forId === id ? usageWindowState.window : '24h';
+    usageWindowState.forId === id ? usageWindowState.window : initialWindow;
   const usageCoverage = usage?.coverage ?? {
     state: 'unknown' as UsageState,
     reason: 'usage_read_failed',
   };
 
   useEffect(() => {
+    prevInitialWindowRef.current = initialWindow;
     active.current = true;
     const ownerAtMount = ++ownerEpoch.current;
     inFlight.current = false;
@@ -698,8 +1011,13 @@ export function FreshKeyDetails({
     setRecord(null);
     setUsage(null);
     setUsage24h(null);
+    usageRef.current = null;
+    usage24hRef.current = null;
+    latestServerToMsRef.current = 0;
+    usageSeq.current += 1;
+    usage24hSeq.current += 1;
     setUsageFailed(false);
-    setUsageWindowState({ forId: id, window: '24h' });
+    setUsageWindowState({ forId: id, window: initialWindow });
     setApplyPending(false);
     setApplyUnknown(false);
     setApplyError('');
@@ -719,7 +1037,10 @@ export function FreshKeyDetails({
     const previous = typeof document !== 'undefined' ? document.activeElement : null;
     if (open) {
       void read(ownerAtMount);
-      void readUsage(ownerAtMount, '24h');
+      void readUsage(ownerAtMount, initialWindow);
+      if (initialWindow !== '24h') {
+        void readUsage24h(ownerAtMount);
+      }
     }
     return () => {
       active.current = false;
@@ -732,6 +1053,13 @@ export function FreshKeyDetails({
       }
     };
   }, [id, credential, reloadToken, open]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const prev = prevInitialWindowRef.current;
+    prevInitialWindowRef.current = initialWindow;
+    if (!open || prev === initialWindow) return;
+    switchUsageWindow(initialWindow);
+  }, [initialWindow, open]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     setDetailTab(initialTab);
@@ -783,6 +1111,23 @@ export function FreshKeyDetails({
     }
   }
 
+  async function resolveVerifiedSecret(ownerAtStart: number): Promise<string | null> {
+    if (!record || record.lifecycle === 'superseded') return null;
+    const value = await client.post<{ secret: string }>(resource + '/secret', {}, auth);
+    if (!active.current || ownerEpoch.current !== ownerAtStart) return null;
+    if (!value || typeof value.secret !== 'string') throw new Error();
+    if (!validSavedSecret(record, value.secret)) {
+      const latest = validate(await client.get<Key>(resource, auth));
+      if (!active.current || ownerEpoch.current !== ownerAtStart) return null;
+      setRecord(latest);
+      onSaved(latest);
+      if (latest.lifecycle === 'superseded' || !validSavedSecret(latest, value.secret)) {
+        throw new Error();
+      }
+    }
+    return value.secret;
+  }
+
   async function copySavedSecret() {
     if (copyingRef.current || !record || record.lifecycle === 'superseded') return;
     const ownerAtStart = ownerEpoch.current;
@@ -790,18 +1135,9 @@ export function FreshKeyDetails({
     setCopying(true);
     setCopyFeedback('');
     try {
-      const value = await client.post<{ secret: string }>(resource + '/secret', {}, auth);
-      if (!active.current || ownerEpoch.current !== ownerAtStart) return;
-      if (!value || typeof value.secret !== 'string') throw new Error();
-      if (!validSavedSecret(record, value.secret)) {
-        const latest = validate(await client.get<Key>(resource, auth));
-        if (!active.current || ownerEpoch.current !== ownerAtStart) return;
-        setRecord(latest);
-        onSaved(latest);
-        if (latest.lifecycle === 'superseded' || !validSavedSecret(latest, value.secret))
-          throw new Error();
-      }
-      await navigator.clipboard.writeText(value.secret);
+      const secret = await resolveVerifiedSecret(ownerAtStart);
+      if (!secret) return;
+      await navigator.clipboard.writeText(secret);
       if (active.current && ownerEpoch.current === ownerAtStart) setCopyFeedback('copied');
     } catch (err) {
       if (!active.current || ownerEpoch.current !== ownerAtStart) return;
@@ -812,6 +1148,45 @@ export function FreshKeyDetails({
           await read(ownerAtStart);
         }
       }
+    } finally {
+      if (ownerEpoch.current === ownerAtStart) {
+        copyingRef.current = false;
+        if (active.current) setCopying(false);
+      }
+    }
+  }
+
+  async function copySavedAuthHeader(
+    headerPrefix: string
+  ): Promise<'copied' | 'failed' | 'ignored'> {
+    if (copyingRef.current || !record || record.lifecycle === 'superseded') return 'ignored';
+    const ownerAtStart = ownerEpoch.current;
+    copyingRef.current = true;
+    setCopying(true);
+    try {
+      const secret = await resolveVerifiedSecret(ownerAtStart);
+      if (!secret) return 'ignored';
+      if (
+        typeof navigator === 'undefined' ||
+        !navigator.clipboard ||
+        typeof navigator.clipboard.writeText !== 'function'
+      ) {
+        throw new Error('clipboard_unavailable');
+      }
+      await navigator.clipboard.writeText(`${headerPrefix}${secret}`);
+      if (!active.current || ownerEpoch.current !== ownerAtStart) return 'ignored';
+      return 'copied';
+    } catch (err) {
+      if (!active.current || ownerEpoch.current !== ownerAtStart) return 'ignored';
+      if (err instanceof PublicApiError && err.kind === 'authentication') {
+        onUnauthorized();
+        return 'ignored';
+      }
+      if (err instanceof PublicApiError && err.status === 409) {
+        await read(ownerAtStart);
+        if (!active.current || ownerEpoch.current !== ownerAtStart) return 'ignored';
+      }
+      return 'failed';
     } finally {
       if (ownerEpoch.current === ownerAtStart) {
         copyingRef.current = false;
@@ -857,9 +1232,10 @@ export function FreshKeyDetails({
     window: UsageWindow = activeUsageWindow
   ) {
     const seq = ++usageSeq.current;
+    const seq24h = window === '24h' ? ++usage24hSeq.current : 0;
     let usagePath = `${resource}/usage`;
     if (window === '7d' || window === '30d') {
-      const toMs = Date.now();
+      const toMs = Math.max(Date.now(), latestServerToMsRef.current);
       const spanMs = window === '7d' ? 7 * 86_400_000 : 30 * 86_400_000;
       const fromMs = Math.max(1, toMs - spanMs);
       usagePath = `${resource}/usage?from_ms=${fromMs}&to_ms=${toMs}`;
@@ -867,29 +1243,72 @@ export function FreshKeyDetails({
     try {
       const parsed = parseKeyUsage(await client.get<unknown>(usagePath, auth), id);
       if (!parsed) throw new Error('Invalid usage response');
-      if (!active.current || ownerEpoch.current !== ownerAtStart || seq !== usageSeq.current) {
+      if (!active.current || ownerEpoch.current !== ownerAtStart) {
         return;
       }
+      latestServerToMsRef.current = Math.max(latestServerToMsRef.current, parsed.toMs);
+      if (window === '24h' && seq24h === usage24hSeq.current) {
+        usage24hRef.current = parsed;
+        setUsage24h(parsed);
+      }
+      if (seq !== usageSeq.current) {
+        return;
+      }
+      usageRef.current = parsed;
       setUsage(parsed);
-      if (window === '24h') setUsage24h(parsed);
       setUsageFailed(false);
     } catch (err) {
-      if (!active.current || ownerEpoch.current !== ownerAtStart || seq !== usageSeq.current) {
+      if (!active.current || ownerEpoch.current !== ownerAtStart) {
+        return;
+      }
+      if (err instanceof PublicApiError && err.kind === 'authentication') {
+        if (seq === usageSeq.current || (window === '24h' && seq24h === usage24hSeq.current)) {
+          onUnauthorized();
+        }
+        return;
+      }
+      if (window === '24h' && seq24h === usage24hSeq.current) {
+        usage24hRef.current = null;
+        setUsage24h(null);
+      }
+      if (seq !== usageSeq.current) {
+        return;
+      }
+      usageRef.current = null;
+      setUsage(null);
+      setUsageFailed(true);
+    }
+  }
+
+  async function readUsage24h(ownerAtStart = ownerEpoch.current) {
+    const seq = ++usage24hSeq.current;
+    try {
+      const parsed = parseKeyUsage(await client.get<unknown>(`${resource}/usage`, auth), id);
+      if (!parsed) throw new Error('Invalid usage response');
+      if (!active.current || ownerEpoch.current !== ownerAtStart || seq !== usage24hSeq.current) {
+        return;
+      }
+      latestServerToMsRef.current = Math.max(latestServerToMsRef.current, parsed.toMs);
+      usage24hRef.current = parsed;
+      setUsage24h(parsed);
+    } catch (err) {
+      if (!active.current || ownerEpoch.current !== ownerAtStart || seq !== usage24hSeq.current) {
         return;
       }
       if (err instanceof PublicApiError && err.kind === 'authentication') {
         onUnauthorized();
         return;
       }
-      setUsage(null);
-      if (window === '24h') setUsage24h(null);
-      setUsageFailed(true);
+      usage24hRef.current = null;
+      setUsage24h(null);
     }
   }
 
   function switchUsageWindow(nextWindow: UsageWindow) {
     if (nextWindow === activeUsageWindow) return;
     setUsageWindowState({ forId: id, window: nextWindow });
+    usageRef.current = null;
+    setUsage(null);
     setUsageFailed(false);
     void readUsage(ownerEpoch.current, nextWindow);
   }
@@ -1405,8 +1824,74 @@ export function FreshKeyDetails({
     if (canClose()) onClose();
   }
 
+  const language = useFullWebLanguage();
+  const storeTheme = useThemeStore((state) => state.resolvedTheme);
+  const dataPalette = useMemo(() => getDataPalette(storeTheme), [storeTheme]);
+  const displaySeries = useMemo<DisplayUsageBucket[]>(() => {
+    if (!usage || usage.series.length === 0) return [];
+    const spanMs = usage.toMs - usage.fromMs;
+    // Preserve tiny synthetic test windows verbatim
+    if (spanMs <= 60_000) return usage.series;
+    const HOUR_MS = 3_600_000;
+    const DAY_MS = 86_400_000;
+    const targetStepMs =
+      spanMs <= 30 * HOUR_MS
+        ? HOUR_MS
+        : spanMs <= 8 * DAY_MS
+          ? 6 * HOUR_MS
+          : DAY_MS;
+    const baseStepMs = Math.max(usage.bucketMs || HOUR_MS, targetStepMs);
+    const lastSourceMs = Math.max(usage.toMs - 1, usage.fromMs);
+    let stepMs = baseStepMs;
+    let startBucket = Math.floor(usage.fromMs / stepMs) * stepMs;
+    let endBucket = Math.floor(lastSourceMs / stepMs) * stepMs;
+    let slotCount = Math.max(1, Math.floor((endBucket - startBucket) / stepMs) + 1);
+    if (slotCount > 32) {
+      const minStepMs = Math.max(stepMs, Math.ceil(Math.max(1, lastSourceMs - usage.fromMs) / 31));
+      const factor = Math.max(2, Math.ceil(minStepMs / baseStepMs));
+      stepMs = baseStepMs * factor;
+      startBucket = Math.floor(usage.fromMs / stepMs) * stepMs;
+      endBucket = Math.floor(lastSourceMs / stepMs) * stepMs;
+      slotCount = Math.max(1, Math.floor((endBucket - startBucket) / stepMs) + 1);
+      while (slotCount > 32) {
+        stepMs += baseStepMs;
+        startBucket = Math.floor(usage.fromMs / stepMs) * stepMs;
+        endBucket = Math.floor(lastSourceMs / stepMs) * stepMs;
+        slotCount = Math.max(1, Math.floor((endBucket - startBucket) / stepMs) + 1);
+      }
+    }
+    const map = new Map<number, DisplayUsageBucket>();
+    for (let i = 0; i < slotCount; i += 1) {
+      const b = startBucket + i * stepMs;
+      map.set(b, { bucketMs: b, calls: 0, failure: 0, totalTokens: 0 });
+    }
+    for (const pt of usage.series) {
+      const rawB = Math.floor(pt.bucketMs / stepMs) * stepMs;
+      const clampedB = Math.min(endBucket, Math.max(startBucket, rawB));
+      const slot = map.get(clampedB);
+      if (slot) {
+        slot.calls += pt.calls;
+        slot.failure += pt.failure;
+        slot.totalTokens += pt.totalTokens;
+      }
+    }
+    return Array.from(map.values());
+  }, [usage]);
   const maxBucketCalls =
-    usage && usage.series.length > 0 ? Math.max(...usage.series.map((p) => p.calls), 0) : 0;
+    displaySeries.length > 0 ? Math.max(...displaySeries.map((p) => p.calls), 0) : 0;
+  const usageSpanMs = usage ? Math.max(0, usage.toMs - usage.fromMs) : 0;
+  const usageCoverageStateForChart: UsageState = usage?.coverage.state ?? 'unknown';
+  const usageTrendOption = useMemo(
+    () =>
+      buildKeyUsageTrendOption({
+        series: displaySeries,
+        spanMs: usageSpanMs,
+        state: usageCoverageStateForChart,
+        dataPalette,
+        language,
+      }),
+    [dataPalette, displaySeries, language, usageCoverageStateForChart, usageSpanMs]
+  );
   const unifiedStatus = record ? keyUnifiedStatus(record) : null;
   const superseded = !!record && record.lifecycle === 'superseded';
   const revokedOrSuperseded =
@@ -1427,10 +1912,16 @@ export function FreshKeyDetails({
       : null;
   const overviewUsage = usage24h ?? (activeUsageWindow === '24h' ? usage : null);
   const overviewCoverageState: UsageState = overviewUsage?.coverage.state ?? 'unknown';
-  const overviewLastUsedText =
-    overviewCoverageState === 'unknown' || overviewCoverageState === 'unavailable'
-      ? '—'
-      : (usageTimeText(overviewUsage?.totals?.lastUsedAtMs ?? null) ?? '—');
+  const overviewProven =
+    overviewCoverageState === 'complete' || overviewCoverageState === 'partial';
+  const overviewLastActiveTime =
+    overviewProven && overviewUsage?.totals?.lastUsedAtMs
+      ? detailTime(overviewUsage.totals.lastUsedAtMs)
+      : null;
+  const overviewTopModels = overviewProven ? (overviewUsage?.topModels ?? []) : [];
+  const overviewModelCount = overviewProven
+    ? Math.max(overviewUsage?.modelCount ?? overviewTopModels.length, overviewTopModels.length)
+    : 0;
   const isZeroSeries =
     !!usage &&
     usage.series.length > 0 &&
@@ -1555,6 +2046,9 @@ export function FreshKeyDetails({
                   onClick={() => {
                     void read(ownerEpoch.current);
                     void readUsage(ownerEpoch.current, activeUsageWindow);
+                    if (activeUsageWindow !== '24h') {
+                      void readUsage24h(ownerEpoch.current);
+                    }
                   }}
                 >
                   <FullWebIcon name="refresh" size={14} />
@@ -1787,9 +2281,9 @@ export function FreshKeyDetails({
                     </DrawerNotice>
                   )}
                   <DrawerSectionCard
-                    variant="highlight"
-                    icon={<FullWebIcon name="chart" size={18} />}
-                    title={k('usageSummaryTitle')}
+                    variant="default"
+                    icon={<FullWebIcon name="chart" size={15} />}
+                    title={k('overviewSnapshotTitle')}
                     titleBadge={<DrawerScopePill>{k('usageWindow24h')}</DrawerScopePill>}
                     metaActions={
                       <Button
@@ -1802,68 +2296,22 @@ export function FreshKeyDetails({
                       </Button>
                     }
                   >
-                    <div data-testid="key-overview-kpi-strip">
+                    <div className="key-overview-kpi-strip" data-testid="key-overview-kpi-strip">
                       <MetricSummaryGrid
-                        density="compact"
-                        columns={3}
-                        cards={[
-                          {
-                            label: k('overviewCalls24h'),
-                            value: usageCountText(overviewUsage?.totals?.calls, overviewCoverageState),
-                            meta: '',
-                            icon: 'calls',
-                            accent: 'blue',
-                          },
-                          {
-                            label: k('overviewTokens24h'),
-                            value: usageCountText(
-                              overviewUsage?.totals?.totalTokens,
-                              overviewCoverageState
-                            ),
-                            meta: '',
-                            icon: 'tokens',
-                            accent: 'indigo',
-                          },
-                          {
-                            label: k('usageLastUsed'),
-                            value: overviewLastUsedText,
-                            meta: '',
-                            icon: 'latency',
-                            accent: 'teal',
-                          },
-                        ]}
+                        columns={4}
+                        cards={buildKeySummaryKpiCards(
+                          overviewUsage?.totals,
+                          overviewCoverageState
+                        )}
                       />
                     </div>
                   </DrawerSectionCard>
                   <DrawerSectionCard
                     variant="default"
                     icon={<FullWebIcon name="info" size={15} />}
-                    title={t('keysDetails')}
+                    title={k('overviewKeyInfoTitle')}
                   >
                     <DrawerDefinitionList testId="key-detail-metadata">
-                      <DrawerDlRow label={k('created')}>
-                        {createdTime ? (
-                          <time dateTime={createdTime.iso}>{createdTime.label}</time>
-                        ) : (
-                          '—'
-                        )}
-                      </DrawerDlRow>
-                      <DrawerDlRow label={k('originLabel')}>
-                        {k(keyOriginTextKey(record.origin))}
-                      </DrawerDlRow>
-                      {lastRotatedTime && (
-                        <DrawerDlRow
-                          label={k('lastRotatedLabel')}
-                          valueTestId="detail-last-rotated-at"
-                        >
-                          <time dateTime={lastRotatedTime.iso}>{lastRotatedTime.label}</time>
-                        </DrawerDlRow>
-                      )}
-                      {revokedTime && (
-                        <DrawerDlRow label={k('revokedAtLabel')}>
-                          <time dateTime={revokedTime.iso}>{revokedTime.label}</time>
-                        </DrawerDlRow>
-                      )}
                       <DrawerDlRow
                         label={t('keysIdentity')}
                         mono
@@ -1877,6 +2325,56 @@ export function FreshKeyDetails({
                           {id}
                         </code>
                       </DrawerDlRow>
+                      <DrawerDlRow
+                        label={k('overviewLastActiveLabel')}
+                        muted={overviewProven && !overviewLastActiveTime}
+                        valueTestId="detail-last-active"
+                      >
+                        {overviewLastActiveTime ? (
+                          <time dateTime={overviewLastActiveTime.iso}>
+                            {overviewLastActiveTime.label}
+                          </time>
+                        ) : overviewProven ? (
+                          k('noUsageInWindow')
+                        ) : (
+                          '—'
+                        )}
+                      </DrawerDlRow>
+                      {overviewTopModels.length > 0 && (
+                        <DrawerDlRow
+                          label={k('overviewActiveModelsLabel')}
+                          valueTestId="detail-active-models"
+                        >
+                          <span className="key-overview-models-inline">
+                            {overviewTopModels.slice(0, 3).map((entry) => (
+                              <span key={entry.model} className="key-model-chip is-pair">
+                                <span className="key-model-chip-name">{entry.model}</span>
+                              </span>
+                            ))}
+                            {overviewModelCount > 3 && (
+                              <span className="key-model-more">+{overviewModelCount - 3}</span>
+                            )}
+                            {overviewModelCount > 1 && (
+                              <span className="key-overview-models-summary">
+                                {formatKeyModelsSummaryLine(overviewModelCount)}
+                              </span>
+                            )}
+                          </span>
+                        </DrawerDlRow>
+                      )}
+                      {lastRotatedTime && (
+                        <DrawerDlRow
+                          label={k('lastRotatedLabel')}
+                          valueTestId="detail-last-rotated-at"
+                        >
+                          <time dateTime={lastRotatedTime.iso}>{lastRotatedTime.label}</time>
+                        </DrawerDlRow>
+                      )}
+                      {revokedTime && (
+                        <DrawerDlRow label={k('revokedAtLabel')}>
+                          <time dateTime={revokedTime.iso}>{revokedTime.label}</time>
+                        </DrawerDlRow>
+                      )}
                       {record.operationId && (
                         <DrawerDlRow label={k('operationIdLabel')} mono>
                           <code data-testid="detail-operation-id">{record.operationId}</code>
@@ -1896,6 +2394,10 @@ export function FreshKeyDetails({
                       reloadToken={reloadToken}
                       compact
                       clientOnly
+                      drawerEmbed
+                      maskedKeyPreview={record.maskedPreview}
+                      onCopyAuthHeader={copySavedAuthHeader}
+                      authHeaderCopyDisabled={busy || copying || applyPending || applyUnknown}
                       defaultProtocolsCollapsed={false}
                       testIdPrefix="detail-access-info"
                     />
@@ -1908,61 +2410,64 @@ export function FreshKeyDetails({
                   testId="key-detail-panel-usage"
                   hidden={detailTab !== 'usage'}
                 >
-                  <DrawerSectionCard
-                    variant="highlight"
-                    icon={<FullWebIcon name="chart" size={18} />}
-                    title={k('usageSectionTitle')}
-                    testId="key-detail-usage-policy"
-                    metaActions={
-                      <div className="key-usage-links" data-testid="key-usage-links">
-                        <CrossPageLink
-                          route="/monitoring"
-                          apiKeyId={id}
-                          className="btn btn-secondary btn-sm"
-                          testId="detail-link-monitoring"
-                          disabled={!canClose()}
-                          onNavigate={close}
-                        >
-                          {k('usageLinkMonitoring')}
-                        </CrossPageLink>
-                        <CrossPageLink
-                          route="/usage-analytics"
-                          apiKeyId={id}
-                          className="btn btn-secondary btn-sm"
-                          testId="detail-link-analytics"
-                          disabled={!canClose()}
-                          onNavigate={close}
-                        >
-                          {k('usageLinkAnalytics')}
-                        </CrossPageLink>
-                      </div>
-                    }
+                  <section
+                    className="key-usage-workspace"
+                    data-testid="key-detail-usage-policy"
                   >
-                    <div className="key-usage-filter-row">
-                      <div data-testid="usage-window-tabs">
-                        <SegmentedTabs
-                          items={[
-                            { id: '24h', label: k('usageWindow24h') },
-                            { id: '7d', label: k('usageWindow7d') },
-                            { id: '30d', label: k('usageWindow30d') },
-                          ]}
-                          activeTab={activeUsageWindow}
-                          onChange={(next) => switchUsageWindow(next as UsageWindow)}
-                          ariaLabel={k('usageWindowLabel')}
-                          idBase="key-usage-window"
-                          className="key-usage-window-tabs"
-                          variant="joined"
-                          size="sm"
-                          responsiveFullWidth={false}
-                        />
+                    <div className="key-usage-control-card">
+                      <div className="key-usage-filter-row">
+                        <div className="key-usage-filter-left">
+                          <div data-testid="usage-window-tabs">
+                            <SegmentedTabs
+                              items={[
+                                { id: '24h', label: k('usageWindow24h') },
+                                { id: '7d', label: k('usageWindow7d') },
+                                { id: '30d', label: k('usageWindow30d') },
+                              ]}
+                              activeTab={activeUsageWindow}
+                              onChange={(next) => switchUsageWindow(next as UsageWindow)}
+                              ariaLabel={k('usageWindowLabel')}
+                              idBase="key-usage-window"
+                              className="key-usage-window-tabs"
+                              size="sm"
+                              responsiveFullWidth={false}
+                            />
+                          </div>
+                          {usage && usage.totals && (
+                            <span
+                              className="key-usage-window-inline"
+                              title={`${detailTime(usage.fromMs).label} — ${detailTime(usage.toMs).label}`}
+                            >
+                              {usageCompactTimeText(usage.fromMs, 'created') ?? detailTime(usage.fromMs).label} —{' '}
+                              {usageCompactTimeText(usage.toMs, 'created') ?? detailTime(usage.toMs).label}
+                            </span>
+                          )}
+                        </div>
+                        <div className="key-usage-links" data-testid="key-usage-links">
+                          <CrossPageLink
+                            route="/monitoring"
+                            apiKeyId={id}
+                            className="btn btn-secondary btn-sm"
+                            testId="detail-link-monitoring"
+                            disabled={!canClose()}
+                            onNavigate={close}
+                          >
+                            {k('usageLinkMonitoring')}
+                          </CrossPageLink>
+                          <CrossPageLink
+                            route="/usage-analytics"
+                            apiKeyId={id}
+                            className="btn btn-secondary btn-sm"
+                            testId="detail-link-analytics"
+                            disabled={!canClose()}
+                            onNavigate={close}
+                          >
+                            {k('usageLinkAnalytics')}
+                          </CrossPageLink>
+                        </div>
                       </div>
-                      {usage && usage.totals && (
-                        <p className="key-usage-window-meta">
-                          <strong>{k('usageWindowLabel')}:</strong> {detailTime(usage.fromMs).label} —{' '}
-                          {detailTime(usage.toMs).label}
-                        </p>
-                      )}
                     </div>
+
                     {!usage && !usageFailed ? (
                       <p className="key-field-help" role="status">
                         {k('usageReading')}
@@ -1991,51 +2496,14 @@ export function FreshKeyDetails({
                         )}
                         {usage && usage.totals && (
                           <>
-                            <dl
-                              className="key-usage-stat-grid key-usage-totals"
-                              data-testid="key-usage-totals"
-                            >
-                              <div>
-                                <dt>{k('usageCalls')}</dt>
-                                <dd>{usageCountText(usage.totals.calls, usage.coverage.state)}</dd>
-                              </div>
-                              <div>
-                                <dt>{k('usageSuccess')}</dt>
-                                <dd>
-                                  {usageCountText(usage.totals.success, usage.coverage.state)}
-                                </dd>
-                              </div>
-                              <div>
-                                <dt>{k('usageFailure')}</dt>
-                                <dd>
-                                  {usageCountText(usage.totals.failure, usage.coverage.state)}
-                                </dd>
-                              </div>
-                              <div>
-                                <dt>{k('usageTotalTokens')}</dt>
-                                <dd>
-                                  {usageCountText(usage.totals.totalTokens, usage.coverage.state)}
-                                </dd>
-                              </div>
-                              <div>
-                                <dt>{k('usageInputTokens')}</dt>
-                                <dd>
-                                  {usageCountText(usage.totals.inputTokens, usage.coverage.state)}
-                                </dd>
-                              </div>
-                              <div>
-                                <dt>{k('usageOutputTokens')}</dt>
-                                <dd>
-                                  {usageCountText(usage.totals.outputTokens, usage.coverage.state)}
-                                </dd>
-                              </div>
-                              <div>
-                                <dt>{k('usageLastUsed')}</dt>
-                                <dd>{usageTimeText(usage.totals.lastUsedAtMs) ?? '—'}</dd>
-                              </div>
-                            </dl>
+                            <div className="key-usage-totals" data-testid="key-usage-totals">
+                              <MetricSummaryGrid
+                                columns={4}
+                                cards={buildKeySummaryKpiCards(usage.totals, usage.coverage.state)}
+                              />
+                            </div>
                             {!(
-                              usage.series.length > 0 &&
+                              displaySeries.length > 0 &&
                               (maxBucketCalls > 0 || isZeroSeries)
                             ) &&
                               (usage.coverage.state === 'complete' ||
@@ -2051,84 +2519,247 @@ export function FreshKeyDetails({
                         )}
                       </>
                     )}
-                  </DrawerSectionCard>
-                  {usage &&
-                    usage.totals &&
-                    usage.series.length > 0 &&
-                    (maxBucketCalls > 0 || isZeroSeries) && (
-                      <DrawerSectionCard
-                        variant="default"
-                        icon={<FullWebIcon name="trendingUp" size={15} />}
-                        title={`${k('usageSeriesTitle')}${isZeroSeries ? ` · ${k('usageNoCalls')}` : ''}`}
-                        testId="key-usage-series"
-                        metaActions={
-                          <span className="key-usage-legend">
-                            <span className="key-usage-legend-item is-success">
-                              {k('usageSuccess')}
+
+                    {usage &&
+                      usage.totals &&
+                      displaySeries.length > 0 &&
+                      (maxBucketCalls > 0 || isZeroSeries) && (
+                        <DrawerSectionCard
+                          variant="default"
+                          icon={<FullWebIcon name="trendingUp" size={15} />}
+                          title={`${k('usageTrendTitle')}${isZeroSeries ? ` · ${k('usageNoCalls')}` : ''}`}
+                          testId="key-usage-series"
+                          metaActions={
+                            <span className="key-usage-legend">
+                              <span className="key-usage-legend-item is-success">
+                                {k('usageSuccess')}
+                              </span>
+                              <span className="key-usage-legend-item is-failure">
+                                {k('usageFailure')}
+                              </span>
+                              <span className="key-usage-legend-item is-tokens">
+                                {k('cardMetricTokens')}
+                              </span>
                             </span>
-                            <span className="key-usage-legend-item is-failure">
-                              {k('usageFailure')}
-                            </span>
-                          </span>
-                        }
-                      >
-                        <div
-                          className="key-usage-bars"
-                          data-testid="key-usage-bars"
-                          role="list"
-                          aria-label={k('usageSeriesTitle')}
+                          }
                         >
-                          {usage.series.map((point) => {
-                            const totalPct =
-                              maxBucketCalls > 0
-                                ? Math.max(6, Math.round((point.calls / maxBucketCalls) * 100))
-                                : 0;
-                            const failureCalls = Math.min(point.failure, point.calls);
-                            const successCalls = Math.max(0, point.calls - failureCalls);
-                            const failurePct =
-                              point.calls > 0
-                                ? Math.round((failureCalls / point.calls) * 100)
-                                : 0;
-                            const successPct =
-                              point.calls > 0 ? Math.max(0, 100 - failurePct) : 0;
-                            const timeLabel = detailTime(point.bucketMs).label;
-                            const tooltip = `${timeLabel} · ${usageCountText(point.calls, usage.coverage.state)} ${k('usageCalls')}${failureCalls > 0 ? ` (${usageCountText(failureCalls, usage.coverage.state)} ${k('usageFailure')})` : ''} · ${usageCountText(point.totalTokens, usage.coverage.state)} ${k('usageTotalTokens')}`;
+                          <div
+                            className="key-usage-bars"
+                            data-testid="key-usage-bars"
+                          >
+                            <EChartsView
+                              option={usageTrendOption}
+                              className="key-usage-echarts"
+                              ariaLabel={k('usageTrendTitle')}
+                            />
+                          </div>
+                        </DrawerSectionCard>
+                      )}
+
+                    {usage &&
+                      usage.totals &&
+                      (usage.coverage.state === 'complete' ||
+                        usage.coverage.state === 'partial') &&
+                      usage.totals.totalTokens > 0 && (
+                        <DrawerSectionCard
+                          variant="default"
+                          icon={<IconBinary size={15} />}
+                          title={k('usageTokenMixTitle')}
+                          testId="key-usage-token-mix"
+                          metaActions={
+                            usage.totals.cachedTokens !== undefined &&
+                            usage.totals.inputTokens > 0 ? (
+                              <span className="key-usage-cache-pill">
+                                {k('usageInputCacheHitRate')}{' '}
+                                {Math.min(
+                                  100,
+                                  (Math.max(0, usage.totals.cachedTokens) /
+                                    usage.totals.inputTokens) *
+                                    100
+                                ).toFixed(1)}%
+                              </span>
+                            ) : undefined
+                          }
+                        >
+                          {(() => {
+                            const state = usage.coverage.state;
+                            const inputTok = Math.max(0, usage.totals.inputTokens);
+                            const cachedTok = Math.min(
+                              inputTok,
+                              Math.max(0, usage.totals.cachedTokens ?? 0)
+                            );
+                            const uncachedInput = Math.max(0, inputTok - cachedTok);
+                            const outputTok = Math.max(0, usage.totals.outputTokens);
+                            const reasoningTok = Math.max(0, usage.totals.reasoningTokens ?? 0);
+                            const segmentTotal = Math.max(
+                              1,
+                              uncachedInput + cachedTok + outputTok + reasoningTok
+                            );
+                            const segments = [
+                              {
+                                key: 'uncached',
+                                label: k('usageUncachedInput'),
+                                tokens: uncachedInput,
+                                tone: 'is-uncached',
+                              },
+                              ...(cachedTok > 0
+                                ? [
+                                    {
+                                      key: 'cached',
+                                      label: k('usageCachedTokensLabel'),
+                                      tokens: cachedTok,
+                                      tone: 'is-cached',
+                                    },
+                                  ]
+                                : []),
+                              {
+                                key: 'output',
+                                label: k('usageOutputTokens'),
+                                tokens: outputTok,
+                                tone: 'is-output',
+                              },
+                              ...(reasoningTok > 0
+                                ? [
+                                    {
+                                      key: 'reasoning',
+                                      label: k('usageReasoningTokens'),
+                                      tokens: reasoningTok,
+                                      tone: 'is-reasoning',
+                                    },
+                                  ]
+                                : []),
+                            ];
                             return (
-                              <div
-                                key={point.bucketMs}
-                                className="key-usage-bar-col"
-                                role="listitem"
-                                tabIndex={0}
-                                title={tooltip}
-                                aria-label={tooltip}
-                              >
-                                {point.calls > 0 ? (
-                                  <div
-                                    className="key-usage-bar-stack"
-                                    style={{ height: `${totalPct}%` }}
-                                  >
-                                    {failureCalls > 0 && (
+                              <div className="key-token-mix-body">
+                                <div className="key-token-mix-track" aria-hidden="true">
+                                  {segments
+                                    .filter((seg) => seg.tokens > 0)
+                                    .map((seg) => (
                                       <span
-                                        className="key-usage-bar-failure"
-                                        style={{ height: `${failurePct}%` }}
+                                        key={seg.key}
+                                        className={`key-token-mix-seg ${seg.tone}`}
+                                        style={{
+                                          width: `${((seg.tokens / segmentTotal) * 100).toFixed(2)}%`,
+                                        }}
                                       />
-                                    )}
-                                    {successCalls > 0 && (
-                                      <span
-                                        className="key-usage-bar-success"
-                                        style={{ height: `${successPct}%` }}
-                                      />
-                                    )}
-                                  </div>
-                                ) : (
-                                  <div className="key-usage-bar-empty" />
-                                )}
+                                    ))}
+                                </div>
+                                <div className="key-token-mix-legend">
+                                  {segments.map((seg) => {
+                                    const pct = ((seg.tokens / segmentTotal) * 100).toFixed(1);
+                                    return (
+                                      <div
+                                        key={seg.key}
+                                        className="key-token-mix-item"
+                                        title={`${seg.label}: ${usageCountText(seg.tokens, state)} (${pct}%)`}
+                                      >
+                                        <span className={`key-token-mix-dot ${seg.tone}`} aria-hidden="true" />
+                                        <span className="key-token-mix-name">{seg.label}</span>
+                                        <strong className="key-token-mix-val">
+                                          {usageCompactNumberText(seg.tokens, state)}
+                                        </strong>
+                                        <span className="key-token-mix-pct">({pct}%)</span>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
                               </div>
                             );
-                          })}
-                        </div>
-                      </DrawerSectionCard>
-                    )}
+                          })()}
+                        </DrawerSectionCard>
+                      )}
+
+                    {usage &&
+                      usage.topModels &&
+                      usage.topModels.length > 0 &&
+                      (usage.coverage.state === 'complete' ||
+                        usage.coverage.state === 'partial') && (
+                        <DrawerSectionCard
+                          variant="default"
+                          icon={<IconBot size={15} />}
+                          title={k('usageModelBreakdownTitle')}
+                          testId="key-usage-models"
+                          metaActions={
+                            <span className="key-usage-models-count">
+                              {formatKeyModelsSummaryLine(
+                                Math.max(usage.modelCount ?? usage.topModels.length, usage.topModels.length)
+                              )}
+                            </span>
+                          }
+                        >
+                          {(() => {
+                            const state = usage.coverage.state;
+                            const hasAnyCost = usage.topModels.some(
+                              (m) => m.estimatedCostUsd !== undefined && m.estimatedCostUsd > 0
+                            );
+                            const sorted = [...usage.topModels].sort((a, b) => {
+                              if (hasAnyCost) {
+                                const ca = a.estimatedCostUsd ?? -1;
+                                const cb = b.estimatedCostUsd ?? -1;
+                                if (cb !== ca) return cb - ca;
+                              }
+                              if (b.calls !== a.calls) return b.calls - a.calls;
+                              return a.model.localeCompare(b.model);
+                            });
+                            const maxMetric = Math.max(
+                              ...sorted.map((m) =>
+                                hasAnyCost ? (m.estimatedCostUsd ?? 0) : m.calls
+                              ),
+                              0.000001
+                            );
+                            return (
+                              <div className="key-usage-models-list">
+                                {sorted.map((m) => {
+                                  const sharePct = Math.min(
+                                    100,
+                                    Math.max(
+                                      3,
+                                      ((hasAnyCost ? (m.estimatedCostUsd ?? 0) : m.calls) / maxMetric) * 100
+                                    )
+                                  );
+                                  return (
+                                    <div key={m.model} className="key-usage-model-row">
+                                      <div className="key-usage-model-top">
+                                        <span className="key-usage-model-name" title={m.model}>
+                                          {m.model}
+                                        </span>
+                                        <span className="key-usage-model-metrics">
+                                          <span>
+                                            {usageCompactNumberText(m.calls, state)} {k('callsUnit')}
+                                          </span>
+                                          {m.totalTokens !== undefined && m.totalTokens > 0 && (
+                                            <>
+                                              <span className="key-usage-model-sep">·</span>
+                                              <span>
+                                                {usageCompactNumberText(m.totalTokens, state)}
+                                              </span>
+                                            </>
+                                          )}
+                                          {m.estimatedCostUsd !== undefined && (
+                                            <>
+                                              <span className="key-usage-model-sep">·</span>
+                                              <strong>
+                                                {usageCompactUsdText(m.estimatedCostUsd, state)}
+                                              </strong>
+                                            </>
+                                          )}
+                                        </span>
+                                      </div>
+                                      <div className="key-usage-model-bar-track" aria-hidden="true">
+                                        <span
+                                          className="key-usage-model-bar-fill"
+                                          style={{ width: `${sharePct.toFixed(1)}%` } as CSSProperties}
+                                        />
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            );
+                          })()}
+                        </DrawerSectionCard>
+                      )}
+                  </section>
                 </DrawerTabPanel>
               </>
             )}

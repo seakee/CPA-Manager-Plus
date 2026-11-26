@@ -538,12 +538,21 @@ func (a *freshApplication) keyUsageSummary(w http.ResponseWriter, r *http.Reques
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
+	fromMS, toMS, err := usageWindow(r.URL.Query())
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
 	ids, err := a.keys.IdentityIDs(r.Context())
 	if err != nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
-	summary, err := a.usage.Summary(r.Context(), ids)
+	summary, err := a.usage.SummaryWindow(r.Context(), ids, fromMS, toMS)
+	if errors.Is(err, usageapp.ErrWindow) {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
 	if err != nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return

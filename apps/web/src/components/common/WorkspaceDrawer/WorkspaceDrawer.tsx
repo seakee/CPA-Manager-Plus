@@ -580,6 +580,7 @@ export interface DrawerDlRowProps {
   muted?: boolean;
   onCopy?: () => void | Promise<void>;
   copied?: boolean;
+  copyDisabled?: boolean;
   copyAriaLabel?: string;
   copyTitle?: string;
   copyTestId?: string;
@@ -594,6 +595,7 @@ export function DrawerDlRow({
   muted = false,
   onCopy,
   copied = false,
+  copyDisabled = false,
   copyAriaLabel,
   copyTitle,
   copyTestId,
@@ -618,6 +620,7 @@ export function DrawerDlRow({
           <button
             type="button"
             className={styles.inlineCopyBtn}
+            disabled={copyDisabled}
             onClick={() => void onCopy()}
             aria-label={copyAriaLabel}
             title={copyTitle}

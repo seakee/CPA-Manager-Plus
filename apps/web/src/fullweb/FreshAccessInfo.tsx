@@ -3,6 +3,13 @@ import { fullWebLanguage, subscribeFullWebLanguage } from '../i18n/fullweb';
 import { accessInfoText as a, type FreshAccessInfoTextKey } from '../i18n/freshAccessInfo';
 import { Button } from '../components/ui/Button';
 import { SegmentedTabs } from '../components/ui/SegmentedTabs';
+import {
+  DrawerDefinitionList,
+  DrawerDlRow,
+  DrawerNotice,
+  DrawerSectionCard,
+  DrawerStatusPill,
+} from '../components/common/WorkspaceDrawer';
 import { FullWebIcon } from './FullWebIcon';
 import {
   PublicApiError,
@@ -51,6 +58,10 @@ export interface AccessInfoSummaryProps {
   clientOnly?: boolean;
   hideRefresh?: boolean;
   completionRecovery?: boolean;
+  drawerEmbed?: boolean;
+  maskedKeyPreview?: string;
+  onCopyAuthHeader?: (headerPrefix: string) => Promise<'copied' | 'failed' | 'ignored'>;
+  authHeaderCopyDisabled?: boolean;
 }
 
 const VALID_MODES: Record<AccessMode, true> = {
@@ -372,6 +383,17 @@ function protocolHelpAndHeader(
   }
 }
 
+function protocolAuthHeaderPrefix(id: string): string {
+  switch (id) {
+    case 'anthropic':
+      return 'x-api-key: ';
+    case 'gemini':
+      return 'x-goog-api-key: ';
+    default:
+      return 'Authorization: Bearer ';
+  }
+}
+
 export function AccessInfoSummary({
   client,
   auth,
@@ -389,6 +411,10 @@ export function AccessInfoSummary({
   clientOnly = false,
   hideRefresh = false,
   completionRecovery = false,
+  drawerEmbed = false,
+  maskedKeyPreview,
+  onCopyAuthHeader,
+  authHeaderCopyDisabled = false,
 }: AccessInfoSummaryProps) {
   const [language, setLanguage] = useState(fullWebLanguage);
   const [fetched, setFetched] = useState<AccessInfo | null>(null);
@@ -405,6 +431,9 @@ export function AccessInfoSummary({
 
   const activeRef = useRef(true);
   const requestSeqRef = useRef(0);
+  const copySeqRef = useRef(0);
+  const authHeaderCopySeqRef = useRef(0);
+  const authHeaderCopyInFlightRef = useRef(false);
   const onUnauthorizedRef = useRef(onUnauthorized);
   const onLoadedRef = useRef(onLoaded);
   onUnauthorizedRef.current = onUnauthorized;
@@ -435,6 +464,9 @@ export function AccessInfoSummary({
   useEffect(() => {
     setCopyFeedback(null);
     setCopiedTarget(null);
+    copySeqRef.current += 1;
+    authHeaderCopySeqRef.current += 1;
+    authHeaderCopyInFlightRef.current = false;
     if (copyTimerRef.current !== null) {
       clearTimeout(copyTimerRef.current);
       copyTimerRef.current = null;
@@ -522,6 +554,7 @@ export function AccessInfoSummary({
 
   async function copyValue(target: string, textValue: string) {
     if (!textValue) return;
+    const seq = ++copySeqRef.current;
     try {
       if (
         typeof navigator === 'undefined' ||
@@ -531,23 +564,64 @@ export function AccessInfoSummary({
         throw new Error('clipboard_unavailable');
       }
       await navigator.clipboard.writeText(textValue);
-      if (activeRef.current) {
+      if (activeRef.current && seq === copySeqRef.current) {
         setCopyFeedback({ target, state: 'copied' });
         setCopiedTarget(target);
-        if (copyTimerRef.current !== null) {
-          clearTimeout(copyTimerRef.current);
-        }
+        clearTimeout(copyTimerRef.current ?? undefined);
         copyTimerRef.current = setTimeout(() => {
-          if (activeRef.current) {
+          if (activeRef.current && seq === copySeqRef.current) {
             setCopiedTarget((prev) => (prev === target ? null : prev));
           }
           copyTimerRef.current = null;
         }, 1500);
       }
     } catch {
-      if (activeRef.current) {
+      if (activeRef.current && seq === copySeqRef.current) {
         setCopiedTarget(null);
         setCopyFeedback({ target, state: 'failed' });
+      }
+    }
+  }
+
+  async function copyAuthHeader(
+    protocolId: string,
+    headerPrefix: string,
+    fallbackTemplate: string
+  ) {
+    if (authHeaderCopyDisabled || authHeaderCopyInFlightRef.current) return;
+    const target = `protocol-header-${protocolId}`;
+    if (!onCopyAuthHeader) {
+      await copyValue(target, fallbackTemplate);
+      return;
+    }
+    const seq = ++copySeqRef.current;
+    const headerSeq = ++authHeaderCopySeqRef.current;
+    authHeaderCopyInFlightRef.current = true;
+    try {
+      const outcome = await onCopyAuthHeader(headerPrefix);
+      if (!activeRef.current || seq !== copySeqRef.current) return;
+      if (outcome === 'copied') {
+        setCopyFeedback({ target, state: 'copied' });
+        setCopiedTarget(target);
+        clearTimeout(copyTimerRef.current ?? undefined);
+        copyTimerRef.current = setTimeout(() => {
+          if (activeRef.current && seq === copySeqRef.current) {
+            setCopiedTarget((prev) => (prev === target ? null : prev));
+          }
+          copyTimerRef.current = null;
+        }, 1500);
+      } else if (outcome === 'failed') {
+        setCopiedTarget(null);
+        setCopyFeedback({ target, state: 'failed' });
+      }
+    } catch {
+      if (activeRef.current && seq === copySeqRef.current) {
+        setCopiedTarget(null);
+        setCopyFeedback({ target, state: 'failed' });
+      }
+    } finally {
+      if (authHeaderCopySeqRef.current === headerSeq) {
+        authHeaderCopyInFlightRef.current = false;
       }
     }
   }
@@ -557,6 +631,20 @@ export function AccessInfoSummary({
     .join(' ');
 
   if (info === undefined && !auth.value) {
+    if (drawerEmbed) {
+      return (
+        <DrawerSectionCard
+          variant="default"
+          icon={<FullWebIcon name="link" size={15} />}
+          title={a('drawerClientTitle', language)}
+          testId={`${testIdPrefix}-summary`}
+        >
+          <DrawerNotice tone="info" icon={<FullWebIcon name="info" size={16} />} role="status" testId={`${testIdPrefix}-idle`}>
+            {a('awaitingAuth', language)}
+          </DrawerNotice>
+        </DrawerSectionCard>
+      );
+    }
     return (
       <section className={rootClassName} data-testid={`${testIdPrefix}-summary`}>
         <div className="alert alert-info" role="status" data-testid={`${testIdPrefix}-idle`}>
@@ -571,6 +659,21 @@ export function AccessInfoSummary({
   }
 
   if (info === undefined && loading && !effective) {
+    if (drawerEmbed) {
+      return (
+        <DrawerSectionCard
+          variant="default"
+          icon={<FullWebIcon name="link" size={15} />}
+          title={a('drawerClientTitle', language)}
+          testId={`${testIdPrefix}-summary`}
+          dataAttributes={{ 'aria-busy': 'true' }}
+        >
+          <p className="key-drawer-access-foot" role="status" data-testid={`${testIdPrefix}-loading`}>
+            {a('loading', language)}
+          </p>
+        </DrawerSectionCard>
+      );
+    }
     return (
       <section
         className={rootClassName}
@@ -589,6 +692,40 @@ export function AccessInfoSummary({
   }
 
   if ((info !== undefined && !providedInfo) || (info === undefined && loadFailed && !effective)) {
+    if (drawerEmbed) {
+      return (
+        <DrawerSectionCard
+          variant="default"
+          icon={<FullWebIcon name="link" size={15} />}
+          title={a('drawerClientTitle', language)}
+          testId={`${testIdPrefix}-summary`}
+          metaActions={
+            info === undefined ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                data-testid={`${testIdPrefix}-retry`}
+                onClick={() => setManualRetry((n) => n + 1)}
+              >
+                <FullWebIcon name="refresh" size={13} />
+                {a('retry', language)}
+              </Button>
+            ) : undefined
+          }
+        >
+          <DrawerNotice
+            tone="warning"
+            icon={<FullWebIcon name="alert" size={16} />}
+            role="alert"
+            title={a('loadErrorTitle', language)}
+            testId={`${testIdPrefix}-error`}
+          >
+            {a('loadErrorHelp', language)}
+          </DrawerNotice>
+        </DrawerSectionCard>
+      );
+    }
     return (
       <section className={rootClassName} data-testid={`${testIdPrefix}-summary`}>
         <div className="alert alert-warn" role="alert" data-testid={`${testIdPrefix}-error`}>
@@ -1007,6 +1144,243 @@ export function AccessInfoSummary({
       )}
     </>
   );
+
+  if (drawerEmbed) {
+    const statusText = effective.ready
+      ? a('statusReady', language)
+      : isPendingRestart
+        ? a('statusPendingRestart', language)
+        : a('statusNotReady', language);
+    const externalInlineParts =
+      effective.mode === 'connect_external' && externalUrl
+        ? a('externalDirectInline', language).split('{url}')
+        : null;
+    const activeProtoBaseUrl = activeProtocol
+      ? formatAccessEndpointUrl(activeProtocol.basePath, effective.mode, resolvedOrigin)
+      : '';
+    const activeProtoExampleUrl = activeProtocol
+      ? formatAccessEndpointUrl(activeProtocol.examplePath, effective.mode, resolvedOrigin)
+      : '';
+    const activeProtoHasDistinctExample = Boolean(
+      activeProtoExampleUrl && activeProtoExampleUrl !== activeProtoBaseUrl
+    );
+    const activeProtoMeta = activeProtocol
+      ? protocolHelpAndHeader(activeProtocol.id, language)
+      : null;
+    const activeHeaderPrefix = activeProtocol ? protocolAuthHeaderPrefix(activeProtocol.id) : '';
+    const displayAuthHeader =
+      activeProtocol && activeProtoMeta
+        ? maskedKeyPreview
+          ? `${activeHeaderPrefix}${maskedKeyPreview}`
+          : activeProtoMeta.header
+        : '';
+
+    return (
+      <DrawerSectionCard
+        variant="default"
+        icon={<FullWebIcon name="link" size={15} />}
+        title={a('drawerClientTitle', language)}
+        className="key-drawer-access-card"
+        testId={`${testIdPrefix}-summary`}
+        dataAttributes={{
+          'data-client-only': 'true',
+          ...(loading ? { 'aria-busy': 'true' } : {}),
+        }}
+        titleBadge={
+          <DrawerStatusPill tone={effective.ready ? 'success' : 'warning'} dot>
+            <span data-testid={`${testIdPrefix}-status`}>{statusText}</span>
+          </DrawerStatusPill>
+        }
+        metaActions={
+          <>
+            {isSharedPrefix && (
+              <DrawerStatusPill tone="warning">
+                <span data-testid={`${testIdPrefix}-shared-badge`}>
+                  {a('sharedBadge', language)}
+                </span>
+              </DrawerStatusPill>
+            )}
+            {effective.protocols.length > 1 && activeProtocol && (
+              <SegmentedTabs
+                ariaLabel={a('protocolTabsLabel', language)}
+                idBase={`${testIdPrefix}-protocols`}
+                className="key-protocol-tabs is-drawer-inline"
+                size="sm"
+                responsiveFullWidth={false}
+                activeTab={activeProtocol.id}
+                onChange={setSelectedProtocolId}
+                items={effective.protocols.map((protocol) => ({
+                  id: protocol.id,
+                  label: protocol.label,
+                  testId: `${testIdPrefix}-protocol-tab-${protocol.id}`,
+                }))}
+              />
+            )}
+            {info === undefined && !hideRefresh && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                iconOnly={effective.ready}
+                aria-label={a('retry', language)}
+                title={a('retry', language)}
+                data-testid={`${testIdPrefix}-retry`}
+                disabled={loading}
+                onClick={() => setManualRetry((n) => n + 1)}
+              >
+                <FullWebIcon name="refresh" size={13} />
+                {!effective.ready ? a('retry', language) : null}
+              </Button>
+            )}
+          </>
+        }
+      >
+        {notReadyCopy && (
+          <DrawerNotice
+            tone="warning"
+            icon={<FullWebIcon name="alert" size={16} />}
+            role="status"
+            title={notReadyCopy.title}
+            testId={`${testIdPrefix}-not-ready`}
+          >
+            {notReadyCopy.desc}
+          </DrawerNotice>
+        )}
+
+        {isSharedPrefix && (
+          <DrawerNotice
+            tone="warning"
+            icon={<FullWebIcon name="alert" size={16} />}
+            role="status"
+            title={a('sharedWarningTitle', language)}
+            testId={`${testIdPrefix}-shared-warning`}
+          >
+            {a('sharedWarningDesc', language)}
+          </DrawerNotice>
+        )}
+
+        {activeProtocol && activeProtoMeta ? (
+          <div
+            id={`${testIdPrefix}-protocol-${activeProtocol.id}`}
+            role="tabpanel"
+            aria-labelledby={
+              effective.protocols.length > 1
+                ? `${testIdPrefix}-protocols-${activeProtocol.id}`
+                : undefined
+            }
+            data-testid={`${testIdPrefix}-protocols`}
+          >
+            <DrawerDefinitionList
+              className="key-drawer-access-dl"
+              testId={`${testIdPrefix}-protocol-${activeProtocol.id}`}
+            >
+              <DrawerDlRow
+                label={a('baseUrlLabel', language)}
+                mono
+                onCopy={() => copyValue(`protocol-${activeProtocol.id}`, activeProtoBaseUrl)}
+                copied={copiedTarget === `protocol-${activeProtocol.id}`}
+                copyAriaLabel={`${a('copyUrl', language)}: ${activeProtocol.label}`}
+                copyTitle={a('copyUrl', language)}
+                copyTestId={`${testIdPrefix}-copy-${activeProtocol.id}`}
+              >
+                <code
+                  className="key-drawer-access-code"
+                  data-testid={`${testIdPrefix}-protocol-base-${activeProtocol.id}`}
+                >
+                  {activeProtoBaseUrl}
+                </code>
+              </DrawerDlRow>
+
+              {activeProtoHasDistinctExample && (
+                <DrawerDlRow
+                  label={a('exampleEndpointLabel', language)}
+                  mono
+                  onCopy={() =>
+                    copyValue(`protocol-example-${activeProtocol.id}`, activeProtoExampleUrl)
+                  }
+                  copied={copiedTarget === `protocol-example-${activeProtocol.id}`}
+                  copyAriaLabel={`${a('copyExample', language)}: ${activeProtocol.label}`}
+                  copyTitle={a('copyExample', language)}
+                  copyTestId={`${testIdPrefix}-copy-example-${activeProtocol.id}`}
+                >
+                  <code
+                    className="key-drawer-access-code"
+                    data-testid={`${testIdPrefix}-protocol-example-${activeProtocol.id}`}
+                  >
+                    {activeProtoExampleUrl}
+                  </code>
+                </DrawerDlRow>
+              )}
+
+              <DrawerDlRow
+                label={a('authHeaderLabel', language)}
+                mono
+                onCopy={() =>
+                  copyAuthHeader(activeProtocol.id, activeHeaderPrefix, activeProtoMeta.header)
+                }
+                copied={copiedTarget === `protocol-header-${activeProtocol.id}`}
+                copyDisabled={authHeaderCopyDisabled}
+                copyAriaLabel={`${a('copyHeader', language)}: ${activeProtocol.label}`}
+                copyTitle={a('copyHeader', language)}
+                copyTestId={`${testIdPrefix}-copy-header-${activeProtocol.id}`}
+              >
+                <code
+                  className="key-drawer-access-code"
+                  data-testid={`${testIdPrefix}-protocol-header-${activeProtocol.id}`}
+                >
+                  {displayAuthHeader}
+                </code>
+              </DrawerDlRow>
+            </DrawerDefinitionList>
+          </div>
+        ) : (
+          <>
+            {effective.mode !== 'connect_external' && inferenceUrl && (
+              <DrawerDefinitionList className="key-drawer-access-dl">
+                <DrawerDlRow
+                  label={a('inferenceBase', language)}
+                  mono
+                  onCopy={() => copyValue('inference', inferenceUrl)}
+                  copied={copiedTarget === 'inference'}
+                  copyAriaLabel={`${a('copyUrl', language)}: ${a('inferenceBase', language)}`}
+                  copyTitle={a('copyUrl', language)}
+                  copyTestId={`${testIdPrefix}-copy-inference`}
+                >
+                  <code
+                    className="key-drawer-access-code"
+                    data-testid={`${testIdPrefix}-inference`}
+                  >
+                    {inferenceUrl}
+                  </code>
+                </DrawerDlRow>
+              </DrawerDefinitionList>
+            )}
+            <p className="key-drawer-access-foot" data-testid={`${testIdPrefix}-protocols-empty`}>
+              {a('protocolsEmpty', language)}
+            </p>
+          </>
+        )}
+
+        {externalInlineParts && (
+          <p className="key-drawer-access-foot" data-testid={`${testIdPrefix}-external-note`}>
+            {externalInlineParts[0]}
+            <code data-testid={`${testIdPrefix}-external`}>{externalUrl}</code>
+            {externalInlineParts[1] ?? ''}
+          </p>
+        )}
+
+        {copyFeedback && (
+          <p
+            className={copyFeedback.state === 'copied' ? 'sr-only' : 'journey-inline-error'}
+            role="status"
+            data-testid={`${testIdPrefix}-copy-feedback`}
+          >
+            {a(copyFeedback.state === 'copied' ? 'copied' : 'copyFailed', language)}
+          </p>
+        )}
+      </DrawerSectionCard>
+    );
+  }
 
   return (
     <section

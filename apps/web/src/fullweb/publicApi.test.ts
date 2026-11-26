@@ -806,16 +806,24 @@ describe('canonical Full Web Public API transport', () => {
 
   it('allows bounded usage window queries only on GET api-keys/{id}/usage and keeps rejecting all other queries', async () => {
     browserOrigin();
-    const transport = vi.fn<typeof fetch>().mockResolvedValue(
-      Response.json({
-        keyId: 'key-1',
-        fromMs: 1000,
-        toMs: 2000,
-        bucketMs: 1000,
-        coverage: { state: 'complete', reason: 'observed', collectingSinceMs: 1000, lastProcessedEventId: 1, targetEventId: 1 },
-        totals: null,
-        series: [],
-      })
+    const transport = vi.fn<typeof fetch>().mockImplementation(() =>
+      Promise.resolve(
+        Response.json({
+          keyId: 'key-1',
+          fromMs: 1000,
+          toMs: 2000,
+          bucketMs: 1000,
+          coverage: {
+            state: 'complete',
+            reason: 'observed',
+            collectingSinceMs: 1000,
+            lastProcessedEventId: 1,
+            targetEventId: 1,
+          },
+          totals: null,
+          series: [],
+        })
+      )
     );
     const client = createPublicApiClient(() => context, transport);
     await client.get('api-keys/key-1/usage?from_ms=1000&to_ms=2000', credential);
@@ -825,7 +833,17 @@ describe('canonical Full Web Public API transport', () => {
       expect.objectContaining({ method: 'GET' })
     );
 
+    await client.get('api-keys/usage-summary?from_ms=1000&to_ms=2000', credential);
+    expect(transport).toHaveBeenCalledTimes(2);
+    expect(transport).toHaveBeenLastCalledWith(
+      'https://manager.example:18317/phase4-test/api/v2/api-keys/usage-summary?from_ms=1000&to_ms=2000',
+      expect.objectContaining({ method: 'GET' })
+    );
+
     transport.mockClear();
+    await expect(
+      client.post('api-keys/usage-summary?from_ms=1000&to_ms=2000', {}, credential)
+    ).rejects.toMatchObject({ kind: 'routing_unavailable' });
     await expect(
       client.post('api-keys/key-1/usage?from_ms=1000&to_ms=2000', {}, credential)
     ).rejects.toMatchObject({ kind: 'routing_unavailable' });

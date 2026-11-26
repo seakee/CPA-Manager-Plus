@@ -354,7 +354,10 @@ export function keyUnifiedStatus(key: Key): {
   labelKey: KeyUnifiedStatusKey;
   pillClass: string;
 } {
-  if (key.lifecycle === 'superseded' && !key.operationId) {
+  if (
+    (key.lifecycle === 'superseded' || key.runtimeState === 'revoked_observed') &&
+    !key.operationId
+  ) {
     return { labelKey: 'statusRevoked', pillClass: 'is-muted' };
   }
   if (key.operationId || key.runtimeState === 'applying') {

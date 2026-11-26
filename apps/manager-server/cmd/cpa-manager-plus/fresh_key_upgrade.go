@@ -1034,12 +1034,21 @@ func (u *upgradeKeyWorkspace) serveHTTP(w http.ResponseWriter, r *http.Request, 
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
+		fromMS, toMS, err := usageWindow(r.URL.Query())
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
 		ids, err := u.keys.IdentityIDs(r.Context())
 		if err != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		summary, err := u.usage.Summary(r.Context(), ids)
+		summary, err := u.usage.SummaryWindow(r.Context(), ids, fromMS, toMS)
+		if errors.Is(err, usageapp.ErrWindow) {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
 		if err != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return

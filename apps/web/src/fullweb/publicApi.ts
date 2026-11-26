@@ -209,7 +209,10 @@ export function createPublicApiClient(
     // bounded usage-window query on GET. Query/absolute URLs and URL
     // normalization cannot select another transport destination.
     const usageWindowMatch =
-      method === 'GET' && /^api-keys\/[a-zA-Z0-9_-]+\/usage\?from_ms=\d+&to_ms=\d+$/.test(resource);
+      method === 'GET' &&
+      /^(?:api-keys\/[a-zA-Z0-9_-]+\/usage|api-keys\/usage-summary)\?from_ms=\d+&to_ms=\d+$/.test(
+        resource
+      );
     const [pathPart, queryPart = ''] = usageWindowMatch ? resource.split('?') : [resource, ''];
     if (
       !context ||
