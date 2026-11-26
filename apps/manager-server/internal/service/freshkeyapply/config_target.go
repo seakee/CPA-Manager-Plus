@@ -78,26 +78,50 @@ func (s *Service) ConfigTarget(ctx context.Context, generation uint64) (string, 
 // It intentionally returns only a boolean and never a credential. A Gateway
 // that needs the authority itself must call the same profile through ConfigTarget
 // and must not copy this predicate's observations.
+// ManagedProofStamp binds an admission proof and a key-list observation to the
+// exact same Supervisor runtime generation, active gateway artifact, and CPA
+// configuration/keyset snapshot digest. A zero stamp is never valid.
+type ManagedProofStamp struct {
+	valid   bool
+	version authProofVersion
+}
+
+func (m ManagedProofStamp) Valid() bool {
+	return m.valid
+}
+
+func (m ManagedProofStamp) Matches(other ManagedProofStamp) bool {
+	return m.valid && other.valid && m.version == other.version
+}
+
 func (s *Service) DefaultInstallCPAAuthorityProven(ctx context.Context) bool {
+	proven, _ := s.DefaultInstallCPAAuthorityProvenStamp(ctx)
+	return proven
+}
+
+// DefaultInstallCPAAuthorityProvenStamp returns both the admission verdict and
+// the fenced snapshot stamp that justified it so concurrent callers can verify
+// they observed the identical Runtime and CPA keyset.
+func (s *Service) DefaultInstallCPAAuthorityProvenStamp(ctx context.Context) (bool, ManagedProofStamp) {
 	s = s.active()
 	if s == nil || s.profile != ProfileManaged {
-		return false
+		return false, ManagedProofStamp{}
 	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	p, err := s.permit(ctx)
 	if err != nil {
-		return false
+		return false, ManagedProofStamp{}
 	}
 	target, err := s.target(ctx, p)
 	if err != nil {
-		return false
+		return false, ManagedProofStamp{}
 	}
 	p.runtimeGeneration = uint64(target.Generation)
 	p.runtimeArtifact = string(target.ActiveGatewayArtifact.ArtifactID)
 	if p.Strategy == string(bootstrap.AdoptExisting) {
 		if err = s.requireInstallJournal(ctx, p); err != nil {
-			return false
+			return false, ManagedProofStamp{}
 		}
 	}
 	// A configuration read is not proof that the live client middleware has
@@ -105,19 +129,33 @@ func (s *Service) DefaultInstallCPAAuthorityProven(ctx context.Context) bool {
 	// fence the result against both Runtime and the source configuration.
 	w, ok := s.wire.(keyWire)
 	if !ok {
-		return false
+		return false, ManagedProofStamp{}
 	}
 	snapshot, err := w.KeySnapshot(ctx, p.ManagementKey)
 	if err != nil || len(snapshot.Keys) == 0 {
-		return false
+		return false, ManagedProofStamp{}
 	}
 	proven, err := w.SampleKeySet(ctx, snapshot.Keys[:1], nil)
 	if err != nil || !proven {
-		return false
+		return false, ManagedProofStamp{}
 	}
 	if _, err = s.target(ctx, p); err != nil {
-		return false
+		return false, ManagedProofStamp{}
 	}
 	current, err := w.KeySnapshot(ctx, p.ManagementKey)
-	return err == nil && current.SourceSHA256 == snapshot.SourceSHA256 && slices.Equal(current.Keys, snapshot.Keys)
+	if err != nil || current.SourceSHA256 != snapshot.SourceSHA256 || !slices.Equal(current.Keys, snapshot.Keys) {
+		return false, ManagedProofStamp{}
+	}
+	return true, ManagedProofStamp{
+		valid: true,
+		version: authProofVersion{
+			profile:           ProfileManaged,
+			target:            p.Identity,
+			runID:             p.RunID,
+			runtimeGeneration: p.runtimeGeneration,
+			runtimeArtifact:   p.runtimeArtifact,
+			sourceSHA256:      snapshot.SourceSHA256,
+			keysSHA256:        orderedKeysDigest(snapshot.Keys),
+		},
+	}
 }

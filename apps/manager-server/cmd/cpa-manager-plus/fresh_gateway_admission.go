@@ -7,6 +7,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/freshbootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshrouting"
 )
 
@@ -70,10 +71,15 @@ func (a *freshApplication) freshAuthority(w http.ResponseWriter, r *http.Request
 // route model traffic through CPAMP Ingress, and private attested or incomplete
 // installations fail closed.
 func (a *freshApplication) gatewayAdmissionProven(ctx context.Context) bool {
+	proven, _ := a.gatewayAdmissionProvenStamp(ctx)
+	return proven
+}
+
+func (a *freshApplication) gatewayAdmissionProvenStamp(ctx context.Context) (bool, freshkeyapply.ManagedProofStamp) {
 	if a == nil || a.keyApply == nil {
-		return false
+		return false, freshkeyapply.ManagedProofStamp{}
 	}
-	return a.keyApply.DefaultInstallCPAAuthorityProven(ctx)
+	return a.keyApply.DefaultInstallCPAAuthorityProvenStamp(ctx)
 }
 
 // freshAuthorityReplyFor binds the posture to the checkpoint it was computed

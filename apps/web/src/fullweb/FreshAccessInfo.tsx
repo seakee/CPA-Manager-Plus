@@ -62,6 +62,7 @@ export interface AccessInfoSummaryProps {
   maskedKeyPreview?: string;
   onCopyAuthHeader?: (headerPrefix: string) => Promise<'copied' | 'failed' | 'ignored'>;
   authHeaderCopyDisabled?: boolean;
+  visible?: boolean;
 }
 
 const VALID_MODES: Record<AccessMode, true> = {
@@ -415,12 +416,14 @@ export function AccessInfoSummary({
   maskedKeyPreview,
   onCopyAuthHeader,
   authHeaderCopyDisabled = false,
+  visible = true,
 }: AccessInfoSummaryProps) {
   const [language, setLanguage] = useState(fullWebLanguage);
   const [fetched, setFetched] = useState<AccessInfo | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
   const [manualRetry, setManualRetry] = useState(0);
+  const [foregroundRetry, setForegroundRetry] = useState(0);
   const [copyFeedback, setCopyFeedback] = useState<{
     target: string;
     state: 'copied' | 'failed';
@@ -438,6 +441,16 @@ export function AccessInfoSummary({
   const onLoadedRef = useRef(onLoaded);
   onUnauthorizedRef.current = onUnauthorized;
   onLoadedRef.current = onLoaded;
+  const visibleRef = useRef(visible);
+  const needsForegroundRetryRef = useRef(false);
+
+  useEffect(() => {
+    visibleRef.current = visible;
+    if (visible && needsForegroundRetryRef.current) {
+      needsForegroundRetryRef.current = false;
+      setForegroundRetry((n) => n + 1);
+    }
+  }, [visible]);
 
   useEffect(() => {
     return subscribeFullWebLanguage(() => setLanguage(fullWebLanguage()));
@@ -488,10 +501,10 @@ export function AccessInfoSummary({
 
     const seq = ++requestSeqRef.current;
     const ownerAtStart = authFingerprint;
+    const startedWhileHidden = !visibleRef.current;
     let cancelled = false;
     setLoading(true);
     setLoadFailed(false);
-
     void (async () => {
       try {
         const raw = await client.get<unknown>('api-keys/access-info', {
@@ -527,10 +540,29 @@ export function AccessInfoSummary({
         if (err instanceof PublicApiError && err.kind === 'authentication') {
           setFetched(null);
           setLoadFailed(false);
+          if (startedWhileHidden || !visibleRef.current) {
+            if (visibleRef.current) {
+              needsForegroundRetryRef.current = false;
+              setForegroundRetry((n) => n + 1);
+            } else {
+              needsForegroundRetryRef.current = true;
+            }
+            return;
+          }
           onUnauthorizedRef.current?.();
           return;
         }
         setFetched(null);
+        if (startedWhileHidden || !visibleRef.current) {
+          setLoadFailed(false);
+          if (visibleRef.current) {
+            needsForegroundRetryRef.current = false;
+            setForegroundRetry((n) => n + 1);
+          } else {
+            needsForegroundRetryRef.current = true;
+          }
+          return;
+        }
         setLoadFailed(true);
       } finally {
         if (
@@ -547,7 +579,16 @@ export function AccessInfoSummary({
     return () => {
       cancelled = true;
     };
-  }, [client, auth.kind, auth.value, authFingerprint, info, reloadToken, manualRetry]);
+  }, [
+    client,
+    auth.kind,
+    auth.value,
+    authFingerprint,
+    info,
+    reloadToken,
+    manualRetry,
+    foregroundRetry,
+  ]);
 
   const effective = info !== undefined ? providedInfo : fetched;
   const resolvedOrigin = useMemo(() => resolveAccessOrigin(origin), [origin]);

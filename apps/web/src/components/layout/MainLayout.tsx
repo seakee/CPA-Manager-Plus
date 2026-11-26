@@ -270,6 +270,8 @@ interface MainLayoutProps {
   hasUnsavedChanges?: boolean;
   navigationDisabled?: boolean;
   contentFooter?: ReactNode;
+  /** Optional intent signal when the user hovers or focuses an inactive nav link. */
+  onNavItemIntent?: (path: string) => void;
   /**
    * Optional host-owned route seam. Full Web uses this only for resources
    * whose authority is not the historical CPA panel (for example the
@@ -290,6 +292,7 @@ function MainLayoutContent({
   hasUnsavedChanges = false,
   navigationDisabled = false,
   contentFooter,
+  onNavItemIntent,
 }: MainLayoutProps = {}) {
   const { t } = useTranslation();
   const { showNotification, showConfirmation } = useNotificationStore();
@@ -564,7 +567,17 @@ function MainLayoutContent({
     });
   }, [fetchConfig]);
 
+  const pluginLoadSeqRef = useRef(0);
+  const pluginConnectionKey = `${connectionStatus}:${apiBase}:${String(supportsPlugin)}`;
+  const pluginConnectionKeyRef = useRef(pluginConnectionKey);
+  useEffect(() => {
+    pluginConnectionKeyRef.current = pluginConnectionKey;
+    pluginLoadSeqRef.current += 1;
+  }, [pluginConnectionKey]);
+
   const loadPluginResources = useCallback(async () => {
+    const seq = ++pluginLoadSeqRef.current;
+    const expectedConnectionKey = pluginConnectionKey;
     if (connectionStatus !== 'connected' || !supportsPlugin) {
       setPluginResources([]);
       return;
@@ -572,6 +585,12 @@ function MainLayoutContent({
 
     try {
       const plugins = await pluginsApi.list();
+      if (
+        seq !== pluginLoadSeqRef.current ||
+        pluginConnectionKeyRef.current !== expectedConnectionKey
+      ) {
+        return;
+      }
       setPluginResources(
         isPluginResourceNavVisible({
           supportsPlugin,
@@ -581,9 +600,15 @@ function MainLayoutContent({
           : []
       );
     } catch {
+      if (
+        seq !== pluginLoadSeqRef.current ||
+        pluginConnectionKeyRef.current !== expectedConnectionKey
+      ) {
+        return;
+      }
       setPluginResources([]);
     }
-  }, [connectionStatus, supportsPlugin]);
+  }, [connectionStatus, pluginConnectionKey, supportsPlugin]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -997,6 +1022,16 @@ function MainLayoutContent({
         aria-current={active ? 'page' : undefined}
         aria-disabled={navigationDisabled || undefined}
         className={`nav-item ${active ? 'active' : ''}`}
+        onMouseEnter={() => {
+          if (!navigationDisabled && !active) {
+            onNavItemIntent?.(item.path);
+          }
+        }}
+        onFocus={() => {
+          if (!navigationDisabled && !active) {
+            onNavItemIntent?.(item.path);
+          }
+        }}
         onClick={(event) => {
           if (navigationDisabled) {
             event.preventDefault();

@@ -14,6 +14,7 @@ import {
   formatKeyPaginationInfo,
   formatKeySortFieldCalls,
   formatKeyTableCount,
+  formatKeyUsageColumnHeader,
   keyWorkspaceText as k,
 } from '../i18n/freshKeyWorkspace';
 import { externalWorkspaceText as x } from '../i18n/freshExternal';
@@ -136,6 +137,7 @@ function usageSummaryResourceForWindow(
 }
 
 const KEY_PAGE_SIZE_OPTIONS = [10, 20, 50] as const;
+const AUTO_REFRESH_COOLDOWN_MS = 5_000;
 
 export function FreshApiKeys({
   client,
@@ -244,6 +246,25 @@ export function FreshApiKeys({
   revocationOpenRef.current = revocationOpen;
   const regenerateChangedRef = useRef(false);
   regenerateOpenRef.current = Boolean(regenerateTargetId);
+  const workspaceTabRef = useRef(workspaceTab);
+  workspaceTabRef.current = workspaceTab;
+  const hasUnresolvedUiRef = useRef(false);
+  hasUnresolvedUiRef.current = Boolean(
+    createOpen ||
+      selected ||
+      renameTarget ||
+      revocationOpen ||
+      regenerateTargetId ||
+      recoveryKey ||
+      pending ||
+      secret ||
+      detailPending ||
+      operationPending
+  );
+  const wasVisibleRef = useRef(visible);
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
+  const lastRefreshCompletedAtRef = useRef(0);
   const alive = useRef(true);
   // Disjoint ownership for reads vs key mutations so overlapping operations
   // never clear each other's lock, while `busy` reflects whether either owns
@@ -279,6 +300,7 @@ export function FreshApiKeys({
       activeReadEpoch.current = null;
       activeMutation.current = false;
       pendingRefresh.current = false;
+      lastRefreshCompletedAtRef.current = 0;
       if (rowCopyTimer.current !== null) {
         clearTimeout(rowCopyTimer.current);
         rowCopyTimer.current = null;
@@ -326,7 +348,7 @@ export function FreshApiKeys({
     }
   }
 
-  async function refresh(forced = false) {
+  async function refresh(forced = false, options?: { backgroundRevalidate?: boolean }) {
     // Forced refreshes (rebind, committed revocation, explicit blocker reload)
     // retire pre-existing reads immediately and run even if details are open.
     // An unforced refresh coalesces behind any open operation or drawer.
@@ -345,7 +367,9 @@ export function FreshApiKeys({
     const ownerAtStart = ownerEpoch.current;
     activeReadEpoch.current = epoch;
     const mutationsAtStart = mutationRev.current;
+    const startedWhileHidden = !visibleRef.current;
     let authenticatedFailure = false;
+    let prewarmNeedsForegroundRetry = false;
     syncBusy();
     setError('');
     try {
@@ -377,6 +401,7 @@ export function FreshApiKeys({
       setRevocationAvailable(result.revocationAvailable);
       setPresenceUnverified(!!result.presenceUnverified);
       setBlocker(null);
+      lastRefreshCompletedAtRef.current = Date.now();
       if (
         result.revocationAvailable &&
         !operationPendingRef.current &&
@@ -428,25 +453,38 @@ export function FreshApiKeys({
         if (!alive.current || readEpoch.current !== epoch || ownerEpoch.current !== ownerAtStart)
           return;
         if (usageErr instanceof PublicApiError && usageErr.kind === 'authentication') {
-          authenticatedFailure = true;
-          onUnauthorized();
+          if (startedWhileHidden || !visibleRef.current) {
+            lastRefreshCompletedAtRef.current = 0;
+            prewarmNeedsForegroundRetry = true;
+          } else {
+            authenticatedFailure = true;
+            onUnauthorized();
+          }
         }
-        if (seq === usageReqSeq.current) {
+        if (seq === usageReqSeq.current && !options?.backgroundRevalidate) {
           setUsage(null);
         }
       }
       // Usage is intentionally best-effort; a failed read leaves the key list usable.
     } catch (err) {
       if (alive.current && readEpoch.current === epoch && ownerEpoch.current === ownerAtStart) {
-        if (err instanceof PublicApiError && err.kind === 'authentication') {
-          authenticatedFailure = true;
+        if (startedWhileHidden || (!visibleRef.current && err instanceof PublicApiError && err.kind === 'authentication')) {
+          lastRefreshCompletedAtRef.current = 0;
+          prewarmNeedsForegroundRetry = true;
+        } else {
+          if (err instanceof PublicApiError && err.kind === 'authentication') {
+            authenticatedFailure = true;
+          }
+          failure(err);
         }
-        failure(err);
       }
     } finally {
       if (ownerEpoch.current === ownerAtStart && activeReadEpoch.current === epoch) {
         activeReadEpoch.current = null;
         if (authenticatedFailure) pendingRefresh.current = false;
+        if (prewarmNeedsForegroundRetry && visibleRef.current) {
+          pendingRefresh.current = true;
+        }
         if (alive.current && pendingRefresh.current && !activeMutation.current && !selectedRef.current && !detailPendingRef.current) {
           pendingRefresh.current = false;
           void refresh(true);
@@ -495,7 +533,11 @@ export function FreshApiKeys({
         return;
       }
       if (usageErr instanceof PublicApiError && usageErr.kind === 'authentication') {
-        onUnauthorized();
+        if (visibleRef.current) {
+          onUnauthorized();
+        } else {
+          lastRefreshCompletedAtRef.current = 0;
+        }
         return;
       }
       if (seq === usageReqSeq.current) {
@@ -516,6 +558,7 @@ export function FreshApiKeys({
   useEffect(() => {
     rebindSeq.current += 1;
     pendingReapplyOpId.current = '';
+    lastRefreshCompletedAtRef.current = 0;
     if (prevCredentialRef.current !== credential) {
       prevCredentialRef.current = credential;
       ownerEpoch.current += 1;
@@ -572,6 +615,32 @@ export function FreshApiKeys({
     setAccessInfo(null);
     void refresh(true);
   }, [reloadToken, credential]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const becameVisible = visible && !wasVisibleRef.current;
+    wasVisibleRef.current = visible;
+    if (!becameVisible) return;
+    if (Date.now() - lastRefreshCompletedAtRef.current < AUTO_REFRESH_COOLDOWN_MS) return;
+    if (
+      activeReadEpoch.current !== null ||
+      activeMutation.current ||
+      selectedRef.current ||
+      detailPendingRef.current ||
+      creationPendingRef.current ||
+      secretPendingRef.current ||
+      operationPendingRef.current ||
+      regeneratePendingRef.current ||
+      revocationOpenRef.current ||
+      regenerateOpenRef.current ||
+      hasUnresolvedUiRef.current
+    ) {
+      return;
+    }
+    if (workspaceTabRef.current === 'access') {
+      setAccessReloadToken((token) => token + 1);
+    }
+    void refresh(false, { backgroundRevalidate: true });
+  }, [visible]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function copyCreatedSecret() {
     if (!secret) return;
@@ -2674,9 +2743,82 @@ export function FreshApiKeys({
           loading={keys === null}
           loadingFallback={
             !error ? (
-              <div className="key-empty" role="status">
-                <FullWebIcon name="refresh" size={28} />
-                <p>{t('keysLoading')}</p>
+              <div
+                className="key-loading-skeleton"
+                role="status"
+                aria-busy="true"
+                data-testid="keys-loading-skeleton"
+              >
+                <span className="sr-only">{t('keysLoading')}</span>
+                {viewMode === 'table' ? (
+                  <div className="key-table-scroll" aria-hidden="true">
+                    <table className="key-table key-skeleton-table">
+                      <thead>
+                        <tr>
+                          <th scope="col" className="key-col-identity">
+                            {k('credential')}
+                          </th>
+                          <th scope="col" className="key-col-status">
+                            {k('lifecycle')}
+                          </th>
+                          <th scope="col" className="key-col-models">
+                            {k('modelsColumn')}
+                          </th>
+                          <th scope="col" className="key-col-usage">
+                            {formatKeyUsageColumnHeader(usageWindow)}
+                          </th>
+                          <th scope="col" className="key-col-time">
+                            {k('timeColumn')}
+                          </th>
+                          <th scope="col" className="key-col-actions">
+                            {k('actions')}
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {[0, 1, 2, 3].map((rowIdx) => (
+                          <tr key={rowIdx} className="key-skeleton-row">
+                            <td className="key-col-identity">
+                              <span className="key-skeleton-bar key-skeleton-name" />
+                              <span className="key-skeleton-bar key-skeleton-preview" />
+                            </td>
+                            <td className="key-col-status">
+                              <span className="key-skeleton-pill" />
+                            </td>
+                            <td className="key-col-models">
+                              <span className="key-skeleton-bar key-skeleton-models" />
+                            </td>
+                            <td className="key-col-usage">
+                              <span className="key-skeleton-bar key-skeleton-usage" />
+                            </td>
+                            <td className="key-col-time">
+                              <span className="key-skeleton-bar key-skeleton-time" />
+                            </td>
+                            <td className="key-col-actions">
+                              <span className="key-skeleton-bar key-skeleton-action" />
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="key-card-grid key-skeleton-cards" aria-hidden="true">
+                    {[0, 1, 2].map((cardIdx) => (
+                      <div key={cardIdx} className="key-card key-skeleton-card">
+                        <div className="key-skeleton-card-head">
+                          <span className="key-skeleton-bar key-skeleton-name" />
+                          <span className="key-skeleton-pill" />
+                        </div>
+                        <span className="key-skeleton-bar key-skeleton-preview" />
+                        <div className="key-skeleton-card-foot">
+                          <span className="key-skeleton-bar key-skeleton-usage" />
+                          <span className="key-skeleton-bar key-skeleton-action" />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             ) : null
           }
@@ -2784,7 +2926,7 @@ export function FreshApiKeys({
             onRevoke={(id) => openRevocationFor(id, 'revoke')}
           />
         </WorkspaceListPanel>
-        {gatewayPending && (
+        {keys !== null && gatewayPending && (
           <aside className="key-gateway-note">
             <FullWebIcon name="shield" />
             <div>
@@ -2818,6 +2960,7 @@ export function FreshApiKeys({
           hideRefresh={true}
           className="card fresh-keys-access-panel"
           onLoaded={setAccessInfo}
+          visible={visible}
         />
       </div>
       {selected && (

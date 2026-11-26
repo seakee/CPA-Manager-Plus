@@ -499,4 +499,63 @@ describe('Full Web pinned navigation (Option A multi-expand)', () => {
     expect(aside().props.className.split(/\s+/)).not.toContain('open');
     expect(aside().props.className.split(/\s+/)).not.toContain('pin-edit-mode');
   });
+
+  it('ignores out-of-order stale plugin list responses when immediate and delayed refreshes overlap', async () => {
+    state.connectionStatus = 'connected';
+    state.supportsPlugin = true;
+
+    let resolveOld!: (value: { pluginsEnabled: boolean; plugins: unknown[] }) => void;
+    let resolveNew!: (value: { pluginsEnabled: boolean; plugins: unknown[] }) => void;
+    const oldReq = new Promise<{ pluginsEnabled: boolean; plugins: unknown[] }>((res) => {
+      resolveOld = res;
+    });
+    const newReq = new Promise<{ pluginsEnabled: boolean; plugins: unknown[] }>((res) => {
+      resolveNew = res;
+    });
+    state.pluginsList.mockReturnValueOnce(oldReq).mockReturnValueOnce(newReq);
+
+    await mount('/plugins', true, { routeBase: '/console' });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 5));
+    });
+    expect(state.pluginsList).toHaveBeenCalledTimes(1);
+
+    // Second refresh triggers before the first finishes and resolves first with plugins enabled.
+    const refreshListeners = windowListeners.get('plugin-resources-refresh') ?? new Set();
+    await act(async () => {
+      for (const listener of refreshListeners) {
+        listener(new Event('plugin-resources-refresh'));
+      }
+    });
+    expect(state.pluginsList).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      resolveNew({
+        pluginsEnabled: true,
+        plugins: [
+          {
+            id: 'demo-plugin',
+            name: 'Demo Plugin',
+            effectiveEnabled: true,
+            menus: [
+              {
+                menu: 'Demo Plugin Nav',
+                description: 'Demo page',
+                path: '/v0/management/plugin-resources/demo-plugin/index.html',
+              },
+            ],
+          },
+        ],
+      });
+      await Promise.resolve();
+    });
+    expect(JSON.stringify(renderer!.toJSON())).toContain('Demo Plugin Nav');
+
+    // Now the older pre-reload response resolves late with pluginsEnabled: false; it must NOT wipe the menu.
+    await act(async () => {
+      resolveOld({ pluginsEnabled: false, plugins: [] });
+      await Promise.resolve();
+    });
+    expect(JSON.stringify(renderer!.toJSON())).toContain('Demo Plugin Nav');
+  });
 });
