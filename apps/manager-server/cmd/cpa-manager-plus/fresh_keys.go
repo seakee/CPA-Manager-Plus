@@ -134,6 +134,7 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 			targetGen := op.Strategy.TargetGeneration
 			if op.Routing.Committed && freshkeyapply.ManagerOwnedStrategy(op.Strategy) {
 				admitCtx, admitCancel = context.WithTimeout(r.Context(), freshKeysGatewayAdmissionTimeout)
+				defer admitCancel()
 				admitDone = make(chan gatewayAdmissionSample, 1)
 				go func() {
 					admitted, stamp := authority.DefaultInstallCPAAuthorityProvenStamp(admitCtx)

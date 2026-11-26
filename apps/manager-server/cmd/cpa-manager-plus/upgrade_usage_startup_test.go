@@ -1179,10 +1179,22 @@ func TestUpgradeStartupPreservesFailedDisabledForeignAndMovedAsUnproven(t *testi
 			}
 			checkRej := newUpgradeExternalRejection(st.SQLDB())
 			defer checkRej.close()
-			refused, err := checkRej.check(context.Background(), binding.Identity, envelopeDigest(binding.ManagementKey))
-			if err != nil || !refused {
-				t.Fatalf("durable external rejection after collector 401: refused=%v err=%v, want true/nil", refused, err)
+			credDigest := envelopeDigest(binding.ManagementKey)
+			// Collector marks status "stopped" before invoking its auth-rejection
+			// callback (collector.go refuseAuthRun); poll until the callback commits
+			// the durable refusal row.
+			deadline = time.Now().Add(3 * time.Second)
+			for {
+				refused, checkErr := checkRej.check(context.Background(), binding.Identity, credDigest)
+				if checkErr == nil && refused {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("durable external rejection after collector 401: refused=%v err=%v, want true/nil", refused, checkErr)
+				}
+				time.Sleep(10 * time.Millisecond)
 			}
+			assertUnproven(t, st, usageSvc)
 		})
 	})
 
