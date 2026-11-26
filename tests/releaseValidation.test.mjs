@@ -1,8 +1,36 @@
-import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { fileURLToPath } from 'node:url';
+import { gunzipSync, gzipSync } from 'node:zlib';
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+  generateSlotKeypair,
+  signSlotManifestBytes,
+} from '../bin/release/cpamp-slot-sign.mjs';
+import { packageSlotArchive } from '../bin/release/package-cpamp-slot.mjs';
+import {
+  extractSlotMetadataFromArchive,
+  generateReleaseInfo,
+} from '../bin/release/generate-release-info.mjs';
+import { verifyLocalReleaseAssets } from '../bin/release/verify-published-release.mjs';
+import {
+  expectedV2AssetNames,
+  v2DockerRoleTag,
+  v2SlotArchiveName,
+} from '../bin/release/update-contract.mjs';
 import {
   parseReleaseTag,
   validateChangedReleaseContent,
@@ -460,5 +488,701 @@ describe('v2 beta release content continuity', () => {
     expect(() =>
       validateReleaseNotes({ tag: v2Tag, chinese, english: english.replaceAll(v2Tag, 'v2.0.0') })
     ).toThrow();
+  });
+
+  it('validates v2.0.0-beta.2 release notes, changed-content gate, and topology continuity', () => {
+    const beta2Tag = 'v2.0.0-beta.2';
+    expect(parseReleaseTag(beta2Tag)).toEqual({ tag: beta2Tag, prerelease: true });
+    const sha = 'b'.repeat(40);
+    const beta1Chinese = readFileSync(
+      new URL('../docs/release-notes/v2.0.0-beta.1-zh.md', import.meta.url),
+      'utf8'
+    );
+    const beta1English = readFileSync(
+      new URL('../docs/release-notes/v2.0.0-beta.1-en.md', import.meta.url),
+      'utf8'
+    );
+    const beta1Telegram = readFileSync(
+      new URL('../docs/release-posts/v2.0.0-beta.1-telegram.html', import.meta.url),
+      'utf8'
+    );
+    const beta2Metadata = {
+      summary: {
+        zh: 'v2.0.0-beta.2：离线 Ed25519 签名槽位自更新引擎。',
+        en: 'v2.0.0-beta.2: offline Ed25519 signed-slot self-update engine.',
+      },
+      update: {
+        breaking: false,
+        migration_required: false,
+        minimum_direct_upgrade_version: 'v2.0.0-beta.1',
+        upgrade_guide_url: 'https://cpamp-docs.seakee.dev/next/operations/update.html',
+      },
+      compatibility: { minimum_cpa_version: 'v8.0.55' },
+    };
+    const beta2Chinese = beta1Chinese
+      .replaceAll('v2.0.0-beta.1', beta2Tag)
+      .replace(/<!-- cpamp-update[\s\S]*?-->/, `<!-- cpamp-update\n${JSON.stringify(beta2Metadata)}\n-->`);
+    const beta2English = beta1English.replaceAll('v2.0.0-beta.1', beta2Tag);
+    const beta2Telegram = beta1Telegram.replaceAll('v2.0.0-beta.1', beta2Tag);
+    const files = {
+      [`docs/release-notes/${beta2Tag}-zh.md`]: beta2Chinese,
+      [`docs/release-notes/${beta2Tag}-en.md`]: beta2English,
+      [`docs/release-posts/${beta2Tag}-telegram.html`]: beta2Telegram,
+    };
+    const resolveFixtureKey = (filePath) =>
+      Object.keys(files).find((rel) => filePath === rel || filePath.endsWith(`/${rel}`));
+    const readFile = (filePath) => {
+      const key = resolveFixtureKey(filePath);
+      if (!key) throw new Error(`Missing fixture file: ${filePath}`);
+      return files[key];
+    };
+    const fileExists = (filePath) => Boolean(resolveFixtureKey(filePath));
+
+    expect(
+      validateReleaseContent({ tag: beta2Tag, dryRun: true, allowV2Beta: true, readFile, fileExists })
+    ).toMatchObject({ paths: { telegram: `docs/release-posts/${beta2Tag}-telegram.html` } });
+    expect(
+      validateChangedReleaseContent({
+        changedFiles: Object.keys(files),
+        dryRun: true,
+        allowV2Beta: true,
+        readFile,
+        fileExists,
+      }).tags
+    ).toEqual([beta2Tag]);
+    expect(
+      validateReleaseTopology({
+        tag: beta2Tag,
+        sha,
+        v2Ref: 'origin/v2',
+        dryRun: true,
+        allowV2Beta: true,
+        git: (args) => {
+          if (args[0] === 'rev-parse' && args[2] === 'origin/v2^{commit}') return sha;
+          if (args[0] === 'show') return readFile(args[1].split(':')[1]);
+          throw new Error(`Unexpected git call: ${args.join(' ')}`);
+        },
+      })
+    ).toMatchObject({ candidateSha: sha, sourceRef: 'origin/v2', sourceSha: sha });
+    expect(() =>
+      validateReleaseNotes({
+        tag: beta2Tag,
+        chinese: beta2Chinese,
+        english: beta2English.replaceAll(beta2Tag, 'v2.0.0-beta.1'),
+      })
+    ).toThrow();
+  });
+});
+
+describe('v2 slot archive verification in verify-published-release', () => {
+  const tempDirs = [];
+  const mkDir = (prefix) => {
+    const dir = mkdtempSync(path.join(tmpdir(), prefix));
+    tempDirs.push(dir);
+    return dir;
+  };
+  afterEach(() => {
+    const makeWritable = (target) => {
+      const lst = lstatSync(target);
+      if (lst.isSymbolicLink() || !lst.isDirectory()) return;
+      chmodSync(target, 0o755);
+      for (const child of readdirSync(target)) {
+        makeWritable(path.join(target, child));
+      }
+    };
+    while (tempDirs.length > 0) {
+      const dir = tempDirs.pop();
+      if (!existsSync(dir)) continue;
+      makeWritable(dir);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  const sha256Of = (value) => `sha256:${createHash('sha256').update(value).digest('hex')}`;
+  const commit = 'b'.repeat(40);
+
+  const stageSlotInput = () => {
+    const root = mkDir('cpamp-relval-stage-');
+    const writeMember = (rel, body, mode = 0o644) => {
+      const full = path.join(root, rel);
+      mkdirSync(path.dirname(full), { recursive: true });
+      writeFileSync(full, body);
+      chmodSync(full, mode);
+    };
+    writeMember('bin/cpamp-launcher', '#!/bin/sh\necho launcher\n', 0o755);
+    writeMember('bin/cpamp-runtime-supervisor', '#!/bin/sh\necho supervisor\n', 0o755);
+    writeMember('bin/cpa-manager-plus', '#!/bin/sh\necho manager\n', 0o755);
+    writeMember('bin/cpamp-ingress', '#!/bin/sh\necho ingress\n', 0o755);
+    writeMember(
+      'share/cpamp/release/base-abi.json',
+      JSON.stringify({ schema_version: 1, base_epoch: 1, platform: 'linux/amd64' }) + '\n',
+      0o444
+    );
+    writeMember('share/cpamp/release/fullweb-manifest.json', '{"schemaVersion":1}\n', 0o444);
+    writeMember('share/cpamp/release/public-api-transport-contract.json', '{"schemaVersion":1}\n', 0o444);
+    writeMember('share/cpamp/runtime/cpa-artifact.json', '{"schemaVersion":1}\n', 0o444);
+    writeMember('share/cpamp/runtime/config.seed.yaml', 'port: 8317\n', 0o644);
+    writeMember('share/cpamp/runtime/seed-lineage.json', '{"schema_version":1}\n', 0o644);
+    writeMember('share/licenses/cpamp/LICENSE', 'MIT\n', 0o444);
+    return root;
+  };
+
+  const buildV2AssetsDir = (tag, slotArchivePath) => {
+    const assetsDir = mkDir('cpamp-relval-assets-');
+    const nativeDir = path.join(assetsDir, 'native');
+    mkdirSync(nativeDir, { recursive: true });
+
+    const compose = [
+      'name: cpa-manager-plus',
+      'services:',
+      '  cpa-manager-plus:',
+      `    image: seakee/cpa-manager-plus:${tag.slice(1)}-full@${sha256Of('full-manifest')}`,
+      '',
+    ].join('\n');
+    const pairing = {
+      schema_version: 1,
+      version: tag,
+      source_commit: commit,
+      platform: 'linux/amd64',
+      cpa: { version: '8.0.55', artifact_id: sha256Of('cpa') },
+      fullweb: {
+        manifest_sha256: sha256Of('fullweb-manifest'),
+        index_html_sha256: sha256Of('management-html'),
+        asset_count: 42,
+      },
+      api_contract: {
+        sha256: sha256Of('api-contract'),
+        contract_id: 'cpamp-r1-embedded-public-api-transport-v1',
+      },
+      compose: {
+        filename: 'docker-compose.v2-embedded.yml',
+        sha256: sha256Of(compose),
+        size: Buffer.byteLength(compose, 'utf8'),
+      },
+      images: Object.fromEntries(
+        ['slim', 'full'].map((role) => [
+          role,
+          {
+            repository: 'seakee/cpa-manager-plus',
+            tag: v2DockerRoleTag(tag, role),
+            image_ref: `seakee/cpa-manager-plus:${v2DockerRoleTag(tag, role)}@${sha256Of(`${role}-manifest`)}`,
+            manifest_digest: sha256Of(`${role}-manifest`),
+            image_config_digest: sha256Of(`${role}-config`),
+            binary_sha256: sha256Of(`${role}-binary`),
+            release_provenance_sha256: sha256Of(`${role}-provenance`),
+          },
+        ])
+      ),
+    };
+    const slotBytes = readFileSync(slotArchivePath);
+    const slotName = v2SlotArchiveName(tag, 'amd64');
+    const slotInfo = {
+      assets: [
+        {
+          name: slotName,
+          platform: 'linux/amd64',
+          sha256: `sha256:${createHash('sha256').update(slotBytes).digest('hex')}`,
+          size: slotBytes.length,
+          min_base_epoch: 1,
+          schema_generation: 1,
+        },
+      ],
+    };
+    const notes = `<!-- cpamp-update\n${JSON.stringify({
+      summary: { zh: 'Beta 2', en: 'Beta 2' },
+      update: {
+        breaking: false,
+        migration_required: false,
+        minimum_direct_upgrade_version: 'v2.0.0-beta.1',
+        upgrade_guide_url: 'https://cpamp-docs.seakee.dev/next/operations/update.html',
+      },
+      compatibility: { minimum_cpa_version: 'v8.0.55' },
+    })}\n-->`;
+    const info = generateReleaseInfo(tag, commit, notes, {
+      dryRun: true,
+      allowV2Beta: true,
+      pairing,
+      slot: slotInfo,
+    });
+
+    const checksums = [];
+    const writeAsset = (relPath, body) => {
+      const full = path.join(assetsDir, relPath);
+      mkdirSync(path.dirname(full), { recursive: true });
+      writeFileSync(full, body);
+      checksums.push(`${createHash('sha256').update(body).digest('hex')}  ${relPath}\n`);
+    };
+    for (const name of expectedV2AssetNames(tag)) {
+      if (name === 'checksums.txt') continue;
+      if (name === 'release-info.json') {
+        writeAsset(name, JSON.stringify(info, null, 2));
+      } else if (name === 'embedded-release-pairing.json') {
+        writeAsset(name, JSON.stringify(pairing, null, 2));
+      } else if (name === 'docker-compose.v2-embedded.yml') {
+        writeAsset(name, compose);
+      } else if (name === slotName) {
+        writeAsset(`native/${name}`, slotBytes);
+      } else if (name.includes('_linux_amd64')) {
+        writeAsset(`native/${name}`, `${name}\n`);
+      } else {
+        writeAsset(name, `${name}\n`);
+      }
+    }
+    writeFileSync(path.join(assetsDir, 'checksums.txt'), checksums.join(''));
+    return assetsDir;
+  };
+
+  it('rejects cpamp-root-2026-01 signed with an unrelated key and gates ephemeral dry-run keys in verify-published-release', () => {
+    const tag = 'v2.0.0-beta.2';
+    const stageRoot = stageSlotInput();
+    const dryPair = generateSlotKeypair('cpamp-dry-run-2026');
+    const validOut = mkDir('cpamp-relval-valid-');
+    const validPkg = packageSlotArchive({
+      root: stageRoot,
+      version: tag,
+      sourceCommit: commit,
+      platform: 'linux/amd64',
+      keyId: 'cpamp-dry-run-2026',
+      privateKey: dryPair.privateKeyPem,
+      publicKeyHex: dryPair.publicKeyHex,
+      out: validOut,
+    });
+    const dryAssetsDir = buildV2AssetsDir(tag, validPkg.archivePath);
+
+    const pubJsonDir = mkDir('cpamp-relval-pub-');
+    const pubJsonPath = path.join(pubJsonDir, 'ephemeral-slot-signing-key.pub.json');
+    writeFileSync(pubJsonPath, JSON.stringify(dryPair.publicRecord, null, 2) + '\n');
+
+    // Dry-run rejects unknown cpamp-dry-run-* unless allowEphemeralSlotKey AND slotPublicKeyHex are provided
+    expect(() =>
+      verifyLocalReleaseAssets({ tag, assetsDir: dryAssetsDir, dryRun: true, allowV2Beta: true })
+    ).toThrow(/Unknown untrusted slot key_id/);
+    expect(() =>
+      verifyLocalReleaseAssets({
+        tag,
+        assetsDir: dryAssetsDir,
+        dryRun: true,
+        allowV2Beta: true,
+        allowEphemeralSlotKey: true,
+      })
+    ).toThrow(/Ephemeral slot key verification requires --slot-public-key/);
+    expect(
+      verifyLocalReleaseAssets({
+        tag,
+        assetsDir: dryAssetsDir,
+        dryRun: true,
+        allowV2Beta: true,
+        allowEphemeralSlotKey: true,
+        slotPublicKeyHex: dryPair.publicKeyHex,
+      })
+    ).toMatchObject({ complete: true, expectedAssets: 7 });
+
+    const verifyScript = fileURLToPath(
+      new URL('../bin/release/verify-published-release.mjs', import.meta.url)
+    );
+    const cliFail = spawnSync(
+      process.execPath,
+      [verifyScript, '--tag', tag, '--mode', 'assets', '--assets-dir', dryAssetsDir, '--dry-run', '--allow-v2-beta'],
+      { encoding: 'utf8' }
+    );
+    expect(cliFail.status).not.toBe(0);
+    expect(cliFail.stderr).toContain('Unknown untrusted slot key_id');
+
+    const cliMissingKey = spawnSync(
+      process.execPath,
+      [
+        verifyScript,
+        '--tag',
+        tag,
+        '--mode',
+        'assets',
+        '--assets-dir',
+        dryAssetsDir,
+        '--dry-run',
+        '--allow-v2-beta',
+        '--allow-ephemeral-slot-key',
+      ],
+      { encoding: 'utf8' }
+    );
+    expect(cliMissingKey.status).not.toBe(0);
+    expect(cliMissingKey.stderr).toContain('Ephemeral slot key verification requires --slot-public-key');
+
+    const cliPass = spawnSync(
+      process.execPath,
+      [
+        verifyScript,
+        '--tag',
+        tag,
+        '--mode',
+        'assets',
+        '--assets-dir',
+        dryAssetsDir,
+        '--dry-run',
+        '--allow-v2-beta',
+        '--allow-ephemeral-slot-key',
+        '--slot-public-key',
+        pubJsonPath,
+      ],
+      { encoding: 'utf8' }
+    );
+    expect(cliPass.status).toBe(0);
+
+    // Flipping 1 bit in the 64-byte Ed25519 signature of an ephemeral cpamp-dry-run-2026 archive fails verifyLocalReleaseAssets and CLI even with allowEphemeralSlotKey + slotPublicKeyHex
+    const bitFlipExtractDir = mkDir('cpamp-relval-bitflip-extract-');
+    execFileSync('tar', ['-xzf', validPkg.archivePath, '-C', bitFlipExtractDir]);
+    const bitFlipSigPath = path.join(bitFlipExtractDir, 'slot-manifest.json.sig');
+    chmodSync(bitFlipSigPath, 0o644);
+    const bitFlipSigObj = JSON.parse(readFileSync(bitFlipSigPath, 'utf8'));
+    const bitFlipSigBytes = Buffer.from(bitFlipSigObj.signature, 'base64');
+    bitFlipSigBytes[0] ^= 0x01;
+    bitFlipSigObj.signature = bitFlipSigBytes.toString('base64');
+    writeFileSync(bitFlipSigPath, JSON.stringify(bitFlipSigObj, null, 2) + '\n');
+    chmodSync(bitFlipSigPath, 0o444);
+    const bitFlipArchivePath = path.join(
+      mkDir('cpamp-relval-bitflip-out-'),
+      v2SlotArchiveName(tag, 'amd64')
+    );
+    execFileSync('tar', ['-czf', bitFlipArchivePath, '-C', bitFlipExtractDir, '.']);
+    execFileSync('chmod', ['-R', 'u+rwX', bitFlipExtractDir]);
+    const bitFlipAssetsDir = buildV2AssetsDir(tag, bitFlipArchivePath);
+
+    expect(() =>
+      verifyLocalReleaseAssets({
+        tag,
+        assetsDir: bitFlipAssetsDir,
+        dryRun: true,
+        allowV2Beta: true,
+        allowEphemeralSlotKey: true,
+        slotPublicKeyHex: dryPair.publicKeyHex,
+      })
+    ).toThrow(/signature verification failed/);
+
+    const cliBitFlip = spawnSync(
+      process.execPath,
+      [
+        verifyScript,
+        '--tag',
+        tag,
+        '--mode',
+        'assets',
+        '--assets-dir',
+        bitFlipAssetsDir,
+        '--dry-run',
+        '--allow-v2-beta',
+        '--allow-ephemeral-slot-key',
+        '--slot-public-key',
+        dryPair.publicKeyHex,
+      ],
+      { encoding: 'utf8' }
+    );
+    expect(cliBitFlip.status).not.toBe(0);
+    expect(cliBitFlip.stderr).toContain('signature verification failed');
+
+    // generate-release-info CLI --allow-ephemeral-slot-key --slot-public-key succeeds on valid archive and rejects bit-flipped signature
+    const genScript = fileURLToPath(
+      new URL('../bin/release/generate-release-info.mjs', import.meta.url)
+    );
+    const genWorkDir = mkDir('cpamp-relval-gencli-');
+    mkdirSync(path.join(genWorkDir, 'docs', 'release-notes'), { recursive: true });
+    writeFileSync(
+      path.join(genWorkDir, 'docs', 'release-notes', `${tag}-zh.md`),
+      `<!-- cpamp-update\n${JSON.stringify({
+        summary: { zh: 'Beta 2', en: 'Beta 2' },
+        update: {
+          breaking: false,
+          migration_required: false,
+          minimum_direct_upgrade_version: 'v2.0.0-beta.1',
+          upgrade_guide_url: 'https://cpamp-docs.seakee.dev/next/operations/update.html',
+        },
+        compatibility: { minimum_cpa_version: 'v8.0.55' },
+      })}\n-->\n`
+    );
+    const pairingPath = path.join(dryAssetsDir, 'embedded-release-pairing.json');
+    const genOutPath = path.join(genWorkDir, 'release-info.json');
+    const genPass = spawnSync(
+      process.execPath,
+      [
+        genScript,
+        tag,
+        genOutPath,
+        commit,
+        '--dry-run',
+        '--allow-v2-beta',
+        '--pairing',
+        pairingPath,
+        '--allow-ephemeral-slot-key',
+        '--slot-public-key',
+        pubJsonPath,
+        '--slot-archive',
+        validPkg.archivePath,
+      ],
+      { cwd: genWorkDir, encoding: 'utf8' }
+    );
+    expect(genPass.status, genPass.stderr).toBe(0);
+    const genBitFlip = spawnSync(
+      process.execPath,
+      [
+        genScript,
+        tag,
+        genOutPath,
+        commit,
+        '--dry-run',
+        '--allow-v2-beta',
+        '--pairing',
+        pairingPath,
+        '--allow-ephemeral-slot-key',
+        '--slot-public-key',
+        pubJsonPath,
+        '--slot-archive',
+        bitFlipArchivePath,
+      ],
+      { cwd: genWorkDir, encoding: 'utf8' }
+    );
+    expect(genBitFlip.status).not.toBe(0);
+    expect(genBitFlip.stderr).toContain('signature verification failed');
+    // Forged cpamp-root-2026-01 archive signed with an unrelated Ed25519 private key is ALWAYS rejected
+    const extractDir = mkDir('cpamp-relval-forged-extract-');
+    execFileSync('tar', ['-xzf', validPkg.archivePath, '-C', extractDir]);
+    const manifestPath = path.join(extractDir, 'slot-manifest.json');
+    const sigPath = path.join(extractDir, 'slot-manifest.json.sig');
+    chmodSync(manifestPath, 0o644);
+    chmodSync(sigPath, 0o644);
+    const manifestObj = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    manifestObj.key_id = 'cpamp-root-2026-01';
+    const forgedManifestText = JSON.stringify(manifestObj, null, 2) + '\n';
+    writeFileSync(manifestPath, forgedManifestText);
+    const unrelatedPair = generateSlotKeypair('cpamp-root-2026-01');
+    const forgedSig = signSlotManifestBytes(
+      Buffer.from(forgedManifestText, 'utf8'),
+      unrelatedPair.privateKeyPem,
+      'cpamp-root-2026-01'
+    );
+    writeFileSync(sigPath, JSON.stringify(forgedSig, null, 2) + '\n');
+    chmodSync(manifestPath, 0o444);
+    chmodSync(sigPath, 0o444);
+    const forgedArchivePath = path.join(mkDir('cpamp-relval-forged-out-'), v2SlotArchiveName(tag, 'amd64'));
+    execFileSync('tar', ['-czf', forgedArchivePath, '-C', extractDir, '.']);
+    const forgedAssetsDir = buildV2AssetsDir(tag, forgedArchivePath);
+
+    expect(() =>
+      verifyLocalReleaseAssets({
+        tag,
+        assetsDir: forgedAssetsDir,
+        dryRun: true,
+        allowV2Beta: true,
+        allowEphemeralSlotKey: true,
+      })
+    ).toThrow(/signature verification failed/);
+
+    const cliForged = spawnSync(
+      process.execPath,
+      [
+        verifyScript,
+        '--tag',
+        tag,
+        '--mode',
+        'assets',
+        '--assets-dir',
+        forgedAssetsDir,
+        '--dry-run',
+        '--allow-v2-beta',
+        '--allow-ephemeral-slot-key',
+      ],
+      { encoding: 'utf8' }
+    );
+    expect(cliForged.status).not.toBe(0);
+    expect(cliForged.stderr).toContain('signature verification failed');
+
+    // Modifying 1 byte inside bin/cpa-manager-plus without re-signing slot-manifest.json
+    // must fail BOTH extractSlotMetadataFromArchive (generate-release-info) AND verifyLocalReleaseAssets (verify-published-release)
+    const rawTar = Buffer.from(gunzipSync(readFileSync(validPkg.archivePath)));
+    let offset = 0;
+    let flipped = false;
+    while (offset + 512 <= rawTar.length) {
+      const hdr = rawTar.subarray(offset, offset + 512);
+      if (hdr.every((b) => b === 0)) break;
+      const name = hdr.subarray(0, 100).toString('utf8').replace(/\0.*$/, '');
+      const size = Number.parseInt(hdr.subarray(124, 136).toString('utf8').replace(/\0.*$/, '').trim() || '0', 8);
+      const dataStart = offset + 512;
+      if (name === 'bin/cpa-manager-plus') {
+        rawTar[dataStart] ^= 0x01;
+        flipped = true;
+        break;
+      }
+      offset = dataStart + Math.ceil(size / 512) * 512;
+    }
+    expect(flipped).toBe(true);
+    const modifiedArchivePath = path.join(mkDir('cpamp-relval-modbyte-out-'), v2SlotArchiveName(tag, 'amd64'));
+    writeFileSync(modifiedArchivePath, gzipSync(rawTar));
+
+    expect(() =>
+      extractSlotMetadataFromArchive(modifiedArchivePath, tag, {
+        dryRun: true,
+        allowEphemeralSlotKey: true,
+        slotPublicKeyHex: dryPair.publicKeyHex,
+      })
+    ).toThrow(/sha256 mismatch/);
+
+    const genModified = spawnSync(
+      process.execPath,
+      [
+        genScript,
+        tag,
+        genOutPath,
+        commit,
+        '--dry-run',
+        '--allow-v2-beta',
+        '--pairing',
+        pairingPath,
+        '--allow-ephemeral-slot-key',
+        '--slot-public-key',
+        pubJsonPath,
+        '--slot-archive',
+        modifiedArchivePath,
+      ],
+      { cwd: genWorkDir, encoding: 'utf8' }
+    );
+    expect(genModified.status).not.toBe(0);
+    expect(genModified.stderr).toContain('sha256 mismatch');
+
+    const modifiedAssetsDir = buildV2AssetsDir(tag, modifiedArchivePath);
+    expect(() =>
+      verifyLocalReleaseAssets({
+        tag,
+        assetsDir: modifiedAssetsDir,
+        dryRun: true,
+        allowV2Beta: true,
+        allowEphemeralSlotKey: true,
+        slotPublicKeyHex: dryPair.publicKeyHex,
+      })
+    ).toThrow(/sha256 mismatch/);
+
+    const cliModified = spawnSync(
+      process.execPath,
+      [
+        verifyScript,
+        '--tag',
+        tag,
+        '--mode',
+        'assets',
+        '--assets-dir',
+        modifiedAssetsDir,
+        '--dry-run',
+        '--allow-v2-beta',
+        '--allow-ephemeral-slot-key',
+        '--slot-public-key',
+        pubJsonPath,
+      ],
+      { encoding: 'utf8' }
+    );
+    expect(cliModified.status).not.toBe(0);
+    expect(cliModified.stderr).toContain('sha256 mismatch');
+  });
+
+  it('rejects a signed slot archive with 1 altered octal digit in a tar header checksum even when outer digests match', () => {
+    const tag = 'v2.0.0-beta.2';
+    const stageRoot = stageSlotInput();
+    const dryPair = generateSlotKeypair('cpamp-dry-run-2026');
+    const validOut = mkDir('cpamp-relval-chksum-valid-');
+    const validPkg = packageSlotArchive({
+      root: stageRoot,
+      version: tag,
+      sourceCommit: commit,
+      platform: 'linux/amd64',
+      keyId: 'cpamp-dry-run-2026',
+      privateKey: dryPair.privateKeyPem,
+      publicKeyHex: dryPair.publicKeyHex,
+      out: validOut,
+    });
+    const pubJsonDir = mkDir('cpamp-relval-chksum-pub-');
+    const pubJsonPath = path.join(pubJsonDir, 'ephemeral-slot-signing-key.pub.json');
+    writeFileSync(pubJsonPath, JSON.stringify(dryPair.publicRecord, null, 2) + '\n');
+
+    const rawTar = Buffer.from(gunzipSync(readFileSync(validPkg.archivePath)));
+    let offset = 0;
+    let altered = false;
+    while (offset + 512 <= rawTar.length) {
+      const hdr = rawTar.subarray(offset, offset + 512);
+      if (hdr.every((b) => b === 0)) break;
+      const name = hdr.subarray(0, 100).toString('utf8').replace(/\0.*$/, '');
+      const size = Number.parseInt(
+        hdr.subarray(124, 136).toString('utf8').replace(/\0.*$/, '').trim() || '0',
+        8
+      );
+      if (name === 'bin/cpa-manager-plus') {
+        let octalIdx = -1;
+        for (let i = 154; i >= 148; i -= 1) {
+          if (hdr[i] >= 0x30 && hdr[i] <= 0x37) {
+            octalIdx = i;
+            break;
+          }
+        }
+        expect(octalIdx).toBeGreaterThanOrEqual(148);
+        expect(octalIdx).toBeLessThanOrEqual(154);
+        rawTar[offset + octalIdx] ^= 0x01;
+        altered = true;
+        break;
+      }
+      offset = offset + 512 + Math.ceil(size / 512) * 512;
+    }
+    expect(altered).toBe(true);
+
+    const tamperedGz = gzipSync(rawTar);
+    const tamperedArchivePath = path.join(
+      mkDir('cpamp-relval-chksum-out-'),
+      v2SlotArchiveName(tag, 'amd64')
+    );
+    writeFileSync(tamperedArchivePath, tamperedGz);
+
+    expect(() =>
+      extractSlotMetadataFromArchive(tamperedArchivePath, tag, {
+        dryRun: true,
+        allowEphemeralSlotKey: true,
+        slotPublicKeyHex: dryPair.publicKeyHex,
+      })
+    ).toThrow(/invalid tar header checksum/);
+
+    const assetsDir = buildV2AssetsDir(tag, tamperedArchivePath);
+    const info = JSON.parse(readFileSync(path.join(assetsDir, 'release-info.json'), 'utf8'));
+    expect(info.distribution.slot.assets[0]).toMatchObject({
+      name: v2SlotArchiveName(tag, 'amd64'),
+      sha256: sha256Of(tamperedGz),
+      size: tamperedGz.length,
+    });
+
+    expect(() =>
+      verifyLocalReleaseAssets({
+        tag,
+        assetsDir,
+        dryRun: true,
+        allowV2Beta: true,
+        allowEphemeralSlotKey: true,
+        slotPublicKeyHex: dryPair.publicKeyHex,
+      })
+    ).toThrow(/invalid tar header checksum/);
+
+    const verifyScript = fileURLToPath(
+      new URL('../bin/release/verify-published-release.mjs', import.meta.url)
+    );
+    const cliVerify = spawnSync(
+      process.execPath,
+      [
+        verifyScript,
+        '--tag',
+        tag,
+        '--mode',
+        'assets',
+        '--assets-dir',
+        assetsDir,
+        '--dry-run',
+        '--allow-v2-beta',
+        '--allow-ephemeral-slot-key',
+        '--slot-public-key',
+        pubJsonPath,
+      ],
+      { encoding: 'utf8' }
+    );
+    expect(cliVerify.status).not.toBe(0);
+    expect(cliVerify.stderr).toContain('invalid tar header checksum');
   });
 });

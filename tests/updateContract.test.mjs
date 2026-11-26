@@ -24,7 +24,10 @@ import {
   v2ImageRoles,
   v2NativeArchiveName,
   v2ReleaseInfoPath,
+  v2SlotArchiveName,
+  v2SlotRequiresAsset,
   validateV2Pairing,
+  validateV2SlotDistribution,
 } from '../bin/release/update-contract.mjs';
 import { generateReleaseInfo } from '../bin/release/generate-release-info.mjs';
 import {
@@ -833,5 +836,155 @@ describe('v2 beta release contract', () => {
         validateV2Pairing(tampered, { tag: v2Tag, sourceCommit: v2SourceCommit })
       ).toThrow(/unexpected slim repository/);
     }
+  });
+
+  it('enforces v2 slot asset naming, beta.1 optionality, and beta.2+ requirement', () => {
+    expect(v2SlotArchiveName('v2.0.0-beta.2')).toBe('cpamp-slot_v2.0.0-beta.2_linux_amd64.tar.gz');
+    expect(v2SlotArchiveName('v2.0.0-beta.2', 'arm64')).toBe(
+      'cpamp-slot_v2.0.0-beta.2_linux_arm64.tar.gz'
+    );
+    expect(() => v2SlotArchiveName('v2.0.0-beta.2', '386')).toThrow(/Unsupported v2 slot/);
+
+    expect(v2SlotRequiresAsset('v1.17.1')).toBe(false);
+    expect(v2SlotRequiresAsset('v2.0.0-beta.1')).toBe(false);
+    expect(v2SlotRequiresAsset('v2.0.0-beta.2')).toBe(true);
+    expect(v2SlotRequiresAsset('v2.0.0-beta.3')).toBe(true);
+
+    const beta1Assets = expectedV2AssetNames('v2.0.0-beta.1');
+    expect(beta1Assets).toHaveLength(6);
+    expect(assertV2AssetSet(beta1Assets, 'v2.0.0-beta.1')).toEqual(beta1Assets);
+    const beta1WithSlot = [...beta1Assets, v2SlotArchiveName('v2.0.0-beta.1', 'amd64')].sort();
+    expect(assertV2AssetSet(beta1WithSlot, 'v2.0.0-beta.1')).toEqual(beta1WithSlot);
+
+    const beta2Assets = expectedV2AssetNames('v2.0.0-beta.2');
+    expect(beta2Assets).toHaveLength(7);
+    expect(beta2Assets).toContain('cpamp-slot_v2.0.0-beta.2_linux_amd64.tar.gz');
+    expect(assertV2AssetSet(beta2Assets, 'v2.0.0-beta.2')).toEqual(beta2Assets);
+    expect(() =>
+      assertV2AssetSet(
+        beta2Assets.filter((name) => !name.startsWith('cpamp-slot_')),
+        'v2.0.0-beta.2'
+      )
+    ).toThrow(/asset set mismatch/);
+    expect(() =>
+      assertV2AssetSet(
+        [
+          ...beta2Assets.filter((name) => !name.startsWith('cpamp-slot_')),
+          'cpamp-slot_v2.0.0-beta.1_linux_amd64.tar.gz',
+        ],
+        'v2.0.0-beta.2'
+      )
+    ).toThrow(/slot asset version mismatch/);
+    expect(() =>
+      assertV2AssetSet(
+        [
+          ...beta2Assets.filter((name) => !name.startsWith('cpamp-slot_')),
+          'cpamp-slot_v2.0.0-beta.2_linux_arm64.tar.gz',
+        ],
+        'v2.0.0-beta.2'
+      )
+    ).toThrow(/Unsupported v2 slot platform/);
+  });
+
+  it('validates distribution.slot schema and asset bindings across beta.1 and beta.2+', () => {
+    const beta2Tag = 'v2.0.0-beta.2';
+    const beta2Pairing = () => {
+      const base = v2Pairing();
+      base.version = beta2Tag;
+      for (const role of v2ImageRoles) {
+        base.images[role].tag = v2DockerRoleTag(beta2Tag, role);
+        base.images[role].image_ref =
+          `${base.images[role].repository}:${base.images[role].tag}@${base.images[role].manifest_digest}`;
+      }
+      return base;
+    };
+    const validSlot = {
+      assets: [
+        {
+          name: v2SlotArchiveName(beta2Tag, 'amd64'),
+          platform: 'linux/amd64',
+          sha256: sha256Of('slot-amd64'),
+          size: 4096,
+          min_base_epoch: 1,
+          schema_generation: 1,
+        },
+      ],
+    };
+
+    // beta.2+ fails closed without distribution.slot
+    expect(() =>
+      generateReleaseInfo(beta2Tag, v2SourceCommit, v2Notes(), {
+        dryRun: true,
+        allowV2Beta: true,
+        pairing: beta2Pairing(),
+      })
+    ).toThrow(/slot distribution is required/);
+
+    const infoBeta2 = generateReleaseInfo(beta2Tag, v2SourceCommit, v2Notes(), {
+      dryRun: true,
+      allowV2Beta: true,
+      pairing: beta2Pairing(),
+      slot: validSlot,
+    });
+    expect(infoBeta2.distribution.slot).toEqual(validSlot);
+    expect(
+      assertV2AssetBindings(infoBeta2, {
+        composeSha256: sha256Of(v2ComposeContent),
+        composeSize: Buffer.byteLength(v2ComposeContent, 'utf8'),
+        pairing: beta2Pairing(),
+        slotAssets: [
+          {
+            name: v2SlotArchiveName(beta2Tag, 'amd64'),
+            sha256: sha256Of('slot-amd64'),
+            size: 4096,
+          },
+        ],
+      })
+    ).toBe(infoBeta2);
+
+    // beta.1 allows omitting distribution.slot, and validates it when supplied
+    expect(validateV2SlotDistribution(undefined, v2Tag)).toBeUndefined();
+    const beta1Slot = {
+      assets: [
+        {
+          name: v2SlotArchiveName(v2Tag, 'arm64'),
+          platform: 'linux/arm64',
+          sha256: sha256Of('slot-arm64'),
+          size: 2048,
+          min_base_epoch: 1,
+          schema_generation: 1,
+        },
+      ],
+    };
+    expect(validateV2SlotDistribution(beta1Slot, v2Tag)).toEqual(beta1Slot);
+
+    // Invalid slot entries fail closed
+    const invalidCases = [
+      [{ ...validSlot.assets[0], name: 'cpamp-slot_v2.0.0-beta.1_linux_amd64.tar.gz' }, /version mismatch/],
+      [{ ...validSlot.assets[0], platform: 'linux/arm64' }, /platform mismatch/],
+      [{ ...validSlot.assets[0], sha256: 'deadbeef' }, /slot asset digest/],
+      [{ ...validSlot.assets[0], size: 0 }, /size/],
+      [{ ...validSlot.assets[0], min_base_epoch: 0 }, /min_base_epoch/],
+      [{ ...validSlot.assets[0], schema_generation: 0 }, /schema_generation/],
+    ];
+    for (const [badAsset, errorPattern] of invalidCases) {
+      expect(() => validateV2SlotDistribution({ assets: [badAsset] }, beta2Tag)).toThrow(
+        errorPattern
+      );
+    }
+    expect(() =>
+      assertV2AssetBindings(infoBeta2, {
+        composeSha256: sha256Of(v2ComposeContent),
+        composeSize: Buffer.byteLength(v2ComposeContent, 'utf8'),
+        pairing: beta2Pairing(),
+        slotAssets: [
+          {
+            name: v2SlotArchiveName(beta2Tag, 'amd64'),
+            sha256: sha256Of('tampered-slot'),
+            size: 4096,
+          },
+        ],
+      })
+    ).toThrow(/digest does not match/);
   });
 });

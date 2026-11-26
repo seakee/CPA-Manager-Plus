@@ -142,10 +142,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      ephemeral_slot_key: ${{ steps.prepare_release_artifact.outputs.ephemeral_slot_key }}
     env:
       RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
       RELEASE_MAJOR: ${{ needs.preflight.outputs.release_major }}
-
     steps:
       - name: Checkout release source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -187,6 +188,11 @@ jobs:
           PACKAGE_MODE: ${{ needs.preflight.outputs.release_major == '2' && 'v2' || 'v1' }}
 
       - name: Prepare release artifact
+        id: prepare_release_artifact
+        env:
+          CPAMP_SLOT_SIGNING_PRIVATE_KEY: ${{ secrets.CPAMP_SLOT_SIGNING_PRIVATE_KEY }}
+          CPAMP_SLOT_SIGNING_KEY_ID: ${{ vars.CPAMP_SLOT_SIGNING_KEY_ID }}
+          DRY_RUN: ${{ needs.preflight.outputs.dry_run }}
         run: |
           set -euo pipefail
           rm -rf dist/release
@@ -194,15 +200,63 @@ jobs:
           cp apps/web/dist/panel/management.html dist/release/management.html
           if [ "${RELEASE_MAJOR}" = "2" ]; then
             cp "dist/native/cpa-manager-plus-native-v2_${RELEASE_TAG}_linux_amd64.tar.gz" dist/release/native/
+            slot_required="$(node --input-type=module -e '
+              import { v2SlotRequiresAsset } from "./bin/release/update-contract.mjs";
+              process.stdout.write(String(v2SlotRequiresAsset(process.argv[1])));
+            ' "${RELEASE_TAG}")"
+            used_ephemeral_slot_key="false"
+            if [ "${slot_required}" = "true" ] || [ -n "${CPAMP_SLOT_SIGNING_PRIVATE_KEY:-}" ]; then
+              slot_stage="${RUNNER_TEMP}/cpamp-slot-stage"
+              rm -rf "${slot_stage}"
+              mkdir -p "${slot_stage}"
+              tar -xzf "dist/release/native/cpa-manager-plus-native-v2_${RELEASE_TAG}_linux_amd64.tar.gz" \
+                --strip-components=1 -C "${slot_stage}"
+              rm -f "${slot_stage}/share/cpamp/provenance.json"
+              mv "${slot_stage}/bin/cpa-manager-plus-ingress" "${slot_stage}/bin/cpamp-ingress"
+              mv "${slot_stage}/bin/cpa-manager-plus-runtime-supervisor" "${slot_stage}/bin/cpamp-runtime-supervisor"
+              slot_key_args=()
+              if [ -n "${CPAMP_SLOT_SIGNING_PRIVATE_KEY:-}" ]; then
+                slot_key_args+=(
+                  --private-key "env:CPAMP_SLOT_SIGNING_PRIVATE_KEY"
+                  --key-id "${CPAMP_SLOT_SIGNING_KEY_ID:-cpamp-root-2026-01}"
+                )
+              elif [ "${DRY_RUN}" = "true" ]; then
+                slot_dry_keys="${RUNNER_TEMP}/cpamp-slot-dryrun-keys"
+                node bin/release/cpamp-slot-sign.mjs keygen --key-id cpamp-dry-run-2026 --out-dir "${slot_dry_keys}"
+                slot_key_args+=(
+                  --private-key "${slot_dry_keys}/cpamp-dry-run-2026.priv.pem"
+                  --public-key "${slot_dry_keys}/cpamp-dry-run-2026.pub.json"
+                  --key-id cpamp-dry-run-2026
+                  --allow-ephemeral-slot-key
+                )
+                used_ephemeral_slot_key="true"
+              else
+                echo "CPAMP_SLOT_SIGNING_PRIVATE_KEY secret is required to package ${RELEASE_TAG} slot archive." >&2
+                exit 1
+              fi
+              node bin/release/package-cpamp-slot.mjs \
+                --root "${slot_stage}" \
+                --version "${RELEASE_TAG}" \
+                --source-commit "${GITHUB_SHA}" \
+                --platform linux/amd64 \
+                --min-base-epoch 1 \
+                --schema-generation 1 \
+                "${slot_key_args[@]}" \
+                --out "dist/release/cpamp-slot_${RELEASE_TAG}_linux_amd64.tar.gz"
+              if [ "${used_ephemeral_slot_key}" = "true" ]; then
+                cp "${slot_dry_keys}/cpamp-dry-run-2026.pub.json" "dist/release/ephemeral-slot-signing-key.pub.json"
+              fi
+            fi
+            echo "ephemeral_slot_key=${used_ephemeral_slot_key}" >> "${GITHUB_OUTPUT}"
           else
             cp dist/native/* dist/release/native/
+            echo "ephemeral_slot_key=false" >> "${GITHUB_OUTPUT}"
           fi
           cp "docs/release-notes/${RELEASE_TAG}-zh.md" dist/release/release-notes.md
           if [ "${RELEASE_MAJOR}" = "1" ]; then
             node bin/release/generate-release-info.mjs "${RELEASE_TAG}" dist/release/release-info.json
           fi
           find dist/release -maxdepth 2 -type f -print | sort
-
       - name: Upload release artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -698,6 +752,8 @@ jobs:
       contents: read
     env:
       RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+      DRY_RUN: ${{ needs.preflight.outputs.dry_run }}
+      EPHEMERAL_SLOT_KEY: ${{ needs.build_release_assets.outputs.ephemeral_slot_key }}
     steps:
       - name: Checkout release source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -724,16 +780,35 @@ jobs:
       - name: Generate and verify exact six-asset v2 bundle
         run: |
           set -euo pipefail
+          if [ -f "dist/release/ephemeral-slot-signing-key.pub.json" ]; then
+            mv "dist/release/ephemeral-slot-signing-key.pub.json" "${RUNNER_TEMP}/ephemeral-slot-signing-key.pub.json"
+          fi
           cp "${RUNNER_TEMP}/v2-embedded-candidate/docker-compose.v2-embedded.yml" dist/release/
           cp "${RUNNER_TEMP}/v2-embedded-candidate/embedded-release-pairing.json" dist/release/
+          slot_args=()
+          ephemeral_slot_args=()
+          if [ "${DRY_RUN}" = "true" ] && [ "${EPHEMERAL_SLOT_KEY:-false}" = "true" ]; then
+            ephemeral_slot_args+=(--allow-ephemeral-slot-key --slot-public-key "${RUNNER_TEMP}/ephemeral-slot-signing-key.pub.json")
+          fi
+          if [ -f "dist/release/cpamp-slot_${RELEASE_TAG}_linux_amd64.tar.gz" ]; then
+            slot_args+=(--slot-archive "dist/release/cpamp-slot_${RELEASE_TAG}_linux_amd64.tar.gz")
+          fi
           node bin/release/generate-release-info.mjs "${RELEASE_TAG}" dist/release/release-info.json \
-            --dry-run --allow-v2-beta --pairing dist/release/embedded-release-pairing.json
-          (cd dist/release && sha256sum native/*.tar.gz management.html docker-compose.v2-embedded.yml \
-            embedded-release-pairing.json release-info.json > checksums.txt)
+            --dry-run --allow-v2-beta --pairing dist/release/embedded-release-pairing.json \
+            "${ephemeral_slot_args[@]}" "${slot_args[@]}"
+          (
+            cd dist/release
+            extra_slots=()
+            for f in cpamp-slot_*.tar.gz; do
+              [ -e "$f" ] && extra_slots+=("$f")
+            done
+            sha256sum native/*.tar.gz "${extra_slots[@]}" management.html docker-compose.v2-embedded.yml \
+              embedded-release-pairing.json release-info.json > checksums.txt
+          )
           node bin/release/verify-published-release.mjs --tag "${RELEASE_TAG}" \
             --mode assets --assets-dir dist/release --dry-run --allow-v2-beta \
+            "${ephemeral_slot_args[@]}" \
             --result-path "${RUNNER_TEMP}/v2-asset-verification.json"
-
       - name: Setup read-only registry inspection
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
@@ -742,7 +817,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          ephemeral_slot_args=()
+          if [ "${DRY_RUN}" = "true" ] && [ "${EPHEMERAL_SLOT_KEY:-false}" = "true" ]; then
+            ephemeral_slot_args+=(--allow-ephemeral-slot-key --slot-public-key "${RUNNER_TEMP}/ephemeral-slot-signing-key.pub.json")
+          fi
           node bin/release/publish-update-index.mjs --dry-run --allow-v2-beta-dry-run \
+            "${ephemeral_slot_args[@]}" \
             --candidate dist/release/release-info.json --candidate-assets-dir dist/release \
             > "${RUNNER_TEMP}/versions.json"
 

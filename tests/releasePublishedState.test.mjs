@@ -1,11 +1,14 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gunzipSync, gzipSync } from 'node:zlib';
+import { generateSlotKeypair } from '../bin/release/cpamp-slot-sign.mjs';
+import { packageSlotArchive } from '../bin/release/package-cpamp-slot.mjs';
 import { generateReleaseInfo } from '../bin/release/generate-release-info.mjs';
-import { v2DockerRoleTag } from '../bin/release/update-contract.mjs';
+import { v2DockerRoleTag, v2SlotArchiveName } from '../bin/release/update-contract.mjs';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   buildExpectedReleaseAssets,
@@ -887,5 +890,336 @@ describe('v2 beta published release verification', () => {
         stdio: 'pipe',
       })
     ).toThrow(/does not allow missing assets/);
+  });
+
+  const buildSignedSlotBytes = (targetTag) => {
+    const stageRoot = mkdtempSync(path.join(tmpdir(), 'cpamp-pubstate-stage-'));
+    temporaryDirectories.push(stageRoot);
+    const writeMember = (rel, body, mode = 0o644) => {
+      const full = path.join(stageRoot, rel);
+      mkdirSync(path.dirname(full), { recursive: true });
+      writeFileSync(full, body);
+      chmodSync(full, mode);
+    };
+    writeMember('bin/cpamp-launcher', '#!/bin/sh\necho launcher\n', 0o755);
+    writeMember('bin/cpamp-runtime-supervisor', '#!/bin/sh\necho supervisor\n', 0o755);
+    writeMember('bin/cpa-manager-plus', '#!/bin/sh\necho manager\n', 0o755);
+    writeMember('bin/cpamp-ingress', '#!/bin/sh\necho ingress\n', 0o755);
+    writeMember(
+      'share/cpamp/release/base-abi.json',
+      JSON.stringify({ schema_version: 1, base_epoch: 1, platform: 'linux/amd64' }) + '\n',
+      0o444
+    );
+    writeMember('share/cpamp/release/fullweb-manifest.json', '{"schemaVersion":1}\n', 0o444);
+    writeMember('share/cpamp/release/public-api-transport-contract.json', '{"schemaVersion":1}\n', 0o444);
+    writeMember('share/cpamp/runtime/cpa-artifact.json', '{"schemaVersion":1}\n', 0o444);
+    writeMember('share/cpamp/runtime/config.seed.yaml', 'port: 8317\n', 0o644);
+    writeMember('share/cpamp/runtime/seed-lineage.json', '{"schema_version":1}\n', 0o644);
+    writeMember('share/licenses/cpamp/LICENSE', 'MIT\n', 0o444);
+    const outDir = mkdtempSync(path.join(tmpdir(), 'cpamp-pubstate-slotout-'));
+    temporaryDirectories.push(outDir);
+    const pair = generateSlotKeypair('cpamp-dry-run-2026');
+    const pkg = packageSlotArchive({
+      root: stageRoot,
+      version: targetTag,
+      sourceCommit: v2SourceCommit,
+      platform: 'linux/amd64',
+      keyId: 'cpamp-dry-run-2026',
+      privateKey: pair.privateKeyPem,
+      publicKeyHex: pair.publicKeyHex,
+      out: outDir,
+    });
+    return { bytes: readFileSync(pkg.archivePath), publicKeyHex: pair.publicKeyHex, archivePath: pkg.archivePath };
+  };
+
+  const makeV2TagFixture = (targetTag, { includeSlot = true, tamperSlotInInfo = false } = {}) => {
+    const directory = mkdtempSync(path.join(tmpdir(), `cpamp-${targetTag}-`));
+    temporaryDirectories.push(directory);
+    const nativeDirectory = path.join(directory, 'native');
+    mkdirSync(nativeDirectory);
+    const pairing = v2PairingRecord();
+    pairing.version = targetTag;
+    for (const role of ['slim', 'full']) {
+      pairing.images[role].tag = v2DockerRoleTag(targetTag, role);
+      pairing.images[role].image_ref =
+        `${pairing.images[role].repository}:${pairing.images[role].tag}@${pairing.images[role].manifest_digest}`;
+    }
+    const slotName = v2SlotArchiveName(targetTag, 'amd64');
+    const slotFixture = includeSlot ? buildSignedSlotBytes(targetTag) : null;
+    const slotBytes = slotFixture ? slotFixture.bytes : Buffer.alloc(0);
+    const slotDigest = `sha256:${createHash('sha256').update(slotBytes).digest('hex')}`;
+    const slotInfo = includeSlot
+      ? {
+          assets: [
+            {
+              name: slotName,
+              platform: 'linux/amd64',
+              sha256: tamperSlotInInfo ? `sha256:${'f'.repeat(64)}` : slotDigest,
+              size: slotBytes.length,
+              min_base_epoch: 1,
+              schema_generation: 1,
+            },
+          ],
+        }
+      : undefined;
+    const info = generateReleaseInfo(targetTag, v2SourceCommit, v2Notes(), {
+      dryRun: true,
+      allowV2Beta: true,
+      pairing,
+      ...(slotInfo ? { slot: slotInfo } : {}),
+    });
+    const writtenFiles = [];
+    const recordAsset = (filePath, contents) => {
+      writeFileSync(filePath, contents);
+      writtenFiles.push({ filePath, contents });
+    };
+    recordAsset(path.join(directory, 'release-info.json'), JSON.stringify(info, null, 2));
+    for (const name of expectedReleaseAssetNames(targetTag, { dryRun: true, allowV2Beta: true })) {
+      if (name === 'release-info.json' || name === 'checksums.txt') continue;
+      const assetPath = [
+        'management.html',
+        'docker-compose.v2-embedded.yml',
+        'embedded-release-pairing.json',
+      ].includes(name)
+        ? path.join(directory, name)
+        : path.join(nativeDirectory, name);
+      const body =
+        name === 'embedded-release-pairing.json'
+          ? JSON.stringify(pairing)
+          : name === 'docker-compose.v2-embedded.yml'
+            ? v2ComposeContent
+            : name === slotName
+              ? slotBytes
+              : `${name}\n`;
+      recordAsset(assetPath, body);
+    }
+    if (includeSlot && targetTag === v2Tag) {
+      recordAsset(path.join(nativeDirectory, slotName), slotBytes);
+    }
+    writeFileSync(
+      path.join(directory, 'checksums.txt'),
+      writtenFiles
+        .map(
+          ({ filePath, contents }) =>
+            `${createHash('sha256').update(contents).digest('hex')}  ${path
+              .relative(directory, filePath)
+              .replaceAll('\\', '/')}\n`
+        )
+        .join('')
+    );
+    return { directory, slotName, slotPublicKeyHex: slotFixture?.publicKeyHex, slotArchivePath: slotFixture?.archivePath };
+  };
+
+  it('verifies v2.0.0-beta.2 seven-asset releases including distribution.slot binding', () => {
+    const beta2Tag = 'v2.0.0-beta.2';
+    const { directory, slotName, slotPublicKeyHex, slotArchivePath } = makeV2TagFixture(beta2Tag, { includeSlot: true });
+    expect(() =>
+      verifyLocalReleaseAssets({
+        tag: beta2Tag,
+        assetsDir: directory,
+        dryRun: true,
+        allowV2Beta: true,
+        allowEphemeralSlotKey: true,
+      })
+    ).toThrow(/Ephemeral slot key verification requires --slot-public-key/);
+    expect(
+      verifyLocalReleaseAssets({
+        tag: beta2Tag,
+        assetsDir: directory,
+        dryRun: true,
+        allowV2Beta: true,
+        allowEphemeralSlotKey: true,
+        slotPublicKeyHex,
+      })
+    ).toMatchObject({ mode: 'assets', expectedAssets: 7, complete: true });
+
+    const assets = buildExpectedReleaseAssets(directory, beta2Tag, {
+      dryRun: true,
+      allowV2Beta: true,
+      allowEphemeralSlotKey: true,
+      slotPublicKeyHex,
+    });
+    const release = v2Release({
+      assets,
+      overrides: { tag_name: beta2Tag },
+    });
+    expect(
+      verifyPublishedRelease({
+        release,
+        tag: beta2Tag,
+        prerelease: true,
+        body: '# v2 Beta\n',
+        assets,
+        allowV2Beta: true,
+        dryRun: true,
+      })
+    ).toMatchObject({ expectedAssets: 7, publishedAssets: 7, complete: true });
+    expect(
+      verifyPublishedReleaseMetadata({
+        release,
+        tag: beta2Tag,
+        prerelease: true,
+        body: '# v2 Beta\n',
+        allowV2Beta: true,
+        dryRun: true,
+      })
+    ).toMatchObject({ expectedAssets: 7, publishedAssets: 7, complete: true });
+
+    // Reject tampered slot digest in release-info.json
+    const { directory: badDigestDir, slotPublicKeyHex: badDigestPubKey } = makeV2TagFixture(beta2Tag, {
+      includeSlot: true,
+      tamperSlotInInfo: true,
+    });
+    expect(() =>
+      buildExpectedReleaseAssets(badDigestDir, beta2Tag, {
+        dryRun: true,
+        allowV2Beta: true,
+        allowEphemeralSlotKey: true,
+        slotPublicKeyHex: badDigestPubKey,
+      })
+    ).toThrow(/slot asset digest does not match/);
+    // Reject bit-flipped Ed25519 signature in ephemeral cpamp-dry-run-2026 slot archive
+    const bitFlipExtractDir = mkdtempSync(path.join(tmpdir(), 'cpamp-pubstate-bitflip-'));
+    temporaryDirectories.push(bitFlipExtractDir);
+    execFileSync('tar', ['-xzf', slotArchivePath, '-C', bitFlipExtractDir]);
+    const bitFlipSigPath = path.join(bitFlipExtractDir, 'slot-manifest.json.sig');
+    chmodSync(bitFlipSigPath, 0o644);
+    const bitFlipSigObj = JSON.parse(readFileSync(bitFlipSigPath, 'utf8'));
+    const bitFlipSigBytes = Buffer.from(bitFlipSigObj.signature, 'base64');
+    bitFlipSigBytes[0] ^= 0x01;
+    bitFlipSigObj.signature = bitFlipSigBytes.toString('base64');
+    writeFileSync(bitFlipSigPath, JSON.stringify(bitFlipSigObj, null, 2) + '\n');
+    chmodSync(bitFlipSigPath, 0o444);
+    const bitFlipArchiveDir = mkdtempSync(path.join(tmpdir(), 'cpamp-pubstate-bitflip-out-'));
+    temporaryDirectories.push(bitFlipArchiveDir);
+    const bitFlipArchivePath = path.join(bitFlipArchiveDir, slotName);
+    execFileSync('tar', ['-czf', bitFlipArchivePath, '-C', bitFlipExtractDir, '.']);
+    execFileSync('chmod', ['-R', 'u+rwX', bitFlipExtractDir]);
+    const bitFlipBytes = readFileSync(bitFlipArchivePath);
+    const bitFlipInfo = JSON.parse(readFileSync(path.join(directory, 'release-info.json'), 'utf8'));
+    bitFlipInfo.distribution.slot.assets[0].sha256 = `sha256:${createHash('sha256').update(bitFlipBytes).digest('hex')}`;
+    bitFlipInfo.distribution.slot.assets[0].size = bitFlipBytes.length;
+    const bitFlipDir = mkdtempSync(path.join(tmpdir(), 'cpamp-pubstate-bitflip-dir-'));
+    temporaryDirectories.push(bitFlipDir);
+    execFileSync('cp', ['-R', `${directory}/.`, bitFlipDir]);
+    writeFileSync(path.join(bitFlipDir, 'release-info.json'), JSON.stringify(bitFlipInfo, null, 2));
+    writeFileSync(path.join(bitFlipDir, 'native', slotName), bitFlipBytes);
+    const bitFlipChecksums = readFileSync(path.join(bitFlipDir, 'checksums.txt'), 'utf8')
+      .trimEnd()
+      .split('\n')
+      .map((line) => {
+        const rel = line.slice(66);
+        const abs = path.join(bitFlipDir, rel);
+        return `${createHash('sha256').update(readFileSync(abs)).digest('hex')}  ${rel}\n`;
+      })
+      .join('');
+    writeFileSync(path.join(bitFlipDir, 'checksums.txt'), bitFlipChecksums);
+    expect(() =>
+      verifyLocalReleaseAssets({
+        tag: beta2Tag,
+        assetsDir: bitFlipDir,
+        dryRun: true,
+        allowV2Beta: true,
+        allowEphemeralSlotKey: true,
+        slotPublicKeyHex,
+      })
+    ).toThrow(/signature verification failed/);
+
+    // Reject missing slot asset on disk in beta.2
+    rmSync(path.join(directory, 'native', slotName));
+    expect(() =>
+      buildExpectedReleaseAssets(directory, beta2Tag, {
+        dryRun: true,
+        allowV2Beta: true,
+        allowEphemeralSlotKey: true,
+        slotPublicKeyHex,
+      })
+    ).toThrow(/Missing expected v2 release asset/);
+
+    // Modifying 1 byte inside bin/cpa-manager-plus without re-signing slot-manifest.json
+    // must fail verifyLocalReleaseAssets even when release-info.json & checksums.txt match the re-gzipped archive
+    const modTar = Buffer.from(gunzipSync(readFileSync(slotArchivePath)));
+    let offset = 0;
+    let flipped = false;
+    while (offset + 512 <= modTar.length) {
+      const hdr = modTar.subarray(offset, offset + 512);
+      if (hdr.every((b) => b === 0)) break;
+      const name = hdr.subarray(0, 100).toString('utf8').replace(/\0.*$/, '');
+      const size = Number.parseInt(hdr.subarray(124, 136).toString('utf8').replace(/\0.*$/, '').trim() || '0', 8);
+      const dataStart = offset + 512;
+      if (name === 'bin/cpa-manager-plus') {
+        modTar[dataStart] ^= 0x01;
+        flipped = true;
+        break;
+      }
+      offset = dataStart + Math.ceil(size / 512) * 512;
+    }
+    expect(flipped).toBe(true);
+    const modBytes = gzipSync(modTar);
+    const modDir = mkdtempSync(path.join(tmpdir(), 'cpamp-pubstate-modbyte-dir-'));
+    temporaryDirectories.push(modDir);
+    execFileSync('cp', ['-R', `${directory}/.`, modDir]);
+    const modInfo = JSON.parse(readFileSync(path.join(modDir, 'release-info.json'), 'utf8'));
+    modInfo.distribution.slot.assets[0].sha256 = `sha256:${createHash('sha256').update(modBytes).digest('hex')}`;
+    modInfo.distribution.slot.assets[0].size = modBytes.length;
+    writeFileSync(path.join(modDir, 'release-info.json'), JSON.stringify(modInfo, null, 2));
+    writeFileSync(path.join(modDir, 'native', slotName), modBytes);
+    const modChecksums = readFileSync(path.join(modDir, 'checksums.txt'), 'utf8')
+      .trimEnd()
+      .split('\n')
+      .map((line) => {
+        const rel = line.slice(66);
+        const abs = path.join(modDir, rel);
+        return `${createHash('sha256').update(readFileSync(abs)).digest('hex')}  ${rel}\n`;
+      })
+      .join('');
+    writeFileSync(path.join(modDir, 'checksums.txt'), modChecksums);
+    expect(() =>
+      verifyLocalReleaseAssets({
+        tag: beta2Tag,
+        assetsDir: modDir,
+        dryRun: true,
+        allowV2Beta: true,
+        allowEphemeralSlotKey: true,
+        slotPublicKeyHex,
+      })
+    ).toThrow(/sha256 mismatch/);
+  });
+
+  it('accepts optional 7-asset slot publication for v2.0.0-beta.1 and rejects half-wired slot state', () => {
+    const { directory, slotName, slotPublicKeyHex } = makeV2TagFixture(v2Tag, { includeSlot: true });
+    expect(
+      verifyLocalReleaseAssets({
+        tag: v2Tag,
+        assetsDir: directory,
+        dryRun: true,
+        allowV2Beta: true,
+        allowEphemeralSlotKey: true,
+        slotPublicKeyHex,
+      })
+    ).toMatchObject({ mode: 'assets', expectedAssets: 7, complete: true });
+    const assets = buildExpectedReleaseAssets(directory, v2Tag, {
+      dryRun: true,
+      allowV2Beta: true,
+      allowEphemeralSlotKey: true,
+      slotPublicKeyHex,
+    });
+    expect(
+      verifyPublishedReleaseMetadata({
+        release: v2Release({ assets }),
+        tag: v2Tag,
+        prerelease: true,
+        body: '# v2 Beta\n',
+        allowV2Beta: true,
+        dryRun: true,
+      })
+    ).toMatchObject({ expectedAssets: 7, publishedAssets: 7, complete: true });
+
+    // Half-wired: slot file on disk when release-info.json omits distribution.slot
+    const sixFileDir = makeV2ReleaseFixture();
+    writeFileSync(path.join(sixFileDir, 'native', slotName), 'extra-slot\n');
+    expect(() =>
+      buildExpectedReleaseAssets(sixFileDir, v2Tag, { dryRun: true, allowV2Beta: true })
+    ).toThrow(/lacks distribution\.slot/);
   });
 });

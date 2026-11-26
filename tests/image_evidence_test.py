@@ -586,6 +586,67 @@ class ImageEvidenceTests(unittest.TestCase):
             raw = files[evidence.notice_path(component, "inventory.json", "native")]
             self.assertEqual(inventory["components"][component]["inventorySHA256"],
                              evidence.digest(raw))
+        base_abi_path = "share/cpamp/release/base-abi.json"
+        self.assertIn(base_abi_path, files)
+        self.assertEqual(json.loads(files[base_abi_path]),
+                         {"schema_version": 1, "base_epoch": 1, "platform": "linux/amd64"})
+
+    def test_base_abi_generated_and_validated_for_image_and_native_roles(self):
+        for role, expected_path in (
+            ("cpamp", "/usr/local/share/cpamp/release/base-abi.json"),
+            ("native", "share/cpamp/release/base-abi.json"),
+        ):
+            with self.subTest(role=role):
+                files, _, provenance = self.fixture(role)
+                self.assertIn(expected_path, files)
+                raw = files[expected_path]
+                self.assertEqual(raw.decode("utf-8"), json.dumps(
+                    {"base_epoch": 1, "platform": "linux/amd64", "schema_version": 1},
+                    indent=2, sort_keys=True,
+                ) + "\n")
+                evidence.validate_provenance(provenance, role, VERSION, SHA, files.__getitem__,
+                                             require_base_abi=True)
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    target_file = root / expected_path.lstrip("/")
+                    source_inv = root / "_source_inv.json"
+                    source_inv.write_bytes(SOURCE_BYTES)
+                    for rel, data in base_files(role).items():
+                        p = root / rel.lstrip("/")
+                        p.parent.mkdir(parents=True, exist_ok=True)
+                        p.write_bytes(data)
+                    # Seed minimal notices as make_evidence does
+                    for rel, data in files.items():
+                        if rel.startswith(evidence.LAYOUTS[evidence.ROLE_TARGET[role]]["licenseRoot"]):
+                            p = root / rel.lstrip("/")
+                            p.parent.mkdir(parents=True, exist_ok=True)
+                            p.write_bytes(data)
+                    evidence.build(root, role, VERSION, SHA, "linux/amd64", source_inv)
+                    self.assertEqual((target_file.stat().st_mode & 0o777), 0o444)
+
+    def test_base_abi_validation_rejects_tampered_or_missing_metadata(self):
+        for role, abi_path in (
+            ("cpamp", "/usr/local/share/cpamp/release/base-abi.json"),
+            ("native", "share/cpamp/release/base-abi.json"),
+        ):
+            files, _, provenance = self.fixture(role)
+            missing_files = {k: v for k, v in files.items() if k != abi_path}
+            with self.subTest(role=role, case="missing"), self.assertRaisesRegex(ValueError, "missing base-abi"):
+                evidence.validate_provenance(provenance, role, VERSION, SHA, missing_files.__getitem__,
+                                             require_base_abi=True)
+            bad_cases = (
+                ({"schema_version": 2, "base_epoch": 1, "platform": "linux/amd64"}, "schema_version"),
+                ({"schema_version": 1, "base_epoch": 0, "platform": "linux/amd64"}, "base_epoch"),
+                ({"schema_version": 1, "base_epoch": True, "platform": "linux/amd64"}, "base_epoch"),
+                ({"schema_version": 1, "base_epoch": 1, "platform": "darwin/amd64"}, "base-abi platform"),
+                ({"schema_version": 1, "base_epoch": 1, "platform": "linux/amd64", "extra": 1}, "schema"),
+            )
+            for payload, pattern in bad_cases:
+                tampered = dict(files)
+                tampered[abi_path] = evidence.encoded(payload)
+                with self.subTest(role=role, case=pattern), self.assertRaisesRegex(ValueError, pattern):
+                    evidence.validate_provenance(provenance, role, VERSION, SHA, tampered.__getitem__,
+                                                 require_base_abi=True)
 
     def test_native_rejects_unsupported_platforms(self):
         files, _, provenance = self.fixture("native")
@@ -779,6 +840,8 @@ class DockerContracts(unittest.TestCase):
                 self.assertEqual(result.returncode == 0, success, result.stderr)
         self.assertIn('RUN VERSION="$VERSION" npm run build', text)
         self.assertIn('RUN go version -m /out/cpa-manager-plus | grep -F "BuildDate="', text)
+        self.assertIn("-X main.Version=$VERSION -X main.SourceCommit=$SOURCE_COMMIT", text)
+        self.assertIn("/image/usr/local/share/cpamp/release/base-abi.json", text)
 
     def test_every_network_or_build_stage_validates_identity_first(self):
         stages = self.stages((ROOT / "Dockerfile").read_text())

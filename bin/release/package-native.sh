@@ -206,7 +206,8 @@ verify_native_binary_toolchain() {
   for binary in \
     cpa-manager-plus \
     cpa-manager-plus-ingress \
-    cpa-manager-plus-runtime-supervisor; do
+    cpa-manager-plus-runtime-supervisor \
+    cpamp-launcher; do
     if ! version="$(go version -m "${package_dir}/bin/${binary}" 2>/dev/null | awk 'NR == 1 {print $NF}')" ||
       [ -z "${version}" ]; then
       echo "Cannot read the Go toolchain embedded in bin/${binary}" >&2
@@ -472,11 +473,18 @@ package_v2_linux_amd64() {
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" \
       -o "${package_dir}/bin/cpa-manager-plus-runtime-supervisor" ./cmd/cpamp-runtime-supervisor
   )
+  (
+    cd "${supervisor_src}"
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+      -ldflags "-s -w -X main.Version=${version} -X main.SourceCommit=${source_commit}" \
+      -o "${package_dir}/bin/cpamp-launcher" ./cmd/cpamp-launcher
+  )
 
   chmod 0755 \
     "${package_dir}/bin/cpa-manager-plus" \
     "${package_dir}/bin/cpa-manager-plus-ingress" \
-    "${package_dir}/bin/cpa-manager-plus-runtime-supervisor"
+    "${package_dir}/bin/cpa-manager-plus-runtime-supervisor" \
+    "${package_dir}/bin/cpamp-launcher"
 
   # Native license and provenance evidence, mirroring the image contract.
   cp "${repo_root}/LICENSE" "${package_dir}/share/licenses/cpamp/LICENSE"
@@ -488,6 +496,8 @@ package_v2_linux_amd64() {
   verify_native_binary_toolchain "${package_dir}"
   collect_native_licenses "${package_dir}"
   write_native_provenance "${package_dir}" "${source_commit}"
+  test -s "${package_dir}/share/cpamp/release/base-abi.json"
+  chmod 0444 "${package_dir}/share/cpamp/release/base-abi.json"
 
   # Install launcher, control script, systemd unit, and docs
   cp "${native_script_src}/cpa-manager-plus-launcher" "${package_dir}/bin/cpa-manager-plus-launcher"

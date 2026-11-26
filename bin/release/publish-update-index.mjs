@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { expectedReleaseAssetNames, verifyLocalReleaseAssets } from './verify-published-release.mjs';
+import { resolveSlotPublicKeyHex } from './cpamp-slot-sign.mjs';
 import {
   validateInfo,
   resolveChannels,
@@ -154,7 +155,7 @@ async function readReleaseInfo(response, asset) {
 }
 
 // Verify the complete local asset set before considering a v2 candidate.
-const readCandidateInfo = (assetsDir) => {
+const readCandidateInfo = (assetsDir, options = {}) => {
   const infoPath = path.join(assetsDir, 'release-info.json');
   if (!existsSync(infoPath))
     throw new Error('Candidate assets directory is missing release-info.json');
@@ -163,11 +164,26 @@ const readCandidateInfo = (assetsDir) => {
   if (info?.schema_version !== 2)
     throw new Error('Candidate assets are only supported for v2 Beta');
   const tag = info.release?.version;
+  const hasSlotPub = options.slotPublicKeyHex !== undefined && options.slotPublicKeyHex !== null;
+  const hasPub = options.publicKeyHex !== undefined && options.publicKeyHex !== null;
+  if (
+    hasSlotPub &&
+    hasPub &&
+    String(options.slotPublicKeyHex).trim().toLowerCase() !==
+      String(options.publicKeyHex).trim().toLowerCase()
+  ) {
+    throw new Error('slotPublicKeyHex and publicKeyHex disagree');
+  }
+  const resolvedSlotPublicKeyHex = hasSlotPub ? options.slotPublicKeyHex : options.publicKeyHex;
   verifyLocalReleaseAssets({
     tag,
     assetsDir,
     dryRun: true,
     allowV2Beta: true,
+    allowEphemeralSlotKey: options.allowEphemeralSlotKey === true,
+    ...(resolvedSlotPublicKeyHex !== undefined
+      ? { slotPublicKeyHex: resolvedSlotPublicKeyHex }
+      : {}),
   });
   const digest = 'sha256:' + createHash('sha256').update(rawBytes).digest('hex');
   return { info, digest };
@@ -180,6 +196,9 @@ export async function publishUpdateIndex({
   dryRun = env.DRY_RUN === 'true',
   allowV2Beta = false,
   allowV2BetaDryRun = false,
+  allowEphemeralSlotKey = false,
+  slotPublicKeyHex,
+  publicKeyHex,
   candidateAssetsDir,
   candidateInfoPath,
 } = {}) {
@@ -187,6 +206,12 @@ export async function publishUpdateIndex({
   const dryRunValue = assertBooleanOption({ dryRun }, 'dryRun');
   const allowBeta = assertBooleanOption({ allowV2Beta }, 'allowV2Beta');
   const legacyRehearsal = assertBooleanOption({ allowV2BetaDryRun }, 'allowV2BetaDryRun');
+  const allowEphemeralSlotKeyValue = assertBooleanOption(
+    { allowEphemeralSlotKey },
+    'allowEphemeralSlotKey'
+  );
+  if (allowEphemeralSlotKeyValue && !dryRunValue)
+    throw new Error('--allow-ephemeral-slot-key requires --dry-run');
   if ((candidateAssetsDir !== undefined || candidateInfoPath !== undefined) && !dryRunValue)
     throw new Error('Candidate release inputs require --dry-run');
   if (legacyRehearsal && !dryRunValue)
@@ -212,7 +237,24 @@ export async function publishUpdateIndex({
     if (isV2Version(tag)) throw new Error('1.x maintenance cannot change v2 withdrawals');
   }
   // Local files first: a tampered candidate must fail before any GitHub request.
-  const candidateRecord = candidateAssetsDir ? readCandidateInfo(candidateAssetsDir) : null;
+  const hasSlotPub = slotPublicKeyHex !== undefined && slotPublicKeyHex !== null;
+  const hasPub = publicKeyHex !== undefined && publicKeyHex !== null;
+  if (
+    hasSlotPub &&
+    hasPub &&
+    String(slotPublicKeyHex).trim().toLowerCase() !== String(publicKeyHex).trim().toLowerCase()
+  ) {
+    throw new Error('slotPublicKeyHex and publicKeyHex disagree');
+  }
+  const effectiveSlotPublicKeyHex = hasSlotPub ? slotPublicKeyHex : publicKeyHex;
+  const candidateRecord = candidateAssetsDir
+    ? readCandidateInfo(candidateAssetsDir, {
+        allowEphemeralSlotKey: allowEphemeralSlotKeyValue,
+        ...(effectiveSlotPublicKeyHex !== undefined
+          ? { slotPublicKeyHex: effectiveSlotPublicKeyHex }
+          : {}),
+      })
+    : null;
   if (env.GITHUB_REPOSITORY !== 'seakee/CPA-Manager-Plus') throw new Error('Unexpected repository');
   const token = env.GITHUB_TOKEN;
   if (!token) throw new Error('Missing GitHub token');
@@ -458,7 +500,17 @@ const parseCliOptions = (argumentsList) => {
     if (argument === '--dry-run') options.dryRun = true;
     else if (argument === '--allow-v2-beta') options.allowV2Beta = true;
     else if (argument === '--allow-v2-beta-dry-run') options.allowV2BetaDryRun = true;
-    else if (argument === '--candidate-assets-dir') {
+    else if (argument === '--allow-ephemeral-slot-key') options.allowEphemeralSlotKey = true;
+    else if (argument === '--slot-public-key') {
+      const value = argumentsList[++index];
+      if (!value || value.startsWith('--')) {
+        throw new Error('--slot-public-key requires a 64-hex string or public key file path');
+      }
+      if (options.slotPublicKeyHex !== undefined) {
+        throw new Error('Duplicate argument: --slot-public-key');
+      }
+      options.slotPublicKeyHex = resolveSlotPublicKeyHex(value);
+    } else if (argument === '--candidate-assets-dir') {
       const value = argumentsList[++index];
       if (!value) throw new Error('--candidate-assets-dir requires a path');
       options.candidateAssetsDir = value;
@@ -484,6 +536,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       dryRun,
       allowV2Beta: options.allowV2Beta,
       allowV2BetaDryRun: options.allowV2BetaDryRun,
+      allowEphemeralSlotKey: options.allowEphemeralSlotKey,
+      slotPublicKeyHex: options.slotPublicKeyHex,
       candidateAssetsDir: options.candidateAssetsDir,
       candidateInfoPath: options.candidateInfoPath,
     })

@@ -80,14 +80,22 @@ export function v2ReleaseInfoPath(tag) {
 // #1129 deliberately renames the v2 Native package so it can never collide with
 // a 1.x schema-1 asset; the 1.x `cpa-manager-plus_v*` namespace is forbidden.
 export const v2NativeArchiveName = (tag) => `cpa-manager-plus-native-v2_${tag}_linux_amd64.tar.gz`;
+export const v2SlotArchiveName = (tag, arch = 'amd64') => {
+  if (!['amd64', 'arm64'].includes(arch)) {
+    throw new Error(`Unsupported v2 slot architecture: ${arch}`);
+  }
+  return `cpamp-slot_${tag}_linux_${arch}.tar.gz`;
+};
+export const v2SlotRequiresAsset = (tag) =>
+  isV2Version(tag) && compareVersions(tag, 'v2.0.0-beta.2') >= 0;
 
 const sha256Pattern = /^sha256:[0-9a-f]{64}$/;
 const sourceCommitPattern = /^[0-9a-f]{40}$/;
 const v2NativePattern =
   /^cpa-manager-plus-native-v2_(.+)_(darwin|linux|windows)_(amd64|arm64)\.(?:tar\.gz|zip)$/;
+const v2SlotPattern = /^cpamp-slot_(.+)_linux_(amd64|arm64)\.tar\.gz$/;
 const legacyNativePattern =
   /^cpa-manager-plus_v.+_(darwin|linux|windows)_(amd64|arm64)\.(?:tar\.gz|zip)$/;
-
 const assertSha256 = (value, label) => {
   if (typeof value !== 'string' || !sha256Pattern.test(value)) throw new Error(`Invalid ${label}`);
 };
@@ -139,14 +147,18 @@ export function assertSupportedVersion(raw, options = {}) {
 export const expectedV2AssetNames = (tag) => {
   assertSupportedVersion(tag, { allowV2Beta: true });
   if (!isV2Version(tag)) throw new Error('v2 asset set requires a v2.x.y-beta.N release');
-  return [
+  const assets = [
     'checksums.txt',
     'release-info.json',
     v2EmbeddedComposeFilename,
     v2PairingFilename,
     'management.html',
     v2NativeArchiveName(tag),
-  ].sort();
+  ];
+  if (v2SlotRequiresAsset(tag)) {
+    assets.push(v2SlotArchiveName(tag, 'amd64'));
+  }
+  return assets.sort();
 };
 
 /**
@@ -170,13 +182,24 @@ export function assertV2AssetSet(names, tag) {
       if (native[2] !== 'linux' || native[3] !== 'amd64')
         throw new Error(`Unsupported v2 native platform: ${name}`);
     }
+    const slot = v2SlotPattern.exec(name);
+    if (slot) {
+      if (slot[1] !== tag) throw new Error(`v2 slot asset version mismatch: ${name}`);
+      if (slot[2] !== 'amd64')
+        throw new Error(`Unsupported v2 slot platform: ${name}`);
+    }
   }
   const expected = expectedV2AssetNames(tag);
-  if (list.length !== expected.length || list.some((name, index) => name !== expected[index]))
-    throw new Error(
-      `v2 release asset set mismatch: expected ${expected.join(', ')}, received ${list.join(', ')}`
-    );
-  return list;
+  const matchesExact = (candidate) =>
+    list.length === candidate.length && list.every((name, index) => name === candidate[index]);
+  if (matchesExact(expected)) return list;
+  if (!v2SlotRequiresAsset(tag)) {
+    const withOptionalSlot = [...expected, v2SlotArchiveName(tag, 'amd64')].sort();
+    if (matchesExact(withOptionalSlot)) return list;
+  }
+  throw new Error(
+    `v2 release asset set mismatch: expected ${expected.join(', ')}, received ${list.join(', ')}`
+  );
 }
 
 /**
@@ -279,6 +302,56 @@ export function validateV2Pairing(pairing, { tag, sourceCommit }) {
     throw new Error('v2 role manifest digests must be distinct');
   return pairing;
 }
+export function validateV2SlotDistribution(slot, tag) {
+  if (slot === undefined) {
+    if (v2SlotRequiresAsset(tag)) {
+      throw new Error(`v2 slot distribution is required for ${tag}`);
+    }
+    return undefined;
+  }
+  if (!slot || typeof slot !== 'object' || Array.isArray(slot)) {
+    throw new Error('Invalid v2 slot distribution');
+  }
+  if (!Array.isArray(slot.assets) || slot.assets.length === 0) {
+    throw new Error('v2 slot distribution requires a non-empty assets array');
+  }
+  const seenNames = new Set();
+  const seenPlatforms = new Set();
+  for (const asset of slot.assets) {
+    if (!asset || typeof asset !== 'object' || Array.isArray(asset)) {
+      throw new Error('Invalid v2 slot asset entry');
+    }
+    const match = typeof asset.name === 'string' ? v2SlotPattern.exec(asset.name) : null;
+    if (!match) {
+      throw new Error(`Invalid v2 slot asset name: ${String(asset.name)}`);
+    }
+    if (match[1] !== tag) {
+      throw new Error(`v2 slot asset version mismatch: ${asset.name}`);
+    }
+    const expectedPlatform = `linux/${match[2]}`;
+    if (asset.platform !== expectedPlatform) {
+      throw new Error(
+        `v2 slot asset platform mismatch for ${asset.name}: expected ${expectedPlatform}`
+      );
+    }
+    if (seenNames.has(asset.name) || seenPlatforms.has(asset.platform)) {
+      throw new Error(`Duplicate v2 slot asset or platform: ${asset.name}`);
+    }
+    seenNames.add(asset.name);
+    seenPlatforms.add(asset.platform);
+    assertSha256(asset.sha256, 'v2 slot asset digest');
+    if (!Number.isSafeInteger(asset.size) || asset.size <= 0) {
+      throw new Error(`Invalid v2 slot asset size for ${asset.name}`);
+    }
+    if (!Number.isSafeInteger(asset.min_base_epoch) || asset.min_base_epoch < 1) {
+      throw new Error(`Invalid v2 slot asset min_base_epoch for ${asset.name}`);
+    }
+    if (!Number.isSafeInteger(asset.schema_generation) || asset.schema_generation < 1) {
+      throw new Error(`Invalid v2 slot asset schema_generation for ${asset.name}`);
+    }
+  }
+  return slot;
+}
 
 export function validateV2Info(info, tag) {
   const v = assertSupportedVersion(tag, { allowV2Beta: true });
@@ -370,7 +443,7 @@ export function validateV2Info(info, tag) {
   if (info.distribution?.compose?.filename !== v2EmbeddedComposeFilename)
     throw new Error('Invalid v2 compose distribution');
   assertSha256(info.distribution.compose?.sha256, 'v2 compose digest');
-
+  validateV2SlotDistribution(info.distribution?.slot, tag);
   const pairing = info.pairing;
   if (!pairing || pairing.filename !== v2PairingFilename)
     throw new Error('Invalid v2 pairing reference');
@@ -389,7 +462,10 @@ export function validateV2Info(info, tag) {
  * the pairing record, and every image digest must agree with `release-info.json`.
  * Callers pass what they actually have on disk (or in the published asset list).
  */
-export function assertV2AssetBindings(info, { composeSha256, composeSize, pairing }) {
+export function assertV2AssetBindings(
+  info,
+  { composeSha256, composeSize, pairing, slotAssets }
+) {
   if (typeof composeSha256 !== 'string' || !sha256Pattern.test(composeSha256))
     throw new Error('Invalid v2 compose asset digest');
   if (composeSha256 !== info.distribution.compose.sha256)
@@ -418,6 +494,38 @@ export function assertV2AssetBindings(info, { composeSha256, composeSize, pairin
     );
     if (digests.size !== 1 || !digests.has(validated.images[role].manifest_digest))
       throw new Error(`v2 pairing ${role} digest does not match release info`);
+  }
+  if (slotAssets !== undefined) {
+    if (!Array.isArray(slotAssets)) {
+      throw new Error('Invalid v2 slotAssets binding list');
+    }
+    const slotMetadata = info.distribution?.slot;
+    if (slotAssets.length > 0 && !slotMetadata) {
+      throw new Error('v2 slot asset is present on disk but release info lacks distribution.slot');
+    }
+    if (slotMetadata) {
+      const byName = new Map(slotMetadata.assets.map((asset) => [asset.name, asset]));
+      const diskNames = new Set();
+      for (const disk of slotAssets) {
+        const diskDigest = disk.sha256 ?? disk.digest;
+        const meta = byName.get(disk.name);
+        if (!meta) {
+          throw new Error(`v2 slot asset missing from release info distribution.slot: ${disk.name}`);
+        }
+        if (diskDigest !== meta.sha256) {
+          throw new Error(`v2 slot asset digest does not match release info: ${disk.name}`);
+        }
+        if (disk.size !== meta.size) {
+          throw new Error(`v2 slot asset size does not match release info: ${disk.name}`);
+        }
+        diskNames.add(disk.name);
+      }
+      for (const meta of slotMetadata.assets) {
+        if (!diskNames.has(meta.name)) {
+          throw new Error(`v2 release info distribution.slot asset missing on disk: ${meta.name}`);
+        }
+      }
+    }
   }
   return info;
 }

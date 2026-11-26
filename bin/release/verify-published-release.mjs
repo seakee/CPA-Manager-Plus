@@ -11,11 +11,15 @@ import {
   parseVersion,
   v2EmbeddedComposeFilename,
   v2PairingFilename,
+  v2SlotArchiveName,
+  v2SlotRequiresAsset,
 } from './update-contract.mjs';
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseReleaseTag } from './validate-release.mjs';
+import { extractSlotMetadataFromArchive } from './generate-release-info.mjs';
+import { resolveSlotPublicKeyHex } from './cpamp-slot-sign.mjs';
 
 const fail = (message) => {
   throw new Error(message);
@@ -59,8 +63,18 @@ const assetRecord = (filePath) => {
   };
 };
 
-const buildExpectedV2ReleaseAssets = (assetsDir, tag) => {
-  const expected = expectedV2AssetNames(tag);
+const buildExpectedV2ReleaseAssets = (assetsDir, tag, { requireOptionalSlot = false } = {}) => {
+  const expected = [...expectedV2AssetNames(tag)];
+  if (!v2SlotRequiresAsset(tag)) {
+    const optionalSlotName = v2SlotArchiveName(tag, 'amd64');
+    const optionalSlotExists =
+      existsSync(path.join(assetsDir, optionalSlotName)) ||
+      existsSync(path.join(assetsDir, 'native', optionalSlotName));
+    if (requireOptionalSlot || optionalSlotExists) {
+      expected.push(optionalSlotName);
+      expected.sort();
+    }
+  }
   const locate = (name) => {
     const candidates = [path.join(assetsDir, name), path.join(assetsDir, 'native', name)].filter(
       (candidate) => existsSync(candidate)
@@ -100,19 +114,65 @@ const buildExpectedV2ReleaseAssets = (assetsDir, tag) => {
 export const buildExpectedReleaseAssets = (assetsDir, tag, options = {}) => {
   // Gate M3 at the exported boundary, before the first readFileSync.
   assertV2Rehearsal(tag, options);
+  const dryRun = assertBooleanOption(options, 'dryRun');
+  const allowEphemeralSlotKey = assertBooleanOption(options, 'allowEphemeralSlotKey');
+  if (allowEphemeralSlotKey && !dryRun) {
+    fail('--allow-ephemeral-slot-key requires --dry-run');
+  }
   if (assertSupportedVersion(tag, options).core[0] === '2') {
     const info = JSON.parse(readFileSync(path.join(assetsDir, 'release-info.json'), 'utf8'));
     validateInfo(info, tag, options);
-    const assets = buildExpectedV2ReleaseAssets(assetsDir, tag);
+    const assets = buildExpectedV2ReleaseAssets(assetsDir, tag, {
+      requireOptionalSlot: info.distribution?.slot !== undefined,
+    });
     const byName = new Map(assets.map((asset) => [asset.name, asset]));
     const compose = byName.get(v2EmbeddedComposeFilename);
     const pairingRecord = byName.get(v2PairingFilename);
     if (!compose || !pairingRecord) fail('v2 release assets are missing the compose pairing');
+    const slotFileAssets = assets.filter((asset) =>
+      /^cpamp-slot_.+_linux_(amd64|arm64)\.tar\.gz$/.test(asset.name)
+    );
+    const slotAssets = slotFileAssets.map((asset) => ({
+      name: asset.name,
+      sha256: asset.digest,
+      size: asset.size,
+    }));
     assertV2AssetBindings(info, {
       composeSha256: compose.digest,
       composeSize: compose.size,
       pairing: JSON.parse(readFileSync(pairingRecord.filePath, 'utf8')),
+      slotAssets,
     });
+    const slotPubHex =
+      options.slotPublicKeyHex !== undefined && options.slotPublicKeyHex !== null
+        ? options.slotPublicKeyHex
+        : options.publicKeyHex;
+    if (
+      options.slotPublicKeyHex !== undefined &&
+      options.slotPublicKeyHex !== null &&
+      options.publicKeyHex !== undefined &&
+      options.publicKeyHex !== null &&
+      String(options.slotPublicKeyHex).trim().toLowerCase() !==
+        String(options.publicKeyHex).trim().toLowerCase()
+    ) {
+      fail('slotPublicKeyHex and publicKeyHex disagree');
+    }
+    for (const asset of slotFileAssets) {
+      const extracted = extractSlotMetadataFromArchive(asset.filePath, tag, {
+        dryRun,
+        allowEphemeralSlotKey,
+        ...(slotPubHex !== undefined ? { publicKeyHex: slotPubHex } : {}),
+      });
+      const declared = info.distribution?.slot?.assets?.find((entry) => entry.name === asset.name);
+      if (
+        !declared ||
+        declared.platform !== extracted.platform ||
+        declared.min_base_epoch !== extracted.min_base_epoch ||
+        declared.schema_generation !== extracted.schema_generation
+      ) {
+        fail(`Slot archive ${asset.name} manifest metadata does not match release-info.json`);
+      }
+    }
     return assets;
   }
   validateInfo(JSON.parse(readFileSync(path.join(assetsDir, 'release-info.json'), 'utf8')), tag);
@@ -139,8 +199,22 @@ export const buildExpectedReleaseAssets = (assetsDir, tag, options = {}) => {
   return assets;
 };
 
-export const verifyLocalReleaseAssets = ({ tag, assetsDir, dryRun = false, allowV2Beta = false }) => {
-  const assets = buildExpectedReleaseAssets(assetsDir, tag, { dryRun, allowV2Beta });
+export const verifyLocalReleaseAssets = ({
+  tag,
+  assetsDir,
+  dryRun = false,
+  allowV2Beta = false,
+  allowEphemeralSlotKey = false,
+  slotPublicKeyHex,
+  publicKeyHex,
+}) => {
+  const assets = buildExpectedReleaseAssets(assetsDir, tag, {
+    dryRun,
+    allowV2Beta,
+    allowEphemeralSlotKey,
+    ...(slotPublicKeyHex !== undefined ? { slotPublicKeyHex } : {}),
+    ...(publicKeyHex !== undefined ? { publicKeyHex } : {}),
+  });
   const checksums = assets.find((asset) => asset.name === 'checksums.txt');
   const relativeAssetPath = (asset) =>
     path.relative(assetsDir, asset.filePath).replaceAll('\\', '/');
@@ -335,12 +409,12 @@ export const verifyPublishedReleaseMetadata = ({
   assertV2Rehearsal(tag, { allowV2Beta, dryRun });
   verifyReleaseIdentity({ release, tag, prerelease, body, draft: false, allowV2Beta });
   const actualAssets = sortedPublishedAssets(release);
-  if (isV2Version(tag))
-    assertV2AssetSet(
-      actualAssets.map((asset) => asset.name),
-      tag
-    );
-  const expectedNames = expectedReleaseAssetNames(tag, { allowV2Beta });
+  const expectedNames = isV2Version(tag)
+    ? assertV2AssetSet(
+        actualAssets.map((asset) => asset.name),
+        tag
+      )
+    : expectedReleaseAssetNames(tag, { allowV2Beta });
   if (actualAssets.length !== expectedNames.length) {
     fail(
       `Existing GitHub Release asset count mismatch: expected ${expectedNames.length}, received ${actualAssets.length}`
@@ -374,7 +448,10 @@ const parseArguments = (argumentsList) => {
     const key = name.slice(2);
     if (options[key] !== undefined) fail(`Duplicate argument: ${name}`);
     const next = argumentsList[index + 1];
-    if (['dry-run', 'allow-v2-beta'].includes(key) && (next === undefined || next.startsWith('--')))
+    if (
+      ['dry-run', 'allow-v2-beta', 'allow-ephemeral-slot-key'].includes(key) &&
+      (next === undefined || next.startsWith('--'))
+    )
       options[key] = 'true';
     else {
       if (next === undefined || next.startsWith('--')) fail(`Missing value for ${name}`);
@@ -408,6 +485,8 @@ const runCli = () => {
     'mode',
     'allow-missing-assets',
     'allow-v2-beta',
+    'allow-ephemeral-slot-key',
+    'slot-public-key',
     'dry-run',
     'result-path',
   ]);
@@ -417,7 +496,10 @@ const runCli = () => {
   const tag = requiredOption(options, 'tag');
   const allowV2Beta = booleanOption(options, 'allow-v2-beta');
   const dryRun = booleanOption(options, 'dry-run', process.env.DRY_RUN === 'true');
-  // Gate M3: v2 verification is a rehearsal only, exactly like the producers.
+  const allowEphemeralSlotKey = booleanOption(options, 'allow-ephemeral-slot-key');
+  if (allowEphemeralSlotKey && !dryRun) {
+    fail('--allow-ephemeral-slot-key requires --dry-run');
+  }
   // Dry-run scope for v2: zero GitHub Release, update-index, image-tag and
   // registry writes. The only permitted side effect is the local `--result-path`
   // diagnostic report (stdout remains the authoritative result).
@@ -425,11 +507,19 @@ const runCli = () => {
     fail(
       'v2 release verification is fail-closed (Gate M3); DRY_RUN and --allow-v2-beta are both required'
     );
+  const slotPublicKeyHex =
+    options['slot-public-key'] !== undefined
+      ? resolveSlotPublicKeyHex(options['slot-public-key'])
+      : undefined;
   if (options.mode === 'assets') {
     const result = verifyLocalReleaseAssets({
-      tag, assetsDir: requiredOption(options, 'assets-dir'), dryRun, allowV2Beta,
+      tag,
+      assetsDir: requiredOption(options, 'assets-dir'),
+      dryRun,
+      allowV2Beta,
+      allowEphemeralSlotKey,
+      ...(slotPublicKeyHex !== undefined ? { slotPublicKeyHex } : {}),
     });
-    if (options['result-path']) writeFileSync(options['result-path'], `${JSON.stringify(result, null, 2)}\n`);
     console.log(JSON.stringify(result, null, 2));
     return;
   }
@@ -455,6 +545,8 @@ const runCli = () => {
             assets: buildExpectedReleaseAssets(requiredOption(options, 'assets-dir'), tag, {
               allowV2Beta,
               dryRun,
+              allowEphemeralSlotKey,
+              ...(slotPublicKeyHex !== undefined ? { slotPublicKeyHex } : {}),
             }),
             allowMissingAssets: booleanOption(options, 'allow-missing-assets'),
             allowV2Beta,
@@ -468,6 +560,8 @@ const runCli = () => {
             assets: buildExpectedReleaseAssets(requiredOption(options, 'assets-dir'), tag, {
               allowV2Beta,
               dryRun,
+              allowEphemeralSlotKey,
+              ...(slotPublicKeyHex !== undefined ? { slotPublicKeyHex } : {}),
             }),
             allowMissingAssets: booleanOption(options, 'allow-missing-assets'),
             allowV2Beta,
