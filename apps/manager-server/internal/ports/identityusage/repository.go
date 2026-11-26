@@ -68,12 +68,14 @@ func (s ProjectionState) CaughtUp() bool {
 // Totals are window totals for one Canonical Key. Failure counts requests the
 // gateway recorded as failed; Success is derived by the caller.
 type Totals struct {
-	Calls        int64
-	Failure      int64
-	InputTokens  int64
-	OutputTokens int64
-	TotalTokens  int64
-	LastUsedAtMS *int64
+	Calls           int64
+	Failure         int64
+	InputTokens     int64
+	OutputTokens    int64
+	TotalTokens     int64
+	CachedTokens    int64
+	ReasoningTokens int64
+	LastUsedAtMS    *int64
 }
 
 // Bucket is one time-series point. Buckets without events are omitted.
@@ -83,18 +85,24 @@ type Bucket struct {
 	Failure     int64
 	TotalTokens int64
 }
-// RecentRequest is one bounded recent call for list-row status timelines.
-type RecentRequest struct {
-	TimestampMS int64  `json:"timestampMs"`
-	Failed      bool   `json:"failed"`
-	StatusCode  int    `json:"statusCode,omitempty"`
-	Model       string `json:"model,omitempty"`
-}
 
 // ModelCount summarizes usage calls by model within a window.
 type ModelCount struct {
-	Model string `json:"model"`
-	Calls int64  `json:"calls"`
+	Model            string   `json:"model"`
+	Calls            int64    `json:"calls"`
+	TotalTokens      int64    `json:"totalTokens,omitempty"`
+	EstimatedCostUSD *float64 `json:"estimatedCostUsd,omitempty"`
+}
+
+const RecentStatusSlotCount = 20
+
+// StatusSlot summarizes success and failure counts for one fixed slice of a
+// key's summary window.
+type StatusSlot struct {
+	StartMS int64 `json:"startMs"`
+	EndMS   int64 `json:"endMs"`
+	Success int64 `json:"success"`
+	Failure int64 `json:"failure"`
 }
 
 // Window is the aggregated evidence for one key inside a half-open time range.
@@ -103,16 +111,19 @@ type Window struct {
 	EstimatedCostUSD *float64
 	TopModels        []ModelCount
 	ModelCount       int
-	RecentRequests   []RecentRequest
+	RecentSlots      []StatusSlot
 	// UnmappedEvents counts events of this key's source hash that the
 	// projection could not attribute (unknown, ambiguous or stale). They are
 	// positive proof that the window is incomplete.
 	UnmappedEvents int64
 }
 // KeyRange bounds one Canonical Key's provable window floor [FromMS, toMS).
+// When SlotsFromMS > 0, RecentSlots are sliced across [SlotsFromMS, toMS)
+// while event attribution still enforces FromMS.
 type KeyRange struct {
-	APIKeyID identity.APIKeyID
-	FromMS   int64
+	APIKeyID    identity.APIKeyID
+	FromMS      int64
+	SlotsFromMS int64
 }
 
 // IncompleteDay is one UTC day a v2 Upgrade marked incomplete. Reason is a

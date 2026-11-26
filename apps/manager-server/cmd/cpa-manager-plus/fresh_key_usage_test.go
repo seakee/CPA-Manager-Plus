@@ -402,6 +402,79 @@ func TestFreshKeyUsageReportsRealNumbersAndHonestCoverage(t *testing.T) {
 	}
 }
 
+func TestFreshKeyUsageSummaryExplicitWindowsAndValidation(t *testing.T) {
+	harness := newFreshUsageHarness(t)
+	defer harness.cleanup()
+
+	const dayMS = int64(24 * time.Hour / time.Millisecond)
+	harness.nowMS = harness.key.CreatedAtMS + 31*dayMS
+	harness.useCollection(t, usageapp.PhaseRunning)
+
+	// Seed 2 calls 15d ago (inside 30d, outside 7d) and 3 calls 2d ago (inside both 7d and 30d).
+	timestamps := []int64{
+		harness.nowMS - 15*dayMS,
+		harness.nowMS - 15*dayMS + 1000,
+		harness.nowMS - 2*dayMS,
+		harness.nowMS - 2*dayMS + 1000,
+		harness.nowMS - 2*dayMS + 2000,
+	}
+	for i, ts := range timestamps {
+		eventID := int64(i + 1)
+		evHash := sha256Hex(fmt.Sprintf("summary-window-%d", eventID))
+		if _, err := harness.db.Exec(`insert into usage_events
+			(id, event_hash, request_id, timestamp_ms, timestamp, model, api_key_hash, input_tokens, output_tokens, total_tokens, failed, created_at_ms)
+			values (?, ?, ?, ?, '2026-01-15T00:00:00Z', 'gpt-4', ?, 100, 20, 120, 0, ?)`,
+			eventID, evHash, fmt.Sprintf("sw-%d", eventID), ts, harness.hash, ts); err != nil {
+			t.Fatalf("insert usage event %d: %v", eventID, err)
+		}
+		if _, err := harness.db.Exec(`insert into gateway_usage_identity_projection_v1
+			(usage_event_id, event_hash, request_id, evidence_timestamp_ms, api_key_state, api_key_id, api_key_source_hash,
+			 credential_state, credential_id, credential_source_auth_id, schema_version, projected_at_ms)
+			values (?, ?, ?, ?, 'mapped', ?, ?, 'unknown', null, '', 1, ?)`,
+			eventID, evHash, fmt.Sprintf("sw-%d", eventID), ts, string(harness.key.ID), harness.hash, ts); err != nil {
+			t.Fatalf("insert projection %d: %v", eventID, err)
+		}
+	}
+	harness.markProjectionReady(t)
+
+	// Valid 7d window.
+	from7d := harness.nowMS - 7*dayMS
+	res7d := harness.call("GET", fmt.Sprintf("api-keys/usage-summary?from_ms=%d&to_ms=%d", from7d, harness.nowMS), "")
+	if res7d.Code != http.StatusOK {
+		t.Fatalf("7d usage-summary = %d %s", res7d.Code, res7d.Body.String())
+	}
+	sum7d := decodeUsage[usageapp.SummaryResponse](t, res7d)
+	if sum7d.FromMS != from7d || sum7d.ToMS != harness.nowMS || len(sum7d.Items) != 1 ||
+		sum7d.Items[0].Calls != 3 || sum7d.Items[0].TotalTokens != 360 || len(sum7d.Items[0].RecentSlots) != 20 {
+		t.Fatalf("7d usage-summary payload = %+v", sum7d)
+	}
+
+	// Valid 30d window.
+	from30d := harness.nowMS - 30*dayMS
+	res30d := harness.call("GET", fmt.Sprintf("api-keys/usage-summary?from_ms=%d&to_ms=%d", from30d, harness.nowMS), "")
+	if res30d.Code != http.StatusOK {
+		t.Fatalf("30d usage-summary = %d %s", res30d.Code, res30d.Body.String())
+	}
+	sum30d := decodeUsage[usageapp.SummaryResponse](t, res30d)
+	if sum30d.FromMS != from30d || sum30d.ToMS != harness.nowMS || len(sum30d.Items) != 1 ||
+		sum30d.Items[0].Calls != 5 || sum30d.Items[0].TotalTokens != 600 || len(sum30d.Items[0].RecentSlots) != 20 {
+		t.Fatalf("30d usage-summary payload = %+v", sum30d)
+	}
+
+	// Missing bound -> 400, >31d -> 400, unknown query parameter -> 400.
+	for _, badQuery := range []string{
+		fmt.Sprintf("api-keys/usage-summary?from_ms=%d", from7d),
+		fmt.Sprintf("api-keys/usage-summary?to_ms=%d", harness.nowMS),
+		fmt.Sprintf("api-keys/usage-summary?from_ms=%d&to_ms=%d", harness.nowMS-31*dayMS-1, harness.nowMS),
+		fmt.Sprintf("api-keys/usage-summary?from_ms=%d&to_ms=%d&granularity=day", from7d, harness.nowMS),
+		"api-keys/usage-summary?unknown_param=1",
+	} {
+		if got := harness.call("GET", badQuery, ""); got.Code != http.StatusBadRequest {
+			t.Fatalf("GET %s = %d, want 400", badQuery, got.Code)
+		}
+	}
+}
+
 // A ProductComplete reached inside the running process must arm the same usage
 // chain as a resumed install: it backfills keys staged before completion and
 // starts the Collector, projection and identity worker exactly once.

@@ -39,6 +39,9 @@ type fakeRepo struct {
 	windowRanges       []ports.KeyRange
 	windowFromMS       int64
 	windowToMS         int64
+	seriesFromMS       int64
+	seriesToMS         int64
+	seriesBucketMS     int64
 	markedAt           int64
 }
 
@@ -70,7 +73,8 @@ func (f *fakeRepo) Windows(_ context.Context, ranges []ports.KeyRange, toMS int6
 	return result, nil
 }
 
-func (f *fakeRepo) Series(context.Context, identity.APIKeyID, int64, int64, int64) ([]ports.Bucket, error) {
+func (f *fakeRepo) Series(_ context.Context, _ identity.APIKeyID, fromMS, toMS, bucketMS int64) ([]ports.Bucket, error) {
+	f.seriesFromMS, f.seriesToMS, f.seriesBucketMS = fromMS, toMS, bucketMS
 	return f.series, nil
 }
 
@@ -126,13 +130,10 @@ func healthy() *fakeRepo {
 		projection:   ports.ProjectionState{Status: "ready", LastProcessedEventID: 4, TargetEventID: 4, LatestEventID: 4},
 		windows: map[identity.APIKeyID]ports.Window{testKeyID: {
 			Totals: ports.Totals{
-				Calls: 3, Failure: 1, InputTokens: 30, OutputTokens: 15, TotalTokens: 45, LastUsedAtMS: &lastUsedAtMS,
+				Calls: 3, Failure: 1, InputTokens: 30, OutputTokens: 15, CachedTokens: 10, TotalTokens: 45, LastUsedAtMS: &lastUsedAtMS,
 			},
-			TopModels:  []ports.ModelCount{{Model: "claude-sonnet-4-5", Calls: 3}},
+			TopModels:  []ports.ModelCount{{Model: "claude-sonnet-4-5", Calls: 3, TotalTokens: 45}},
 			ModelCount: 1,
-			RecentRequests: []ports.RecentRequest{
-				{TimestampMS: lastUsedAtMS, Failed: true, StatusCode: 429, Model: "claude-sonnet-4-5"},
-			},
 		}},
 	}
 }
@@ -166,6 +167,9 @@ func TestDetailPublishesCountsOnlyWhenCoverageProvesThem(t *testing.T) {
 	}
 	if response.BucketMS != 3_600_000 || response.FromMS != testNowMS-DefaultWindowMS || response.ToMS != testNowMS {
 		t.Fatalf("window = %+v", response)
+	}
+	if response.ModelCount != 1 || len(response.TopModels) != 1 || response.TopModels[0].Model != "claude-sonnet-4-5" {
+		t.Fatalf("models = %d %+v", response.ModelCount, response.TopModels)
 	}
 }
 
@@ -393,8 +397,9 @@ func TestSummaryReportsPerKeyCoverageAndHidesUnprovenCalls(t *testing.T) {
 		t.Fatalf("items = %+v", summary.Items)
 	}
 	if summary.Items[0].Calls != 3 || summary.Items[0].Success != 2 || summary.Items[0].Failure != 1 ||
+		summary.Items[0].InputTokens != 30 || summary.Items[0].OutputTokens != 15 || summary.Items[0].CachedTokens != 10 ||
 		summary.Items[0].TotalTokens != 45 || summary.Items[0].ModelCount != 1 ||
-		len(summary.Items[0].TopModels) != 1 || len(summary.Items[0].RecentRequests) != 1 ||
+		len(summary.Items[0].TopModels) != 1 ||
 		summary.Items[0].Coverage.State != "complete" ||
 		summary.Items[0].LastUsedAtMS == nil || *summary.Items[0].LastUsedAtMS != testNowMS-1_000_000 {
 		t.Fatalf("first item = %+v", summary.Items[0])
@@ -1219,5 +1224,301 @@ func TestPreCollectionPriorLastUsedSuppressedAcrossUncollectedGap(t *testing.T) 
 	}
 	if sum.Items[0].Coverage.State != string(ports.StateComplete) || sum.Items[0].LastUsedAtMS != nil {
 		t.Fatalf("Summary with pre-collectingAt prior LastUsedAtMS = %+v, want complete + nil LastUsedAtMS", sum.Items[0])
+	}
+}
+
+func TestSummaryWindowBoundsAndTokenBreakdown(t *testing.T) {
+	collectingAt := testNowMS - 31*24*3_600_000
+	cost := 2.52
+	repo := &fakeRepo{
+		collectingAt: collectingAt,
+		projection:   ports.ProjectionState{Status: "ready", LastProcessedEventID: 10, TargetEventID: 10, LatestEventID: 10},
+		bindings: map[identity.APIKeyID]ports.Binding{
+			testKeyID: {
+				APIKeyID:            testKeyID,
+				FirstSeenAtMS:       collectingAt,
+				Origin:              "workspace",
+				IdentityCreatedAtMS: collectingAt,
+			},
+		},
+		windows: map[identity.APIKeyID]ports.Window{
+			testKeyID: {
+				Totals: ports.Totals{
+					Calls:        29,
+					Failure:      1,
+					InputTokens:  390_200,
+					OutputTokens: 55_200,
+					CachedTokens: 310_000,
+					TotalTokens:  445_400,
+				},
+				EstimatedCostUSD: &cost,
+				ModelCount:       4,
+				TopModels: []ports.ModelCount{
+					{Model: "claude-sonnet-4-5", Calls: 20, TotalTokens: 300_000, EstimatedCostUSD: &cost},
+				},
+			},
+		},
+	}
+	svc := newTestService(repo, PhaseRunning)
+	ctx := context.Background()
+
+	from7d := testNowMS - 7*24*3_600_000
+	sum, err := svc.SummaryWindow(ctx, []identity.APIKeyID{testKeyID}, from7d, testNowMS)
+	if err != nil {
+		t.Fatalf("SummaryWindow(7d): %v", err)
+	}
+	if sum.FromMS != from7d || sum.ToMS != testNowMS || len(sum.Items) != 1 {
+		t.Fatalf("SummaryWindow(7d) bounds = (%d, %d) items=%d", sum.FromMS, sum.ToMS, len(sum.Items))
+	}
+	got := sum.Items[0]
+	if got.InputTokens != 390_200 || got.OutputTokens != 55_200 || got.CachedTokens != 310_000 || got.TotalTokens != 445_400 {
+		t.Fatalf("SummaryItem token breakdown = %+v", got)
+	}
+	if _, err := svc.SummaryWindow(ctx, []identity.APIKeyID{testKeyID}, testNowMS-MaxWindowMS-1000, testNowMS); !errors.Is(err, ErrWindow) {
+		t.Fatalf("SummaryWindow(>31d) err = %v, want ErrWindow", err)
+	}
+
+	// Defensive clamping: Success never goes negative if Failure exceeds Calls.
+	repo.windows[testKeyID] = ports.Window{Totals: ports.Totals{Calls: 1, Failure: 3}}
+	clamped, err := svc.SummaryWindow(ctx, []identity.APIKeyID{testKeyID}, from7d, testNowMS)
+	if err != nil {
+		t.Fatalf("SummaryWindow(clamped): %v", err)
+	}
+	if clamped.Items[0].Success != 0 {
+		t.Fatalf("SummaryItem.Success = %d, want 0 when Failure > Calls", clamped.Items[0].Success)
+	}
+}
+
+func TestBucketForStandardWindowsAndNarrowedDetailSpan(t *testing.T) {
+	cases := []struct {
+		name     string
+		windowMS int64
+		wantMS   int64
+	}{
+		{"24h", DefaultWindowMS, 3_600_000},
+		{"7d", 7 * DefaultWindowMS, 21_600_000},
+		{"14d", 14 * DefaultWindowMS, 43_200_000},
+		{"30d", 30 * DefaultWindowMS, 86_400_000},
+		{"31d", MaxWindowMS, 86_400_000},
+	}
+	for _, tc := range cases {
+		if got := bucketFor(tc.windowMS); got != tc.wantMS {
+			t.Fatalf("bucketFor(%s=%d) = %d, want %d", tc.name, tc.windowMS, got, tc.wantMS)
+		}
+	}
+
+	// When a key's attribution start narrows a 30d Detail request down to 2h,
+	// BucketMS and Series must be computed from the narrowed 2h span (300_000ms), not 30d (86_400_000ms).
+	repo := healthy()
+	keyStartMS := testNowMS - 2*3_600_000
+	repo.bindings[testKeyID] = ports.Binding{
+		APIKeyID:            testKeyID,
+		FirstSeenAtMS:       keyStartMS,
+		Origin:              "workspace",
+		IdentityCreatedAtMS: keyStartMS,
+	}
+	svc := newTestService(repo, PhaseRunning)
+	det, err := svc.Detail(context.Background(), testKeyID, testNowMS-30*DefaultWindowMS, testNowMS)
+	if err != nil {
+		t.Fatalf("Detail(narrowed 30d -> 2h): %v", err)
+	}
+	if det.FromMS != keyStartMS || det.ToMS != testNowMS {
+		t.Fatalf("Detail narrowed bounds = [%d, %d), want [%d, %d)", det.FromMS, det.ToMS, keyStartMS, testNowMS)
+	}
+	if det.BucketMS != 300_000 || repo.seriesBucketMS != 300_000 {
+		t.Fatalf("Detail BucketMS=%d seriesBucketMS=%d, want 300000 for 2h narrowed span", det.BucketMS, repo.seriesBucketMS)
+	}
+}
+
+func TestDetailPublishesAndSuppressesExtendedBreakdownFields(t *testing.T) {
+	repo := healthy()
+	cost := 1.25
+	sonnetCost := 1.00
+	haikuCost := 0.25
+	lastUsed := testNowMS - 60_000
+	repo.windows[testKeyID] = ports.Window{
+		Totals: ports.Totals{
+			Calls:           5,
+			Failure:         1,
+			InputTokens:     250_000,
+			OutputTokens:    40_000,
+			CachedTokens:    180_000,
+			ReasoningTokens: 12_500,
+			TotalTokens:     290_000,
+			LastUsedAtMS:    &lastUsed,
+		},
+		EstimatedCostUSD: &cost,
+		ModelCount:       2,
+		TopModels: []ports.ModelCount{
+			{Model: "claude-sonnet-4-5", Calls: 3, TotalTokens: 200_000, EstimatedCostUSD: &sonnetCost},
+			{Model: "claude-haiku-4-5", Calls: 2, TotalTokens: 90_000, EstimatedCostUSD: &haikuCost},
+		},
+	}
+
+	completeResp := detail(t, repo, PhaseRunning)
+	if completeResp.Totals == nil ||
+		completeResp.Totals.CachedTokens != 180_000 ||
+		completeResp.Totals.ReasoningTokens != 12_500 ||
+		completeResp.Totals.EstimatedCostUSD == nil || *completeResp.Totals.EstimatedCostUSD != 1.25 ||
+		completeResp.ModelCount != 2 || len(completeResp.TopModels) != 2 {
+		t.Fatalf("complete DetailResponse = %+v totals=%+v", completeResp, completeResp.Totals)
+	}
+	rawJSON, err := json.Marshal(completeResp)
+	if err != nil {
+		t.Fatalf("marshal DetailResponse: %v", err)
+	}
+	for _, field := range []string{`"cachedTokens":180000`, `"reasoningTokens":12500`, `"estimatedCostUsd":1.25`, `"modelCount":2`, `"topModels":[`} {
+		if !strings.Contains(string(rawJSON), field) {
+			t.Fatalf("DetailResponse JSON missing %s: %s", field, rawJSON)
+		}
+	}
+
+	// Unknown and unavailable states must suppress Totals, TopModels, and ModelCount.
+	for _, phase := range []CollectionPhase{PhaseStarting, PhaseStopped} {
+		suppressed := detail(t, repo, phase)
+		if suppressed.Totals != nil || len(suppressed.TopModels) != 0 || suppressed.ModelCount != 0 || len(suppressed.Series) != 0 {
+			t.Fatalf("phase %s leaked breakdown fields: %+v", phase, suppressed)
+		}
+	}
+}
+
+func TestSummaryWindowExplicitLastUsedParityAndAlignedNativeRecentSlots(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "summary-window-alignment.sqlite"))
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := sqliterepo.Migrate(db); err != nil {
+		t.Fatalf("migrate test db: %v", err)
+	}
+	ctx := context.Background()
+
+	const (
+		runtimeID          = "runtime-align-1"
+		oldIdleKeyID       = identity.APIKeyID("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb1")
+		oldActiveKeyID     = identity.APIKeyID("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2")
+		freshNativeKeyID   = identity.APIKeyID("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb3")
+		adoptedRecentKeyID = identity.APIKeyID("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb4")
+	)
+	collectingAtMS := testNowMS - 30*DefaultWindowMS
+
+	seedKey := func(id identity.APIKeyID, secret, origin string, firstSeenMS int64) string {
+		t.Helper()
+		sum := sha256.Sum256([]byte(secret))
+		hash := hex.EncodeToString(sum[:])
+		if _, err := db.ExecContext(ctx,
+			`insert into gateway_api_key_identities (id, revision, lifecycle, created_at_ms, updated_at_ms) values (?, 1, 'active', ?, ?)`,
+			string(id), firstSeenMS, firstSeenMS); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx,
+			`insert into fresh_client_api_keys (request_id, api_key_id, secret_ciphertext, secret_hash, masked_preview, origin) values (?, ?, 'cipher', ?, 'cpamp_sk_…0000', ?)`,
+			hash[:32], string(id), hash, origin); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx,
+			`insert into gateway_api_key_source_bindings (api_key_id, runtime_identity, api_key_hash, first_seen_at_ms, last_seen_at_ms, retired_at_ms) values (?, ?, ?, ?, ?, null)`,
+			string(id), runtimeID, hash, firstSeenMS, firstSeenMS); err != nil {
+			t.Fatal(err)
+		}
+		return hash
+	}
+	seedEvent := func(name string, ts int64, hash string) {
+		t.Helper()
+		if _, err := db.ExecContext(ctx,
+			`insert into usage_events (event_hash, timestamp_ms, timestamp, api_key_hash, endpoint, model, input_tokens, output_tokens, total_tokens, failed, created_at_ms)
+			 values (?, ?, 'synthetic', ?, '/v1/responses', 'gpt-5', 100, 50, 150, 0, ?)`,
+			name, ts, hash, ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tenDaysAgo := testNowMS - 10*DefaultWindowMS
+	nineDaysAgo := testNowMS - 9*DefaultWindowMS
+	oneHourAgo := testNowMS - 3_600_000
+	thirtyMinAgo := testNowMS - 1_800_000
+
+	hashOldIdle := seedKey(oldIdleKeyID, "cpamp_sk_"+strings.Repeat("6", 64), "workspace", tenDaysAgo)
+	seedEvent("old-idle-9d", nineDaysAgo, hashOldIdle)
+
+	hashOldActive := seedKey(oldActiveKeyID, "cpamp_sk_"+strings.Repeat("7", 64), "workspace", tenDaysAgo)
+	seedEvent("old-active-30m", thirtyMinAgo, hashOldActive)
+
+	hashFreshNative := seedKey(freshNativeKeyID, "cpamp_sk_"+strings.Repeat("8", 64), "workspace", oneHourAgo)
+	seedEvent("fresh-native-30m", thirtyMinAgo, hashFreshNative)
+
+	hashAdopted := seedKey(adoptedRecentKeyID, "cpamp_sk_"+strings.Repeat("9", 64), "adopted", oneHourAgo)
+	seedEvent("adopted-30m", thirtyMinAgo, hashAdopted)
+
+	projRepo := projectionadapter.New(db)
+	if res, err := projRepo.CatchUp(ctx, 100, testNowMS); err != nil || res.Pending {
+		t.Fatalf("CatchUp = %+v (%v)", res, err)
+	}
+
+	repo := sqliteusage.New(db)
+	if err := repo.MarkCollectionStarted(ctx, collectingAtMS); err != nil {
+		t.Fatal(err)
+	}
+	svc := New(repo, func() CollectionPhase { return PhaseRunning })
+	svc.SetClock(func() int64 { return testNowMS })
+
+	ids := []identity.APIKeyID{oldIdleKeyID, oldActiveKeyID, freshNativeKeyID, adoptedRecentKeyID}
+	from7d := testNowMS - 7*DefaultWindowMS
+	sum7d, err := svc.SummaryWindow(ctx, ids, from7d, testNowMS)
+	if err != nil {
+		t.Fatalf("SummaryWindow(7d): %v", err)
+	}
+	for i, id := range ids {
+		det7d, err := svc.Detail(ctx, id, from7d, testNowMS)
+		if err != nil {
+			t.Fatalf("Detail(7d, %s): %v", id, err)
+		}
+		item := sum7d.Items[i]
+		var detLastUsed *int64
+		if det7d.Totals != nil {
+			detLastUsed = det7d.Totals.LastUsedAtMS
+		}
+		if (item.LastUsedAtMS == nil) != (detLastUsed == nil) ||
+			(item.LastUsedAtMS != nil && *item.LastUsedAtMS != *detLastUsed) {
+			t.Fatalf("explicit 7d LastUsedAtMS mismatch for %s: Summary=%v Detail=%v", id, item.LastUsedAtMS, detLastUsed)
+		}
+	}
+	// Explicit 7d window must suppress pre-window LastUsedAtMS (nineDaysAgo < from7d) and keep RecentSlots nil when Calls == 0.
+	if sum7d.Items[0].Calls != 0 || sum7d.Items[0].LastUsedAtMS != nil || sum7d.Items[0].RecentSlots != nil {
+		t.Fatalf("oldIdleKey in explicit 7d = %+v, want Calls=0 LastUsedAtMS=nil RecentSlots=nil", sum7d.Items[0])
+	}
+	// Default 24h Summary still preserves lifetime LastUsedAtMS == nineDaysAgo.
+	sumDefault, err := svc.Summary(ctx, []identity.APIKeyID{oldIdleKeyID})
+	if err != nil {
+		t.Fatalf("Summary(default): %v", err)
+	}
+	if sumDefault.Items[0].LastUsedAtMS == nil || *sumDefault.Items[0].LastUsedAtMS != nineDaysAgo {
+		t.Fatalf("oldIdleKey in default 24h LastUsedAtMS = %v, want %d", sumDefault.Items[0].LastUsedAtMS, nineDaysAgo)
+	}
+
+	// Both native keys (10d old and 1h old) have nativePreBindingProven == true, so their 20 RecentSlots
+	// share the exact [from7d, testNowMS) axis with the 30m-ago call placed in slot 19.
+	oldSlots := sum7d.Items[1].RecentSlots
+	freshSlots := sum7d.Items[2].RecentSlots
+	if len(oldSlots) != ports.RecentStatusSlotCount || len(freshSlots) != ports.RecentStatusSlotCount {
+		t.Fatalf("native RecentSlots lengths = (%d, %d), want 20 each", len(oldSlots), len(freshSlots))
+	}
+	if oldSlots[0].StartMS != from7d || freshSlots[0].StartMS != from7d ||
+		oldSlots[19].EndMS != testNowMS || freshSlots[19].EndMS != testNowMS {
+		t.Fatalf("native RecentSlots outer bounds: old=[%d,%d) fresh=[%d,%d), want [%d,%d)",
+			oldSlots[0].StartMS, oldSlots[19].EndMS, freshSlots[0].StartMS, freshSlots[19].EndMS, from7d, testNowMS)
+	}
+	for i := range ports.RecentStatusSlotCount {
+		if oldSlots[i] != freshSlots[i] {
+			t.Fatalf("slot[%d] mismatch between 10d-old and 1h-old native keys: old=%+v fresh=%+v", i, oldSlots[i], freshSlots[i])
+		}
+	}
+	if freshSlots[19].Success != 1 {
+		t.Fatalf("freshSlots[19] = %+v, want Success=1", freshSlots[19])
+	}
+	// Adopted key bound 1h ago does NOT have nativePreBindingProven, so its slots start at oneHourAgo.
+	adoptedSlots := sum7d.Items[3].RecentSlots
+	if len(adoptedSlots) != ports.RecentStatusSlotCount || adoptedSlots[0].StartMS != oneHourAgo || adoptedSlots[19].EndMS != testNowMS {
+		t.Fatalf("adopted RecentSlots = %+v, want 20 slots over [%d, %d)", adoptedSlots, oneHourAgo, testNowMS)
 	}
 }

@@ -19,10 +19,9 @@ const (
 	// MaxWindowMS bounds an explicit request so one read cannot scan unbounded
 	// history.
 	MaxWindowMS = int64(31 * 24 * time.Hour / time.Millisecond)
-	// maxBucketCount keeps the series small enough for one response.
-	maxBucketCount = 24
-	minBucketMS    = int64(time.Minute / time.Millisecond)
-	maxBucketMS    = int64(time.Hour / time.Millisecond)
+	// maxBucketCount keeps the series small enough for one response and chart.
+	maxBucketCount = 30
+	maxBucketMS    = int64(24 * time.Hour / time.Millisecond)
 )
 
 // ErrWindow is returned for an explicit window Manager refuses to read.
@@ -67,13 +66,16 @@ type IncompleteDay struct {
 
 // Totals are published only when the coverage can bound them.
 type Totals struct {
-	Calls        int64  `json:"calls"`
-	Success      int64  `json:"success"`
-	Failure      int64  `json:"failure"`
-	InputTokens  int64  `json:"inputTokens"`
-	OutputTokens int64  `json:"outputTokens"`
-	TotalTokens  int64  `json:"totalTokens"`
-	LastUsedAtMS *int64 `json:"lastUsedAtMs"`
+	Calls            int64    `json:"calls"`
+	Success          int64    `json:"success"`
+	Failure          int64    `json:"failure"`
+	InputTokens      int64    `json:"inputTokens"`
+	OutputTokens     int64    `json:"outputTokens"`
+	CachedTokens     int64    `json:"cachedTokens,omitempty"`
+	ReasoningTokens  int64    `json:"reasoningTokens,omitempty"`
+	TotalTokens      int64    `json:"totalTokens"`
+	EstimatedCostUSD *float64 `json:"estimatedCostUsd,omitempty"`
+	LastUsedAtMS     *int64   `json:"lastUsedAtMs"`
 }
 
 // SeriesPoint is one bucket of the detail series.
@@ -91,8 +93,10 @@ type DetailResponse struct {
 	ToMS     int64         `json:"toMs"`
 	BucketMS int64         `json:"bucketMs"`
 	Coverage Coverage      `json:"coverage"`
-	Totals   *Totals       `json:"totals"`
-	Series   []SeriesPoint `json:"series"`
+	Totals     *Totals            `json:"totals"`
+	TopModels  []ports.ModelCount `json:"topModels,omitempty"`
+	ModelCount int                `json:"modelCount,omitempty"`
+	Series     []SeriesPoint      `json:"series"`
 	// IncompleteDays names the UTC days inside the window that a v2 Upgrade
 	// marked incomplete. The totals above are then a lower bound, never a
 	// measurement of a complete window.
@@ -105,12 +109,15 @@ type SummaryItem struct {
 	Calls            int64                 `json:"calls"`
 	Success          int64                 `json:"success"`
 	Failure          int64                 `json:"failure"`
-	TotalTokens      int64                 `json:"totalTokens"`
-	EstimatedCostUSD *float64              `json:"estimatedCostUsd,omitempty"`
-	TopModels        []ports.ModelCount    `json:"topModels,omitempty"`
-	ModelCount       int                   `json:"modelCount,omitempty"`
-	RecentRequests   []ports.RecentRequest `json:"recentRequests,omitempty"`
-	LastUsedAtMS     *int64                `json:"lastUsedAtMs"`
+	InputTokens      int64             `json:"inputTokens"`
+	OutputTokens     int64             `json:"outputTokens"`
+	CachedTokens     int64             `json:"cachedTokens,omitempty"`
+	TotalTokens      int64             `json:"totalTokens"`
+	EstimatedCostUSD *float64          `json:"estimatedCostUsd,omitempty"`
+	TopModels        []ports.ModelCount `json:"topModels,omitempty"`
+	ModelCount       int               `json:"modelCount,omitempty"`
+	RecentSlots      []ports.StatusSlot `json:"recentSlots,omitempty"`
+	LastUsedAtMS     *int64            `json:"lastUsedAtMs"`
 	Coverage         CoverageState         `json:"coverage"`
 }
 // SummaryResponse is the batched usage column of the Key list.
@@ -184,22 +191,28 @@ func isNativeOrigin(origin string) bool {
 	return origin == "workspace" || origin == "installer"
 }
 
-// evaluate returns the coverage of one key's window. Reasons are stable codes;
-// the UI owns their localization.
-func evaluate(in evidence) (ports.State, string) {
+func isNativePreBindingProven(binding ports.Binding, bindingErr error, collectingAt, requestedFromMS, windowToMS int64) bool {
 	// Native Manager-minted keys ("workspace" and "installer") did not exist as
 	// externally callable credentials before binding.FirstSeenAtMS, so when
 	// collection was already proven at or before FirstSeenAtMS and strictly
 	// precedes windowToMS, the pre-binding interval inside [requestedFromMS,
 	// windowToMS) is provably zero client calls.
-	nativePreBindingProven := in.bindingErr == nil &&
-		in.collectingAt > 0 &&
-		in.collectingAt < in.windowToMS &&
-		in.windowToMS > in.requestedFromMS &&
-		isNativeOrigin(in.binding.Origin) &&
-		in.binding.IdentityCreatedAtMS > 0 &&
-		in.binding.FirstSeenAtMS <= in.binding.IdentityCreatedAtMS &&
-		in.collectingAt <= in.binding.FirstSeenAtMS
+	return bindingErr == nil &&
+		collectingAt > 0 &&
+		collectingAt < windowToMS &&
+		windowToMS > requestedFromMS &&
+		isNativeOrigin(binding.Origin) &&
+		binding.IdentityCreatedAtMS > 0 &&
+		binding.FirstSeenAtMS <= binding.IdentityCreatedAtMS &&
+		collectingAt <= binding.FirstSeenAtMS
+}
+
+// evaluate returns the coverage of one key's window. Reasons are stable codes;
+// the UI owns their localization.
+func evaluate(in evidence) (ports.State, string) {
+	nativePreBindingProven := isNativePreBindingProven(
+		in.binding, in.bindingErr, in.collectingAt, in.requestedFromMS, in.windowToMS,
+	)
 	switch {
 	case in.collectingAt <= 0:
 		return ports.StateUnknown, "collection_unproven"
@@ -286,11 +299,11 @@ func (s *Service) Detail(ctx context.Context, id identity.APIKeyID, fromMS, toMS
 	if in.bindingErr == nil && in.binding.FirstSeenAtMS > in.windowFromMS {
 		in.windowFromMS = in.binding.FirstSeenAtMS
 	}
-	bucketMS := bucketFor(toMS - fromMS)
 	responseFromMS := fromMS
 	if in.windowFromMS > fromMS && in.windowFromMS < toMS {
 		responseFromMS = in.windowFromMS
 	}
+	bucketMS := bucketFor(toMS - responseFromMS)
 	response := DetailResponse{KeyID: string(id), FromMS: responseFromMS, ToMS: toMS, BucketMS: bucketMS, Series: []SeriesPoint{}}
 	// The projection checkpoint and archive coverage are global facts; they are
 	// only meaningful once the key itself is attributable.
@@ -342,12 +355,20 @@ func (s *Service) Detail(ctx context.Context, id identity.APIKeyID, fromMS, toMS
 			}
 		}
 		totals := Totals{
-			Calls: in.window.Totals.Calls, Failure: in.window.Totals.Failure,
-			InputTokens: in.window.Totals.InputTokens, OutputTokens: in.window.Totals.OutputTokens,
-			TotalTokens: in.window.Totals.TotalTokens, LastUsedAtMS: lastUsedAtMS,
+			Calls:            in.window.Totals.Calls,
+			Success:          max(0, in.window.Totals.Calls-in.window.Totals.Failure),
+			Failure:          in.window.Totals.Failure,
+			InputTokens:      in.window.Totals.InputTokens,
+			OutputTokens:     in.window.Totals.OutputTokens,
+			CachedTokens:     in.window.Totals.CachedTokens,
+			ReasoningTokens:  in.window.Totals.ReasoningTokens,
+			TotalTokens:      in.window.Totals.TotalTokens,
+			EstimatedCostUSD: in.window.EstimatedCostUSD,
+			LastUsedAtMS:     lastUsedAtMS,
 		}
-		totals.Success = totals.Calls - totals.Failure
 		response.Totals = &totals
+		response.TopModels = in.window.TopModels
+		response.ModelCount = in.window.ModelCount
 		if in.windowFromMS < toMS {
 			buckets, err := s.repo.Series(ctx, id, in.windowFromMS, toMS, bucketMS)
 			if err != nil {
@@ -366,8 +387,23 @@ func (s *Service) Detail(ctx context.Context, id identity.APIKeyID, fromMS, toMS
 
 // Summary reads the usage column of the Key list in bounded batches.
 func (s *Service) Summary(ctx context.Context, ids []identity.APIKeyID) (SummaryResponse, error) {
+	return s.SummaryWindow(ctx, ids, 0, 0)
+}
+
+// SummaryWindow reads the usage column of the Key list across an optional
+// bounded window [fromMS, toMS). Zero bounds select the default 24h window.
+func (s *Service) SummaryWindow(ctx context.Context, ids []identity.APIKeyID, fromMS, toMS int64) (SummaryResponse, error) {
 	nowMS := s.now()
-	fromMS, toMS := nowMS-DefaultWindowMS, nowMS
+	explicitWindow := fromMS > 0 || toMS > 0
+	if !explicitWindow {
+		fromMS, toMS = nowMS-DefaultWindowMS, nowMS
+	}
+	if toMS > nowMS {
+		toMS = nowMS
+	}
+	if fromMS <= 0 || toMS <= fromMS || toMS-fromMS > MaxWindowMS {
+		return SummaryResponse{}, ErrWindow
+	}
 	response := SummaryResponse{FromMS: fromMS, ToMS: toMS, Items: make([]SummaryItem, 0, len(ids))}
 
 	collectingAt, err := s.repo.CollectionStartedAtMS(ctx)
@@ -413,7 +449,11 @@ func (s *Service) Summary(ctx context.Context, ids []identity.APIKeyID) (Summary
 			if len(ranges) == 0 || windowFromMS < earliestWindowFromMS {
 				earliestWindowFromMS = windowFromMS
 			}
-			ranges = append(ranges, ports.KeyRange{APIKeyID: id, FromMS: windowFromMS})
+			slotsFromMS := windowFromMS
+			if isNativePreBindingProven(binding, nil, collectingAt, fromMS, toMS) {
+				slotsFromMS = fromMS
+			}
+			ranges = append(ranges, ports.KeyRange{APIKeyID: id, FromMS: windowFromMS, SlotsFromMS: slotsFromMS})
 		}
 	}
 	windows := map[identity.APIKeyID]ports.Window{}
@@ -436,25 +476,27 @@ func (s *Service) Summary(ctx context.Context, ids []identity.APIKeyID) (Summary
 		maxPriorScanMS int64
 		hasPriorScan   bool
 	)
-	for _, id := range ids {
-		if bindingErrs[id] != nil {
-			continue
-		}
-		windowFromMS, ok := windowFromByID[id]
-		if !ok {
-			continue
-		}
-		w := windows[id]
-		if w.Totals.Calls == 0 && w.Totals.LastUsedAtMS != nil && *w.Totals.LastUsedAtMS >= collectingAt && *w.Totals.LastUsedAtMS < windowFromMS {
-			scanFrom := *w.Totals.LastUsedAtMS + 1
-			if scanFrom < windowFromMS {
-				if !hasPriorScan || scanFrom < minPriorScanMS {
-					minPriorScanMS = scanFrom
+	if !explicitWindow {
+		for _, id := range ids {
+			if bindingErrs[id] != nil {
+				continue
+			}
+			windowFromMS, ok := windowFromByID[id]
+			if !ok {
+				continue
+			}
+			w := windows[id]
+			if w.Totals.Calls == 0 && w.Totals.LastUsedAtMS != nil && *w.Totals.LastUsedAtMS >= collectingAt && *w.Totals.LastUsedAtMS < windowFromMS {
+				scanFrom := *w.Totals.LastUsedAtMS + 1
+				if scanFrom < windowFromMS {
+					if !hasPriorScan || scanFrom < minPriorScanMS {
+						minPriorScanMS = scanFrom
+					}
+					if !hasPriorScan || windowFromMS > maxPriorScanMS {
+						maxPriorScanMS = windowFromMS
+					}
+					hasPriorScan = true
 				}
-				if !hasPriorScan || windowFromMS > maxPriorScanMS {
-					maxPriorScanMS = windowFromMS
-				}
-				hasPriorScan = true
 			}
 		}
 	}
@@ -497,7 +539,9 @@ func (s *Service) Summary(ctx context.Context, ids []identity.APIKeyID) (Summary
 		item.Coverage = CoverageState{State: string(state), Reason: reason}
 		if state == ports.StateComplete || state == ports.StatePartial {
 			lastUsedAtMS := window.Totals.LastUsedAtMS
-			if window.Totals.Calls == 0 && lastUsedAtMS != nil && *lastUsedAtMS < windowFromMS {
+			if explicitWindow && lastUsedAtMS != nil && *lastUsedAtMS < windowFromMS {
+				lastUsedAtMS = nil
+			} else if !explicitWindow && window.Totals.Calls == 0 && lastUsedAtMS != nil && *lastUsedAtMS < windowFromMS {
 				if *lastUsedAtMS < collectingAt {
 					lastUsedAtMS = nil
 				} else {
@@ -516,13 +560,16 @@ func (s *Service) Summary(ctx context.Context, ids []identity.APIKeyID) (Summary
 				}
 			}
 			item.Calls = window.Totals.Calls
-			item.Success = window.Totals.Calls - window.Totals.Failure
+			item.Success = max(0, window.Totals.Calls-window.Totals.Failure)
 			item.Failure = window.Totals.Failure
+			item.InputTokens = window.Totals.InputTokens
+			item.OutputTokens = window.Totals.OutputTokens
+			item.CachedTokens = window.Totals.CachedTokens
 			item.TotalTokens = window.Totals.TotalTokens
 			item.EstimatedCostUSD = window.EstimatedCostUSD
 			item.TopModels = window.TopModels
 			item.ModelCount = window.ModelCount
-			item.RecentRequests = window.RecentRequests
+			item.RecentSlots = window.RecentSlots
 			item.LastUsedAtMS = lastUsedAtMS
 			if windowFromMS < toMS && (!hasPublished || windowFromMS < publishedFromMS) {
 				publishedFromMS = windowFromMS
@@ -721,14 +768,23 @@ func incompleteDaysView(days []ports.IncompleteDay) []IncompleteDay {
 	return view
 }
 
+var standardBucketDurationsMS = [...]int64{
+	int64(time.Minute / time.Millisecond),
+	int64(5 * time.Minute / time.Millisecond),
+	int64(15 * time.Minute / time.Millisecond),
+	int64(30 * time.Minute / time.Millisecond),
+	int64(time.Hour / time.Millisecond),
+	int64(6 * time.Hour / time.Millisecond),
+	int64(12 * time.Hour / time.Millisecond),
+	int64(24 * time.Hour / time.Millisecond),
+}
+
 func bucketFor(windowMS int64) int64 {
-	bucket := (windowMS + maxBucketCount - 1) / maxBucketCount
-	bucket = ((bucket + minBucketMS - 1) / minBucketMS) * minBucketMS
-	if bucket < minBucketMS {
-		return minBucketMS
+	raw := (windowMS + maxBucketCount - 1) / maxBucketCount
+	for _, step := range standardBucketDurationsMS {
+		if step >= raw {
+			return step
+		}
 	}
-	if bucket > maxBucketMS {
-		return maxBucketMS
-	}
-	return bucket
+	return maxBucketMS
 }

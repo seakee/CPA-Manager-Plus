@@ -187,6 +187,14 @@ func CostForModelWithServiceTier(modelName string, serviceTier string, tokens Mo
 // Callers should pass resolved/upstream model first, followed by the requested
 // display model or alias as a price fallback.
 func CostForModelCandidatesWithServiceTier(modelNames []string, serviceTier string, tokens ModelTokens, prices map[string]model.ModelPrice) float64 {
+	cost, _ := CostForModelCandidatesWithServiceTierMatched(modelNames, serviceTier, tokens, prices)
+	return cost
+}
+
+// CostForModelCandidatesWithServiceTierMatched computes the cost like
+// CostForModelCandidatesWithServiceTier and reports whether any candidate or
+// built-in model price matched.
+func CostForModelCandidatesWithServiceTierMatched(modelNames []string, serviceTier string, tokens ModelTokens, prices map[string]model.ModelPrice) (float64, bool) {
 	seen := map[string]bool{}
 	candidates := make([]string, 0, len(modelNames))
 	for _, modelName := range modelNames {
@@ -203,7 +211,7 @@ func CostForModelCandidatesWithServiceTier(modelNames []string, serviceTier stri
 	}
 	if pricingModel := strings.TrimSpace(tokens.PricingModel); pricingModel != "" {
 		if price, ok := prices[pricingModel]; ok {
-			return costForPriceWithServiceTier(behaviorModel, serviceTier, tokens, price)
+			return costForPriceWithServiceTier(behaviorModel, serviceTier, tokens, price), true
 		}
 	}
 	for _, modelName := range candidates {
@@ -211,16 +219,16 @@ func CostForModelCandidatesWithServiceTier(modelNames []string, serviceTier stri
 		if !ok {
 			continue
 		}
-		return costForPriceWithServiceTier(behaviorModel, serviceTier, tokens, price)
+		return costForPriceWithServiceTier(behaviorModel, serviceTier, tokens, price), true
 	}
 	for _, modelName := range candidates {
 		price, ok := officialGPT56Price(modelName)
 		if !ok {
 			continue
 		}
-		return costForPriceWithServiceTier(behaviorModel, serviceTier, tokens, price)
+		return costForPriceWithServiceTier(behaviorModel, serviceTier, tokens, price), true
 	}
-	return 0
+	return 0, false
 }
 
 // SumCost folds CostForModel over a slice of (model, tokens) tuples.
