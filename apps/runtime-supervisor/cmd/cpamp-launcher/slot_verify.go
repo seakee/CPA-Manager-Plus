@@ -36,7 +36,7 @@ var (
 
 const (
 	DefaultTrustedSlotKeyID        = "cpamp-root-2026-01"
-	DefaultTrustedSlotPublicKeyHex = "e6eb42c6a92a4c78d1c2e6b050234824b17936788799036b4201f98e6291d41f"
+	DefaultTrustedSlotPublicKeyHex = "c98047b948d5d3d266739effb3f531ee17d9d1c8ea6e6555589d3e0fab7409cc"
 
 	SlotManifestDomainPrefix = "cpamp-slot-manifest-v1\n"
 	SlotManifestFileName     = "slot-manifest.json"

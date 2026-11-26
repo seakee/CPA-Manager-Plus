@@ -34,6 +34,9 @@ import {
 } from '../bin/release/generate-release-info.mjs';
 const SIGN_SCRIPT = fileURLToPath(new URL('../bin/release/cpamp-slot-sign.mjs', import.meta.url));
 const PACKAGE_SCRIPT = fileURLToPath(new URL('../bin/release/package-cpamp-slot.mjs', import.meta.url));
+const LAUNCHER_SLOT_VERIFY_GO = fileURLToPath(
+  new URL('../apps/runtime-supervisor/cmd/cpamp-launcher/slot_verify.go', import.meta.url)
+);
 const SOURCE_COMMIT = 'a'.repeat(40);
 const TEMP_DIRS = [];
 
@@ -200,12 +203,18 @@ function stageSlotRoot({ layout = 'docker', version = 'v2.0.0-beta.2', platform 
 }
 
 describe('cpamp-slot-sign and package-cpamp-slot', () => {
-  it('exposes the default contract root keyring', () => {
+  it('exposes the default contract root keyring in lockstep with cpamp-launcher', () => {
     expect(DEFAULT_SLOT_KEY_ID).toBe('cpamp-root-2026-01');
     expect(TRUSTED_SLOT_PUBLIC_KEYS).toBe(DEFAULT_TRUSTED_SLOT_KEYS);
     expect(DEFAULT_TRUSTED_SLOT_KEYS).toEqual({
-      'cpamp-root-2026-01': 'e6eb42c6a92a4c78d1c2e6b050234824b17936788799036b4201f98e6291d41f',
+      'cpamp-root-2026-01': 'c98047b948d5d3d266739effb3f531ee17d9d1c8ea6e6555589d3e0fab7409cc',
     });
+
+    const goSource = readFileSync(LAUNCHER_SLOT_VERIFY_GO, 'utf8');
+    const goKeyId = goSource.match(/DefaultTrustedSlotKeyID\s*=\s*"([^"]+)"/)?.[1];
+    const goPubHex = goSource.match(/DefaultTrustedSlotPublicKeyHex\s*=\s*"([^"]+)"/)?.[1];
+    expect(goKeyId).toBe(DEFAULT_SLOT_KEY_ID);
+    expect(goPubHex).toBe(DEFAULT_TRUSTED_SLOT_KEYS[DEFAULT_SLOT_KEY_ID]);
   });
 
   it('generates Ed25519 keypairs via API and CLI with 0600 private key', () => {

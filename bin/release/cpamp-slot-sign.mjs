@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url';
 export const SLOT_MANIFEST_SIGNING_DOMAIN = 'cpamp-slot-manifest-v1\n';
 export const DEFAULT_SLOT_KEY_ID = 'cpamp-root-2026-01';
 export const DEFAULT_TRUSTED_SLOT_KEYS = Object.freeze({
-  'cpamp-root-2026-01': 'e6eb42c6a92a4c78d1c2e6b050234824b17936788799036b4201f98e6291d41f',
+  'cpamp-root-2026-01': 'c98047b948d5d3d266739effb3f531ee17d9d1c8ea6e6555589d3e0fab7409cc',
 });
 export const TRUSTED_SLOT_PUBLIC_KEYS = DEFAULT_TRUSTED_SLOT_KEYS;
 
