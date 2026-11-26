@@ -77,6 +77,13 @@ type LatestAccountRequest struct {
 	HeaderTraceID   string
 }
 
+type AccountRecentBucketRow struct {
+	RequestIndex int
+	BucketID     int64
+	SuccessCalls int64
+	FailureCalls int64
+}
+
 type rankedAccountRequest struct {
 	LatestAccountRequest
 	id int64
@@ -292,10 +299,32 @@ func latestRequestBatchedIdentityPredicate(targetAlias, eventAlias string) strin
 
 func normalizeLatestRequestProvider(value string) string {
 	value = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), "_", "-"))
-	if value == "grok" || value == "x-ai" {
+	switch value {
+	case "grok", "x-ai":
 		return "xai"
+	case "gemini-interactions":
+		return "interactions"
+	case "vertex-compat":
+		return "vertex"
+	case "openai":
+		return "openai-compatibility"
+	default:
+		if strings.HasPrefix(value, "openai-compatible-") {
+			return "openai-compatibility"
+		}
+		return value
 	}
-	return value
+}
+
+func normalizedProviderCaseSQL(expr string) string {
+	norm := `lower(replace(trim(` + expr + `), '_', '-'))`
+	return `(case
+		when ` + norm + ` in ('x-ai', 'grok') then 'xai'
+		when ` + norm + ` in ('gemini-interactions', 'interactions') then 'interactions'
+		when ` + norm + ` in ('vertex-compat', 'vertex') then 'vertex'
+		when ` + norm + ` in ('openai', 'openai-compatibility') or ` + norm + ` like 'openai-compatible-%' then 'openai-compatibility'
+		else ` + norm + `
+	end)`
 }
 
 func snapshotLatestRequestPredicates(authFileSnapshot, authIndex string) []latestRequestPredicate {
@@ -308,26 +337,16 @@ func snapshotLatestRequestPredicates(authFileSnapshot, authIndex string) []lates
 
 func authIndexLatestRequestPredicates(authIndex, provider string) []latestRequestPredicate {
 	// Keep e.auth_index equality candidates indexable by idx_usage_events_auth_index
-	// while restricting to rows without an auth_file_snapshot and matching provider.
-	providerFilter := ` and lower(replace(trim(coalesce(nullif(trim(e.auth_provider_snapshot), ''), e.provider, '')), '_', '-'))`
-	var providerSQL string
-	var providerArgs []any
-	if provider == "xai" {
-		providerSQL = providerFilter + ` in ('xai', 'x-ai', 'grok')`
-	} else {
-		providerSQL = providerFilter + ` = ?`
-		providerArgs = []any{provider}
-	}
-	noFileFilter := ` and (e.auth_file_snapshot is null or e.auth_file_snapshot = '')`
+	// while restricting to API-key rows without an auth_file_snapshot or OAuth account identity.
+	providerSQL := ` and ` + normalizedProviderCaseSQL(`coalesce(nullif(trim(e.auth_provider_snapshot), ''), e.provider, '')`) + ` = ?`
+	noFileFilter := ` and (e.auth_file_snapshot is null or e.auth_file_snapshot = '')` +
+		` and coalesce(trim(e.auth_account_id_snapshot), '') = ''`
 	variants := uniqueAuthIndexVariants(authIndex)
 	predicates := make([]latestRequestPredicate, 0, len(variants))
 	for _, variant := range variants {
-		args := make([]any, 0, 1+len(providerArgs))
-		args = append(args, variant)
-		args = append(args, providerArgs...)
 		predicates = append(predicates, latestRequestPredicate{
 			sql:  `e.auth_index = ?` + noFileFilter + providerSQL,
-			args: args,
+			args: []any{variant, provider},
 		})
 	}
 	return predicates
@@ -443,13 +462,9 @@ limit ?`, args...)
 	return requests, rows.Err()
 }
 
-func (r *repository) recentAccountRequestsBatched(
-	ctx context.Context,
-	targets []LatestAccountRequestQuery,
-	limit int,
-) ([]LatestAccountRequest, error) {
+func buildLatestRequestTargetValues(targets []LatestAccountRequestQuery) (string, []any) {
 	values := make([]string, 0, len(targets))
-	args := make([]any, 0, len(targets)*8+1)
+	args := make([]any, 0, len(targets)*8)
 	for _, target := range targets {
 		authFileSnapshot := strings.TrimSpace(target.AuthFileSnapshot)
 		authIndex := strings.TrimSpace(target.AuthIndex)
@@ -482,15 +497,25 @@ func (r *repository) recentAccountRequestsBatched(
 			identityMode,
 		)
 	}
-	if len(values) == 0 {
+	return strings.Join(values, ","), args
+}
+
+func (r *repository) recentAccountRequestsBatched(
+	ctx context.Context,
+	targets []LatestAccountRequestQuery,
+	limit int,
+) ([]LatestAccountRequest, error) {
+	valuesSQL, targetArgs := buildLatestRequestTargetValues(targets)
+	if valuesSQL == "" {
 		return []LatestAccountRequest{}, nil
 	}
+	args := make([]any, 0, len(targetArgs)+1)
+	args = append(args, targetArgs...)
 	args = append(args, limit)
-
 	rows, err := r.db.QueryContext(ctx, `with credential_targets(
 	request_index, auth_file_snapshot, auth_index, provider, workspace_id, member, project_id, identity_mode
 ) as (
-	values `+strings.Join(values, ",")+`
+	values `+valuesSQL+`
 ), snapshot_candidates as (
 	select
 		t.request_index,
@@ -542,15 +567,10 @@ func (r *repository) recentAccountRequestsBatched(
 		on t.auth_file_snapshot = ''
 		and t.auth_index <> ''
 		and coalesce(e.auth_file_snapshot, '') = ''
+		and coalesce(trim(e.auth_account_id_snapshot), '') = ''
 		and e.auth_index collate nocase = t.auth_index
-		and (
-			case lower(replace(trim(coalesce(nullif(trim(e.auth_provider_snapshot), ''), e.provider, '')), '_', '-'))
-				when 'x-ai' then 'xai'
-				when 'grok' then 'xai'
-				else lower(replace(trim(coalesce(nullif(trim(e.auth_provider_snapshot), ''), e.provider, '')), '_', '-'))
-			end
-		) = t.provider
-), candidates as (
+		and ` + normalizedProviderCaseSQL(`coalesce(nullif(trim(e.auth_provider_snapshot), ''), e.provider, '')`) + ` = t.provider
+ ), candidates as (
 	select * from snapshot_candidates
 	union all
 	select * from legacy_source_candidates
@@ -589,7 +609,7 @@ order by request_index, row_number`, args...)
 	}
 	defer rows.Close()
 
-	requests := make([]LatestAccountRequest, 0, len(values)*limit)
+	requests := make([]LatestAccountRequest, 0, (len(targetArgs)/8)*limit)
 	for rows.Next() {
 		var request LatestAccountRequest
 		var failed int
@@ -645,4 +665,137 @@ func mergeRankedAccountRequests(limit int, parts ...[]rankedAccountRequest) []ra
 		merged = merged[:limit]
 	}
 	return merged
+}
+
+func (r *repository) RecentAccountRequestBuckets(
+	ctx context.Context,
+	targets []LatestAccountRequestQuery,
+	fromMS, toMS, bucketMS int64,
+) ([]AccountRecentBucketRow, error) {
+	if len(targets) == 0 || bucketMS <= 0 || toMS <= fromMS {
+		return []AccountRecentBucketRow{}, nil
+	}
+	const targetBatchSize = 100
+	result := make([]AccountRecentBucketRow, 0, len(targets)*4)
+	for start := 0; start < len(targets); start += targetBatchSize {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		end := start + targetBatchSize
+		if end > len(targets) {
+			end = len(targets)
+		}
+		batchRows, err := r.recentAccountRequestBucketsBatch(ctx, targets[start:end], fromMS, toMS, bucketMS)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, batchRows...)
+	}
+	return result, nil
+}
+
+func (r *repository) recentAccountRequestBucketsBatch(
+	ctx context.Context,
+	targets []LatestAccountRequestQuery,
+	fromMS, toMS, bucketMS int64,
+) ([]AccountRecentBucketRow, error) {
+	valuesSQL, targetArgs := buildLatestRequestTargetValues(targets)
+	if valuesSQL == "" {
+		return []AccountRecentBucketRow{}, nil
+	}
+	identityPredicate := latestRequestBatchedIdentityPredicate("t", "e")
+	query := `
+with credential_targets(request_index, auth_file_snapshot, auth_index, provider, workspace_id, member, project_id, identity_mode) as (
+	values ` + valuesSQL + `
+), snapshot_candidates as (
+	select
+		t.request_index,
+		e.id,
+		e.timestamp_ms,
+		e.failed
+	from credential_targets t
+	join usage_events e
+		on t.auth_file_snapshot <> ''
+		and e.timestamp_ms >= ?
+		and e.timestamp_ms < ?
+		and e.auth_file_snapshot collate nocase = t.auth_file_snapshot
+		and (
+			t.auth_index = ''
+			or coalesce(e.auth_index, '') = ''
+			or e.auth_index collate nocase = t.auth_index
+		)
+		and ` + identityPredicate + `
+), legacy_source_candidates as (
+	select
+		t.request_index,
+		e.id,
+		e.timestamp_ms,
+		e.failed
+	from credential_targets t
+	join usage_events e
+		on t.auth_file_snapshot <> ''
+		and e.timestamp_ms >= ?
+		and e.timestamp_ms < ?
+		and coalesce(e.auth_file_snapshot, '') = ''
+		and e.source collate nocase = t.auth_file_snapshot
+		and (e.account_snapshot is null or lower(trim(e.source)) <> lower(trim(e.account_snapshot)))
+		and (e.auth_label_snapshot is null or lower(trim(e.source)) <> lower(trim(e.auth_label_snapshot)))
+		and (
+			t.auth_index = ''
+			or coalesce(e.auth_index, '') = ''
+			or e.auth_index collate nocase = t.auth_index
+		)
+		and ` + identityPredicate + `
+), auth_index_candidates as (
+	select
+		t.request_index,
+		e.id,
+		e.timestamp_ms,
+		e.failed
+	from credential_targets t
+	join usage_events e
+		on t.auth_file_snapshot = ''
+		and t.auth_index <> ''
+		and e.timestamp_ms >= ?
+		and e.timestamp_ms < ?
+		and coalesce(e.auth_file_snapshot, '') = ''
+		and coalesce(trim(e.auth_account_id_snapshot), '') = ''
+		and e.auth_index collate nocase = t.auth_index
+		and ` + normalizedProviderCaseSQL(`coalesce(nullif(trim(e.auth_provider_snapshot), ''), e.provider, '')`) + ` = t.provider
+), deduped as (
+	select request_index, id, timestamp_ms, failed from snapshot_candidates
+	union
+	select request_index, id, timestamp_ms, failed from legacy_source_candidates
+	union
+	select request_index, id, timestamp_ms, failed from auth_index_candidates
+)
+select
+	request_index,
+	(timestamp_ms / ?) as bucket_id,
+	coalesce(sum(case when failed = 0 then 1 else 0 end), 0) as success_calls,
+	coalesce(sum(case when failed != 0 then 1 else 0 end), 0) as failure_calls
+from deduped
+group by request_index, bucket_id
+order by request_index asc, bucket_id asc`
+
+	args := make([]any, 0, len(targetArgs)+7)
+	args = append(args, targetArgs...)
+	args = append(args, fromMS, toMS, fromMS, toMS, fromMS, toMS, bucketMS)
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []AccountRecentBucketRow
+	for rows.Next() {
+		var row AccountRecentBucketRow
+		if err := rows.Scan(&row.RequestIndex, &row.BucketID, &row.SuccessCalls, &row.FailureCalls); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

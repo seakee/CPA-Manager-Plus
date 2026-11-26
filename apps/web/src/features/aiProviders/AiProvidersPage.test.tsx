@@ -2398,8 +2398,11 @@ describe('AiProvidersPage stateful store + real drawer integration', () => {
     expect(clearCacheSpy).not.toHaveBeenCalled();
     expect(updateConfigValueSpy).not.toHaveBeenCalled();
     expect(mocks.getConfig).toHaveBeenCalledTimes(1);
+    // v8Supported=true must not fire redundant legacy Vertex/OpenAI fallback reads.
+    expect(mocks.getVertexConfigs).not.toHaveBeenCalled();
+    expect(mocks.getOpenAIProviders).not.toHaveBeenCalled();
 
-    // Re-entering current transition layer reuses valid __full__ cache without refetching
+    // Re-entering current transition layer within 5s reuses valid __full__ cache without refetching
     mocks.transitionLayer = { status: 'background', isCurrentLayer: false };
     await act(async () => {
       renderer.update(<AiProvidersPage />);
@@ -2417,5 +2420,74 @@ describe('AiProvidersPage stateful store + real drawer integration', () => {
     clearCacheSpy.mockRestore();
     updateConfigValueSpy.mockRestore();
     act(() => renderer.unmount());
+  });
+
+  it('silently revalidates provider list on remount after 5s cooldown while skipping refetch within 5s', async () => {
+    const nowSpy = vi.spyOn(Date, 'now');
+    try {
+      nowSpy.mockReturnValue(3_000_000);
+      const firstProvider: OpenAIProviderConfig = {
+        name: 'Initial OpenAI',
+        baseUrl: 'https://initial.example.com/v1',
+        apiKeyEntries: [{ apiKey: 'sk-initial' }],
+      };
+      const addedProvider: OpenAIProviderConfig = {
+        name: 'Freshly Added OpenAI',
+        baseUrl: 'https://fresh.example.com/v1',
+        apiKeyEntries: [{ apiKey: 'sk-fresh' }],
+      };
+
+      mocks.getConfig.mockResolvedValueOnce({
+        v8Supported: true,
+        geminiApiKeys: [],
+        interactionsApiKeys: [],
+        codexApiKeys: [],
+        xaiApiKeys: [],
+        claudeApiKeys: [],
+        vertexApiKeys: [],
+        openaiCompatibility: [firstProvider],
+      });
+
+      let renderer!: ReactTestRenderer;
+      await act(async () => {
+        renderer = create(<AiProvidersPage />);
+      });
+      await flush();
+      expect(mocks.getConfig).toHaveBeenCalledTimes(1);
+      expect(mocks.getVertexConfigs).not.toHaveBeenCalled();
+      expect(mocks.getOpenAIProviders).not.toHaveBeenCalled();
+      act(() => renderer.unmount());
+
+      // Remount within 5s: cache hit, zero extra requests.
+      nowSpy.mockReturnValue(3_003_000);
+      await act(async () => {
+        renderer = create(<AiProvidersPage />);
+      });
+      await flush();
+      expect(mocks.getConfig).toHaveBeenCalledTimes(1);
+      act(() => renderer.unmount());
+
+      // Remount after 5s (still within 30s global TTL): silently revalidates and shows new provider.
+      nowSpy.mockReturnValue(3_006_000);
+      mocks.getConfig.mockResolvedValueOnce({
+        v8Supported: true,
+        geminiApiKeys: [],
+        interactionsApiKeys: [],
+        codexApiKeys: [],
+        xaiApiKeys: [],
+        claudeApiKeys: [],
+        vertexApiKeys: [],
+        openaiCompatibility: [firstProvider, addedProvider],
+      });
+      await act(async () => {
+        renderer = create(<AiProvidersPage />);
+      });
+      await flush();
+      expect(mocks.getConfig).toHaveBeenCalledTimes(2);
+      expect(JSON.stringify(renderer.toJSON())).toContain('Freshly Added OpenAI');
+      act(() => renderer.unmount());
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 });

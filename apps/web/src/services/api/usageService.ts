@@ -996,6 +996,13 @@ export interface MonitoringAccountLatestRequest {
   header_trace_id?: string;
 }
 
+export interface MonitoringAccountRecentBucket {
+  time: string;
+  bucket_start_ms?: number;
+  success: number;
+  failed: number;
+}
+
 export interface MonitoringAccountHistoryItem {
   row_key: string;
   account_key: string;
@@ -1011,6 +1018,7 @@ export interface MonitoringAccountHistoryItem {
   last_seen_ms: number | null;
   latest_request?: MonitoringAccountLatestRequest | null;
   recent_requests?: MonitoringAccountLatestRequest[];
+  recent_buckets?: MonitoringAccountRecentBucket[];
   sync_status: 'ready' | 'pending' | 'empty' | string;
 }
 

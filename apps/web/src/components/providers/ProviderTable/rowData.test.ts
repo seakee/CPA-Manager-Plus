@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { OpenAIProviderConfig, ProviderKeyConfig } from '@/types';
-import { buildRecentRequestCompositeKey } from '@/utils/recentRequests';
+import {
+  buildRecentRequestCompositeKey,
+  mergeRecentRequestBucketGroups,
+  RECENT_REQUEST_BUCKET_DURATION_MS,
+} from '@/utils/recentRequests';
 import type { ProviderRecentUsageMap } from '../utils';
 import { buildProviderRows } from './rowData';
 
@@ -237,7 +241,7 @@ describe('buildProviderRows', () => {
     expect(rows[0].haystack).toContain('codex primary pool');
   });
 
-  it('prefers SQLite history metrics while keeping statusData assembled from CPA recent buckets', () => {
+  it('prefers SQLite history metrics and assembles statusData from SQLite recentBuckets when matched', () => {
     const usageByProvider: ProviderRecentUsageMap = new Map([
       [
         'claude',
@@ -245,20 +249,26 @@ describe('buildProviderRows', () => {
           [
             buildRecentRequestCompositeKey('https://api.anthropic.com', 'sk-ant-1'),
             {
-              success: 19,
-              failed: 1,
-              recentRequests: [
-                { time: '16:40-16:50', success: 2, failed: 0 },
-                { time: '16:50-17:00', success: 0, failed: 0 },
-                ...Array.from({ length: 16 }, () => ({ time: '17:00-17:10', success: 0, failed: 0 })),
-                { time: '19:40-19:50', success: 3, failed: 0 },
-                { time: '19:50-20:00', success: 1, failed: 1 },
-              ],
+              success: 1,
+              failed: 0,
+              recentRequests: [{ time: '19:50-20:00', success: 1, failed: 0 }],
             },
           ],
         ]),
       ],
     ]);
+    const historyRecentBuckets = [
+      { time: '16:40-16:50', bucketStartMs: 1_700_000_000_000, success: 2, failed: 0 },
+      { time: '16:50-17:00', bucketStartMs: 1_700_000_600_000, success: 0, failed: 0 },
+      ...Array.from({ length: 16 }, (_, idx) => ({
+        time: '17:00-17:10',
+        bucketStartMs: 1_700_001_200_000 + idx * 600_000,
+        success: 0,
+        failed: 0,
+      })),
+      { time: '19:40-19:50', bucketStartMs: 1_700_010_800_000, success: 3, failed: 0 },
+      { time: '19:50-20:00', bucketStartMs: 1_700_011_400_000, success: 1, failed: 1 },
+    ];
     const historyStatusData = {
       blocks: Array.from({ length: 10 }, (_, idx) => (idx === 4 ? ('failure' as const) : ('success' as const))),
       blockDetails: Array.from({ length: 10 }, (_, idx) => ({
@@ -285,6 +295,7 @@ describe('buildProviderRows', () => {
           successRate: 95,
           lastSeenMs: 1_700_000_999_000,
           recentRequests: [],
+          recentBuckets: historyRecentBuckets,
           recentStatusData: historyStatusData,
         },
       ],
@@ -307,6 +318,9 @@ describe('buildProviderRows', () => {
       failure: 1,
       rate: 0.8,
     });
+    expect(rows[0].recentStatusData?.blocks).toHaveLength(20);
+    expect(rows[0].recentStatusData?.totalSuccess).toBe(6);
+    expect(rows[0].recentStatusData?.totalFailure).toBe(1);
     expect(rows[0].lastSeenMs).toBe(1_700_000_999_000);
   });
 
@@ -452,5 +466,210 @@ describe('buildProviderRows', () => {
     expect(rows[1].v8GroupKeyMeta).toEqual({ index: 2, total: 2 });
     expect(rows[1].statsSource).toBe('none');
     expect(rows[1].latestFailure).toBeUndefined();
+  });
+
+  it('merges SQLite 20-bucket recentBuckets with live CPA buckets so CPA restarts never drop 200-minute counts', () => {
+    const bucketsTemplate = Array.from({ length: 20 }, (_, idx) => ({
+      time: `${String(Math.floor((idx * 10) / 60)).padStart(2, '0')}:${String((idx * 10) % 60).padStart(2, '0')}-${String(Math.floor(((idx + 1) * 10) / 60)).padStart(2, '0')}:${String(((idx + 1) * 10) % 60).padStart(2, '0')}`,
+      bucketStartMs: 1_795_690_000_000 + idx * 600_000,
+      success: 0,
+      failed: 0,
+    }));
+    // Live CPA restarted mid-window and only remembers 1 post-restart request in bucket 19.
+    const liveBuckets = bucketsTemplate.map((b, idx) =>
+      idx === 19 ? { ...b, success: 1 } : { ...b }
+    );
+    // SQLite history retains 1 request in bucket 18 + 2 requests in bucket 19 (total 3 in 200m, 10 lifetime).
+    const historyBuckets = bucketsTemplate.map((b, idx) => {
+      if (idx === 18) return { ...b, success: 1 };
+      if (idx === 19) return { ...b, success: 2 };
+      return { ...b };
+    });
+
+    const usageByProvider: ProviderRecentUsageMap = new Map([
+      [
+        'minimax',
+        new Map([
+          [
+            buildRecentRequestCompositeKey('https://api.minimaxi.com/v1', 'sk-mm-1'),
+            { success: 1, failed: 0, recentRequests: liveBuckets },
+          ],
+        ]),
+      ],
+    ]);
+
+    const provider: OpenAIProviderConfig = {
+      name: 'Minimax',
+      baseUrl: 'https://api.minimaxi.com/v1',
+      apiKeyEntries: [{ apiKey: 'sk-mm-1', authIndex: 'b375c6488dddc736' }],
+      models: [{ name: 'MiniMax-M3.1-Flash' }],
+    };
+    const rowKey = 'openai:minimax::https://api.minimaxi.com/v1::sk-mm-1::0';
+    const rowsWithoutHistory = buildProviderRows({
+      ...emptyInput,
+      openai: [provider],
+      usageByProvider,
+    });
+    const actualRowKey = rowsWithoutHistory[0].key;
+    void rowKey;
+
+    const historyByRowKey = new Map([
+      [
+        actualRowKey,
+        {
+          matched: true,
+          totalRequests: 10,
+          successCalls: 10,
+          failureCalls: 0,
+          totalTokens: 43_144,
+          totalCost: 0.004,
+          successRate: 100,
+          lastSeenMs: 1_795_698_087_608,
+          recentRequests: [],
+          recentBuckets: historyBuckets,
+          recentStatusData: rowsWithoutHistory[0].statusData,
+        },
+      ],
+    ]);
+
+    const rows = buildProviderRows({
+      ...emptyInput,
+      openai: [provider],
+      usageByProvider,
+      historyByRowKey,
+    });
+
+    expect(rows[0].statsSource).toBe('history');
+    expect(rows[0].stats).toEqual({ success: 10, failure: 0 });
+    expect(rows[0].recentSuccess).toBe(3);
+    expect(rows[0].recentFailure).toBe(0);
+    expect(rows[0].statusData.blocks).toHaveLength(10);
+    expect(rows[0].statusData.totalSuccess).toBe(3);
+    expect(rows[0].recentStatusData?.blocks).toHaveLength(20);
+    expect(rows[0].recentStatusData?.totalSuccess).toBe(3);
+  });
+
+  it('aligns multi-key SQLite recentBuckets by absolute bucketStartMs and falls back to live when history is unmatched', () => {
+    const baseStart = 1_795_689_600_000;
+    const keyABuckets = Array.from({ length: 20 }, (_, idx) => ({
+      bucketStartMs: baseStart + idx * RECENT_REQUEST_BUCKET_DURATION_MS,
+      success: idx === 19 ? 4 : 0,
+      failed: 0,
+    }));
+    // Key B's window rolled 1 bucket forward compared to Key A.
+    const keyBBuckets = Array.from({ length: 20 }, (_, idx) => ({
+      bucketStartMs: baseStart + (idx + 1) * RECENT_REQUEST_BUCKET_DURATION_MS,
+      success: idx === 18 ? 3 : idx === 19 ? 2 : 0,
+      failed: 0,
+    }));
+
+    const merged = mergeRecentRequestBucketGroups([keyABuckets, keyBBuckets]);
+    expect(merged).toHaveLength(20);
+    expect(merged[18].bucketStartMs).toBe(baseStart + 19 * RECENT_REQUEST_BUCKET_DURATION_MS);
+    expect(merged[18].success).toBe(7); // 4 from Key A + 3 from Key B in same UTC bucket
+    expect(merged[19].bucketStartMs).toBe(baseStart + 20 * RECENT_REQUEST_BUCKET_DURATION_MS);
+    expect(merged[19].success).toBe(2); // newer rolled-over bucket preserved
+
+    // When SQLite history is unmatched (e.g. collector paused / new provider), rowData uses live CPA buckets.
+    const provider: OpenAIProviderConfig = {
+      name: 'LiveOnly',
+      baseUrl: 'https://api.liveonly.example/v1',
+      apiKeyEntries: [{ apiKey: 'sk-live-1', authIndex: 'live-idx-1' }],
+      models: [{ name: 'model-1' }],
+    };
+    const usageByProvider: ProviderRecentUsageMap = new Map([
+      [
+        'liveonly',
+        new Map([
+          [
+            buildRecentRequestCompositeKey('https://api.liveonly.example/v1', 'sk-live-1'),
+            { success: 2, failed: 0, recentRequests: keyBBuckets.slice(-1) },
+          ],
+        ]),
+      ],
+    ]);
+    const rows = buildProviderRows({
+      ...emptyInput,
+      openai: [provider],
+      usageByProvider,
+    });
+    expect(rows[0].statsSource).toBe('live');
+    expect(rows[0].stats).toEqual({ success: 2, failure: 0 });
+    expect(rows[0].recentStatusData?.totalSuccess).toBe(2);
+  });
+
+  it('keeps timeline on SQLite history source when matched history has no recent calls even if live CPA has uncollected calls', () => {
+    const emptyHistoryStatusBar = {
+      blocks: Array(10).fill('idle') as Array<'idle'>,
+      blockDetails: Array.from({ length: 10 }, () => ({
+        success: 0,
+        failure: 0,
+        rate: -1,
+        startTime: 0,
+        endTime: 0,
+      })),
+      successRate: 100,
+      totalSuccess: 0,
+      totalFailure: 0,
+    };
+    const provider: OpenAIProviderConfig = {
+      name: 'OlderHistory',
+      baseUrl: 'https://api.older.example/v1',
+      apiKeyEntries: [{ apiKey: 'sk-old-1', authIndex: 'old-idx-1' }],
+      models: [{ name: 'model-old' }],
+    };
+    const usageByProvider: ProviderRecentUsageMap = new Map([
+      [
+        'olderhistory',
+        new Map([
+          [
+            buildRecentRequestCompositeKey('https://api.older.example/v1', 'sk-old-1'),
+            {
+              success: 1,
+              failed: 0,
+              recentRequests: [{ time: '21:00-21:10', success: 1, failed: 0 }],
+            },
+          ],
+        ]),
+      ],
+    ]);
+    const probeRows = buildProviderRows({
+      ...emptyInput,
+      openai: [provider],
+      usageByProvider,
+    });
+    const rowKey = probeRows[0].key;
+    const historyByRowKey = new Map([
+      [
+        rowKey,
+        {
+          matched: true,
+          totalRequests: 100,
+          successCalls: 100,
+          failureCalls: 0,
+          totalTokens: 500_000,
+          totalCost: 0.5,
+          successRate: 100,
+          lastSeenMs: 1_700_000_000_000,
+          recentRequests: [],
+          // Explicitly omit recentBuckets to cover both absent and zero-filled windows.
+          recentStatusData: emptyHistoryStatusBar,
+        },
+      ],
+    ]);
+
+    const rows = buildProviderRows({
+      ...emptyInput,
+      openai: [provider],
+      usageByProvider,
+      historyByRowKey,
+    });
+
+    expect(rows[0].statsSource).toBe('history');
+    expect(rows[0].stats).toEqual({ success: 100, failure: 0 });
+    expect(rows[0].recentSuccess).toBe(0);
+    expect(rows[0].recentFailure).toBe(0);
+    expect(rows[0].statusData.totalSuccess).toBe(0);
+    expect(rows[0].recentStatusData?.totalSuccess).toBe(0);
   });
 });

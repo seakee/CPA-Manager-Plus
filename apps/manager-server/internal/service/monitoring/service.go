@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/codexquota"
+	usageeventrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageevent"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/pricing"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/usagehourly"
 	monitoringrollup "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/usagemonitoring"
@@ -321,7 +322,15 @@ type AccountHistoryItem struct {
 	LastSeenMS     *int64                 `json:"last_seen_ms"`
 	LatestRequest  *AccountLatestRequest  `json:"latest_request,omitempty"`
 	RecentRequests []AccountLatestRequest `json:"recent_requests,omitempty"`
+	RecentBuckets  []AccountRecentBucket  `json:"recent_buckets,omitempty"`
 	SyncStatus     string                 `json:"sync_status"`
+}
+
+type AccountRecentBucket struct {
+	Time          string `json:"time"`
+	BucketStartMS int64  `json:"bucket_start_ms"`
+	Success       int64  `json:"success"`
+	Failed        int64  `json:"failed"`
 }
 
 // AccountLatestRequest is the most recent persisted request for an auth file.
@@ -1853,6 +1862,9 @@ func (s *Service) accountHistory(ctx context.Context, req AccountHistoryRequest)
 	stableKeys := make([]string, 0, len(req.Accounts))
 	legacyAliases := make(map[string]string)
 	legacyConflicts := make(map[string]struct{})
+	apiKeyAliases := make(map[string]string)
+	apiKeyConflicts := make(map[string]struct{})
+	apiKeyTargets := make([]usageeventrepo.APIKeyAccountTarget, 0, len(req.Accounts))
 	targetKeys := make([]string, len(req.Accounts))
 	validTargets := make([]bool, len(req.Accounts))
 	latestRequestTargets := make([]store.LatestAccountRequestQuery, 0, len(req.Accounts))
@@ -1863,24 +1875,26 @@ func (s *Service) accountHistory(ctx context.Context, req AccountHistoryRequest)
 		if valid {
 			keys = append(keys, key)
 			stableKeys = append(stableKeys, key)
-			legacyKey, allowed, err := s.store.UsageEvents.ResolveCodexLegacyAccountKey(ctx, accountHistoryIdentityFields(account))
+			identityFields := accountHistoryIdentityFields(account)
+			legacyKey, allowed, err := s.store.UsageEvents.ResolveCodexLegacyAccountKey(ctx, identityFields)
 			if err != nil {
 				return AccountHistoryResponse{}, err
 			}
 			if allowed && legacyKey != "" && legacyKey != key {
 				keys = append(keys, legacyKey)
-				if _, conflicted := legacyConflicts[legacyKey]; conflicted {
-					continue
-				}
-				if owner, exists := legacyAliases[legacyKey]; exists && owner != key {
-					// A blank-ID legacy bucket cannot be assigned to two stable
-					// accounts in one request. Keep both targets fail-closed.
-					delete(legacyAliases, legacyKey)
-					legacyConflicts[legacyKey] = struct{}{}
-				} else {
-					legacyAliases[legacyKey] = key
+				if _, conflicted := legacyConflicts[legacyKey]; !conflicted {
+					if owner, exists := legacyAliases[legacyKey]; exists && owner != key {
+						delete(legacyAliases, legacyKey)
+						legacyConflicts[legacyKey] = struct{}{}
+					} else {
+						legacyAliases[legacyKey] = key
+					}
 				}
 			}
+			apiKeyTargets = append(apiKeyTargets, usageeventrepo.APIKeyAccountTarget{
+				RequestIndex: index,
+				Fields:       identityFields,
+			})
 		}
 		if latestAccountRequestTargetValid(account) {
 			latestRequestTargets = append(latestRequestTargets, store.LatestAccountRequestQuery{
@@ -1892,6 +1906,31 @@ func (s *Service) accountHistory(ctx context.Context, req AccountHistoryRequest)
 				AuthProjectIDSnapshot: account.AuthProjectIDSnapshot,
 				AccountSnapshot:       account.AccountSnapshot,
 			})
+		}
+	}
+	if len(apiKeyTargets) > 0 {
+		resolvedAPIKeyMap, err := s.store.UsageEvents.ResolveAPIKeyAccountKeysBatch(ctx, apiKeyTargets)
+		if err != nil {
+			return AccountHistoryResponse{}, err
+		}
+		for _, target := range apiKeyTargets {
+			key := targetKeys[target.RequestIndex]
+			for _, resolvedKey := range resolvedAPIKeyMap[target.RequestIndex] {
+				if resolvedKey == "" || resolvedKey == key {
+					continue
+				}
+				keys = append(keys, resolvedKey)
+				stableKeys = append(stableKeys, resolvedKey)
+				if _, conflicted := apiKeyConflicts[resolvedKey]; conflicted {
+					continue
+				}
+				if owner, exists := apiKeyAliases[resolvedKey]; exists && owner != key {
+					delete(apiKeyAliases, resolvedKey)
+					apiKeyConflicts[resolvedKey] = struct{}{}
+				} else {
+					apiKeyAliases[resolvedKey] = key
+				}
+			}
 		}
 	}
 	keys = uniqueAccountHistoryKeys(keys)
@@ -1921,6 +1960,7 @@ func (s *Service) accountHistory(ctx context.Context, req AccountHistoryRequest)
 		return AccountHistoryResponse{}, err
 	}
 	mergeAliasedAccountHistoryTotals(totals, legacyAliases)
+	mergeAliasedAccountHistoryTotals(totals, apiKeyAliases)
 	if len(legacyAliases) > 0 {
 		fencedLatestID, fenceErr := s.store.LatestUsageEventID(ctx)
 		if fenceErr != nil {
@@ -1936,6 +1976,7 @@ func (s *Service) accountHistory(ctx context.Context, req AccountHistoryRequest)
 			if err != nil {
 				return AccountHistoryResponse{}, err
 			}
+			mergeAliasedAccountHistoryTotals(totals, apiKeyAliases)
 		}
 	}
 	recentRequests, err := s.store.RecentAccountRequests(
@@ -1957,6 +1998,30 @@ func (s *Service) accountHistory(ctx context.Context, req AccountHistoryRequest)
 			*mapped,
 		)
 	}
+	const (
+		recentBucketCount    = 20
+		recentBucketSpanMS   = 10 * 60 * 1000
+	)
+	currentBucketID := generatedAtMS / recentBucketSpanMS
+	firstBucketID := currentBucketID - (recentBucketCount - 1)
+	bucketFromMS := firstBucketID * recentBucketSpanMS
+	bucketToMS := (currentBucketID + 1) * recentBucketSpanMS
+	recentBucketRows, err := s.store.RecentAccountRequestBuckets(
+		ctx,
+		latestRequestTargets,
+		bucketFromMS,
+		bucketToMS,
+		recentBucketSpanMS,
+	)
+	if err != nil {
+		return AccountHistoryResponse{}, err
+	}
+	recentBucketsByTargetIndex := buildAccountRecentBucketsByTarget(
+		recentBucketRows,
+		firstBucketID,
+		recentBucketCount,
+		recentBucketSpanMS,
+	)
 	pending := latestID > checkpoint.LastEventID
 	items := make([]AccountHistoryItem, 0, len(req.Accounts))
 	for index := range req.Accounts {
@@ -1979,6 +2044,7 @@ func (s *Service) accountHistory(ctx context.Context, req AccountHistoryRequest)
 			continue
 		}
 		total := totals[key]
+		targetRecentBuckets := recentBucketsByTargetIndex[index]
 		if total == nil {
 			items = append(items, AccountHistoryItem{
 				RowKey:         req.Accounts[index].RowKey,
@@ -1986,9 +2052,13 @@ func (s *Service) accountHistory(ctx context.Context, req AccountHistoryRequest)
 				Matched:        false,
 				LatestRequest:  latestRequest,
 				RecentRequests: targetRecentRequests,
+				RecentBuckets:  targetRecentBuckets,
 				SyncStatus:     accountHistorySyncStatus(false, pending),
 			})
 			continue
+		}
+		if len(targetRecentBuckets) == 0 {
+			targetRecentBuckets = buildEmptyAccountRecentBuckets(firstBucketID, recentBucketCount, recentBucketSpanMS)
 		}
 		var successRate *float64
 		if total.requests > 0 {
@@ -2009,6 +2079,7 @@ func (s *Service) accountHistory(ctx context.Context, req AccountHistoryRequest)
 			LastSeenMS:     nullableMSPointer(total.lastSeenMS),
 			LatestRequest:  latestRequest,
 			RecentRequests: targetRecentRequests,
+			RecentBuckets:  targetRecentBuckets,
 			SyncStatus:     accountHistorySyncStatus(true, pending),
 		})
 	}
@@ -4137,6 +4208,61 @@ func buildHeaderSnapshots(items []store.HeaderSnapshot) []HeaderSnapshot {
 		})
 	}
 	return result
+}
+
+func buildEmptyAccountRecentBuckets(
+	firstBucketID int64,
+	bucketCount int,
+	bucketSpanMS int64,
+) []AccountRecentBucket {
+	if bucketCount <= 0 || bucketSpanMS <= 0 {
+		return nil
+	}
+	buckets := make([]AccountRecentBucket, bucketCount)
+	for idx := 0; idx < bucketCount; idx++ {
+		startMS := (firstBucketID + int64(idx)) * bucketSpanMS
+		endMS := startMS + bucketSpanMS
+		start := time.UnixMilli(startMS).In(time.Local)
+		end := time.UnixMilli(endMS).In(time.Local)
+		buckets[idx] = AccountRecentBucket{
+			Time:          start.Format("15:04") + "-" + end.Format("15:04"),
+			BucketStartMS: startMS,
+		}
+	}
+	return buckets
+}
+
+func buildAccountRecentBucketsByTarget(
+	rows []store.AccountRecentBucketRow,
+	firstBucketID int64,
+	bucketCount int,
+	bucketSpanMS int64,
+) map[int][]AccountRecentBucket {
+	if len(rows) == 0 || bucketCount <= 0 || bucketSpanMS <= 0 {
+		return nil
+	}
+	byTarget := make(map[int][]AccountRecentBucket)
+	ensureBuckets := func(targetIndex int) []AccountRecentBucket {
+		if existing, ok := byTarget[targetIndex]; ok {
+			return existing
+		}
+		buckets := buildEmptyAccountRecentBuckets(firstBucketID, bucketCount, bucketSpanMS)
+		byTarget[targetIndex] = buckets
+		return buckets
+	}
+	for _, row := range rows {
+		offset := int(row.BucketID - firstBucketID)
+		if offset < 0 || offset >= bucketCount {
+			continue
+		}
+		if row.SuccessCalls <= 0 && row.FailureCalls <= 0 {
+			continue
+		}
+		buckets := ensureBuckets(row.RequestIndex)
+		buckets[offset].Success += row.SuccessCalls
+		buckets[offset].Failed += row.FailureCalls
+	}
+	return byTarget
 }
 
 type accountHistoryTotal struct {
