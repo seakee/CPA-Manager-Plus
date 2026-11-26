@@ -24,7 +24,10 @@ export interface UsageTotals {
   failure: number;
   inputTokens: number;
   outputTokens: number;
+  cachedTokens?: number;
+  reasoningTokens?: number;
   totalTokens: number;
+  estimatedCostUsd?: number;
   lastUsedAtMs: number | null;
 }
 
@@ -42,24 +45,23 @@ export interface KeyUsage {
   bucketMs: number;
   coverage: UsageCoverage;
   totals: UsageTotals | null;
+  topModels?: UsageModelCount[];
+  modelCount?: number;
   series: UsagePoint[];
 }
 
 export interface UsageModelCount {
   model: string;
   calls: number;
+  totalTokens?: number;
+  estimatedCostUsd?: number;
 }
 
-export interface UsageRecentRequest {
-  timestampMs: number;
-  failed: boolean;
-  statusCode?: number;
-  model?: string;
-}
-
-export interface KeyStatusBlock {
-  state: 'idle' | 'success' | 'failure';
-  title?: string;
+export interface UsageStatusSlot {
+  startMs: number;
+  endMs: number;
+  success: number;
+  failure: number;
 }
 
 export interface UsageSummaryItem {
@@ -67,11 +69,14 @@ export interface UsageSummaryItem {
   calls: number;
   success?: number;
   failure?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedTokens?: number;
   totalTokens?: number;
   estimatedCostUsd?: number;
   topModels?: UsageModelCount[];
   modelCount?: number;
-  recentRequests?: UsageRecentRequest[];
+  recentSlots?: UsageStatusSlot[];
   lastUsedAtMs: number | null;
   coverage: UsageCoverageState;
 }
@@ -111,6 +116,52 @@ function parseCoverageState(value: unknown): UsageCoverageState | null {
 
 // Malformed usage is never repaired into a plausible number: the caller shows
 // an unknown coverage instead.
+function parseTopModelsList(rawTopModels: unknown): UsageModelCount[] {
+  const topModels: UsageModelCount[] = [];
+  if (!Array.isArray(rawTopModels)) return topModels;
+  for (const m of rawTopModels) {
+    if (!m || typeof m !== 'object') continue;
+    const model = field(m, 'model');
+    const mCalls = field(m, 'calls');
+    const mTokens = field(m, 'totalTokens');
+    const mCost = field(m, 'estimatedCostUsd');
+    if (typeof model === 'string' && model.trim() && isCount(mCalls)) {
+      topModels.push({
+        model: model.trim(),
+        calls: mCalls,
+        ...(isCount(mTokens) ? { totalTokens: mTokens } : {}),
+        ...(typeof mCost === 'number' && Number.isFinite(mCost) && mCost >= 0
+          ? { estimatedCostUsd: mCost }
+          : {}),
+      });
+    }
+  }
+  return topModels;
+}
+
+function parseStatusSlotsList(rawSlots: unknown): UsageStatusSlot[] {
+  if (!Array.isArray(rawSlots)) return [];
+  const out: UsageStatusSlot[] = [];
+  for (const slot of rawSlots) {
+    if (!slot || typeof slot !== 'object') continue;
+    const startMs = field(slot, 'startMs');
+    const endMs = field(slot, 'endMs');
+    const success = field(slot, 'success');
+    const failure = field(slot, 'failure');
+    if (
+      !isMillis(startMs) ||
+      !isMillis(endMs) ||
+      endMs < startMs ||
+      !isCount(success) ||
+      !isCount(failure)
+    ) {
+      continue;
+    }
+    out.push({ startMs, endMs, success, failure });
+  }
+  return out;
+}
+
 export function parseKeyUsage(value: unknown, keyId: string): KeyUsage | null {
   if (!value || typeof value !== 'object') return null;
   const rawCoverage = field(value, 'coverage');
@@ -142,7 +193,10 @@ export function parseKeyUsage(value: unknown, keyId: string): KeyUsage | null {
     const failure = field(totals, 'failure') ?? field(totals, 'failedCalls');
     const inputTokens = field(totals, 'inputTokens');
     const outputTokens = field(totals, 'outputTokens');
+    const cachedTokensRaw = field(totals, 'cachedTokens');
+    const reasoningTokensRaw = field(totals, 'reasoningTokens');
     const totalTokens = field(totals, 'totalTokens');
+    const estimatedCostRaw = field(totals, 'estimatedCostUsd');
     const lastUsedAtMs = field(totals, 'lastUsedAtMs');
     if (
       !isCount(calls) ||
@@ -150,12 +204,30 @@ export function parseKeyUsage(value: unknown, keyId: string): KeyUsage | null {
       !isCount(failure) ||
       !isCount(inputTokens) ||
       !isCount(outputTokens) ||
+      (cachedTokensRaw !== undefined && cachedTokensRaw !== null && !isCount(cachedTokensRaw)) ||
+      (reasoningTokensRaw !== undefined &&
+        reasoningTokensRaw !== null &&
+        !isCount(reasoningTokensRaw)) ||
       !isCount(totalTokens) ||
+      (estimatedCostRaw !== undefined &&
+        estimatedCostRaw !== null &&
+        (typeof estimatedCostRaw !== 'number' || !Number.isFinite(estimatedCostRaw) || estimatedCostRaw < 0)) ||
       !isOptionalMillis(lastUsedAtMs) ||
       success + failure !== calls
     )
       return null;
-    parsedTotals = { calls, success, failure, inputTokens, outputTokens, totalTokens, lastUsedAtMs };
+    parsedTotals = {
+      calls,
+      success,
+      failure,
+      inputTokens,
+      outputTokens,
+      ...(typeof cachedTokensRaw === 'number' ? { cachedTokens: cachedTokensRaw } : {}),
+      ...(typeof reasoningTokensRaw === 'number' ? { reasoningTokens: reasoningTokensRaw } : {}),
+      totalTokens,
+      ...(typeof estimatedCostRaw === 'number' ? { estimatedCostUsd: estimatedCostRaw } : {}),
+      lastUsedAtMs,
+    };
   }
   const rawSeries = field(value, 'series');
   if (!Array.isArray(rawSeries)) return null;
@@ -170,6 +242,8 @@ export function parseKeyUsage(value: unknown, keyId: string): KeyUsage | null {
       return null;
     series.push({ bucketMs: bucket, calls, failure, totalTokens });
   }
+  const detailTopModels = parseTopModelsList(field(value, 'topModels'));
+  const detailModelCount = field(value, 'modelCount');
   return {
     keyId,
     fromMs,
@@ -183,6 +257,8 @@ export function parseKeyUsage(value: unknown, keyId: string): KeyUsage | null {
       targetEventId,
     },
     totals: parsedTotals,
+    ...(detailTopModels.length > 0 ? { topModels: detailTopModels } : {}),
+    ...(isCount(detailModelCount) ? { modelCount: detailModelCount } : {}),
     series,
   };
 }
@@ -193,7 +269,14 @@ export function parseUsageSummary(value: unknown): UsageSummary | null {
   const fromMs = field(value, 'fromMs');
   const toMs = field(value, 'toMs');
   const rawItems = field(value, 'items');
-  if (!isMillis(fromMs) || !isMillis(toMs) || !coverage || !Array.isArray(rawItems)) return null;
+  if (
+    !isMillis(fromMs) ||
+    !isMillis(toMs) ||
+    toMs <= fromMs ||
+    !coverage ||
+    !Array.isArray(rawItems)
+  )
+    return null;
   const items: UsageSummaryItem[] = [];
   for (const item of rawItems) {
     if (!item || typeof item !== 'object') return null;
@@ -201,65 +284,49 @@ export function parseUsageSummary(value: unknown): UsageSummary | null {
     const calls = field(item, 'calls');
     const success = field(item, 'success');
     const failure = field(item, 'failure');
+    const inputTokens = field(item, 'inputTokens');
+    const outputTokens = field(item, 'outputTokens');
+    const cachedTokens = field(item, 'cachedTokens');
     const totalTokens = field(item, 'totalTokens');
     const estimatedCostUsd = field(item, 'estimatedCostUsd');
     const rawTopModels = field(item, 'topModels');
     const modelCount = field(item, 'modelCount');
-    const rawRecentRequests = field(item, 'recentRequests');
     const lastUsedAtMs = field(item, 'lastUsedAtMs');
     const itemCoverage = parseCoverageState(field(item, 'coverage'));
+    const hasSuccess = success !== undefined && success !== null;
+    const hasFailure = failure !== undefined && failure !== null;
     if (
       typeof keyId !== 'string' ||
       !/^[a-f0-9]{32}$/.test(keyId) ||
       !isCount(calls) ||
+      (hasSuccess && !isCount(success)) ||
+      (hasFailure && !isCount(failure)) ||
+      (isCount(success) && isCount(failure) && success + failure !== calls) ||
+      (isCount(success) && success > calls) ||
+      (isCount(failure) && failure > calls) ||
       !isOptionalMillis(lastUsedAtMs) ||
       !itemCoverage
     )
       return null;
 
-    const topModels: UsageModelCount[] = [];
-    if (Array.isArray(rawTopModels)) {
-      for (const m of rawTopModels) {
-        if (!m || typeof m !== 'object') continue;
-        const model = field(m, 'model');
-        const mCalls = field(m, 'calls');
-        if (typeof model === 'string' && model.trim() && isCount(mCalls)) {
-          topModels.push({ model: model.trim(), calls: mCalls });
-        }
-      }
-    }
-
-    const recentRequests: UsageRecentRequest[] = [];
-    if (Array.isArray(rawRecentRequests)) {
-      for (const req of rawRecentRequests) {
-        if (!req || typeof req !== 'object') continue;
-        const timestampMs = field(req, 'timestampMs');
-        const failed = field(req, 'failed');
-        const statusCode = field(req, 'statusCode');
-        const model = field(req, 'model');
-        if (isMillis(timestampMs) && typeof failed === 'boolean') {
-          recentRequests.push({
-            timestampMs,
-            failed,
-            ...(isCount(statusCode) && statusCode > 0 ? { statusCode } : {}),
-            ...(typeof model === 'string' && model.trim() ? { model: model.trim() } : {}),
-          });
-        }
-      }
-    }
+    const topModels = parseTopModelsList(rawTopModels);
+    const recentSlots = parseStatusSlotsList(field(item, 'recentSlots'));
 
     items.push({
       keyId,
       calls,
       ...(isCount(success) ? { success } : {}),
       ...(isCount(failure) ? { failure } : {}),
+      ...(isCount(inputTokens) ? { inputTokens } : {}),
+      ...(isCount(outputTokens) ? { outputTokens } : {}),
+      ...(isCount(cachedTokens) ? { cachedTokens } : {}),
       ...(isCount(totalTokens) ? { totalTokens } : {}),
       ...(typeof estimatedCostUsd === 'number' && Number.isFinite(estimatedCostUsd) && estimatedCostUsd >= 0
         ? { estimatedCostUsd }
         : {}),
       ...(topModels.length > 0 ? { topModels } : {}),
       ...(isCount(modelCount) ? { modelCount } : {}),
-      ...(recentRequests.length > 0 ? { recentRequests } : {}),
+      ...(recentSlots.length > 0 ? { recentSlots } : {}),
       lastUsedAtMs,
       coverage: itemCoverage,
     });
@@ -335,20 +402,43 @@ export function usageCountText(value: number | null | undefined, state: UsageSta
   return value.toLocaleString();
 }
 
+const COMPACT_NUMBER_UNITS = [
+  { threshold: 1_000_000_000_000_000, suffix: 'Q' },
+  { threshold: 1_000_000_000_000, suffix: 'T' },
+  { threshold: 1_000_000_000, suffix: 'B' },
+  { threshold: 1_000_000, suffix: 'M' },
+  { threshold: 1_000, suffix: 'K' },
+] as const;
+
+function formatBoundedCompactMagnitude(absValue: number): string {
+  const unitIndex = COMPACT_NUMBER_UNITS.findIndex((item) => absValue >= item.threshold);
+  if (unitIndex >= 0) {
+    const unit = COMPACT_NUMBER_UNITS[unitIndex]!;
+    const formatted = (absValue / unit.threshold).toFixed(1);
+    const nextUnit = unitIndex > 0 ? COMPACT_NUMBER_UNITS[unitIndex - 1] : undefined;
+    if (nextUnit && Number(formatted) >= 1_000) {
+      return `${(absValue / nextUnit.threshold).toFixed(1).replace(/\.0$/, '')}${nextUnit.suffix}`;
+    }
+    return `${formatted.replace(/\.0$/, '')}${unit.suffix}`;
+  }
+  return String(Math.round(absValue));
+}
+
 export function usageCompactNumberText(
   value: number | null | undefined,
   state: UsageState
 ): string {
-  if (state === 'unknown' || state === 'unavailable' || value === null || value === undefined)
+  if (
+    state === 'unknown' ||
+    state === 'unavailable' ||
+    value === null ||
+    value === undefined ||
+    !Number.isFinite(value)
+  )
     return '—';
+  if (state === 'partial' && value <= 0) return '—';
   const prefix = state === 'partial' && value > 0 ? '≥' : '';
-  if (value >= 1_000_000) {
-    return `${prefix}${(value / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
-  }
-  if (value >= 1_000) {
-    return `${prefix}${(value / 1_000).toFixed(1).replace(/\.0$/, '')}K`;
-  }
-  return `${prefix}${value}`;
+  return `${prefix}${formatBoundedCompactMagnitude(Math.max(0, value))}`;
 }
 
 export function usageCompactUsdText(
@@ -364,38 +454,29 @@ export function usageCompactUsdText(
   ) {
     return '—';
   }
-  const prefix = state === 'partial' && value > 0 ? '≥' : '';
-  if (value > 0 && value < 0.01) {
+  const safe = Math.max(0, value);
+  if (state === 'partial' && safe === 0) {
+    return '—';
+  }
+  const prefix = state === 'partial' && safe > 0 ? '≥' : '';
+  if (safe > 0 && safe < 0.01) {
     return `${prefix}<$0.01`;
   }
-  if (value >= 1_000) {
-    return `${prefix}$${usageCompactNumberText(Math.round(value), 'complete')}`;
+  const rounded = Number(safe.toFixed(2));
+  if (rounded < 1_000) {
+    return `${prefix}$${safe.toFixed(2)}`;
   }
-  return `${prefix}$${value.toFixed(2)}`;
-}
-
-export function buildKeyStatusBlocks(
-  recentRequests: readonly UsageRecentRequest[] | undefined,
-  slotCount = 10
-): KeyStatusBlock[] {
-  const ordered = [...(recentRequests ?? [])]
-    .filter((item) => Number.isFinite(item.timestampMs))
-    .sort((a, b) => a.timestampMs - b.timestampMs)
-    .slice(-slotCount);
-
-  const idleCount = Math.max(0, slotCount - ordered.length);
-  const blocks: KeyStatusBlock[] = Array.from({ length: idleCount }, () => ({ state: 'idle' as const }));
-  for (const req of ordered) {
-    const d = new Date(req.timestampMs);
-    const timeStr = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-    const statusPart = req.failed && req.statusCode ? ` (${req.statusCode})` : '';
-    const modelPart = req.model ? ` · ${req.model}` : '';
-    blocks.push({
-      state: req.failed ? 'failure' : 'success',
-      title: `${timeStr}${statusPart}${modelPart}`,
-    });
+  const unitIndex = COMPACT_NUMBER_UNITS.findIndex((item) => rounded >= item.threshold);
+  if (unitIndex < 0) {
+    return `${prefix}$${safe.toFixed(2)}`;
   }
-  return blocks;
+  const unit = COMPACT_NUMBER_UNITS[unitIndex]!;
+  const formatted = (safe / unit.threshold).toFixed(2);
+  const nextUnit = unitIndex > 0 ? COMPACT_NUMBER_UNITS[unitIndex - 1] : undefined;
+  if (nextUnit && Number(formatted) >= 1_000) {
+    return `${prefix}$${(safe / nextUnit.threshold).toFixed(2)}${nextUnit.suffix}`;
+  }
+  return `${prefix}$${formatted}${unit.suffix}`;
 }
 
 // Timestamps in the workspace follow the selected UI language, like the detail

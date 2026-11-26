@@ -375,6 +375,48 @@ const en = {
   adoptedOriginInline: 'Adopted',
   callsUnit: 'calls',
   recentRequestsHint: 'Last 10 requests (oldest to newest)',
+  cardMetricRequests: 'Requests',
+  cardMetricTokens: 'Tokens',
+  cardMetricCost: 'Cost',
+  cardMetricSuccessRate: 'Success',
+  cardRecentStatusTitle: 'Recent Status',
+  modelsTotalSuffix: 'models',
+  timeColumn: 'Time',
+  timeCreatedShort: 'Created',
+  timeRotatedShort: 'Rotated',
+  timeRevokedShort: 'Revoked',
+  timeRotatedFullPrefix: 'Last regenerated',
+  usageShortColumn: 'Usage (24h)',
+  timeActiveShort: 'Active',
+  neverUsedShort: 'Never used',
+  sortFieldCost: 'Estimated cost',
+  sortFieldTokens: 'Total tokens',
+  usageWindowSelectorLabel: 'Usage window',
+  usageWindowShort24h: '24h',
+  usageWindowShort7d: '7d',
+  usageWindowShort30d: '30d',
+  usageInputTokensLabel: 'Input tokens',
+  usageOutputTokensLabel: 'Output tokens',
+  usageCachedTokensLabel: 'Cache hit',
+  usageCallsBreakdownLabel: 'Requests',
+  usageSuccessShort: 'OK',
+  usageFailureShort: 'Failed',
+  usageAvgPerCall: 'Avg',
+  usageTrendTitle: 'Traffic & Token Trend',
+  usageTokenMixTitle: 'Token Composition',
+  usageUncachedInput: 'Uncached input',
+  usageReasoningTokens: 'Reasoning',
+  usageInputCacheHitRate: 'Input cache hit',
+  usageModelBreakdownTitle: 'Model Consumption',
+  overviewSnapshotTitle: '24h Snapshot',
+  overviewKeyInfoTitle: 'Key Information',
+  overviewLastActiveLabel: 'Last active',
+  overviewActiveModelsLabel: 'Active models (24h)',
+  cardTopModelsTitle: 'Model Mix',
+  cardOtherModelsSummary: '{count} other models · {amount} ({pct}%)',
+  cardOtherModelsPctOnly: '{count} other models ({pct}%)',
+  cardModelsEmpty: 'No model calls in current window',
+  originConsoleShort: 'Console',
 };
 const zh: typeof en = {
   installerOrigin: '安装生成的密钥',
@@ -731,6 +773,48 @@ const zh: typeof en = {
   adoptedOriginInline: '接管',
   callsUnit: '次',
   recentRequestsHint: '最近 10 次请求（从左到右由旧到新）',
+  cardMetricRequests: '请求',
+  cardMetricTokens: 'Token',
+  cardMetricCost: '费用',
+  cardMetricSuccessRate: '成功率',
+  cardRecentStatusTitle: '最近状态',
+  modelsTotalSuffix: '个模型',
+  timeColumn: '时间',
+  timeCreatedShort: '创建',
+  timeRotatedShort: '轮换',
+  timeRevokedShort: '撤销',
+  timeRotatedFullPrefix: '最近重新生成',
+  usageShortColumn: '用量 (24h)',
+  timeActiveShort: '活跃',
+  neverUsedShort: '从未使用',
+  sortFieldCost: '预估费用',
+  sortFieldTokens: '总 Token',
+  usageWindowSelectorLabel: '统计时间范围',
+  usageWindowShort24h: '24h',
+  usageWindowShort7d: '7d',
+  usageWindowShort30d: '30d',
+  usageInputTokensLabel: '输入 Token',
+  usageOutputTokensLabel: '输出 Token',
+  usageCachedTokensLabel: '缓存命中',
+  usageCallsBreakdownLabel: '调用统计',
+  usageSuccessShort: '成功',
+  usageFailureShort: '失败',
+  usageAvgPerCall: '均值',
+  usageTrendTitle: '流量与消耗趋势',
+  usageTokenMixTitle: 'Token 构成',
+  usageUncachedInput: '未缓存输入',
+  usageReasoningTokens: '推理思考',
+  usageInputCacheHitRate: '输入缓存命中率',
+  usageModelBreakdownTitle: '模型消耗分布',
+  overviewSnapshotTitle: '近 24 小时概览',
+  overviewKeyInfoTitle: '密钥信息',
+  overviewLastActiveLabel: '最近活跃',
+  overviewActiveModelsLabel: '常用模型 (24h)',
+  cardTopModelsTitle: '模型消耗构成',
+  cardOtherModelsSummary: '其余 {count} 个模型合计 {amount}（{pct}%）',
+  cardOtherModelsPctOnly: '其余 {count} 个模型（{pct}%）',
+  cardModelsEmpty: '当前窗口暂无模型调用',
+  originConsoleShort: '控制台创建',
 };
 const tw: typeof en = {
   installerOrigin: '安裝產生的金鑰',
@@ -1087,6 +1171,48 @@ const tw: typeof en = {
   adoptedOriginInline: '接管',
   callsUnit: '次',
   recentRequestsHint: '最近 10 次請求（從左到右由舊到新）',
+  cardMetricRequests: '請求',
+  cardMetricTokens: 'Token',
+  cardMetricCost: '費用',
+  cardMetricSuccessRate: '成功率',
+  cardRecentStatusTitle: '最近狀態',
+  modelsTotalSuffix: '個模型',
+  timeColumn: '時間',
+  timeCreatedShort: '建立',
+  timeRotatedShort: '輪換',
+  timeRevokedShort: '撤銷',
+  timeRotatedFullPrefix: '最近重新產生',
+  usageShortColumn: '用量 (24h)',
+  timeActiveShort: '活躍',
+  neverUsedShort: '從未使用',
+  sortFieldCost: '預估費用',
+  sortFieldTokens: '總 Token',
+  usageWindowSelectorLabel: '統計時間範圍',
+  usageWindowShort24h: '24h',
+  usageWindowShort7d: '7d',
+  usageWindowShort30d: '30d',
+  usageInputTokensLabel: '輸入 Token',
+  usageOutputTokensLabel: '輸出 Token',
+  usageCachedTokensLabel: '快取命中',
+  usageCallsBreakdownLabel: '呼叫統計',
+  usageSuccessShort: '成功',
+  usageFailureShort: '失敗',
+  usageAvgPerCall: '均值',
+  usageTrendTitle: '流量與消耗趨勢',
+  usageTokenMixTitle: 'Token 構成',
+  usageUncachedInput: '未快取輸入',
+  usageReasoningTokens: '推理思考',
+  usageInputCacheHitRate: '輸入快取命中率',
+  usageModelBreakdownTitle: '模型消耗分佈',
+  overviewSnapshotTitle: '近 24 小時概覽',
+  overviewKeyInfoTitle: '金鑰資訊',
+  overviewLastActiveLabel: '最近活躍',
+  overviewActiveModelsLabel: '常用模型 (24h)',
+  cardTopModelsTitle: '模型消耗構成',
+  cardOtherModelsSummary: '其餘 {count} 個模型合計 {amount}（{pct}%）',
+  cardOtherModelsPctOnly: '其餘 {count} 個模型（{pct}%）',
+  cardModelsEmpty: '目前視窗暫無模型呼叫',
+  originConsoleShort: '主控台建立',
 };
 const ru: typeof en = {
   installerOrigin: 'Ключ установки',
@@ -1459,6 +1585,48 @@ const ru: typeof en = {
   adoptedOriginInline: 'Принятый',
   callsUnit: 'выз.',
   recentRequestsHint: 'Последние 10 запросов (слева направо)',
+  cardMetricRequests: 'Запросы',
+  cardMetricTokens: 'Токены',
+  cardMetricCost: 'Стоимость',
+  cardMetricSuccessRate: 'Успех',
+  cardRecentStatusTitle: 'Недавний статус',
+  modelsTotalSuffix: 'мод.',
+  timeColumn: 'Время',
+  timeCreatedShort: 'Создан',
+  timeRotatedShort: 'Ротация',
+  timeRevokedShort: 'Отозван',
+  timeRotatedFullPrefix: 'Последнее пересоздание',
+  usageShortColumn: 'Расход (24 ч)',
+  timeActiveShort: 'Активн.',
+  neverUsedShort: 'Не использовался',
+  sortFieldCost: 'Стоимость',
+  sortFieldTokens: 'Токены',
+  usageWindowSelectorLabel: 'Период статистики',
+  usageWindowShort24h: '24 ч',
+  usageWindowShort7d: '7 д',
+  usageWindowShort30d: '30 д',
+  usageInputTokensLabel: 'Входные токены',
+  usageOutputTokensLabel: 'Выходные токены',
+  usageCachedTokensLabel: 'Чтение из кэша',
+  usageCallsBreakdownLabel: 'Запросы',
+  usageSuccessShort: 'Усп.',
+  usageFailureShort: 'Сбоев',
+  usageAvgPerCall: 'Средн.',
+  usageTrendTitle: 'Тренд запросов и токенов',
+  usageTokenMixTitle: 'Состав токенов',
+  usageUncachedInput: 'Ввод без кэша',
+  usageReasoningTokens: 'Рассуждение',
+  usageInputCacheHitRate: 'Попадание в кэш ввода',
+  usageModelBreakdownTitle: 'Распределение по моделям',
+  overviewSnapshotTitle: 'Обзор за 24 ч',
+  overviewKeyInfoTitle: 'Сведения о ключе',
+  overviewLastActiveLabel: 'Последняя активность',
+  overviewActiveModelsLabel: 'Активные модели (24 ч)',
+  cardTopModelsTitle: 'Структура моделей',
+  cardOtherModelsSummary: 'Остальные ({count}): {amount} ({pct}%)',
+  cardOtherModelsPctOnly: 'Остальные ({count}): {pct}%',
+  cardModelsEmpty: 'Нет вызовов моделей в окне',
+  originConsoleShort: 'Создан в консоли',
 };
 export function keyWorkspaceText(key: keyof typeof en, languageOverride?: string) {
   const language = languageOverride || fullWebLanguage();
@@ -1528,4 +1696,100 @@ export function formatKeyPaginationInfo(
     return `Страница ${page} / ${totalPages} · Показано ${startItem}-${endItem} / ${total}`;
   }
   return `Page ${page} / ${totalPages} · Showing ${startItem}-${endItem} / ${total}`;
+}
+
+export function formatKeyModelsSummaryLine(
+  totalModels: number,
+  languageOverride?: string
+): string {
+  const language = languageOverride || fullWebLanguage();
+  if (language === 'zh-TW') return `共 ${totalModels} 個模型`;
+  if (language.startsWith('zh')) return `共 ${totalModels} 个模型`;
+  if (language.startsWith('ru')) return `${totalModels} мод.`;
+  const modelNoun = totalModels === 1 ? 'model' : 'models';
+  return `${totalModels} ${modelNoun}`;
+}
+
+export function formatKeyUsageColumnHeader(
+  window: '24h' | '7d' | '30d',
+  languageOverride?: string
+): string {
+  const language = languageOverride || fullWebLanguage();
+  if (language === 'zh-TW' || language.startsWith('zh')) {
+    return `用量 (${window})`;
+  }
+  if (language.startsWith('ru')) {
+    const winText = window === '24h' ? '24 ч' : window === '7d' ? '7 д' : '30 д';
+    return `Расход (${winText})`;
+  }
+  return `Usage (${window})`;
+}
+
+export function formatKeyModelsPopoverTitle(
+  window: '24h' | '7d' | '30d',
+  languageOverride?: string
+): string {
+  const language = languageOverride || fullWebLanguage();
+  if (language === 'zh-TW') return `近 ${window} 模型調用分佈`;
+  if (language.startsWith('zh')) return `近 ${window} 模型调用分布`;
+  if (language.startsWith('ru')) {
+    const winText = window === '24h' ? '24 ч' : window === '7d' ? '7 д' : '30 д';
+    return `Распределение моделей (${winText})`;
+  }
+  return `Model breakdown (${window})`;
+}
+
+export function formatKeySortFieldCalls(
+  window: '24h' | '7d' | '30d',
+  languageOverride?: string
+): string {
+  const language = languageOverride || fullWebLanguage();
+  if (language === 'zh-TW') return `${window} 呼叫`;
+  if (language.startsWith('zh')) return `${window} 调用`;
+  if (language.startsWith('ru')) {
+    const winText = window === '24h' ? '24ч' : window === '7d' ? '7д' : '30д';
+    return `Вызовы (${winText})`;
+  }
+  return `Calls (${window})`;
+}
+
+export function formatKeyOtherModelsSummary(
+  options: {
+    count: number;
+    amount?: string | null;
+    pct?: number | null;
+    callsText?: string | null;
+  },
+  languageOverride?: string
+): string {
+  const { count, amount, pct, callsText } = options;
+  const language = languageOverride || fullWebLanguage();
+  const dict =
+    language === 'zh-TW' ? tw : language.startsWith('zh') ? zh : language.startsWith('ru') ? ru : en;
+
+  if (callsText) {
+    if (language === 'zh-TW') return `其餘 ${count} 個模型 · ${callsText}`;
+    if (language.startsWith('zh')) return `其余 ${count} 个模型 · ${callsText}`;
+    if (language.startsWith('ru')) return `Остальные (${count}): ${callsText}`;
+    const noun = count === 1 ? 'other model' : 'other models';
+    return `${count} ${noun} · ${callsText}`;
+  }
+
+  const pctStr = String(pct ?? 0);
+  if (amount) {
+    if (!language.startsWith('zh') && !language.startsWith('ru') && count === 1) {
+      return `1 other model · ${amount} (${pctStr}%)`;
+    }
+    return dict.cardOtherModelsSummary
+      .replace('{count}', String(count))
+      .replace('{amount}', amount)
+      .replace('{pct}', pctStr);
+  }
+
+  if (!language.startsWith('zh') && !language.startsWith('ru') && count === 1) {
+    return `1 other model (${pctStr}%)`;
+  }
+  return dict.cardOtherModelsPctOnly
+    .replace('{count}', String(count))
+    .replace('{pct}', pctStr);
 }

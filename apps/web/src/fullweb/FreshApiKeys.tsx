@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { fullWebText as t } from '../i18n/fullweb';
 import { Button } from '../components/ui/Button';
-import { DropdownMenu } from '../components/ui/DropdownMenu';
 import { Input } from '../components/ui/Input';
 import { Modal } from '../components/ui/Modal';
 import { SegmentedTabs } from '../components/ui/SegmentedTabs';
@@ -13,6 +12,7 @@ import { useClientPagination, usePersistedViewMode } from '../hooks/list';
 import {
   formatKeyPageSizeOption,
   formatKeyPaginationInfo,
+  formatKeySortFieldCalls,
   formatKeyTableCount,
   keyWorkspaceText as k,
 } from '../i18n/freshKeyWorkspace';
@@ -21,28 +21,16 @@ import { FullWebIcon } from './FullWebIcon';
 import './freshKeys.css';
 import { useHeaderRefresh } from '../hooks/useHeaderRefresh';
 import { PublicApiError, type PublicApiClient } from './publicApi';
+import { FreshApiKeyListViews } from './FreshApiKeyListViews';
 import { FreshKeyDetails, FreshKeyRenameModal } from './FreshKeyDetails';
 import { FreshKeyRevocation } from './FreshKeyRevocation';
 import { FreshKeyRegenerate } from './FreshKeyRegenerate';
 import { AccessInfoSummary, type AccessInfo } from './FreshAccessInfo';
-import {
-  buildKeyStatusBlocks,
-  parseUsageSummary,
-  usageCompactNumberText,
-  usageCompactTimeText,
-  usageCompactUsdText,
-  usageCountText,
-  usageCoveragePill,
-  usageReasonText,
-  usageStateText,
-  usageTimeText,
-  type UsageSummary,
-} from './freshKeyUsage';
+import { parseUsageSummary, type UsageSummary } from './freshKeyUsage';
 import {
   effectBlockerTextKey,
   isTerminalKeyOperationOutcome,
   keyDisplayName,
-  keyUnifiedStatus,
   maskedPreviewOf,
   validKey,
   validKeyNameInput,
@@ -125,14 +113,27 @@ function isExternalOrSourceBlocker(code?: string): boolean {
   ].includes(code);
 }
 
-type KeySortKey = 'created' | 'recent' | 'calls24h' | 'name';
+type KeySortKey = 'created' | 'recent' | 'calls24h' | 'cost' | 'tokens' | 'name';
 
 const KEY_SORT_DEFAULT_DIRECTIONS: Record<KeySortKey, SortDirection> = {
   created: 'desc',
   recent: 'desc',
   calls24h: 'desc',
+  cost: 'desc',
+  tokens: 'desc',
   name: 'asc',
 };
+
+function usageSummaryResourceForWindow(
+  win: '24h' | '7d' | '30d',
+  latestServerToMs = 0
+): string {
+  if (win === '24h') return 'api-keys/usage-summary';
+  const toMs = Math.max(Date.now(), latestServerToMs);
+  const days = win === '7d' ? 7 : 30;
+  const fromMs = Math.max(1, toMs - days * 86_400_000);
+  return `api-keys/usage-summary?from_ms=${fromMs}&to_ms=${toMs}`;
+}
 
 const KEY_PAGE_SIZE_OPTIONS = [10, 20, 50] as const;
 
@@ -196,6 +197,7 @@ export function FreshApiKeys({
   const [detailIntent, setDetailIntent] = useState<{
     tab?: 'overview' | 'usage';
     action?: 'rename';
+    window?: '24h' | '7d' | '30d';
   } | null>(null);
   const [rowCopyState, setRowCopyState] = useState<{
     id: string;
@@ -211,6 +213,11 @@ export function FreshApiKeys({
   });
   const [workspaceTab, setWorkspaceTab] = useState<'keys' | 'access'>('keys');
   const [runtimeFilter, setRuntimeFilter] = useState<'all' | 'effective' | 'attention'>('all');
+  const [usageWindow, setUsageWindow] = useState<'24h' | '7d' | '30d'>('24h');
+  const usageWindowRef = useRef<'24h' | '7d' | '30d'>('24h');
+  usageWindowRef.current = usageWindow;
+  const usageReqSeq = useRef(0);
+  const latestServerToMsRef = useRef(0);
   const [sortBy, setSortBy] = useState<{ key: KeySortKey; direction: SortDirection }>({
     key: 'created',
     direction: 'desc',
@@ -370,7 +377,6 @@ export function FreshApiKeys({
       setRevocationAvailable(result.revocationAvailable);
       setPresenceUnverified(!!result.presenceUnverified);
       setBlocker(null);
-      try {
       if (
         result.revocationAvailable &&
         !operationPendingRef.current &&
@@ -398,10 +404,26 @@ export function FreshApiKeys({
           // Best-effort operation sync during list refresh.
         }
       }
-        const parsed = parseUsageSummary(await client.get<unknown>('api-keys/usage-summary', auth));
+      const targetWindow = usageWindowRef.current;
+      const seq = ++usageReqSeq.current;
+      try {
+        const parsed = parseUsageSummary(
+          await client.get<unknown>(
+            usageSummaryResourceForWindow(targetWindow, latestServerToMsRef.current),
+            auth
+          )
+        );
         if (!parsed) throw new Error('Invalid usage summary response');
-        if (alive.current && readEpoch.current === epoch && ownerEpoch.current === ownerAtStart)
+        if (
+          alive.current &&
+          readEpoch.current === epoch &&
+          ownerEpoch.current === ownerAtStart &&
+          seq === usageReqSeq.current &&
+          usageWindowRef.current === targetWindow
+        ) {
+          latestServerToMsRef.current = Math.max(latestServerToMsRef.current, parsed.toMs);
           setUsage(parsed);
+        }
       } catch (usageErr) {
         if (!alive.current || readEpoch.current !== epoch || ownerEpoch.current !== ownerAtStart)
           return;
@@ -409,7 +431,9 @@ export function FreshApiKeys({
           authenticatedFailure = true;
           onUnauthorized();
         }
-        setUsage(null);
+        if (seq === usageReqSeq.current) {
+          setUsage(null);
+        }
       }
       // Usage is intentionally best-effort; a failed read leaves the key list usable.
     } catch (err) {
@@ -435,29 +459,47 @@ export function FreshApiKeys({
 
   async function refreshUsageSummarySilently(
     ownerAtStart = ownerEpoch.current,
-    rebindAtStart = rebindSeq.current
+    rebindAtStart = rebindSeq.current,
+    targetWindow = usageWindowRef.current
   ) {
+    const seq = ++usageReqSeq.current;
     try {
       const parsed = parseUsageSummary(
-        await client.get<unknown>('api-keys/usage-summary', auth)
+        await client.get<unknown>(
+          usageSummaryResourceForWindow(targetWindow, latestServerToMsRef.current),
+          auth
+        )
       );
-      if (!parsed) return;
       if (
-        alive.current &&
-        ownerEpoch.current === ownerAtStart &&
-        rebindSeq.current === rebindAtStart
+        !alive.current ||
+        ownerEpoch.current !== ownerAtStart ||
+        rebindSeq.current !== rebindAtStart ||
+        seq !== usageReqSeq.current
       ) {
+        return;
+      }
+      if (!parsed) {
+        setUsage(null);
+        return;
+      }
+      if (usageWindowRef.current === targetWindow) {
+        latestServerToMsRef.current = Math.max(latestServerToMsRef.current, parsed.toMs);
         setUsage(parsed);
       }
     } catch (usageErr) {
       if (
-        alive.current &&
-        ownerEpoch.current === ownerAtStart &&
-        rebindSeq.current === rebindAtStart &&
-        usageErr instanceof PublicApiError &&
-        usageErr.kind === 'authentication'
+        !alive.current ||
+        ownerEpoch.current !== ownerAtStart ||
+        rebindSeq.current !== rebindAtStart
       ) {
+        return;
+      }
+      if (usageErr instanceof PublicApiError && usageErr.kind === 'authentication') {
         onUnauthorized();
+        return;
+      }
+      if (seq === usageReqSeq.current) {
+        setUsage(null);
       }
     }
   }
@@ -519,6 +561,10 @@ export function FreshApiKeys({
       setRevocationOpen(false);
       setRevocationPreset(null);
       setLatestOperationResult(null);
+      setUsageWindow('24h');
+      usageWindowRef.current = '24h';
+      ++usageReqSeq.current;
+      latestServerToMsRef.current = 0;
       reportPending();
     }
     setBlocker(null);
@@ -676,7 +722,7 @@ export function FreshApiKeys({
 
   function openKeyDetails(
     keyId: string,
-    intent?: { tab?: 'overview' | 'usage'; action?: 'rename' }
+    intent?: { tab?: 'overview' | 'usage'; action?: 'rename'; window?: '24h' | '7d' | '30d' }
   ) {
     if (locked) return;
     setDetailIntent(intent ?? null);
@@ -1721,6 +1767,42 @@ export function FreshApiKeys({
               if (callsA !== null && callsB !== null && callsA !== callsB) {
                 return sortBy.direction === 'asc' ? callsA - callsB : callsB - callsA;
               }
+            } else if (sortBy.key === 'cost') {
+              const costA =
+                usageA &&
+                (usageA.coverage.state === 'complete' || usageA.coverage.state === 'partial') &&
+                usageA.estimatedCostUsd !== undefined
+                  ? usageA.estimatedCostUsd
+                  : null;
+              const costB =
+                usageB &&
+                (usageB.coverage.state === 'complete' || usageB.coverage.state === 'partial') &&
+                usageB.estimatedCostUsd !== undefined
+                  ? usageB.estimatedCostUsd
+                  : null;
+              if (costA === null && costB !== null) return 1;
+              if (costB === null && costA !== null) return -1;
+              if (costA !== null && costB !== null && costA !== costB) {
+                return sortBy.direction === 'asc' ? costA - costB : costB - costA;
+              }
+            } else if (sortBy.key === 'tokens') {
+              const tokA =
+                usageA &&
+                (usageA.coverage.state === 'complete' || usageA.coverage.state === 'partial') &&
+                usageA.totalTokens !== undefined
+                  ? usageA.totalTokens
+                  : null;
+              const tokB =
+                usageB &&
+                (usageB.coverage.state === 'complete' || usageB.coverage.state === 'partial') &&
+                usageB.totalTokens !== undefined
+                  ? usageB.totalTokens
+                  : null;
+              if (tokA === null && tokB !== null) return 1;
+              if (tokB === null && tokA !== null) return -1;
+              if (tokA !== null && tokB !== null && tokA !== tokB) {
+                return sortBy.direction === 'asc' ? tokA - tokB : tokB - tokA;
+              }
             } else if (sortBy.key === 'recent') {
               const usedA = usageA?.lastUsedAtMs ?? null;
               const usedB = usageB?.lastUsedAtMs ?? null;
@@ -1765,7 +1847,9 @@ export function FreshApiKeys({
   const keySortOptions: Array<{ value: KeySortKey; label: string }> = [
     { value: 'created', label: k('sortFieldCreated') },
     { value: 'recent', label: k('sortFieldRecent') },
-    { value: 'calls24h', label: k('sortFieldCalls24h') },
+    { value: 'calls24h', label: formatKeySortFieldCalls(usageWindow) },
+    { value: 'cost', label: k('sortFieldCost') },
+    { value: 'tokens', label: k('sortFieldTokens') },
     { value: 'name', label: k('sortFieldName') },
   ];
   const selectedSortLabel =
@@ -1811,152 +1895,6 @@ export function FreshApiKeys({
     !!pending ||
     !!secret ||
     !!recoveryKey;
-  // One cell = the provable count, its coverage and when the key was last used.
-  // Unknown coverage prints an em dash instead of a zero.
-  const usageCell = (id: string) => {
-    const item = usageById.get(id);
-    const state = item?.coverage.state ?? 'unknown';
-    const proven = state === 'complete' || state === 'partial';
-    const calls = item?.calls ?? 0;
-    const success = item?.success ?? Math.max(0, calls - (item?.failure ?? 0));
-    const failure = item?.failure ?? 0;
-    const showTokens = proven && item?.totalTokens !== undefined && item.totalTokens > 0;
-    const showCost =
-      proven && item?.estimatedCostUsd !== undefined && item.estimatedCostUsd > 0;
-    const successRate =
-      calls > 0 ? Math.round((success / calls) * 1000) / 10 : null;
-    const statusBlocks =
-      proven && calls > 0 ? buildKeyStatusBlocks(item?.recentRequests) : null;
-    const lastUsedFullText = usageTimeText(item?.lastUsedAtMs) ?? '—';
-    const lastUsedText = usageCompactTimeText(item?.lastUsedAtMs, 'recent') ?? '—';
-    if (!proven) {
-      return (
-        <button
-          type="button"
-          className="key-usage-cell key-usage-trigger"
-          data-testid={'open-key-usage-' + id}
-          disabled={locked}
-          title={usageReasonText(item?.coverage.reason ?? 'usage_read_failed')}
-          onClick={() => openKeyDetails(id, { tab: 'usage' })}
-        >
-          <div className="key-usage-top">
-            <strong>—</strong>
-            <span className={'key-state-pill ' + usageCoveragePill(state)}>
-              {usageStateText(state)}
-            </span>
-          </div>
-          <small title={lastUsedFullText !== '—' ? lastUsedFullText : undefined}>
-            {k('usageLastUsed')}: {lastUsedFullText}
-          </small>
-        </button>
-      );
-    }
-
-    if (calls === 0) {
-      return (
-        <button
-          type="button"
-          className="key-usage-cell key-usage-trigger"
-          data-testid={'open-key-usage-' + id}
-          disabled={locked}
-          title={usageReasonText(item?.coverage.reason ?? 'observed')}
-          onClick={() => openKeyDetails(id, { tab: 'usage' })}
-        >
-          <div className="key-usage-top">
-            <span className="key-recent-idle-pill">
-              <span className="key-recent-idle-dot" aria-hidden="true" />
-              <span>{k('noUsageInWindow')}</span>
-            </span>
-            {state !== 'complete' && (
-              <span className={'key-state-pill ' + usageCoveragePill(state)}>
-                {usageStateText(state)}
-              </span>
-            )}
-          </div>
-          <small title={lastUsedFullText !== '—' ? lastUsedFullText : undefined}>
-            {k('usageLastUsed')}: {lastUsedFullText}
-          </small>
-        </button>
-      );
-    }
-
-    return (
-      <button
-        type="button"
-        className="key-usage-cell key-usage-trigger"
-        data-testid={'open-key-usage-' + id}
-        disabled={locked}
-        title={usageReasonText(item?.coverage.reason ?? 'observed')}
-        onClick={() => openKeyDetails(id, { tab: 'usage' })}
-      >
-        <div className="key-usage-top">
-          <span className="key-stat-total" title={k('usageCalls')}>
-            {`${usageCountText(calls, state)} ${k('callsUnit')}`}
-          </span>
-          <span className="key-stat-success" title={k('usageSuccess')}>
-            <FullWebIcon name="check" size={12} />
-            {usageCountText(success, state)}
-          </span>
-          <span className="key-stat-failure" title={k('usageFailure')}>
-            <FullWebIcon name="close" size={12} />
-            {usageCountText(failure, state)}
-          </span>
-          {successRate !== null && state === 'complete' && (
-            <span
-              className={`key-stat-rate ${
-                successRate >= 90
-                  ? 'is-high'
-                  : successRate >= 50
-                    ? 'is-medium'
-                    : 'is-low'
-              }`}
-            >
-              {`${successRate}%`}
-            </span>
-          )}
-          {(showTokens || showCost) && (
-            <span className="key-usage-meta-pill">
-              {showTokens ? `${usageCompactNumberText(item?.totalTokens, state)} tok` : ''}
-              {showTokens && showCost ? ' · ' : ''}
-              {showCost ? usageCompactUsdText(item?.estimatedCostUsd, state) : ''}
-            </span>
-          )}
-          {state !== 'complete' && (
-            <span className={'key-state-pill ' + usageCoveragePill(state)}>
-              {usageStateText(state)}
-            </span>
-          )}
-        </div>
-        <div className="key-recent-bar-row">
-          {statusBlocks && item?.recentRequests && item.recentRequests.length > 0 ? (
-            <div
-              className="key-recent-bar"
-              aria-hidden="true"
-              title={k('recentRequestsHint')}
-            >
-              {statusBlocks.map((blk, idx) => (
-                <span
-                  key={idx}
-                  className={`key-recent-block is-${blk.state}`}
-                  title={blk.title}
-                />
-              ))}
-            </div>
-          ) : null}
-          <span
-            className="key-recent-time"
-            title={
-              lastUsedFullText !== '—'
-                ? `${k('usageLastUsed')}: ${lastUsedFullText}`
-                : undefined
-            }
-          >
-            {lastUsedText}
-          </span>
-        </div>
-      </button>
-    );
-  };
   const createdKeyRecord = createdKeyId
     ? (keys || []).find((item) => item.id === createdKeyId) || null
     : null;
@@ -2682,6 +2620,45 @@ export function FreshApiKeys({
           headerTestId="key-table-topbar"
           showHeader={Boolean(keys && keys.length > 0)}
           summary={formatKeyTableCount(visibleKeys.length)}
+          headerActions={
+            <SegmentedTabs<'24h' | '7d' | '30d'>
+              ariaLabel={k('usageWindowSelectorLabel')}
+              idBase="key-list-usage-window"
+              className="key-usage-window-tabs"
+              variant="joined"
+              size="sm"
+              responsiveFullWidth={false}
+              activeTab={usageWindow}
+              onChange={(nextWin) => {
+                if (nextWin === usageWindowRef.current) return;
+                usageWindowRef.current = nextWin;
+                setUsageWindow(nextWin);
+                setUsage(null);
+                void refreshUsageSummarySilently(
+                  ownerEpoch.current,
+                  rebindSeq.current,
+                  nextWin
+                );
+              }}
+              items={[
+                {
+                  id: '24h',
+                  testId: 'key-list-usage-window-24h',
+                  label: k('usageWindowShort24h'),
+                },
+                {
+                  id: '7d',
+                  testId: 'key-list-usage-window-7d',
+                  label: k('usageWindowShort7d'),
+                },
+                {
+                  id: '30d',
+                  testId: 'key-list-usage-window-30d',
+                  label: k('usageWindowShort30d'),
+                },
+              ]}
+            />
+          }
           viewMode={{
             idBase: 'key-view-mode',
             value: viewMode,
@@ -2790,303 +2767,22 @@ export function FreshApiKeys({
               : null
           }
         >
-          <div className="key-table-scroll">
-              <table
-                className={`key-table ${viewMode === 'cards' ? 'is-cards-view' : ''}`}
-                role="table"
-              >
-                <caption className="sr-only">{k('scope')}</caption>
-                <thead role="rowgroup">
-                  <tr role="row">
-                    {(
-                      ['credential', 'lifecycle', 'modelsColumn', 'usageColumn', 'actions'] as const
-                    ).map((label) => (
-                      <th key={label} scope="col" role="columnheader">
-                        {k(label)}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody role="rowgroup">
-                  {pagedKeys.map((key) => {
-                    const originLabel =
-                      key.origin === 'installer'
-                        ? k('installerOriginInline')
-                        : key.origin === 'adopted'
-                          ? k('adoptedOriginInline')
-                          : k('workspaceOriginInline');
-                    const createdFullText = usageTimeText(key.createdAtMs) ?? '—';
-                    const createdText = usageCompactTimeText(key.createdAtMs, 'created') ?? '—';
-                    const unified = keyUnifiedStatus(key);
-                    const revokedText =
-                      key.lifecycle === 'superseded' && key.revokedAtMs
-                        ? usageTimeText(key.revokedAtMs)
-                        : null;
-                    const displayName = keyDisplayName(
-                      key,
-                      k('installerOrigin'),
-                      k('adoptedOrigin'),
-                      t('keysUnnamed')
-                    );
-                    return (
-                      <tr
-                        key={key.id}
-                        role="row"
-                        data-testid={'key-row-' + key.id}
-                        data-interactive={!locked ? 'true' : undefined}
-                        className={selected === key.id ? 'is-selected' : undefined}
-                        onClick={(event) => {
-                          if (
-                            typeof Element !== 'undefined' &&
-                            event.target instanceof Element &&
-                            event.target.closest('button, a, input, [role="menuitem"]')
-                          ) {
-                            return;
-                          }
-                          if (!locked) openKeyDetails(key.id);
-                        }}
-                      >
-                        <td className="key-col-identity" role="cell" data-label={k('name')}>
-                          <div className="key-name-cell">
-                            <div>
-                              <button
-                                type="button"
-                                className="key-name-link"
-                                disabled={locked}
-                                onClick={() => openKeyDetails(key.id)}
-                              >
-                                {displayName}
-                              </button>
-                              <small className="key-secret-inline" title={key.id}>
-                                <code>{key.maskedPreview}</code>
-                                {key.lifecycle !== 'superseded' && (
-                                  <button
-                                    type="button"
-                                    className="key-inline-copy-btn"
-                                    data-testid={'copy-row-secret-' + key.id}
-                                    aria-label={k('copyKey') + ': ' + displayName}
-                                    disabled={
-                                      locked ||
-                                      (rowCopyState?.id === key.id &&
-                                        rowCopyState.status === 'copying')
-                                    }
-                                    onClick={(event) => {
-                                      event?.stopPropagation?.();
-                                      void copyRowKeySecret(key);
-                                    }}
-                                  >
-                                    <FullWebIcon
-                                      name={
-                                        rowCopyState?.id === key.id &&
-                                        rowCopyState.status === 'copied'
-                                          ? 'check'
-                                          : 'copy'
-                                      }
-                                      size={13}
-                                    />
-                                  </button>
-                                )}
-                                {rowCopyState?.id === key.id &&
-                                  rowCopyState.status !== 'copying' && (
-                                    <span
-                                      role="status"
-                                      className={`key-inline-copy-feedback ${rowCopyState.status === 'copied' ? 'is-copied' : 'is-failed'}`}
-                                      data-testid={'copy-row-secret-feedback-' + key.id}
-                                    >
-                                      {k(
-                                        rowCopyState.status === 'copied'
-                                          ? 'copiedShort'
-                                          : 'copyFailedShort'
-                                      )}
-                                    </span>
-                                  )}
-                                <span className="key-meta-pair">
-                                  <span className="key-meta-sep" aria-hidden="true">·</span>
-                                  <span className="key-origin-inline">{originLabel}</span>
-                                </span>
-                                <span className="key-meta-pair">
-                                  <span className="key-meta-sep" aria-hidden="true">·</span>
-                                  <span
-                                    className="key-created-inline"
-                                    title={
-                                      createdFullText !== '—'
-                                        ? `${k('created')}: ${createdFullText}`
-                                        : undefined
-                                    }
-                                  >
-                                    {createdText}
-                                  </span>
-                                </span>
-                              </small>
-                            </div>
-                          </div>
-                        </td>
-                        <td className="key-col-state" role="cell" data-label={k('lifecycle')}>
-                          <div className="key-state-stack">
-                            <span
-                              className={'key-state-pill ' + unified.pillClass}
-                              data-testid={'key-status-' + key.id}
-                            >
-                              {k(unified.labelKey)}
-                            </span>
-                            {revokedText && (
-                              <small
-                                className="key-state-subtext"
-                                data-testid={'key-revoked-at-' + key.id}
-                              >
-                                {k('revokedAtPrefix')} {revokedText}
-                              </small>
-                            )}
-                          </div>
-                        </td>
-                        <td
-                          className="key-col-models"
-                          role="cell"
-                          data-label={k('modelsColumn')}
-                        >
-                          {(() => {
-                            const usageItem = usageById.get(key.id);
-                            const usageState = usageItem?.coverage.state ?? 'unknown';
-                            const usageProven = usageState === 'complete' || usageState === 'partial';
-                            const topModels = usageProven ? (usageItem?.topModels ?? []) : [];
-                            const totalModels = usageProven
-                              ? (usageItem?.modelCount ?? topModels.length)
-                              : 0;
-                            if (!usageProven || topModels.length === 0) {
-                              return <span className="key-muted-dash">—</span>;
-                            }
-                            const primary = topModels[0];
-                            const extraCount = Math.max(0, totalModels - 1);
-                            const secondaryText = topModels
-                              .slice(1, 3)
-                              .map((m) => `${m.model} (${m.calls})`)
-                              .join(' · ');
-                            return (
-                              <div
-                                className="key-models-cell"
-                                title={topModels.map((m) => `${m.model}: ${m.calls}`).join('\n')}
-                              >
-                                <div className="key-models-top">
-                                  <span className="key-model-chip">{primary.model}</span>
-                                  {extraCount > 0 && (
-                                    <span className="key-model-more">{`+${extraCount}`}</span>
-                                  )}
-                                </div>
-                                <small className="key-models-sub">
-                                  {secondaryText
-                                    ? `${primary.calls} ${k('callsUnit')} · ${secondaryText}`
-                                    : `${primary.calls} ${k('callsUnit')}`}
-                                </small>
-                              </div>
-                            );
-                          })()}
-                        </td>
-                        <td
-                          className="key-col-usage"
-                          role="cell"
-                          data-label={k('usageColumn')}
-                          data-testid={'key-usage-' + key.id}
-                        >
-                          {usageCell(key.id)}
-                        </td>
-                        <td
-                          className="key-col-actions"
-                          role="cell"
-                          data-label={k('actions')}
-                          onClick={(event) => event?.stopPropagation?.()}
-                        >
-                          <div className="key-row-actions">
-                            {key.lifecycle !== 'superseded' && (
-                              <>
-                                <div className="key-quick-actions">
-                                  <Button
-                                    type="button"
-                                    variant="secondary"
-                                    size="xs"
-                                    iconOnly
-                                    className="key-quick-btn key-quick-btn-rename"
-                                    data-testid={'row-rename-' + key.id}
-                                    title={k('rename')}
-                                    aria-label={k('rename')}
-                                    disabled={locked || operationPending}
-                                    onClick={() => setRenameTarget(key)}
-                                  >
-                                    <FullWebIcon name="edit" size={14} />
-                                  </Button>
-                                  {revocationAvailable && (
-                                    <Button
-                                      type="button"
-                                      variant="secondary"
-                                      size="xs"
-                                      iconOnly
-                                      className="key-quick-btn key-quick-btn-regenerate"
-                                      data-testid={'row-regenerate-' + key.id}
-                                      title={k('regenerateKey')}
-                                      aria-label={k('regenerateKey')}
-                                      disabled={locked || operationPending}
-                                      onClick={() => openRegenerateFor(key.id)}
-                                    >
-                                      <FullWebIcon name="rotate" size={14} />
-                                    </Button>
-                                  )}
-                                  <DropdownMenu
-                                    ariaLabel={k('moreActions') + ': ' + displayName}
-                                    triggerIcon={<FullWebIcon name="moreVertical" size={14} />}
-                                    triggerTitle={k('moreActions')}
-                                    triggerClassName="btn btn-ghost btn-xs btn-icon-only key-quick-btn key-quick-btn-more"
-                                    disabled={locked || operationPending}
-                                    items={[
-                                      {
-                                        key: 'rename',
-                                        label: k('rename'),
-                                        onClick: () => setRenameTarget(key),
-                                      },
-                                      {
-                                        key: 'usage',
-                                        label: k('viewUsage'),
-                                        onClick: () => openKeyDetails(key.id, { tab: 'usage' }),
-                                      },
-                                      ...(revocationAvailable
-                                        ? [
-                                            { key: 'divider-ops', type: 'divider' as const },
-                                            {
-                                              key: 'regenerate',
-                                              label: k('regenerateKey'),
-                                              onClick: () => openRegenerateFor(key.id),
-                                            },
-                                            {
-                                              key: 'revoke',
-                                              label: k('quickRevoke'),
-                                              tone: 'danger' as const,
-                                              onClick: () => openRevocationFor(key.id, 'revoke'),
-                                            },
-                                          ]
-                                        : []),
-                                    ]}
-                                  />
-                                </div>
-                                <span className="key-actions-divider" aria-hidden="true" />
-                              </>
-                            )}
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="xs"
-                              className="key-row-detail-btn"
-                              data-testid={'open-key-' + key.id}
-                              disabled={locked}
-                              onClick={() => openKeyDetails(key.id)}
-                            >
-                              {k('rowDetails')}
-                            </Button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+          <FreshApiKeyListViews
+            viewMode={viewMode}
+            usageWindow={usageWindow}
+            keys={pagedKeys}
+            usageById={usageById}
+            selectedId={selected}
+            locked={locked}
+            operationPending={operationPending}
+            revocationAvailable={revocationAvailable}
+            rowCopyState={rowCopyState}
+            onOpenDetails={(id, options) => openKeyDetails(id, options)}
+            onCopySecret={(keyItem) => void copyRowKeySecret(keyItem)}
+            onRename={(keyItem) => setRenameTarget(keyItem)}
+            onRegenerate={(id) => openRegenerateFor(id)}
+            onRevoke={(id) => openRevocationFor(id, 'revoke')}
+          />
         </WorkspaceListPanel>
         {gatewayPending && (
           <aside className="key-gateway-note">
@@ -3131,6 +2827,7 @@ export function FreshApiKeys({
           key={selected}
           id={selected}
           initialTab={detailIntent?.tab}
+          initialWindow={detailIntent?.window}
           initialAction={detailIntent?.action}
           client={client}
           gatewayPending={gatewayPending}

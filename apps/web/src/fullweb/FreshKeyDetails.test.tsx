@@ -3,9 +3,10 @@ import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FreshKeyDetails } from './FreshKeyDetails';
 import { createPublicApiClient } from './publicApi';
-import { fullWebText as t } from '../i18n/fullweb';
+import { setFullWebLanguage, fullWebText as t } from '../i18n/fullweb';
 import { keyWorkspaceText as k } from '../i18n/freshKeyWorkspace';
 import { workspaceDrawerStyles } from '../components/common/WorkspaceDrawer';
+import { EChartsView } from '../components/charts/EChartsView';
 
 // Renderer tests exercise domain state; browser acceptance covers the shared
 // portal, focus, animation and close controls.
@@ -107,6 +108,7 @@ describe('Canonical key detail and rename', () => {
     close.mockClear();
   });
   afterEach(async () => {
+    setFullWebLanguage('en');
     if (renderer) await act(async () => renderer.unmount());
     vi.useRealTimers();
     vi.unstubAllGlobals();
@@ -1386,10 +1388,7 @@ describe('Canonical key detail and rename', () => {
     };
     const rotatedSecret = `cpamp_sk_${'0'.repeat(60)}89ab`;
     const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(globalThis.navigator, 'clipboard', {
-      configurable: true,
-      value: { writeText },
-    });
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
     const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
       const url = String(input);
       const method = (init?.method ?? 'GET').toUpperCase();
@@ -1612,8 +1611,8 @@ describe('Canonical key detail and rename', () => {
     });
     const statTiles = renderer.root
       .findByProps({ 'data-testid': 'key-usage-totals' })
-      .findAllByType('dt');
-    expect(statTiles).toHaveLength(7);
+      .findAllByProps({ 'data-metric-summary-header': 'true' });
+    expect(statTiles).toHaveLength(4);
 
     // Switch back to Overview and copy Key ID via detail-copy-key-id.
     const writeText = vi.fn().mockResolvedValue(undefined);
@@ -1699,5 +1698,1118 @@ describe('Canonical key detail and rename', () => {
     expect(renderer.root.findByProps({ 'data-testid': 'key-usage-empty' }).props.className).toBe(
       'key-usage-empty-state'
     );
+  });
+
+  it('renders EChartsView trend, token composition bar, and model consumption breakdown in usage tab', async () => {
+    await mount(
+      vi.fn<typeof fetch>(() => Promise.resolve(Response.json(key))),
+      key.id,
+      {
+        keyId: key.id,
+        fromMs: 1_000,
+        toMs: 2_000,
+        bucketMs: 1_000,
+        coverage: {
+          state: 'complete',
+          reason: 'observed',
+          collectingSinceMs: 500,
+          lastProcessedEventId: 10,
+          targetEventId: 10,
+        },
+        totals: {
+          calls: 20,
+          success: 19,
+          failure: 1,
+          inputTokens: 100_000,
+          outputTokens: 20_000,
+          cachedTokens: 40_000,
+          totalTokens: 120_000,
+          estimatedCostUsd: 1.8,
+          lastUsedAtMs: 1_800,
+        },
+        topModels: [
+          { model: 'gpt-5.3-codex', calls: 12, totalTokens: 70_000, estimatedCostUsd: 0.6 },
+          { model: 'claude-opus-4-6', calls: 8, totalTokens: 50_000, estimatedCostUsd: 1.2 },
+        ],
+        modelCount: 2,
+        series: [{ bucketMs: 1_000, calls: 20, failure: 1, totalTokens: 120_000 }],
+      }
+    );
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'key-detail-tab-usage' }).props.onClick();
+      await Promise.resolve();
+    });
+    const readNodeText = (node: unknown): string => {
+      if (typeof node === 'string' || typeof node === 'number') return String(node);
+      if (Array.isArray(node)) return node.map(readNodeText).join('');
+      if (!node || typeof node !== 'object' || !('children' in node)) return '';
+      return readNodeText(node.children);
+    };
+    const tokenMixNode = renderer.root.findByProps({ 'data-testid': 'key-usage-token-mix' });
+    const tokenMixText = readNodeText(tokenMixNode);
+    expect(tokenMixText).toContain('40.0%');
+    expect(tokenMixText).toContain('60K');
+    expect(tokenMixText).toContain('40K');
+    expect(tokenMixText).toContain('20K');
+
+    const modelsNode = renderer.root.findByProps({ 'data-testid': 'key-usage-models' });
+    const modelsText = readNodeText(modelsNode);
+    expect(modelsText.indexOf('claude-opus-4-6')).toBeLessThan(modelsText.indexOf('gpt-5.3-codex'));
+    expect(modelsText).toContain('$1.20');
+    expect(modelsText).toContain('$0.60');
+  });
+
+  it('renders unified 3-card overview with 24h cost KPI, active models, and masked protocol auth header copy', async () => {
+    const writeText = vi.fn(() => Promise.resolve());
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    const fullSecret = 'cpamp_sk_' + 'c'.repeat(64);
+    const effectiveKey = {
+      ...key,
+      name: 'Prod Gateway',
+      runtimeState: 'effective_observed' as const,
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(effectiveKey))
+      .mockResolvedValueOnce(Response.json({ secret: fullSecret }));
+
+    await mount(
+      fetchMock,
+      effectiveKey.id,
+      {
+        keyId: effectiveKey.id,
+        fromMs: 1_000,
+        toMs: 2_000,
+        bucketMs: 1_000,
+        coverage: {
+          state: 'complete',
+          reason: 'observed',
+          collectingSinceMs: 500,
+          lastProcessedEventId: 10,
+          targetEventId: 10,
+        },
+        totals: {
+          calls: 52,
+          success: 48,
+          failure: 4,
+          inputTokens: 687_900,
+          outputTokens: 124_700,
+          cachedTokens: 292_400,
+          totalTokens: 812_600,
+          estimatedCostUsd: 2.52,
+          lastUsedAtMs: 1_700_000_000_000,
+        },
+        topModels: [
+          { model: 'claude-sonnet-4-5', calls: 16, totalTokens: 302_100, estimatedCostUsd: 1.0 },
+          { model: 'gemini-2.5-pro', calls: 12, totalTokens: 225_900, estimatedCostUsd: 0.44 },
+          { model: 'gpt-5.3-codex', calls: 13, totalTokens: 192_800, estimatedCostUsd: 0.4 },
+        ],
+        modelCount: 5,
+        series: [{ bucketMs: 1_000, calls: 52, failure: 4, totalTokens: 812_600 }],
+      },
+      false,
+      {
+        mode: 'connect_external',
+        managementBasePath: '/cpamp',
+        inferenceBasePath: '',
+        externalBaseUrl: 'http://127.0.0.1:18317',
+        protocols: [
+          {
+            id: 'openai',
+            label: 'OpenAI',
+            basePath: 'http://127.0.0.1:18317/v1',
+            examplePath: 'http://127.0.0.1:18317/v1/chat/completions',
+          },
+          {
+            id: 'anthropic',
+            label: 'Anthropic',
+            basePath: 'http://127.0.0.1:18317',
+            examplePath: 'http://127.0.0.1:18317/v1/messages',
+          },
+        ],
+        ready: true,
+      }
+    );
+
+    const readNodeText = (node: unknown): string => {
+      if (typeof node === 'string' || typeof node === 'number') return String(node);
+      if (Array.isArray(node)) return node.map(readNodeText).join('');
+      if (!node || typeof node !== 'object' || !('children' in node)) return '';
+      return readNodeText(node.children);
+    };
+
+    // 1. 24h KPI strip includes calls, success rate, tokens, and estimated cost ($2.52).
+    const kpiText = readNodeText(
+      renderer.root.findByProps({ 'data-testid': 'key-overview-kpi-strip' })
+    );
+    expect(kpiText).toContain('52');
+    expect(kpiText).toContain('92.3%');
+    expect(kpiText).toContain('812.6K');
+    expect(kpiText).toContain('$2.52');
+
+    // 2. Key Information deduplicates header fields and surfaces active models + +2 badge.
+    const metaNode = renderer.root.findByProps({ 'data-testid': 'key-detail-metadata' });
+    const metaText = readNodeText(metaNode);
+    expect(metaText).not.toContain(k('created'));
+    expect(metaText).not.toContain(k('originLabel'));
+    expect(metaText).toContain('claude-sonnet-4-5');
+    expect(metaText).toContain('+2');
+
+    // 3. Streamlined Client Access shows masked header in DOM, switches protocols, and copies verified header without rendering raw secret.
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'detail-access-info-protocol-header-openai' })
+        .props.children
+    ).toBe('Authorization: Bearer cpamp_sk_…cccc');
+    expect(
+      readNodeText(
+        renderer.root.findByProps({ 'data-testid': 'detail-access-info-external-note' })
+      )
+    ).toContain('http://127.0.0.1:18317');
+
+    await act(async () => {
+      renderer.root
+        .findByProps({ 'data-testid': 'detail-access-info-protocol-tab-anthropic' })
+        .props.onClick();
+    });
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'detail-access-info-protocol-header-anthropic' })
+        .props.children
+    ).toBe('x-api-key: cpamp_sk_…cccc');
+
+    await act(async () => {
+      renderer.root
+        .findByProps({ 'data-testid': 'detail-access-info-copy-header-anthropic' })
+        .props.onClick();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(writeText).toHaveBeenCalledWith(`x-api-key: ${fullSecret}`);
+    expect(view()).not.toContain(fullSecret);
+  });
+
+  it('keeps initialWindow=7d active usage separate from background 24h overview, refreshes both, and protects 7d query to_ms against clock skew', async () => {
+    const activeKey = { ...key, runtimeState: 'effective_observed' as const };
+    let resolve7d!: (res: Response) => void;
+    let resolve24h!: (res: Response) => void;
+    const usage7dUrls: string[] = [];
+    let fetchCount7d = 0;
+    let fetchCount24h = 0;
+
+    const server24hToMs = Date.now() + 120_000;
+    const payload24h = {
+      keyId: activeKey.id,
+      fromMs: server24hToMs - 86_400_000,
+      toMs: server24hToMs,
+      bucketMs: 3_600_000,
+      coverage: {
+        state: 'complete',
+        reason: 'observed',
+        collectingSinceMs: 1_000,
+        lastProcessedEventId: 10,
+        targetEventId: 10,
+      },
+      totals: {
+        calls: 11,
+        success: 11,
+        failure: 0,
+        inputTokens: 1_100,
+        outputTokens: 200,
+        totalTokens: 1_300,
+        estimatedCostUsd: 0.42,
+        lastUsedAtMs: server24hToMs - 5_000,
+      },
+      series: [{ bucketMs: server24hToMs - 3_600_000, calls: 11, failure: 0, totalTokens: 1_300 }],
+    };
+    const payload7d = {
+      keyId: activeKey.id,
+      fromMs: 1_700_000_000_000,
+      toMs: 1_700_604_800_000,
+      bucketMs: 21_600_000,
+      coverage: {
+        state: 'complete',
+        reason: 'observed',
+        collectingSinceMs: 1_000,
+        lastProcessedEventId: 90,
+        targetEventId: 90,
+      },
+      totals: {
+        calls: 77,
+        success: 70,
+        failure: 7,
+        inputTokens: 70_000,
+        outputTokens: 7_000,
+        totalTokens: 77_000,
+        estimatedCostUsd: 7.77,
+        lastUsedAtMs: 1_700_600_000_000,
+      },
+      series: [{ bucketMs: 1_700_000_000_000, calls: 77, failure: 7, totalTokens: 77_000 }],
+    };
+
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.includes('/usage?from_ms=')) {
+        usage7dUrls.push(url);
+        fetchCount7d += 1;
+        if (fetchCount7d === 1) {
+          return new Promise<Response>((resolve) => {
+            resolve7d = resolve;
+          });
+        }
+        return Promise.resolve(
+          Response.json({
+            ...payload7d,
+            totals: { ...payload7d.totals, calls: 88, success: 81, failure: 7 },
+          })
+        );
+      }
+      if (url.endsWith(`/api-keys/${activeKey.id}/usage`)) {
+        fetchCount24h += 1;
+        if (fetchCount24h === 1) {
+          return new Promise<Response>((resolve) => {
+            resolve24h = resolve;
+          });
+        }
+        return Promise.resolve(
+          Response.json({
+            ...payload24h,
+            totals: { ...payload24h.totals, calls: 22, success: 22, failure: 0 },
+          })
+        );
+      }
+      if (url.endsWith('/api-keys/access-info')) {
+        return Promise.resolve(
+          Response.json({
+            mode: 'new_managed',
+            managementBasePath: '/console',
+            inferenceBasePath: '/api',
+            protocols: [],
+            ready: true,
+          })
+        );
+      }
+      return Promise.resolve(Response.json(activeKey));
+    });
+
+    await act(async () => {
+      renderer = create(
+        <FreshKeyDetails
+          id={activeKey.id}
+          client={createPublicApiClient(() => context, fetchMock)}
+          gatewayPending={false}
+          credential="admin-memory"
+          initialTab="usage"
+          initialWindow="7d"
+          onUnauthorized={unauthorized}
+          onPending={pending}
+          onSaved={saved}
+          onClose={close}
+        />
+      );
+    });
+
+    // Resolve 7d first, then 24h second: 24h must NOT overwrite active 7d Usage tab!
+    await act(async () => {
+      resolve7d(Response.json(payload7d));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      resolve24h(Response.json(payload24h));
+      await Promise.resolve();
+    });
+
+    const readNodeText = (node: unknown): string => {
+      if (typeof node === 'string' || typeof node === 'number') return String(node);
+      if (Array.isArray(node)) return node.map(readNodeText).join('');
+      if (!node || typeof node !== 'object' || !('children' in node)) return '';
+      return readNodeText(node.children);
+    };
+
+    const usageTotalsText = readNodeText(
+      renderer.root.findByProps({ 'data-testid': 'key-usage-totals' })
+    );
+    expect(usageTotalsText).toContain('77');
+    expect(usageTotalsText).toContain('$7.77');
+    expect(usageTotalsText).not.toContain('$0.42');
+
+    const overviewStripText = readNodeText(
+      renderer.root.findByProps({ 'data-testid': 'key-overview-kpi-strip' })
+    );
+    expect(overviewStripText).toContain('11');
+    expect(overviewStripText).toContain('$0.42');
+    expect(overviewStripText).not.toContain('$7.77');
+
+    // Manual refresh updates both active 7d window and 24h overview, using server toMs floor.
+    await act(async () => {
+      button(t('keysReadDetails')).props.onClick();
+      for (let i = 0; i < 6; i += 1) await Promise.resolve();
+    });
+    expect(fetchCount7d).toBe(2);
+    expect(fetchCount24h).toBe(2);
+    const refreshedToMs = Number(new URL(usage7dUrls[1]!).searchParams.get('to_ms'));
+    expect(refreshedToMs).toBeGreaterThanOrEqual(server24hToMs);
+    expect(
+      readNodeText(renderer.root.findByProps({ 'data-testid': 'key-usage-totals' }))
+    ).toContain('88');
+    expect(
+      readNodeText(renderer.root.findByProps({ 'data-testid': 'key-overview-kpi-strip' }))
+    ).toContain('22');
+  });
+
+  it('handles copySavedAuthHeader success, 401, 409 refresh, concurrent busy call, and rejection without template fallback', async () => {
+    const writeText = vi.fn(() => Promise.resolve());
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    const fullSecret = 'cpamp_sk_' + 'c'.repeat(64);
+    const effectiveKey = {
+      ...key,
+      name: 'Header Copy Key',
+      runtimeState: 'effective_observed' as const,
+    };
+    const accessInfo = {
+      mode: 'new_managed' as const,
+      managementBasePath: '/console',
+      inferenceBasePath: '/api',
+      protocols: [
+        {
+          id: 'openai',
+          label: 'OpenAI',
+          basePath: '/api/v1',
+          examplePath: '/api/v1/chat/completions',
+        },
+      ],
+      ready: true,
+    };
+
+    // 1. Success + concurrent busy call ('ignored', no red copyFailed)
+    let resolveSecret!: (res: Response) => void;
+    let secretCalls = 0;
+    const concurrentFetch = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      if (url.endsWith(`/api-keys/${effectiveKey.id}/secret`) && init?.method === 'POST') {
+        secretCalls += 1;
+        return new Promise<Response>((resolve) => {
+          resolveSecret = resolve;
+        });
+      }
+      return Promise.resolve(Response.json(effectiveKey));
+    });
+    await mount(concurrentFetch, effectiveKey.id, undefined, false, accessInfo);
+    await act(async () => {
+      const pSecret = renderer.root
+        .findByProps({ 'data-testid': 'copy-saved-client-secret' })
+        .props.onClick();
+      const pHeader = renderer.root
+        .findByProps({ 'data-testid': 'detail-access-info-copy-header-openai' })
+        .props.onClick();
+      await Promise.resolve();
+      await pHeader;
+      void pSecret;
+    });
+    await act(async () => {
+      await renderer.root
+        .findByProps({ 'data-testid': 'detail-access-info-copy-header-openai' })
+        .props.onClick();
+    });
+    expect(secretCalls).toBe(1);
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'detail-access-info-copy-feedback' })
+    ).toHaveLength(0);
+    await act(async () => {
+      resolveSecret(Response.json({ secret: fullSecret }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(writeText).toHaveBeenCalledWith(fullSecret);
+
+    // Normal header copy succeeds
+    writeText.mockClear();
+    await act(async () => {
+      const p = renderer.root
+        .findByProps({ 'data-testid': 'detail-access-info-copy-header-openai' })
+        .props.onClick();
+      for (let i = 0; i < 4; i += 1) await Promise.resolve();
+      resolveSecret(Response.json({ secret: fullSecret }));
+      await p;
+    });
+    expect(writeText).toHaveBeenCalledWith(`Authorization: Bearer ${fullSecret}`);
+    expect(view()).not.toContain(fullSecret);
+
+    // 2. 401 -> calls onUnauthorized, no red copyFailed
+    await act(async () => renderer.unmount());
+    unauthorized.mockClear();
+    writeText.mockClear();
+    const fetch401 = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(effectiveKey))
+      .mockResolvedValueOnce(new Response('', { status: 401 }));
+    await mount(fetch401, effectiveKey.id, undefined, false, accessInfo);
+    await act(async () => {
+      await renderer.root
+        .findByProps({ 'data-testid': 'detail-access-info-copy-header-openai' })
+        .props.onClick();
+    });
+    expect(unauthorized).toHaveBeenCalledOnce();
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'detail-access-info-copy-feedback' })
+    ).toHaveLength(0);
+
+    // 3. 409 -> refreshes retired key, never writes template or secret
+    await act(async () => renderer.unmount());
+    const retired = {
+      ...effectiveKey,
+      lifecycle: 'superseded' as const,
+      runtimeState: 'revoked_observed' as const,
+    };
+    const fetch409 = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(effectiveKey))
+      .mockResolvedValueOnce(new Response('', { status: 409 }))
+      .mockResolvedValueOnce(Response.json(retired));
+    await mount(fetch409, effectiveKey.id, undefined, false, accessInfo);
+    await act(async () => {
+      await renderer.root
+        .findByProps({ 'data-testid': 'detail-access-info-copy-header-openai' })
+        .props.onClick();
+    });
+    expect(writeText).not.toHaveBeenCalled();
+    expect(saved).toHaveBeenLastCalledWith(retired);
+    expect(renderer.root.findByProps({ 'data-testid': 'detail-runtime-state' }).props.children).toBe(
+      k('statusRevoked')
+    );
+
+    // 4. Rejection -> shows copyFailed and never copies fallback template
+    await act(async () => renderer.unmount());
+    const fetchErr = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(effectiveKey))
+      .mockRejectedValueOnce(new Error('secret read failed'));
+    await mount(fetchErr, effectiveKey.id, undefined, false, accessInfo);
+    await act(async () => {
+      await renderer.root
+        .findByProps({ 'data-testid': 'detail-access-info-copy-header-openai' })
+        .props.onClick();
+    });
+    expect(writeText).not.toHaveBeenCalled();
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'detail-access-info-copy-feedback' }).props.children
+    ).toContain('Clipboard');
+  });
+
+  it('handles token mix reasoningTokens, clamped cache hit, overflow guard, partial avg KPIs, model sort, and >32 bucket step-up', async () => {
+    const readNodeText = (node: unknown): string => {
+      if (typeof node === 'string' || typeof node === 'number') return String(node);
+      if (Array.isArray(node)) return node.map(readNodeText).join('');
+      if (!node || typeof node !== 'object' || !('children' in node)) return '';
+      return readNodeText(node.children);
+    };
+
+    // Case A: omitted reasoningTokens must NOT fabricate Reasoning even when totalTokens > input + output;
+    // cachedTokens > inputTokens clamps cache hit rate <= 100%; partial coverage omits >= on avg ratios;
+    // model breakdown sorts strictly by calls descending when hasAnyCost is false;
+    // >32 base buckets step up cleanly instead of collapsing earlier buckets into bar 0.
+    const startMs = Math.floor(1_700_000_000_000 / 43_200_000) * 43_200_000 + 3 * 3_600_000;
+    const eightDaysEndMs = startMs + 8 * 86_400_000 - 1_000; // <= 8d so base step is 6h, spanning 33 6h-buckets (> 32)
+    await mount(vi.fn<typeof fetch>().mockResolvedValue(Response.json(key)), key.id, {
+      keyId: key.id,
+      fromMs: startMs,
+      toMs: eightDaysEndMs,
+      bucketMs: 21_600_000,
+      coverage: {
+        state: 'partial',
+        reason: 'window_partial',
+        collectingSinceMs: startMs + 3_600_000,
+        lastProcessedEventId: 10,
+        targetEventId: 10,
+      },
+      totals: {
+        calls: 10,
+        success: 10,
+        failure: 0,
+        inputTokens: 100,
+        outputTokens: 50,
+        cachedTokens: 150,
+        totalTokens: 500,
+        estimatedCostUsd: 2.0,
+        lastUsedAtMs: eightDaysEndMs - 1_000,
+      },
+      topModels: [
+        { model: 'zero-priced-model', calls: 2, totalTokens: 50, estimatedCostUsd: 0 },
+        { model: 'heavy-unpriced-model', calls: 1_000, totalTokens: 450 },
+      ],
+      modelCount: 2,
+      series: [
+        { bucketMs: startMs, calls: 1, failure: 0, totalTokens: 50 },
+        { bucketMs: startMs + 6 * 3_600_000, calls: 2, failure: 0, totalTokens: 100 },
+        { bucketMs: startMs + 12 * 3_600_000, calls: 4, failure: 0, totalTokens: 200 },
+        { bucketMs: eightDaysEndMs - 3_600_000, calls: 3, failure: 0, totalTokens: 150 },
+      ],
+    });
+
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'key-detail-tab-usage' }).props.onClick();
+    });
+
+    // Partial totals have >=, but avg ratios do NOT have >=
+    const kpiMetas = renderer.root
+      .findByProps({ 'data-testid': 'key-usage-totals' })
+      .findAllByProps({ 'data-metric-summary-meta': 'true' })
+      .map((node) => readNodeText(node));
+    expect(kpiMetas.some((m) => m.includes('50 /') && !m.includes('≥50'))).toBe(true);
+    expect(kpiMetas.some((m) => m.includes('$0.20 /') && !m.includes('≥$0.20'))).toBe(true);
+
+    // Token mix: no Reasoning fabricated, cache hit clamped <= 100%, bar widths <= 100%
+    const tokenMixA = renderer.root.findByProps({ 'data-testid': 'key-usage-token-mix' });
+    const tokenMixTextA = readNodeText(tokenMixA);
+    expect(tokenMixTextA).toContain('100.0%');
+    expect(tokenMixTextA).not.toContain('150.0%');
+    expect(tokenMixTextA).not.toContain(k('usageReasoningTokens'));
+    const widthsA = tokenMixA
+      .findAll((n) => typeof n.props.className === 'string' && n.props.className.includes('key-token-mix-seg'))
+      .map((n) => parseFloat(String(n.props.style.width)));
+    expect(widthsA.reduce((sum, w) => sum + w, 0)).toBeLessThanOrEqual(100.05);
+
+    // Model breakdown: heavy-unpriced-model (1000 calls) sorts ahead of zero-priced-model ($0, 2 calls)
+    const modelsText = readNodeText(renderer.root.findByProps({ 'data-testid': 'key-usage-models' }));
+    expect(modelsText.indexOf('heavy-unpriced-model')).toBeLessThan(
+      modelsText.indexOf('zero-priced-model')
+    );
+
+    // >32 bucket step-up: bar 0 only holds buckets within its own 12h slot (3 calls, not collapsing slot 12h=4 calls into bar 0)
+    const readChartSummary = () => {
+      const opt = renderer.root.findByType(EChartsView).props.option;
+      if (!opt || typeof opt !== 'object') {
+        throw new Error('Expected chart option object');
+      }
+      const xAxis = 'xAxis' in opt && opt.xAxis && typeof opt.xAxis === 'object' ? opt.xAxis : null;
+      const xData = xAxis && 'data' in xAxis && Array.isArray(xAxis.data) ? xAxis.data : [];
+      const seriesList = 'series' in opt && Array.isArray(opt.series) ? opt.series : [];
+      const firstSeries =
+        seriesList[0] && typeof seriesList[0] === 'object' ? seriesList[0] : null;
+      const seriesName =
+        firstSeries && 'name' in firstSeries && typeof firstSeries.name === 'string'
+          ? firstSeries.name
+          : '';
+      const seriesData =
+        firstSeries && 'data' in firstSeries && Array.isArray(firstSeries.data)
+          ? firstSeries.data
+          : [];
+      const readDatumValue = (datum: unknown) =>
+        typeof datum === 'number'
+          ? datum
+          : datum &&
+              typeof datum === 'object' &&
+              'value' in datum &&
+              typeof datum.value === 'number'
+            ? datum.value
+            : NaN;
+      return {
+        slotCount: xData.length,
+        seriesName,
+        firstValue: readDatumValue(seriesData[0]),
+        secondValue: readDatumValue(seriesData[1]),
+        lastValue: readDatumValue(seriesData[seriesData.length - 1]),
+      };
+    };
+    const summaryBeforeLang = readChartSummary();
+    expect(summaryBeforeLang.slotCount).toBe(17);
+    expect(summaryBeforeLang.firstValue).toBe(3);
+    expect(summaryBeforeLang.secondValue).toBe(4);
+    expect(summaryBeforeLang.lastValue).toBe(3);
+
+    // Language change updates chart option labels via memo deps
+    await act(async () => {
+      setFullWebLanguage('zh-CN');
+    });
+    expect(readChartSummary().seriesName).not.toBe(summaryBeforeLang.seriesName);
+    await act(async () => {
+      setFullWebLanguage('en');
+    });
+
+    // Case B: explicit reasoningTokens renders Reasoning segment; totalTokens < input + output never overflows 100%
+    await act(async () => renderer.unmount());
+    await mount(vi.fn<typeof fetch>().mockResolvedValue(Response.json(key)), key.id, {
+      keyId: key.id,
+      fromMs: 1_000,
+      toMs: 2_000,
+      bucketMs: 1_000,
+      coverage: {
+        state: 'complete',
+        reason: 'observed',
+        collectingSinceMs: 500,
+        lastProcessedEventId: 10,
+        targetEventId: 10,
+      },
+      totals: {
+        calls: 5,
+        success: 5,
+        failure: 0,
+        inputTokens: 80,
+        outputTokens: 50,
+        reasoningTokens: 30,
+        totalTokens: 100,
+        lastUsedAtMs: 1_800,
+      },
+      series: [],
+    });
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'key-detail-tab-usage' }).props.onClick();
+    });
+    const tokenMixB = renderer.root.findByProps({ 'data-testid': 'key-usage-token-mix' });
+    expect(readNodeText(tokenMixB)).toContain(k('usageReasoningTokens'));
+    const widthsB = tokenMixB
+      .findAll((n) => typeof n.props.className === 'string' && n.props.className.includes('key-token-mix-seg'))
+      .map((n) => parseFloat(String(n.props.style.width)));
+    expect(widthsB.reduce((sum, w) => sum + w, 0)).toBeLessThanOrEqual(100.05);
+  });
+
+  it('clears stale metrics on window switch while keeping 24h overview populated when switching early from 24h to 7d', async () => {
+    const activeKey = { ...key, runtimeState: 'effective_observed' as const };
+    let resolve24h!: (res: Response) => void;
+    let resolve7d!: (res: Response) => void;
+    let resolve30d!: (res: Response) => void;
+    const usageQueryUrls: string[] = [];
+
+    const server24hToMs = Date.now() + 180_000;
+    const payload24h = {
+      keyId: activeKey.id,
+      fromMs: server24hToMs - 86_400_000,
+      toMs: server24hToMs,
+      bucketMs: 3_600_000,
+      coverage: {
+        state: 'complete',
+        reason: 'observed',
+        collectingSinceMs: 1_000,
+        lastProcessedEventId: 10,
+        targetEventId: 10,
+      },
+      totals: {
+        calls: 11,
+        success: 11,
+        failure: 0,
+        inputTokens: 1_100,
+        outputTokens: 200,
+        totalTokens: 1_300,
+        estimatedCostUsd: 0.42,
+        lastUsedAtMs: server24hToMs - 5_000,
+      },
+      series: [{ bucketMs: server24hToMs - 3_600_000, calls: 11, failure: 0, totalTokens: 1_300 }],
+    };
+    const payload7d = {
+      keyId: activeKey.id,
+      fromMs: server24hToMs - 7 * 86_400_000,
+      toMs: server24hToMs,
+      bucketMs: 21_600_000,
+      coverage: {
+        state: 'complete',
+        reason: 'observed',
+        collectingSinceMs: 1_000,
+        lastProcessedEventId: 90,
+        targetEventId: 90,
+      },
+      totals: {
+        calls: 77,
+        success: 70,
+        failure: 7,
+        inputTokens: 70_000,
+        outputTokens: 7_000,
+        totalTokens: 77_000,
+        estimatedCostUsd: 7.77,
+        lastUsedAtMs: server24hToMs - 10_000,
+      },
+      series: [{ bucketMs: server24hToMs - 21_600_000, calls: 77, failure: 7, totalTokens: 77_000 }],
+    };
+    const payload30d = {
+      keyId: activeKey.id,
+      fromMs: server24hToMs - 30 * 86_400_000,
+      toMs: server24hToMs,
+      bucketMs: 86_400_000,
+      coverage: {
+        state: 'complete',
+        reason: 'observed',
+        collectingSinceMs: 1_000,
+        lastProcessedEventId: 120,
+        targetEventId: 120,
+      },
+      totals: {
+        calls: 120,
+        success: 118,
+        failure: 2,
+        inputTokens: 110_000,
+        outputTokens: 10_000,
+        totalTokens: 120_000,
+        estimatedCostUsd: 12.34,
+        lastUsedAtMs: server24hToMs - 10_000,
+      },
+      series: [{ bucketMs: server24hToMs - 86_400_000, calls: 120, failure: 2, totalTokens: 120_000 }],
+    };
+
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.includes('/usage?from_ms=')) {
+        usageQueryUrls.push(url);
+        if (usageQueryUrls.length === 1) {
+          return new Promise<Response>((resolve) => {
+            resolve7d = resolve;
+          });
+        }
+        return new Promise<Response>((resolve) => {
+          resolve30d = resolve;
+        });
+      }
+      if (url.endsWith(`/api-keys/${activeKey.id}/usage`)) {
+        return new Promise<Response>((resolve) => {
+          resolve24h = resolve;
+        });
+      }
+      if (url.endsWith('/api-keys/access-info')) {
+        return Promise.resolve(
+          Response.json({
+            mode: 'new_managed',
+            managementBasePath: '/console',
+            inferenceBasePath: '/api',
+            protocols: [],
+            ready: true,
+          })
+        );
+      }
+      return Promise.resolve(Response.json(activeKey));
+    });
+
+    const readNodeText = (node: unknown): string => {
+      if (typeof node === 'string' || typeof node === 'number') return String(node);
+      if (Array.isArray(node)) return node.map(readNodeText).join('');
+      if (!node || typeof node !== 'object' || !('children' in node)) return '';
+      return readNodeText(node.children);
+    };
+
+    await act(async () => {
+      renderer = create(
+        <FreshKeyDetails
+          id={activeKey.id}
+          client={createPublicApiClient(() => context, fetchMock)}
+          gatewayPending={false}
+          credential="admin-memory"
+          initialTab="usage"
+          initialWindow="24h"
+          onUnauthorized={unauthorized}
+          onPending={pending}
+          onSaved={saved}
+          onClose={close}
+        />
+      );
+    });
+
+    // Switch 24h -> 7d before initial 24h settles.
+    await act(async () => {
+      renderer.root.findByProps({ id: 'key-usage-window-7d' }).props.onClick();
+    });
+    expect(
+      renderer.root.findByProps({ id: 'key-usage-window-7d' }).props['aria-selected']
+    ).toBe(true);
+
+    // Resolve 7d first -> Usage tab renders 7d metrics.
+    await act(async () => {
+      resolve7d(Response.json(payload7d));
+      await Promise.resolve();
+    });
+    const usageTotals7d = readNodeText(
+      renderer.root.findByProps({ 'data-testid': 'key-usage-totals' })
+    );
+    expect(usageTotals7d).toContain('77');
+    expect(usageTotals7d).toContain('$7.77');
+
+    // Resolve earlier 24h second -> Usage tab stays on 7d AND Overview KPIs populate from 24h!
+    await act(async () => {
+      resolve24h(Response.json(payload24h));
+      await Promise.resolve();
+    });
+    const usageTotalsAfter24h = readNodeText(
+      renderer.root.findByProps({ 'data-testid': 'key-usage-totals' })
+    );
+    expect(usageTotalsAfter24h).toContain('77');
+    expect(usageTotalsAfter24h).toContain('$7.77');
+    expect(usageTotalsAfter24h).not.toContain('$0.42');
+    const overviewText = readNodeText(
+      renderer.root.findByProps({ 'data-testid': 'key-overview-kpi-strip' })
+    );
+    expect(overviewText).toContain('11');
+    expect(overviewText).toContain('$0.42');
+    expect(overviewText).not.toContain('$7.77');
+
+    // Switch 7d -> 30d: stale 7d metrics clear immediately while 30d request is pending,
+    // and 30d to_ms still honors latestServerToMsRef from the 24h response.
+    await act(async () => {
+      renderer.root.findByProps({ id: 'key-usage-window-30d' }).props.onClick();
+    });
+    expect(renderer.root.findAllByProps({ 'data-testid': 'key-usage-totals' })).toHaveLength(0);
+    const usagePanelDuring30d = readNodeText(
+      renderer.root.findByProps({ 'data-testid': 'key-detail-panel-usage' })
+    );
+    expect(usagePanelDuring30d).toContain(k('usageReading'));
+    expect(usagePanelDuring30d).not.toContain('$7.77');
+    const thirtyDayToMs = Number(new URL(usageQueryUrls[1]!).searchParams.get('to_ms'));
+    expect(thirtyDayToMs).toBeGreaterThanOrEqual(server24hToMs);
+
+    await act(async () => {
+      resolve30d(Response.json(payload30d));
+      await Promise.resolve();
+    });
+    const usageTotals30d = readNodeText(
+      renderer.root.findByProps({ 'data-testid': 'key-usage-totals' })
+    );
+    expect(usageTotals30d).toContain('120');
+    expect(usageTotals30d).toContain('$12.34');
+  });
+
+  it('syncs initialWindow updates while open on the same key id without double-fetching on mount', async () => {
+    const activeKey = { ...key, runtimeState: 'effective_observed' as const };
+    const now = Date.now();
+    let fetch24hCount = 0;
+    let fetchRangeCount = 0;
+    let resolve7d!: (res: Response) => void;
+
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.includes('/usage?from_ms=')) {
+        fetchRangeCount += 1;
+        return new Promise<Response>((resolve) => {
+          resolve7d = resolve;
+        });
+      }
+      if (url.endsWith(`/api-keys/${activeKey.id}/usage`)) {
+        fetch24hCount += 1;
+        return Promise.resolve(
+          Response.json({
+            keyId: activeKey.id,
+            fromMs: now - 86_400_000,
+            toMs: now,
+            bucketMs: 3_600_000,
+            coverage: {
+              state: 'complete',
+              reason: 'observed',
+              collectingSinceMs: 1_000,
+              lastProcessedEventId: 10,
+              targetEventId: 10,
+            },
+            totals: {
+              calls: 15,
+              success: 15,
+              failure: 0,
+              inputTokens: 1_500,
+              outputTokens: 500,
+              totalTokens: 2_000,
+              estimatedCostUsd: 0.65,
+              lastUsedAtMs: now - 5_000,
+            },
+            series: [],
+          })
+        );
+      }
+      if (url.endsWith('/api-keys/access-info')) {
+        return Promise.resolve(
+          Response.json({
+            mode: 'new_managed',
+            managementBasePath: '/console',
+            inferenceBasePath: '/api',
+            protocols: [],
+            ready: true,
+          })
+        );
+      }
+      return Promise.resolve(Response.json(activeKey));
+    });
+
+    const client = createPublicApiClient(() => context, fetchMock);
+    const readNodeText = (node: unknown): string => {
+      if (typeof node === 'string' || typeof node === 'number') return String(node);
+      if (Array.isArray(node)) return node.map(readNodeText).join('');
+      if (!node || typeof node !== 'object' || !('children' in node)) return '';
+      return readNodeText(node.children);
+    };
+
+    await act(async () => {
+      renderer = create(
+        <FreshKeyDetails
+          id={activeKey.id}
+          client={client}
+          gatewayPending={false}
+          credential="admin-memory"
+          open
+          initialTab="usage"
+          initialWindow="24h"
+          onUnauthorized={unauthorized}
+          onPending={pending}
+          onSaved={saved}
+          onClose={close}
+        />
+      );
+    });
+    expect(fetch24hCount).toBe(1);
+    expect(fetchRangeCount).toBe(0);
+    expect(readNodeText(renderer.root.findByProps({ 'data-testid': 'key-usage-totals' }))).toContain(
+      '$0.65'
+    );
+
+    // Update initialWindow on same open key -> switches tab, clears stale metrics, fetches 7d once.
+    await act(async () => {
+      renderer.update(
+        <FreshKeyDetails
+          id={activeKey.id}
+          client={client}
+          gatewayPending={false}
+          credential="admin-memory"
+          open
+          initialTab="usage"
+          initialWindow="7d"
+          onUnauthorized={unauthorized}
+          onPending={pending}
+          onSaved={saved}
+          onClose={close}
+        />
+      );
+    });
+    expect(fetch24hCount).toBe(1);
+    expect(fetchRangeCount).toBe(1);
+    expect(
+      renderer.root.findByProps({ id: 'key-usage-window-7d' }).props['aria-selected']
+    ).toBe(true);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'key-usage-totals' })).toHaveLength(0);
+    const usagePanelDuring7d = readNodeText(
+      renderer.root.findByProps({ 'data-testid': 'key-detail-panel-usage' })
+    );
+    expect(usagePanelDuring7d).toContain(k('usageReading'));
+    expect(usagePanelDuring7d).not.toContain('$0.65');
+
+    await act(async () => {
+      resolve7d(
+        Response.json({
+          keyId: activeKey.id,
+          fromMs: now - 7 * 86_400_000,
+          toMs: now,
+          bucketMs: 21_600_000,
+          coverage: {
+            state: 'complete',
+            reason: 'observed',
+            collectingSinceMs: 1_000,
+            lastProcessedEventId: 50,
+            targetEventId: 50,
+          },
+          totals: {
+            calls: 50,
+            success: 50,
+            failure: 0,
+            inputTokens: 5_000,
+            outputTokens: 1_000,
+            totalTokens: 6_000,
+            estimatedCostUsd: 3.21,
+            lastUsedAtMs: now - 2_000,
+          },
+          series: [],
+        })
+      );
+      await Promise.resolve();
+    });
+    expect(readNodeText(renderer.root.findByProps({ 'data-testid': 'key-usage-totals' }))).toContain(
+      '$3.21'
+    );
+  });
+
+  it('disables detail-access-info-copy-header-* when busy, copying, applyPending, or applyUnknown is active', async () => {
+    vi.stubGlobal('navigator', { clipboard: { writeText: vi.fn().mockResolvedValue(undefined) } });
+    const notAppliedKey = {
+      ...key,
+      name: 'Retryable Key',
+      runtimeState: 'not_applied' as const,
+      effectCode: 'apply_failed',
+    };
+    const accessInfo = {
+      mode: 'new_managed' as const,
+      managementBasePath: '/console',
+      inferenceBasePath: '/api',
+      protocols: [
+        {
+          id: 'openai',
+          label: 'OpenAI',
+          basePath: '/api/v1',
+          examplePath: '/api/v1/chat/completions',
+        },
+      ],
+      ready: true,
+    };
+    let getCount = 0;
+    let resolveRefresh!: (res: Response) => void;
+    let resolveSecret!: (res: Response) => void;
+    let resolveRetry!: (res: Response) => void;
+    let rejectRetry!: (err: Error) => void;
+    let retryCount = 0;
+
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (method === 'GET' && url.endsWith(`/api-keys/${notAppliedKey.id}`)) {
+        getCount += 1;
+        if (getCount === 1) return Promise.resolve(Response.json(notAppliedKey));
+        return new Promise<Response>((resolve) => {
+          resolveRefresh = resolve;
+        });
+      }
+      if (method === 'POST' && url.endsWith(`/api-keys/${notAppliedKey.id}/secret`)) {
+        return new Promise<Response>((resolve) => {
+          resolveSecret = resolve;
+        });
+      }
+      if (method === 'POST' && url.endsWith('/api-keys')) {
+        retryCount += 1;
+        return new Promise<Response>((resolve, reject) => {
+          resolveRetry = resolve;
+          rejectRetry = reject;
+        });
+      }
+      throw new Error(`unexpected ${method} ${url}`);
+    });
+
+    await mount(fetchMock, notAppliedKey.id, undefined, false, accessInfo);
+    const headerCopyBtn = () =>
+      renderer.root.findByProps({ 'data-testid': 'detail-access-info-copy-header-openai' });
+    expect(headerCopyBtn().props.disabled).toBe(false);
+
+    // 1. copying === true disables auth header copy button
+    await act(async () => {
+      void renderer.root
+        .findByProps({ 'data-testid': 'copy-saved-client-secret' })
+        .props.onClick();
+      await Promise.resolve();
+    });
+    expect(headerCopyBtn().props.disabled).toBe(true);
+    await act(async () => {
+      resolveSecret(Response.json({ secret: 'cpamp_sk_' + 'c'.repeat(64) }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(headerCopyBtn().props.disabled).toBe(false);
+
+    // 2. busy === true disables auth header copy button
+    await act(async () => {
+      button(t('keysReadDetails')).props.onClick();
+    });
+    expect(headerCopyBtn().props.disabled).toBe(true);
+    await act(async () => {
+      resolveRefresh(Response.json(notAppliedKey));
+      await Promise.resolve();
+    });
+    expect(headerCopyBtn().props.disabled).toBe(false);
+
+    // 3. applyPending === true and applyUnknown === true disable auth header copy button
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'detail-retry-apply' }).props.onClick();
+    });
+    expect(retryCount).toBe(1);
+    expect(headerCopyBtn().props.disabled).toBe(true);
+    await act(async () => {
+      rejectRetry(new Error('network_uncertain'));
+      await Promise.resolve();
+    });
+    expect(headerCopyBtn().props.disabled).toBe(true);
+    void resolveRetry;
   });
 });

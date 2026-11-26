@@ -82,6 +82,10 @@ const en = {
   headerAnthropic: 'x-api-key: <YOUR_CLIENT_KEY>',
   headerGemini: 'x-goog-api-key: <YOUR_CLIENT_KEY>',
   protocolTabsLabel: 'Select client protocol',
+  drawerClientTitle: 'Client access',
+  authHeaderLabel: 'Auth header',
+  copyHeader: 'Copy header',
+  externalDirectInline: 'Direct to external CPA ({url}); model traffic bypasses CPAMP.',
 };
 
 const zh: typeof en = {
@@ -157,6 +161,10 @@ const zh: typeof en = {
   headerAnthropic: 'x-api-key: <你的客户端密钥>',
   headerGemini: 'x-goog-api-key: <你的客户端密钥>',
   protocolTabsLabel: '选择客户端协议',
+  drawerClientTitle: '客户端接入',
+  authHeaderLabel: '鉴权请求头',
+  copyHeader: '复制请求头',
+  externalDirectInline: '直连外部 CPA（{url}），模型请求不经过 CPAMP 转发。',
 };
 
 const tw: typeof en = {
@@ -232,6 +240,10 @@ const tw: typeof en = {
   headerAnthropic: 'x-api-key: <你的用戶端金鑰>',
   headerGemini: 'x-goog-api-key: <你的用戶端金鑰>',
   protocolTabsLabel: '選擇用戶端協議',
+  drawerClientTitle: '用戶端接入',
+  authHeaderLabel: '驗證標頭',
+  copyHeader: '複製標頭',
+  externalDirectInline: '直連外部 CPA（{url}），模型請求不經由 CPAMP 轉發。',
 };
 
 const ru: typeof en = {
@@ -316,6 +328,10 @@ const ru: typeof en = {
   headerAnthropic: 'x-api-key: <ВАШ_КЛИЕНТСКИЙ_КЛЮЧ>',
   headerGemini: 'x-goog-api-key: <ВАШ_КЛИЕНТСКИЙ_КЛЮЧ>',
   protocolTabsLabel: 'Выбор клиентского протокола',
+  drawerClientTitle: 'Клиентский доступ',
+  authHeaderLabel: 'Заголовок авторизации',
+  copyHeader: 'Копировать заголовок',
+  externalDirectInline: 'Прямое подключение к внешнему CPA ({url}), без проксирования через CPAMP.',
 };
 
 const dictionaries = { en, zh, tw, ru } as const;
