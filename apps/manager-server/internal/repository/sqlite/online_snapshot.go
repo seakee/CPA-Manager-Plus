@@ -504,6 +504,9 @@ func isOSRootSystemSymlink(cleanPath string) bool {
 }
 
 func syncDirectory(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	file, err := os.Open(dir)
 	if err != nil {
 		return err

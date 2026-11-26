@@ -3649,3 +3649,50 @@ func TestTrialChildExitBlockingPipeDrainAfterSoakDoesNotCommitAndRollsBack(t *te
 		t.Fatalf("expected rolled_back with manager_startup_failed, got exists=%t err=%v state=%+v", exists, err, finalSt)
 	}
 }
+
+func TestResolveBaseInstallationAcceptsDevAndCIBaseProvenanceLabels(t *testing.T) {
+	installRoot := t.TempDir()
+	shareDir := filepath.Join(installRoot, "usr", "local", "share", "cpamp")
+	releaseDir := filepath.Join(shareDir, "release")
+	if err := os.MkdirAll(releaseDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	abiJSON := fmt.Sprintf("{\"schema_version\":1,\"base_epoch\":1,\"platform\":%q}\n", ExpectedSlotPlatform())
+	if err := os.WriteFile(filepath.Join(releaseDir, "base-abi.json"), []byte(abiJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, label := range []string{"ci", "dev", "nightly-20261126"} {
+		prov := fmt.Sprintf("{\"version\":%q}\n", label)
+		if err := os.WriteFile(filepath.Join(shareDir, "provenance.json"), []byte(prov), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		info, err := ResolveBaseInstallation(LauncherCLIOptions{Mode: LauncherModeDocker}, os.Geteuid(), func(k string) string {
+			if k == "CPAMP_BASE_INSTALL_ROOT" {
+				return installRoot
+			}
+			return ""
+		})
+		if err != nil {
+			t.Fatalf("ResolveBaseInstallation(%q) unexpected error: %v", label, err)
+		}
+		if info.BaseVersion != label {
+			t.Fatalf("ResolveBaseInstallation(%q).BaseVersion = %q, want %q", label, info.BaseVersion, label)
+		}
+	}
+
+	for _, invalid := range []string{"", "unknown", "v2.0", "2.0", "../bad"} {
+		prov := fmt.Sprintf("{\"version\":%q}\n", invalid)
+		if err := os.WriteFile(filepath.Join(shareDir, "provenance.json"), []byte(prov), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ResolveBaseInstallation(LauncherCLIOptions{Mode: LauncherModeDocker}, os.Geteuid(), func(k string) string {
+			if k == "CPAMP_BASE_INSTALL_ROOT" {
+				return installRoot
+			}
+			return ""
+		}); err == nil {
+			t.Fatalf("ResolveBaseInstallation(%q) unexpectedly succeeded", invalid)
+		}
+	}
+}

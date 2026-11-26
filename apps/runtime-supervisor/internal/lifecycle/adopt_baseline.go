@@ -348,9 +348,12 @@ func (e *Executor) reconcileBundledBaselineDestinationLocked() (bool, error) {
 		return false, nil
 	}
 	candidate := e.currentDescriptorLocked()
+	if origin == nil && staged.ExpectedActiveArtifactID == candidate.ArtifactID {
+		return false, nil
+	}
 	pinned, err := loadPinnedArtifactManifest(state.manifestPath)
 	if err != nil {
-		return false, err
+		return false, nil
 	}
 	if candidate.ArtifactID != pinned.ArtifactID || candidate.ExecutablePath != state.bundled.ExecutablePath {
 		return false, nil

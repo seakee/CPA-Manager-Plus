@@ -623,3 +623,91 @@ func TestStartReconcilesBundledDestinationAfterRestartWithoutOriginSnapshot(t *t
 		t.Fatalf(".stage-request.json mutated after tampered Start: %+v, %v", originAfterTamper, err)
 	}
 }
+
+func TestStartIgnoresLeadingVPinnedManifestWhenDestinationMatchesBundledSelection(t *testing.T) {
+	root := t.TempDir()
+	supervisorRoot := filepath.Join(root, "supervisor")
+	stageRoot := filepath.Join(supervisorRoot, "artifacts", "cpa")
+	selectionRoot := filepath.Join(supervisorRoot, "active", "cpa")
+	destRoot := filepath.Join(supervisorRoot, "destination")
+	gatewayAuth := filepath.Join(root, "gateway", "auth")
+	journalPath := filepath.Join(supervisorRoot, "operations.sqlite")
+	bundledPath := filepath.Join(root, "cpa-v8")
+	manifestPath := filepath.Join(root, "artifact.json")
+
+	binary := []byte("#!/bin/sh\necho exact-cpa\n")
+	if err := os.WriteFile(bundledPath, binary, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(binary)
+	expectedID := artifact.ID("sha256:" + hex.EncodeToString(sum[:]))
+	manifest := fmt.Sprintf("{\"schemaVersion\":1,\"engine\":\"cpa\",\"version\":\"v8.0.55\",\"artifactId\":%q}\n", expectedID)
+	if err := os.WriteFile(manifestPath, []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stageStore, err := runtimeupdate.NewStore(stageRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selectionStore, err := selection.NewStore(selectionRoot, stageStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err := selectionStore.Load(selection.Bundled(bundledPath, manifestPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer := artifact.NewObserver(selected.ExecutablePath, selected.MetadataPath)
+	if err := observer.RefreshFrom(selected.ExecutablePath, selected.MetadataPath); err != nil {
+		t.Fatal(err)
+	}
+	proc := &recordingAcquireProcess{allowStop: true}
+	store, err := journal.Open(t.Context(), journalPath, journal.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec, err := NewExecutor(
+		journal.Authority{RuntimeIdentity: "isolated-adopt-runtime", RuntimeGeneration: 1},
+		store,
+		proc,
+		selected.ExecutablePath,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = exec.Close() })
+	if err := exec.EnableActivateUpdate(selected, observer, selectionStore, readinessFunc(func(context.Context) readiness.State {
+		return readiness.Ready
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.EnableDestination(destRoot, gatewayAuth, "127.0.0.1:8317", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.EnableArtifactAcquisition(manifestPath, WithBundledArtifactExecutable(bundledPath)); err != nil {
+		t.Fatal(err)
+	}
+
+	destReq := DestinationRequest{
+		OperationID:               "real-adopt-operation:adopt-destination",
+		ExpectedRuntimeIdentity:   "isolated-adopt-runtime",
+		ExpectedRuntimeGeneration: 1,
+		ExpectedActiveArtifactID:  expectedID,
+		SourceIdentity:            "managed:" + string(expectedID),
+		SourceClass:               SourceClassNewManaged,
+		APIKeys:                   []string{initialClientKeyFixture()},
+		ManagementKey:             string(bytes.Repeat([]byte("b"), 64)),
+	}
+	if op, err := exec.StageDestination(t.Context(), destReq); err != nil || op.State != journal.StateSucceeded {
+		t.Fatalf("StageDestination = %+v, %v", op, err)
+	}
+	if op, err := exec.Start(t.Context(), StartRequest{
+		OperationID:               "real-adopt-operation:start-destination",
+		ExpectedRuntimeIdentity:   "isolated-adopt-runtime",
+		ExpectedRuntimeGeneration: 1,
+		ExpectedActiveArtifactID:  expectedID,
+	}); err != nil || op.State != journal.StateSucceeded {
+		t.Fatalf("Start with v-prefixed manifest = %+v, %v", op, err)
+	}
+}

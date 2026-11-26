@@ -271,11 +271,37 @@ func readBaseVersionFromProvenance(provenancePath string, expectedOwnerUID int, 
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return "", fmt.Errorf("malformed %s: %w", provenancePath, err)
 	}
-	norm, ok := NormalizeVersionTag(doc.Version)
-	if !ok {
-		return "", fmt.Errorf("invalid SemVer version %q in %s", doc.Version, provenancePath)
+	trimmed := strings.TrimSpace(doc.Version)
+	if norm, ok := NormalizeVersionTag(trimmed); ok {
+		return norm, nil
 	}
-	return norm, nil
+	if isValidNonSemVerBuildLabel(trimmed) {
+		return trimmed, nil
+	}
+	return "", fmt.Errorf("invalid SemVer version %q in %s", doc.Version, provenancePath)
+}
+
+func isValidNonSemVerBuildLabel(raw string) bool {
+	if len(raw) == 0 || len(raw) > 128 || strings.EqualFold(raw, "unknown") {
+		return false
+	}
+	if raw[0] >= '0' && raw[0] <= '9' {
+		return false
+	}
+	if (raw[0] == 'v' || raw[0] == 'V') && len(raw) > 1 && raw[1] >= '0' && raw[1] <= '9' {
+		return false
+	}
+	for i := 0; i < len(raw); i++ {
+		ch := raw[i]
+		isAlnum := (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')
+		if i == 0 && !isAlnum {
+			return false
+		}
+		if !isAlnum && ch != '.' && ch != '_' && ch != '+' && ch != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 func fallbackBaseVersion(getenv func(string) string) string {
