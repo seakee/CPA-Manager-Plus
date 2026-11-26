@@ -37,6 +37,9 @@ type routeTestHarness struct {
 	selectionRoot string
 	pinnedID      string
 	archive       []byte
+	executor      *lifecycle.Executor
+	bundledPath   string
+	manifestPath  string
 }
 
 func newRouteTestHarness(t *testing.T, opts ...lifecycle.AcquisitionOption) *routeTestHarness {
@@ -140,6 +143,9 @@ func newRouteTestHarness(t *testing.T, opts ...lifecycle.AcquisitionOption) *rou
 		selectionRoot: selectionRoot,
 		pinnedID:      pinnedID,
 		archive:       archive,
+		executor:      executor,
+		bundledPath:   missingBundled,
+		manifestPath:  manifestPath,
 	}
 }
 
@@ -952,4 +958,65 @@ func TestArtifactResponseWriterImplicitWriteCommitsHeaderAndClosesWhenUnconsumed
 			t.Fatalf("readDeadlines = %v, want none", recorder.readDeadlines)
 		}
 	})
+}
+
+func TestArtifactBaselineRoutes(t *testing.T) {
+	for _, bundled := range []bool{true, false} {
+		name := "slim upload"
+		if bundled {
+			name = "bundled adoption"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newRouteTestHarness(t)
+			request := func(method, path, token string, body []byte) *httptest.ResponseRecorder {
+				t.Helper()
+				r := httptest.NewRequest(method, path, bytes.NewReader(body))
+				if token != "" {
+					r.Header.Set("Authorization", "Bearer "+token)
+				}
+				w := httptest.NewRecorder()
+				h.handler.ServeHTTP(w, r)
+				return w
+			}
+			check := func(result *httptest.ResponseRecorder, want int, code string) {
+				t.Helper()
+				if result.Code != want || (code != "" && !strings.Contains(result.Body.String(), `"code":"`+code+`"`)) {
+					t.Fatalf("got %d %s; want %d/%s", result.Code, result.Body.String(), want, code)
+				}
+			}
+			check(request(http.MethodPut, artifactUploadPath, "runtime-token", h.archive), http.StatusOK, "")
+			binary := []byte("#!/bin/sh\necho next-route-baseline\n")
+			id := fmt.Sprintf("sha256:%x", sha256.Sum256(binary))
+			manifest := fmt.Sprintf(`{"schemaVersion":1,"engine":"cpa","version":"8.0.56","artifactId":%q}`, id)
+			if err := os.WriteFile(h.manifestPath, []byte(manifest), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if bundled {
+				if err := os.WriteFile(h.bundledPath, binary, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := h.executor.EnableArtifactAcquisition(h.manifestPath, lifecycle.WithAcquisitionPlatform("linux", "amd64"), lifecycle.WithBundledArtifactExecutable(h.bundledPath)); err != nil {
+				t.Fatal(err)
+			}
+			if bundled {
+				body := []byte(fmt.Sprintf(`{"expectedActiveArtifactId":%q}`, h.pinnedID))
+				check(request(http.MethodPost, artifactAdoptBaselinePath, "", body), http.StatusUnauthorized, lifecycle.ArtifactCodeUnauthorized)
+				check(request(http.MethodGet, artifactAdoptBaselinePath, "runtime-token", nil), http.StatusMethodNotAllowed, lifecycle.ArtifactCodeInvalidRequest)
+				check(request(http.MethodPost, artifactAdoptBaselinePath, "runtime-token", []byte(`{"expected_active_artifact_id":"invalid"}`)), http.StatusBadRequest, lifecycle.ArtifactCodeInvalidRequest)
+				check(request(http.MethodPost, artifactAdoptBaselinePath, "runtime-token", []byte(fmt.Sprintf(`{"expectedActiveArtifactId":%q}`, id))), http.StatusConflict, lifecycle.ArtifactCodeArtifactConflict)
+				res := request(http.MethodPost, artifactAdoptBaselinePath, "runtime-token", body)
+				check(res, http.StatusOK, "")
+				var status lifecycle.ArtifactStatusResponse
+				if err := json.Unmarshal(res.Body.Bytes(), &status); err != nil || !status.BundledAvailable || status.AdoptBaselineAvailable || status.Active == nil || string(status.Active.ArtifactID) != id {
+					t.Fatalf("adoption status = %+v, %v", status, err)
+				}
+			} else {
+				archive := buildRouteTarGzip(t, binary, []byte("MIT License\n"))
+				check(request(http.MethodPut, artifactUploadPath+"?allow_baseline_upgrade=true", "runtime-token", archive), http.StatusBadRequest, lifecycle.ArtifactCodeInvalidRequest)
+				check(request(http.MethodPut, artifactUploadPath+"?allow_baseline_upgrade=1&allow_baseline_upgrade=1", "runtime-token", archive), http.StatusBadRequest, lifecycle.ArtifactCodeInvalidRequest)
+				check(request(http.MethodPut, artifactUploadPath+"?allow_baseline_upgrade=1", "runtime-token", archive), http.StatusOK, "")
+			}
+		})
+	}
 }

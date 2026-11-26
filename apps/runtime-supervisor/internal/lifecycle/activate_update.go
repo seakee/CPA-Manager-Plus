@@ -696,7 +696,12 @@ func (j *activationDestinationJournal) Complete(ctx context.Context, runtimeIden
 	if operationID == j.activeSpawnOpID {
 		j.activeSpawnOpID = ""
 		j.activeSpawnFailureCode = ""
-		restoreErr = j.executor.restoreOriginStageRequestLocked()
+		handled, err := j.executor.reconcileBundledBaselineDestinationLocked()
+		if err != nil || handled {
+			restoreErr = err
+		} else {
+			restoreErr = j.executor.restoreOriginStageRequestLocked()
+		}
 	}
 	op, err := j.inner.Complete(ctx, runtimeIdentity, operationID, state, failureCode)
 	if err != nil {
@@ -826,6 +831,9 @@ func (e *Executor) reconcileDestinationStageForCurrentSelectionLocked() error {
 			return ErrActiveArtifactMismatch
 		}
 		return e.syncDestinationExpectedArtifactLocked(descriptor.ArtifactID)
+	}
+	if handled, err := e.reconcileBundledBaselineDestinationLocked(); err != nil || handled {
+		return err
 	}
 	return e.restoreOriginStageRequestLocked()
 }

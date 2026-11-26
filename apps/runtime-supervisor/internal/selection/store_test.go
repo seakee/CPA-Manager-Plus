@@ -220,3 +220,97 @@ func writeSelection(t *testing.T, root, encoded string) {
 func selectionJSON(candidate Descriptor) string {
 	return `{"schemaVersion":1,"engine":"cpa","version":"` + candidate.Version + `","artifactId":"` + string(candidate.ArtifactID) + `"}`
 }
+
+func TestClearSelectionValidatesBundledAndRemovesSelectionAndProvenance(t *testing.T) {
+	root := t.TempDir()
+	stageRoot := filepath.Join(root, "artifacts")
+	selectionRoot := filepath.Join(root, "active")
+	stages := newStageStore(t, stageRoot)
+	store, err := NewStore(selectionRoot, stages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := seedFinalizedStage(t, stageRoot, "8.0.55", []byte("finalized"))
+	if err := store.Commit(candidate); err != nil {
+		t.Fatal(err)
+	}
+	provenance := Provenance{SchemaVersion: SchemaVersion, ArtifactID: candidate.ArtifactID, Origin: OriginBaselineAcquire, BaselineVersionAtCommit: candidate.Version, OperationID: "selection-test"}
+	if err := store.WriteProvenance(provenance); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "bundled")
+	bundled := Bundled(path, "")
+	for _, prepare := range []func() error{
+		func() error { return nil },
+		func() error { return os.Symlink(candidate.ExecutablePath, path) },
+		func() error {
+			if err := os.Remove(path); err != nil {
+				return err
+			}
+			return os.WriteFile(path, []byte("bundled"), 0o644)
+		},
+	} {
+		if err := prepare(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Clear(bundled); !errors.Is(err, ErrSelectionInvalid) {
+			t.Fatalf("Clear invalid executable = %v", err)
+		}
+		if got, err := store.Load(bundled); err != nil || got != candidate {
+			t.Fatalf("invalid clear changed selection: %+v, %v", got, err)
+		}
+		if got, err := store.LoadProvenance(); err != nil || got != provenance {
+			t.Fatalf("invalid clear changed provenance: %+v, %v", got, err)
+		}
+	}
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if got, err := store.Clear(bundled); err != nil || got != bundled {
+			t.Fatalf("Clear = %+v, %v", got, err)
+		}
+	}
+	reopened, err := NewStore(selectionRoot, stages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := reopened.Load(bundled); err != nil || got != bundled {
+		t.Fatalf("Load = %+v, %v", got, err)
+	}
+	if _, err := reopened.LoadProvenance(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("provenance still present: %v", err)
+	}
+}
+
+func TestClearSelectionClassifiesPersistenceFailures(t *testing.T) {
+	for _, scenario := range []string{"selection removal", "provenance removal", "directory sync"} {
+		t.Run(scenario, func(t *testing.T) {
+			root := t.TempDir()
+			store, err := NewStore(filepath.Join(root, "active"), newStageStore(t, filepath.Join(root, "artifacts")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			bundled := Bundled(filepath.Join(root, "bundled"), "")
+			if err := os.WriteFile(bundled.ExecutablePath, []byte("bundle"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			want := ErrSelectionPublicationAmbiguous
+			if scenario == "directory sync" {
+				store.syncRoot = func(string) error { return os.ErrPermission }
+			} else {
+				name := provenanceName
+				if scenario == "selection removal" {
+					name = selectionName
+					want = ErrSelectionNotPublished
+				}
+				if err := os.MkdirAll(filepath.Join(store.root, name, "retained"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := store.Clear(bundled); !errors.Is(err, want) {
+				t.Fatalf("Clear error = %v, want %v", err, want)
+			}
+		})
+	}
+}

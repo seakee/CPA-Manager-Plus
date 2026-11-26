@@ -145,11 +145,14 @@ type ArtifactOperationStatus struct {
 }
 
 type ArtifactStatusResponse struct {
-	SchemaVersion int                      `json:"schemaVersion"`
-	Pinned        ArtifactPinnedStatus     `json:"pinned"`
-	Active        *ArtifactActiveStatus    `json:"active"`
-	Required      bool                     `json:"required"`
-	Operation     *ArtifactOperationStatus `json:"operation"`
+	SchemaVersion            int                      `json:"schemaVersion"`
+	Pinned                   ArtifactPinnedStatus     `json:"pinned"`
+	Active                   *ArtifactActiveStatus    `json:"active"`
+	Required                 bool                     `json:"required"`
+	Operation                *ArtifactOperationStatus `json:"operation"`
+	BundledAvailable         bool                     `json:"bundledAvailable,omitempty"`
+	AdoptBaselineAvailable   bool                     `json:"adoptBaselineAvailable,omitempty"`
+	BaselineUpgradeAvailable bool                     `json:"baselineUpgradeAvailable,omitempty"`
 }
 
 type ArtifactProbeResponse struct {
@@ -158,8 +161,9 @@ type ArtifactProbeResponse struct {
 }
 
 type ArtifactAcquireRequest struct {
-	Source    string `json:"source"`
-	CDNPrefix string `json:"cdnPrefix,omitempty"`
+	Source               string `json:"source"`
+	CDNPrefix            string `json:"cdnPrefix,omitempty"`
+	AllowBaselineUpgrade bool   `json:"allowBaselineUpgrade,omitempty"`
 }
 
 type ArtifactOperationResponse struct {
@@ -260,6 +264,12 @@ func WithAcquisitionStageCleanupHook(hook func(version string) error) Acquisitio
 	}
 }
 
+// WithBundledArtifactExecutable preserves the configured bundled path even
+// when startup selects a persisted finalized stage instead.
+func WithBundledArtifactExecutable(path string) AcquisitionOption {
+	return func(s *artifactAcquisitionState) { s.bundled.ExecutablePath = path }
+}
+
 type stageStoreProvider interface {
 	StageStore() *runtimeupdate.Store
 }
@@ -267,6 +277,7 @@ type stageStoreProvider interface {
 type artifactAcquisitionState struct {
 	mu                        sync.Mutex
 	manifestPath              string
+	bundled                   selection.Descriptor
 	pinned                    *ArtifactPinnedStatus
 	goos                      string
 	goarch                    string
@@ -302,8 +313,18 @@ func (e *Executor) EnableArtifactAcquisition(manifestPath string, sources ...Acq
 	if strings.ContainsRune(trimmedManifest, '\x00') {
 		return errors.New("artifact manifest path must not contain NUL")
 	}
+	e.mu.Lock()
+	selected := e.currentDescriptorLocked()
+	e.mu.Unlock()
+	var bundledPath string
+	if selected.Source == selection.SourceBundled {
+		bundledPath = selected.ExecutablePath
+	} else if existing, ok := executorAcquisitions.Load(e); ok {
+		bundledPath = existing.(*artifactAcquisitionState).bundled.ExecutablePath
+	}
 	state := &artifactAcquisitionState{
 		manifestPath: trimmedManifest,
+		bundled:      selection.Bundled(bundledPath, trimmedManifest),
 		goos:         runtime.GOOS,
 		goarch:       runtime.GOARCH,
 	}
@@ -507,11 +528,13 @@ func (e *Executor) ArtifactStatus() (ArtifactStatusResponse, error) {
 	observer := e.artifact
 	descriptor := e.currentDescriptorLocked()
 	ambiguous := e.activeSelectionAmbiguous
+	bundledAvailable := verifyBaselineExecutable(state.bundled, pinned) == nil
 	procState := e.process.Observe().State
 	processRunning := procState != cpaprocess.StateNotStarted && procState != cpaprocess.StateExited
 	replaceableBaseline := descriptor.IsFinalizedStage() &&
 		(descriptor.ArtifactID != pinned.ArtifactID || (descriptor.Version != "" && descriptor.Version != pinned.Version)) &&
 		!processRunning &&
+		!bundledAvailable &&
 		!ambiguous &&
 		e.mayReplaceAcquiredBaselineLocked(descriptor, selections, stageStore)
 	if !replaceableBaseline && observer != nil {
@@ -526,13 +549,21 @@ func (e *Executor) ArtifactStatus() (ArtifactStatusResponse, error) {
 			}
 		}
 	}
+	newer := !ambiguous && newerPinnedBaseline(descriptor, pinned)
+	baselineUpgrade := active != nil && active.ArtifactID == descriptor.ArtifactID && newer && !bundledAvailable &&
+		hasBaselineAcquisitionProvenance(descriptor, selections)
+	adoptBaseline := active != nil && active.ArtifactID == descriptor.ArtifactID && bundledAvailable && newer &&
+		hasBaselineAcquisitionProvenance(descriptor, selections)
 	e.mu.Unlock()
 	return ArtifactStatusResponse{
-		SchemaVersion: ArtifactSchemaVersion,
-		Pinned:        pinned,
-		Active:        active,
-		Required:      active == nil,
-		Operation:     opCopy,
+		SchemaVersion:            ArtifactSchemaVersion,
+		Pinned:                   pinned,
+		Active:                   active,
+		Required:                 active == nil,
+		Operation:                opCopy,
+		BundledAvailable:         bundledAvailable,
+		AdoptBaselineAvailable:   adoptBaseline,
+		BaselineUpgradeAvailable: baselineUpgrade,
 	}, nil
 }
 
@@ -650,7 +681,7 @@ func (e *Executor) AcquireArtifact(ctx context.Context, req ArtifactAcquireReque
 		return ArtifactOperationStatus{}, false, storeErr
 	}
 
-	alreadyActive, conflictErr := e.evaluateAcquisitionAdmission(state.manifestPath, pinned, selections, stageStore, observer)
+	alreadyActive, upgradeFrom, conflictErr := e.evaluateAcquisitionAdmission(state, pinned, selections, stageStore, observer, req.AllowBaselineUpgrade)
 	if conflictErr != nil {
 		state.mu.Unlock()
 		return ArtifactOperationStatus{}, false, conflictErr
@@ -741,7 +772,7 @@ func (e *Executor) AcquireArtifact(ctx context.Context, req ArtifactAcquireReque
 		defer e.prepareWorkers.Done()
 		execCtx, cancel := context.WithTimeout(e.recoveryContext, AcquireArtifactExecutionTimeout)
 		defer cancel()
-		_, _ = e.executeArtifactAcquisition(execCtx, state, opID, pinned, selections, stageStore, observer, downloadFn)
+		_, _ = e.executeArtifactAcquisition(execCtx, state, opID, pinned, selections, stageStore, observer, upgradeFrom, downloadFn)
 	}()
 
 	return opCopy, true, nil
@@ -749,7 +780,11 @@ func (e *Executor) AcquireArtifact(ctx context.Context, req ArtifactAcquireReque
 
 // UploadArtifact synchronously stages and commits the pinned artifact from an
 // uploaded .tar.gz stream.
-func (e *Executor) UploadArtifact(ctx context.Context, body io.Reader, contentLength int64) (ArtifactOperationStatus, error) {
+func (e *Executor) UploadArtifact(ctx context.Context, body io.Reader, contentLength int64, opts ...ArtifactUploadOptions) (ArtifactOperationStatus, error) {
+	var allowUpgrade bool
+	if len(opts) != 0 {
+		allowUpgrade = opts[0].AllowBaselineUpgrade
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -786,7 +821,7 @@ func (e *Executor) UploadArtifact(ctx context.Context, body io.Reader, contentLe
 		state.mu.Unlock()
 		return ArtifactOperationStatus{}, storeErr
 	}
-	alreadyActive, conflictErr := e.evaluateAcquisitionAdmission(state.manifestPath, pinned, selections, stageStore, observer)
+	alreadyActive, upgradeFrom, conflictErr := e.evaluateAcquisitionAdmission(state, pinned, selections, stageStore, observer, allowUpgrade)
 	if conflictErr != nil {
 		state.mu.Unlock()
 		return ArtifactOperationStatus{}, conflictErr
@@ -872,6 +907,7 @@ func (e *Executor) UploadArtifact(ctx context.Context, body io.Reader, contentLe
 		selections,
 		stageStore,
 		observer,
+		upgradeFrom,
 		func(_ context.Context, dst io.Writer, progress runtimeupdate.ProgressFunc) error {
 			return runtimeupdate.CopyUploadArchive(body, contentLength)(uploadCtx, dst, progress)
 		},
@@ -879,23 +915,30 @@ func (e *Executor) UploadArtifact(ctx context.Context, body io.Reader, contentLe
 }
 
 func (e *Executor) evaluateAcquisitionAdmission(
-	manifestPath string,
+	state *artifactAcquisitionState,
 	pinned ArtifactPinnedStatus,
 	selections activeSelectionStore,
 	stageStore *runtimeupdate.Store,
 	observer activeArtifactRefresher,
-) (alreadyActive bool, err error) {
+	allowUpgrade bool,
+) (alreadyActive bool, upgradeFrom artifact.ID, err error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.evaluateAcquisitionAdmissionLocked(manifestPath, pinned, selections, stageStore, observer)
+	prior := e.currentDescriptorLocked()
+	if allowUpgrade && e.canUpgradeAcquiredBaselineLocked(state, prior, pinned, selections, observer) {
+		upgradeFrom = prior.ArtifactID
+	}
+	alreadyActive, err = e.evaluateAcquisitionAdmissionLocked(state, pinned, selections, stageStore, observer, upgradeFrom)
+	return alreadyActive, upgradeFrom, err
 }
 
 func (e *Executor) evaluateAcquisitionAdmissionLocked(
-	manifestPath string,
+	state *artifactAcquisitionState,
 	pinned ArtifactPinnedStatus,
 	selections activeSelectionStore,
 	stageStore *runtimeupdate.Store,
 	observer activeArtifactRefresher,
+	upgradeFrom artifact.ID,
 ) (alreadyActive bool, err error) {
 	if e.closed.Load() {
 		return false, &ArtifactError{Code: ArtifactCodeInstallFailed, Err: ErrPersistenceUnavailable}
@@ -906,9 +949,15 @@ func (e *Executor) evaluateAcquisitionAdmissionLocked(
 	descriptor := e.currentDescriptorLocked()
 	procState := e.process.Observe().State
 	processRunning := procState != cpaprocess.StateNotStarted && procState != cpaprocess.StateExited
+	if upgradeFrom.IsValid() {
+		if upgradeFrom == descriptor.ArtifactID && e.canUpgradeAcquiredBaselineLocked(state, descriptor, pinned, selections, observer) {
+			return false, nil
+		}
+		return false, &ArtifactError{Code: ArtifactCodeArtifactConflict, Err: runtimeupdate.ErrArtifactConflict}
+	}
 	if descriptor.IsFinalizedStage() {
 		if descriptor.ArtifactID != pinned.ArtifactID || (descriptor.Version != "" && descriptor.Version != pinned.Version) {
-			if !processRunning && e.mayReplaceAcquiredBaselineLocked(descriptor, selections, stageStore) {
+			if !processRunning && verifyBaselineExecutable(state.bundled, pinned) != nil && e.mayReplaceAcquiredBaselineLocked(descriptor, selections, stageStore) {
 				return false, nil
 			}
 			return false, &ArtifactError{
@@ -990,7 +1039,7 @@ func (e *Executor) evaluateAcquisitionAdmissionLocked(
 	}
 	verifyManifest := strings.TrimSpace(descriptor.MetadataPath)
 	if verifyManifest == "" {
-		verifyManifest = strings.TrimSpace(manifestPath)
+		verifyManifest = state.manifestPath
 	}
 	diskObserver := artifact.NewObserver(execPath, verifyManifest)
 	refreshErr := diskObserver.Refresh()
@@ -1046,6 +1095,31 @@ func (e *Executor) mayReplaceAcquiredBaselineLocked(descriptor selection.Descrip
 	return errors.Is(err, os.ErrNotExist) && stages != nil && stages.HasAcquiredStageReadOnly(descriptor.Version, descriptor.ArtifactID)
 }
 
+func hasBaselineAcquisitionProvenance(descriptor selection.Descriptor, selections activeSelectionStore) bool {
+	store, ok := selections.(interface {
+		LoadProvenance() (selection.Provenance, error)
+	})
+	if !ok {
+		return false
+	}
+	provenance, err := store.LoadProvenance()
+	return err == nil && provenance.ArtifactID == descriptor.ArtifactID && provenance.Origin == selection.OriginBaselineAcquire
+}
+
+func (e *Executor) canUpgradeAcquiredBaselineLocked(state *artifactAcquisitionState, prior selection.Descriptor, pinned ArtifactPinnedStatus, selections activeSelectionStore, observer activeArtifactRefresher) bool {
+	if !newerPinnedBaseline(prior, pinned) || e.hasActiveUpdateOperationLocked() || observer == nil ||
+		!hasBaselineAcquisitionProvenance(prior, selections) || verifyBaselineExecutable(state.bundled, pinned) == nil {
+		return false
+	}
+	observed := observer.Observation()
+	return observed != nil && observed.ArtifactID == prior.ArtifactID
+}
+
+// ArtifactUploadOptions opts in to replacing a superseded slim baseline.
+type ArtifactUploadOptions struct {
+	AllowBaselineUpgrade bool
+}
+
 func (e *Executor) executeArtifactAcquisition(
 	ctx context.Context,
 	state *artifactAcquisitionState,
@@ -1054,6 +1128,7 @@ func (e *Executor) executeArtifactAcquisition(
 	selections activeSelectionStore,
 	stageStore *runtimeupdate.Store,
 	observer activeArtifactRefresher,
+	upgradeFrom artifact.ID,
 	download runtimeupdate.AcquireDownloadFunc,
 ) (ArtifactOperationStatus, error) {
 	updateProgress := func(receivedBytes, totalBytes int64) {
@@ -1092,7 +1167,7 @@ func (e *Executor) executeArtifactAcquisition(
 	}
 
 	updatePhase(ArtifactPhaseInstalling)
-	if err := e.commitAcquiredStage(state, opID, pinned, selections, stageStore, observer, stageRes.CreatedStage); err != nil {
+	if err := e.commitAcquiredStage(ctx, state, opID, pinned, selections, stageStore, observer, stageRes.CreatedStage, upgradeFrom); err != nil {
 		return failOperation(err)
 	}
 
@@ -1133,6 +1208,7 @@ func (e *Executor) preverifyDestinationSyncLocked(artifactID artifact.ID) error 
 }
 
 func (e *Executor) commitAcquiredStage(
+	ctx context.Context,
 	state *artifactAcquisitionState,
 	opID string,
 	pinned ArtifactPinnedStatus,
@@ -1140,6 +1216,7 @@ func (e *Executor) commitAcquiredStage(
 	stageStore *runtimeupdate.Store,
 	observer activeArtifactRefresher,
 	createdStage bool,
+	upgradeFrom artifact.ID,
 ) error {
 	cleanupCreatedStage := func(cause error) error {
 		if !createdStage || stageStore == nil {
@@ -1172,7 +1249,17 @@ func (e *Executor) commitAcquiredStage(
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	alreadyActive, conflictErr := e.evaluateAcquisitionAdmissionLocked(state.manifestPath, pinned, selections, stageStore, observer)
+	if upgradeFrom.IsValid() {
+		currentPin, err := loadPinnedArtifactManifest(state.manifestPath)
+		if err != nil {
+			return cleanupCreatedStage(&ArtifactError{Code: ArtifactCodeInstallFailed, Err: err})
+		}
+		if currentPin != pinned {
+			return cleanupCreatedStage(&ArtifactError{Code: ArtifactCodeArtifactConflict, Err: runtimeupdate.ErrArtifactConflict})
+		}
+	}
+
+	alreadyActive, conflictErr := e.evaluateAcquisitionAdmissionLocked(state, pinned, selections, stageStore, observer, upgradeFrom)
 	if conflictErr != nil {
 		return cleanupCreatedStage(conflictErr)
 	}
@@ -1196,14 +1283,20 @@ func (e *Executor) commitAcquiredStage(
 	if observer == nil {
 		return cleanupCreatedStage(&ArtifactError{Code: ArtifactCodeInstallFailed, Err: ErrPersistenceUnavailable})
 	}
-	candidateObserver := artifact.NewObserver(candidate.ExecutablePath, candidate.MetadataPath)
-	err = candidateObserver.Refresh()
-	candidateObs := candidateObserver.Observation()
-	if err != nil || candidateObs == nil || candidateObs.ArtifactID != pinned.ArtifactID || (candidateObs.Version != "" && candidateObs.Version != pinned.Version) {
-		if err == nil {
-			err = runtimeupdate.ErrArtifactConflict
-		}
+	verify := func() error { return verifyBaselineExecutable(candidate, pinned) }
+	if err := verify(); err != nil {
 		return cleanupCreatedStage(&ArtifactError{Code: ArtifactCodeInstallFailed, Err: err})
+	}
+	if upgradeFrom.IsValid() {
+		// Keep the verified stage on trial failure. The candidate may still
+		// be owned by the process manager if rollback could not reap it.
+		return e.switchBaselineLocked(ctx, state, e.currentDescriptorLocked(), candidate, verify, func() error {
+			if err := selections.Commit(candidate); err != nil {
+				return err
+			}
+			writeSelectionProvenance(selections, candidate.ArtifactID, selection.OriginBaselineAcquire, pinned.Version, opID)
+			return nil
+		})
 	}
 	if err := e.preverifyDestinationSyncLocked(candidate.ArtifactID); err != nil {
 		return cleanupCreatedStage(&ArtifactError{Code: ArtifactCodeInstallFailed, Err: err})
@@ -1220,10 +1313,14 @@ func (e *Executor) commitAcquiredStage(
 		return cleanupCreatedStage(&ArtifactError{Code: ArtifactCodeInstallFailed, Err: err})
 	}
 	writeSelectionProvenance(selections, candidate.ArtifactID, selection.OriginBaselineAcquire, pinned.Version, opID)
+	return e.finishBaselineSelectionLocked(state, candidate)
+}
+
+func (e *Executor) finishBaselineSelectionLocked(state *artifactAcquisitionState, candidate selection.Descriptor) error {
 	e.active = candidate
 	e.executable = candidate.ExecutablePath
 
-	refreshErr := refreshSelectedDescriptor(observer, &candidate)
+	refreshErr := refreshSelectedDescriptor(e.artifact, &candidate)
 	if refreshErr == nil && state.postCommitRefreshHook != nil {
 		refreshErr = state.postCommitRefreshHook()
 	}
