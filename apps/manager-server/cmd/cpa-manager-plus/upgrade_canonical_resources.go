@@ -173,7 +173,7 @@ func (u *upgradeCanonicalServer) initCanonicalResources(
 			upgradeCPAUpdateStore{owner: u},
 			upgradeRuntimeClientAdapter{owner: u},
 			u.runtimeModeFor(u.targetMode),
-		).WithModeResolver(func() model.RuntimeMode {
+		).WithArtifactClient(artifactClient).WithModeResolver(func() model.RuntimeMode {
 			return u.effectiveRuntimeMode(context.Background())
 		}).WithProductCompleteProbe(func(ctx context.Context) (bool, error) {
 			op, err := u.loadCurrentOp(ctx)

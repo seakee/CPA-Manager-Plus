@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/ports/identityinventory"
 	ports "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/ports/identitystore"
@@ -90,6 +91,12 @@ func NewService(cfg Config) (*Service, error) {
 //
 // Any failure before step 5 results in zero Canonical writes.
 func (s *Service) ReconcileOnce(ctx context.Context) (ports.ReconcileSnapshotResult, error) {
+	done, blocked := middleware.BeginBackgroundMutation()
+	if blocked {
+		return ports.ReconcileSnapshotResult{}, nil
+	}
+	defer done()
+
 	// Step 1: Pre-capture Runtime Status fence
 	preStatus, err := s.runtimeObserver.Status(ctx)
 	if err != nil {

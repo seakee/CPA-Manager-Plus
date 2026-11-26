@@ -17,6 +17,18 @@ export type CPAUpdateState =
   | 'unsupported'
   | 'managed_externally';
 
+export interface CPABaselineStatus {
+  pinned_version: string;
+  pinned_artifact_id: string;
+  bundled_available?: boolean;
+  adopt_baseline_available: boolean;
+  baseline_upgrade_available: boolean;
+}
+export interface CPABaselineAdoptResult {
+  active_artifact_id: string;
+  baseline: CPABaselineStatus;
+}
+
 export interface CPAUpdateStatus {
   mode: 'embedded' | 'external';
   state: CPAUpdateState;
@@ -29,8 +41,8 @@ export interface CPAUpdateStatus {
   prepare_supported: boolean;
   activate_supported: boolean;
   actionable: boolean;
+  baseline?: CPABaselineStatus;
 }
-
 export interface CPAUpdateIdentity {
   request_id: string;
   target_version: string;
@@ -354,6 +366,28 @@ export function canPrepareCPAUpdate(status: CPAUpdateStatus | null): boolean {
   );
 }
 
+function isBaselineStatus(value: unknown): value is CPABaselineStatus {
+  return (
+    isRecord(value) &&
+    typeof value.pinned_version === 'string' &&
+    typeof value.pinned_artifact_id === 'string' &&
+    (value.bundled_available === undefined || typeof value.bundled_available === 'boolean') &&
+    typeof value.adopt_baseline_available === 'boolean' &&
+    typeof value.baseline_upgrade_available === 'boolean'
+  );
+}
+function parseAdoptBaseline(value: unknown): CPABaselineAdoptResult {
+  if (
+    !isRecord(value) ||
+    typeof value.active_artifact_id !== 'string' ||
+    !artifactID.test(value.active_artifact_id) ||
+    !isBaselineStatus(value.baseline)
+  ) {
+    throw new CPAUpdateAPIError('unavailable', 'response_unreliable');
+  }
+  return value as unknown as CPABaselineAdoptResult;
+}
+
 function parseStatus(value: unknown): CPAUpdateStatus {
   const states: CPAUpdateState[] = [
     'never_checked',
@@ -374,13 +408,13 @@ function parseStatus(value: unknown): CPAUpdateStatus {
     typeof value.last_success_at !== 'string' ||
     ['current_version', 'target_version', 'active_artifact_id', 'last_error'].some(
       (field) => value[field] !== undefined && typeof value[field] !== 'string'
-    )
+    ) ||
+    (value.baseline !== undefined && !isBaselineStatus(value.baseline))
   ) {
     throw new CPAUpdateAPIError('unavailable', 'response_unreliable');
   }
   return value as unknown as CPAUpdateStatus;
 }
-
 function matchesOperation(
   value: unknown,
   phase: CPAUpdatePhase,
@@ -628,5 +662,19 @@ export const cpaUpdateApi = {
       (value) => parseObservation(value, phase, params),
       { method: 'GET', params, signal }
     );
+  },
+  adoptBaseline: (
+    connection: CPAUpdateConnection,
+    expectedActiveArtifactId: string,
+    signal?: AbortSignal
+  ) => {
+    if (!expectedActiveArtifactId || !artifactID.test(expectedActiveArtifactId)) {
+      return Promise.reject(new CPAUpdateAPIError('rejected', 'invalid_request'));
+    }
+    return request(connection, '/adopt-baseline', parseAdoptBaseline, {
+      method: 'POST',
+      data: { expected_active_artifact_id: expectedActiveArtifactId },
+      signal,
+    });
   },
 };

@@ -19,6 +19,7 @@ var (
 	sha256Pattern       = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	sourceCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	nativeAssetPattern  = regexp.MustCompile(`^cpa-manager-plus-native-v2_(.+)_(darwin|linux|windows)_(amd64|arm64)\.(?:tar\.gz|zip)$`)
+	slotAssetPattern    = regexp.MustCompile(`^cpamp-slot_(.+)_linux_(amd64|arm64)\.tar\.gz$`)
 )
 
 type Target struct {
@@ -43,6 +44,17 @@ type DockerImage struct {
 type ComposeDistribution struct {
 	Filename string `json:"filename"`
 	SHA256   string `json:"sha256"`
+}
+type SlotAsset struct {
+	Name             string `json:"name"`
+	Platform         string `json:"platform"`
+	SHA256           string `json:"sha256"`
+	Size             int64  `json:"size"`
+	MinBaseEpoch     int    `json:"min_base_epoch"`
+	SchemaGeneration int    `json:"schema_generation"`
+}
+type SlotDistribution struct {
+	Assets []SlotAsset `json:"assets"`
 }
 type ReleasePairing struct {
 	Filename              string `json:"filename"`
@@ -77,6 +89,7 @@ type ReleaseInfo struct {
 			Assets []string `json:"assets"`
 		} `json:"native"`
 		Compose *ComposeDistribution `json:"compose,omitempty"`
+		Slot    *SlotDistribution    `json:"slot,omitempty"`
 	} `json:"distribution"`
 	Compatibility struct {
 		MinimumCPAVersion *string `json:"minimum_cpa_version"`
@@ -282,6 +295,37 @@ func (info ReleaseInfo) Validate(tag string) error {
 	if info.Distribution.Compose != nil {
 		if !isSafeFilename(info.Distribution.Compose.Filename) || !sha256Pattern.MatchString(info.Distribution.Compose.SHA256) {
 			return errors.New("invalid compose distribution")
+		}
+	}
+	if beta2, parseErr := ParseVersion("v2.0.0-beta.2"); parseErr == nil && Compare(v, beta2) >= 0 && info.Distribution.Slot == nil {
+		return errors.New("missing slot distribution")
+	}
+	if info.Distribution.Slot != nil {
+		if len(info.Distribution.Slot.Assets) < 1 {
+			return errors.New("invalid slot distribution")
+		}
+		seenSlotNames := map[string]bool{}
+		seenSlotPlatforms := map[string]bool{}
+		for _, asset := range info.Distribution.Slot.Assets {
+			if !isSafeFilename(asset.Name) {
+				return errors.New("invalid slot asset")
+			}
+			m := slotAssetPattern.FindStringSubmatch(asset.Name)
+			if m == nil || m[1] != tag {
+				return errors.New("invalid slot asset")
+			}
+			expectedPlatform := "linux/" + m[2]
+			if asset.Platform != expectedPlatform {
+				return errors.New("invalid slot asset platform")
+			}
+			if !sha256Pattern.MatchString(asset.SHA256) || asset.Size <= 0 || asset.Size > MaxSlotArchiveBytes || asset.MinBaseEpoch < 1 || asset.SchemaGeneration < 1 {
+				return errors.New("invalid slot asset metadata")
+			}
+			if seenSlotNames[asset.Name] || seenSlotPlatforms[asset.Platform] {
+				return errors.New("duplicate slot asset")
+			}
+			seenSlotNames[asset.Name] = true
+			seenSlotPlatforms[asset.Platform] = true
 		}
 	}
 	if info.Compatibility.MinimumCPAVersion != nil {

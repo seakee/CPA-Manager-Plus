@@ -1702,11 +1702,17 @@ func legacyBridgePathAllowed(resource, method string) bool {
 		return allowed(http.MethodPost)
 	case "usage-service/updates/channel":
 		return allowed(http.MethodPut)
+	case "usage-service/updates/slot/prepare", "usage-service/updates/slot/activate", "usage-service/updates/slot/rollback":
+		return allowed(http.MethodPost)
+	case "usage-service/updates/slot/prepare-upload":
+		return allowed(http.MethodPut)
 	case "usage-service/runtime/updates":
 		return allowed(http.MethodGet)
 	case "usage-service/runtime/updates/check":
 		return allowed(http.MethodPost)
 	case "usage-service/runtime/updates/prepare", "usage-service/runtime/updates/prepare-upload", "usage-service/runtime/updates/activate":
+		return allowed(http.MethodPost)
+	case "usage-service/runtime/updates/adopt-baseline":
 		return allowed(http.MethodPost)
 	case "usage-service/runtime/updates/operations/prepare", "usage-service/runtime/updates/operations/activate":
 		return allowed(http.MethodGet)

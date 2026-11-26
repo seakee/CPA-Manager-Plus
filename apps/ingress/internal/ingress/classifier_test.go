@@ -31,6 +31,8 @@ func TestTransitionalClassifier(t *testing.T) {
 		{path: "/v0/management/config", want: RouteManager},
 		{path: FreshRoutingControlPath, want: RouteDeny},
 		{path: FreshRoutingAuthorityPath, want: RouteDeny},
+		{path: "/internal/v1/trial", want: RouteDeny},
+		{path: "/internal/v1/trial/release", want: RouteDeny},
 		{path: "/v1/models", want: RouteGateway},
 		{path: "/v1/chat/completions", want: RouteGateway},
 		{path: "/v1/responses", want: RouteGateway},
@@ -221,6 +223,13 @@ func TestPrivateKeyConsumersAreDeniedOnPublicIngressTCP(t *testing.T) {
 				"/internal/fresh-chat-admission%3fignored",
 				"/internal/fresh-chat-admission%3bignored",
 				"/internal/fresh-chat-admission%25252fignored",
+				"/internal/v1/trial",
+				"/internal/v1/trial/release",
+				"/internal%2fv1%2ftrial%2frelease",
+				"/internal%252fv1%252ftrial%252frelease",
+				"/x/../internal/v1/trial/release",
+				"/internal/v1/trial/release%3fignored",
+				"/internal/v1/trial%3bignored",
 			} {
 				req, err := http.NewRequest(http.MethodPost, ingress.URL+path, nil)
 				if err != nil {

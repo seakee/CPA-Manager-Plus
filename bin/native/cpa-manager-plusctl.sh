@@ -2588,6 +2588,125 @@ acquire_upgrade_lock() {
   mv -f "${lock_dir}/pid.tmp" "${lock_dir}/pid"
 }
 
+
+_extract_json_string_field() {
+  local json_file="$1"
+  local field_name="$2"
+  if [ -L "${json_file}" ] || [ ! -f "${json_file}" ]; then
+    return 0
+  fi
+  sed -n "s/.*\"${field_name}\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "${json_file}" 2>/dev/null | head -n 1
+}
+
+_compare_decimal_digits() {
+  local a="$1"
+  local b="$2"
+  if [ "${#a}" -lt "${#b}" ]; then
+    printf '%s\n' "-1"
+    return 0
+  fi
+  if [ "${#a}" -gt "${#b}" ]; then
+    printf '%s\n' "1"
+    return 0
+  fi
+  if [ "${a}" = "${b}" ]; then
+    printf '%s\n' "0"
+  elif [[ "${a}" < "${b}" ]]; then
+    printf '%s\n' "-1"
+  else
+    printf '%s\n' "1"
+  fi
+}
+
+# semver_v2_gte returns 0 (true) when SemVer 2.0 version $1 >= $2 (ignoring leading 'v' and '+build').
+semver_v2_gte() {
+  local raw_a="${1:-}"
+  local raw_b="${2:-}"
+  raw_a="${raw_a#v}"
+  raw_b="${raw_b#v}"
+  raw_a="${raw_a%%+*}"
+  raw_b="${raw_b%%+*}"
+
+  local core_a="${raw_a%%-*}"
+  local pre_a=""
+  if [[ "${raw_a}" == *-* ]]; then
+    pre_a="${raw_a#*-}"
+  fi
+  local core_b="${raw_b%%-*}"
+  local pre_b=""
+  if [[ "${raw_b}" == *-* ]]; then
+    pre_b="${raw_b#*-}"
+  fi
+
+  local IFS='.'
+  local parts_a=() parts_b=()
+  read -r -a parts_a <<<"${core_a}"
+  read -r -a parts_b <<<"${core_b}"
+  if [ "${#parts_a[@]}" -ne 3 ] || [ "${#parts_b[@]}" -ne 3 ]; then
+    return 1
+  fi
+  local idx cmp_res
+  for idx in 0 1 2; do
+    if ! [[ "${parts_a[${idx}]}" =~ ^(0|[1-9][0-9]*)$ ]] || ! [[ "${parts_b[${idx}]}" =~ ^(0|[1-9][0-9]*)$ ]]; then
+      return 1
+    fi
+    cmp_res="$(_compare_decimal_digits "${parts_a[${idx}]}" "${parts_b[${idx}]}")"
+    if [ "${cmp_res}" = "1" ]; then
+      return 0
+    elif [ "${cmp_res}" = "-1" ]; then
+      return 1
+    fi
+  done
+
+  if [ -z "${pre_a}" ] && [ -z "${pre_b}" ]; then
+    return 0
+  fi
+  if [ -z "${pre_a}" ]; then
+    return 0
+  fi
+  if [ -z "${pre_b}" ]; then
+    return 1
+  fi
+
+  local pre_parts_a=() pre_parts_b=()
+  read -r -a pre_parts_a <<<"${pre_a}"
+  read -r -a pre_parts_b <<<"${pre_b}"
+  local limit="${#pre_parts_a[@]}"
+  if [ "${#pre_parts_b[@]}" -gt "${limit}" ]; then
+    limit="${#pre_parts_b[@]}"
+  fi
+  idx=0
+  while [ "${idx}" -lt "${limit}" ]; do
+    if [ "${idx}" -ge "${#pre_parts_a[@]}" ]; then
+      return 1
+    fi
+    if [ "${idx}" -ge "${#pre_parts_b[@]}" ]; then
+      return 0
+    fi
+    local pa="${pre_parts_a[${idx}]}"
+    local pb="${pre_parts_b[${idx}]}"
+    if [ "${pa}" != "${pb}" ]; then
+      local a_num=0 b_num=0
+      [[ "${pa}" =~ ^[0-9]+$ ]] && a_num=1
+      [[ "${pb}" =~ ^[0-9]+$ ]] && b_num=1
+      if [ "${a_num}" -eq 1 ] && [ "${b_num}" -eq 1 ]; then
+        cmp_res="$(_compare_decimal_digits "${pa}" "${pb}")"
+        [ "${cmp_res}" != "-1" ]
+        return $?
+      elif [ "${a_num}" -ne "${b_num}" ]; then
+        [ "${a_num}" -eq 0 ]
+        return $?
+      else
+        if [[ "${pa}" < "${pb}" ]]; then
+          return 1
+        fi
+        return 0
+      fi
+    fi
+    idx=$((idx + 1))
+  done
+  return 0
+}
 _systemd_unit_state=""
 _systemd_load_state=""
 _systemd_active_state=""
@@ -3762,6 +3881,14 @@ upgrade_app() {
   local had_existing_unit=0
   local unit_install_attempted=0
   local rollback_ok=1
+  local eff_runtime_base="${eff_runtime_data_dir:-"${eff_data_dir}/runtime"}"
+  local eff_journal_resolved="${eff_journal_path:-"${eff_runtime_base}/supervisor/operations.sqlite"}"
+  local eff_runtime_root
+  eff_runtime_root="$(dirname "$(dirname "${eff_journal_resolved}")")"
+  local eff_slot_state_file="${eff_runtime_root}/cpamp/slot-state.json"
+  local eff_slots_dir="${eff_runtime_root}/cpamp/slots"
+  local slot_state_reset_performed=0
+  local new_bundle_version=""
   rollback_upgrade_swap() {
     set +e
     rollback_ok=1
@@ -3854,6 +3981,14 @@ upgrade_app() {
         fi
       fi
     fi
+    if [ "${slot_state_reset_performed}" -eq 1 ] && [ -f "${backup_dir}/slot-state.json.bak" ] && [ ! -L "${eff_slot_state_file}" ]; then
+      if ! cp -p "${backup_dir}/slot-state.json.bak" "${eff_slot_state_file}.rollback.$$" ||
+        ! mv -f "${eff_slot_state_file}.rollback.$$" "${eff_slot_state_file}"; then
+        rm -f "${eff_slot_state_file}.rollback.$$" 2>/dev/null || true
+        echo "Rollback error: failed to restore ${eff_slot_state_file}" >&2
+        rollback_ok=0
+      fi
+    fi
     if [ "${rollback_ok}" -eq 1 ]; then
       rm -rf "${backup_dir}" 2>/dev/null || true
     else
@@ -3924,6 +4059,46 @@ upgrade_app() {
     moved_into_target+=("${item}")
   done
 
+  new_bundle_version="$(_extract_json_string_field "${target_home}/share/cpamp/provenance.json" "version")"
+  if [ -n "${new_bundle_version}" ] && [ ! -L "${eff_slot_state_file}" ] && [ -f "${eff_slot_state_file}" ]; then
+    local prev_active_slot=""
+    prev_active_slot="$(_extract_json_string_field "${eff_slot_state_file}" "active_slot")"
+    if [ -n "${prev_active_slot}" ] && semver_v2_gte "${new_bundle_version}" "${prev_active_slot}"; then
+      if cp -p "${eff_slot_state_file}" "${backup_dir}/slot-state.json.bak" 2>/dev/null; then
+        local now_utc=""
+        now_utc="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf '1970-01-01T00:00:00Z')"
+        local reset_tmp="${eff_slot_state_file}.tmp.$$"
+        (
+          umask 077
+          cat >"${reset_tmp}" <<EOF
+{
+  "schema_version": 1,
+  "state": "none",
+  "active_slot": "",
+  "previous_slot": "",
+  "base_version_at_switch": "",
+  "trial_id": "",
+  "snapshot_dir": "",
+  "schema_generation": 1,
+  "previous_schema_generation": 1,
+  "last_failure_code": "",
+  "last_rolled_back_slot": "",
+  "updated_at": "${now_utc}"
+}
+EOF
+        )
+        chmod 0600 "${reset_tmp}" 2>/dev/null || true
+        if [ "$(id -u)" -eq 0 ]; then
+          chown -h 0:0 "${reset_tmp}" 2>/dev/null || true
+        fi
+        if mv -f "${reset_tmp}" "${eff_slot_state_file}"; then
+          slot_state_reset_performed=1
+        else
+          rm -f "${reset_tmp}" 2>/dev/null || true
+        fi
+      fi
+    fi
+  fi
   local install_args=(install --home "${target_home}" --service-name "${service_name}" --unit-dir "${unit_dir}")
   if [ "${skip_systemctl}" = "1" ]; then
     install_args+=(--no-systemctl)
@@ -3999,6 +4174,19 @@ upgrade_app() {
     echo "Upgrade complete (--no-restart)."
   fi
 
+  if [ "${slot_state_reset_performed}" -eq 1 ] && [ -n "${new_bundle_version}" ] && [ ! -L "${eff_slots_dir}" ] && [ -d "${eff_slots_dir}" ]; then
+    local slot_dir_candidate slot_ver_name
+    for slot_dir_candidate in "${eff_slots_dir}"/v*; do
+      [ -e "${slot_dir_candidate}" ] || continue
+      [ -L "${slot_dir_candidate}" ] && continue
+      [ -d "${slot_dir_candidate}" ] || continue
+      slot_ver_name="$(basename "${slot_dir_candidate}")"
+      if semver_v2_gte "${new_bundle_version}" "${slot_ver_name}"; then
+        chmod -R u+w "${slot_dir_candidate}" 2>/dev/null || true
+        rm -rf "${slot_dir_candidate}" 2>/dev/null || true
+      fi
+    done
+  fi
   rm -rf "${backup_dir}" "${stage_dir}"
   _cpamp_upgrade_stage_dir=""
   _cpamp_cleanup_upgrade_dirs

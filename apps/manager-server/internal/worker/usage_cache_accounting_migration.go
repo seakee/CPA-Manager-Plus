@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
@@ -61,26 +62,49 @@ func (w *UsageCacheAccountingMigrationWorker) run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-
-		state, err := w.store.DiscoverUsageCacheAccounting(ctx)
-		if err != nil {
-			w.recordFailure(ctx, err)
-			if !waitFor(ctx, w.retryDelay) {
+		done, blocked := middleware.BeginBackgroundMutation()
+		if blocked {
+			pauseDelay := min(w.retryDelay, 200*time.Millisecond)
+			if pauseDelay <= 0 {
+				pauseDelay = 50 * time.Millisecond
+			}
+			if !waitFor(ctx, pauseDelay) {
 				return
 			}
 			continue
 		}
-		if state.Status == "completed" {
-			w.complete(state)
+
+		var (
+			state  store.DataMigrationState
+			result store.DataMigrationBatchResult
+			err    error
+		)
+		doneAll, retryAfterDelay := func() (bool, bool) {
+			defer done()
+			state, err = w.store.DiscoverUsageCacheAccounting(ctx)
+			if err != nil {
+				w.recordFailure(ctx, err)
+				return false, true
+			}
+			if state.Status == "completed" {
+				w.complete(state)
+				return true, false
+			}
+			w.logStarted.Do(func() {
+				log.Printf("usage cache accounting migration started: last_event_id=%d target_event_id=%d batch_size=%d", state.LastEventID, state.TargetEventID, w.batchSize)
+			})
+
+			result, err = w.store.RunUsageCacheAccountingBatch(ctx, w.batchSize)
+			if err != nil {
+				w.recordFailure(ctx, err)
+				return false, true
+			}
+			return false, false
+		}()
+		if doneAll {
 			return
 		}
-		w.logStarted.Do(func() {
-			log.Printf("usage cache accounting migration started: last_event_id=%d target_event_id=%d batch_size=%d", state.LastEventID, state.TargetEventID, w.batchSize)
-		})
-
-		result, err := w.store.RunUsageCacheAccountingBatch(ctx, w.batchSize)
-		if err != nil {
-			w.recordFailure(ctx, err)
+		if retryAfterDelay {
 			if !waitFor(ctx, w.retryDelay) {
 				return
 			}

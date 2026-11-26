@@ -112,6 +112,9 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 			}
 			detail, err := h.App.CodexInspectionService.CancelRun(r.Context(), id)
 			if err != nil {
+				if writeExternalCodexInspectionBlocker(w, err) {
+					return
+				}
 				response.Error(w, codexInspectionErrorStatus(err), err)
 				return
 			}
@@ -133,6 +136,8 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 
 func codexInspectionErrorStatus(err error) int {
 	switch {
+	case errors.Is(err, codexsvc.ErrTrialHoldActive):
+		return http.StatusServiceUnavailable
 	case errors.Is(err, codexsvc.ErrRunNotFound):
 		return http.StatusNotFound
 	case errors.Is(err, codexsvc.ErrRunAlreadyActive),
@@ -154,6 +159,15 @@ func codexInspectionErrorStatus(err error) int {
 }
 
 func writeExternalCodexInspectionBlocker(w http.ResponseWriter, err error) bool {
+	if errors.Is(err, codexsvc.ErrTrialHoldActive) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Retry-After", "5")
+		response.JSON(w, http.StatusServiceUnavailable, map[string]string{
+			"code":    middleware.TrialHoldErrorCode,
+			"message": middleware.TrialHoldErrorMessage,
+		})
+		return true
+	}
 	if errors.Is(err, cpa.ErrManagementRejected) {
 		response.JSON(w, http.StatusConflict, map[string]string{"code": freshconfig.ReasonManagementRejected})
 		return true

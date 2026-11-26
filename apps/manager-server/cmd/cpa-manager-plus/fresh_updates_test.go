@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/httpapi"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
+	cpaupdateservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaupdate"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/fresh"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/updatecheck"
@@ -169,4 +171,85 @@ func TestFreshUpdateChannelSQLiteAdminRestartAndFailure(t *testing.T) {
 			t.Fatal("non-New scope enabled")
 		}
 	}
+}
+
+func TestFreshCPAAdoptBaselineRequiresPanelAndCompletedSetup(t *testing.T) {
+	prior := "sha256:" + strings.Repeat("a", 64)
+	pin := "sha256:" + strings.Repeat("b", 64)
+	var adopted atomic.Bool
+	supervisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+artifactTestRuntimeToken {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		active, origin, version := prior, "acquired", "8.0.55"
+		if adopted.Load() {
+			active, origin, version = pin, "bundled", "8.0.56"
+		}
+		baseline := func(canAdopt bool) {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schemaVersion": 1, "pinned": map[string]string{"artifactId": pin, "version": "8.0.56"},
+				"active": map[string]string{"artifactId": active, "origin": origin}, "bundledAvailable": true, "adoptBaselineAvailable": canAdopt,
+			})
+		}
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v1/runtime/status":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"protocolVersion": "v1", "runtimeIdentity": "runtime-01", "runtimeGeneration": 1, "state": "ready", "cpaObservedVersion": version,
+				"activeGatewayArtifact": map[string]string{"engine": "cpa", "artifactId": active, "version": version},
+			})
+		case "GET /v1/runtime/artifact":
+			baseline(!adopted.Load())
+		case "POST /v1/runtime/artifact/adopt-baseline":
+			var req map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req["expectedActiveArtifactId"] != prior || !adopted.CompareAndSwap(false, true) {
+				t.Errorf("unexpected adoption request: %v, %v", req, err)
+				w.WriteHeader(http.StatusConflict)
+				return
+			}
+			active, origin = pin, "bundled"
+			baseline(false)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer supervisor.Close()
+	app, _ := newArtifactTestSetup(t, supervisor.URL)
+	commitArtifactTestRouting(t, app)
+	installManagedCheckpoint(t, app, "committed")
+	call := func(method, suffix, token, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		return doArtifactRequest(t, http.HandlerFunc(app.canonicalAPI), method, currentInstallManagementAPIV2Prefix+"cpamp/usage-service/runtime/updates"+suffix, token, "application/json", strings.NewReader(body), int64(len(body)))
+	}
+	admin := "Bearer " + strategyTestAdmin
+	body := `{"expected_active_artifact_id":"` + prior + `"}`
+	if res := call(http.MethodPost, "/adopt-baseline", "", body); res.Code != http.StatusUnauthorized || adopted.Load() {
+		t.Fatalf("unauthenticated adoption = %d %s", res.Code, res.Body)
+	}
+	if res := call(http.MethodPost, "/adopt-baseline", admin, body); res.Code != http.StatusPreconditionRequired || adopted.Load() {
+		t.Fatalf("incomplete adoption = %d %s", res.Code, res.Body)
+	}
+	record, err := app.store.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.store.Update(t.Context(), record.Operation.Identity, record.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.ProductComplete = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertStatus := func(expected string, canAdopt bool) {
+		t.Helper()
+		res := call(http.MethodGet, "", admin, "")
+		var status cpaupdateservice.Status
+		if res.Code != http.StatusOK || json.Unmarshal(res.Body.Bytes(), &status) != nil || status.ActiveArtifactID != expected || status.Baseline == nil || status.Baseline.PinnedArtifactID != pin || status.Baseline.AdoptBaselineAvailable != canAdopt {
+			t.Fatalf("CPA baseline status = %d %s", res.Code, res.Body)
+		}
+	}
+	assertStatus(prior, true)
+	if res := call(http.MethodPost, "/adopt-baseline", admin, body); res.Code != http.StatusOK || !adopted.Load() {
+		t.Fatalf("completed adoption = %d %s", res.Code, res.Body)
+	}
+	assertStatus(pin, false)
 }

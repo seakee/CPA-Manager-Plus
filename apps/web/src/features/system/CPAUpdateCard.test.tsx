@@ -83,6 +83,7 @@ const flowState = (patch: Partial<CPAUpdateFlow> = {}): CPAUpdateFlow => ({
   activate: vi.fn(),
   retry: vi.fn(),
   forget: vi.fn(),
+  adoptBaseline: vi.fn(),
   ...patch,
 });
 const render = async (flow: CPAUpdateFlow) => {
@@ -527,5 +528,30 @@ describe('CPA update product controls', () => {
       })
     );
     expect(text(renderer!.root)).toContain(en.cpa_updates.failures[failureCode]);
+  });
+
+  it('shows baseline upgrade hint and adopts bundled baseline through confirmation modal', async () => {
+    const adoptBaseline = vi.fn().mockResolvedValue(undefined);
+    await render(
+      flowState({
+        status: updateStatus({
+          state: 'up_to_date',
+          baseline: {
+            pinned_version: '6.9.26',
+            pinned_artifact_id: 'sha256:' + 'e'.repeat(64),
+            bundled_available: true,
+            adopt_baseline_available: true,
+            baseline_upgrade_available: true,
+          },
+        }),
+        canPrepare: false,
+        adoptBaseline,
+      })
+    );
+    expect(text(renderer!.root)).toContain('6.9.26');
+    await click(en.cpa_updates.adopt_baseline_action.replace('{{version}}', '6.9.26'));
+    expect(renderer!.root.findByProps({ role: 'dialog' })).toBeTruthy();
+    await click(en.cpa_updates.adopt_baseline_confirm);
+    expect(adoptBaseline).toHaveBeenCalledOnce();
   });
 });

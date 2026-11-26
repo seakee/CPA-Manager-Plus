@@ -52,6 +52,7 @@ type recordingAcquireProcess struct {
 	startSpec cpaprocess.StartSpec
 	starts    int
 	stops     int
+	allowStop bool
 	onStart   func(cpaprocess.StartSpec) error
 }
 
@@ -86,7 +87,31 @@ func (p *recordingAcquireProcess) PrepareStop() (cpaprocess.StopTarget, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.stops++
-	return nil, cpaprocess.ErrStateConflict
+	if !p.allowStop || p.state.State != cpaprocess.StateRunning {
+		return nil, cpaprocess.ErrStateConflict
+	}
+	return &acquisitionStopTarget{process: p, instance: p.state.InstanceID}, nil
+}
+
+type acquisitionStopTarget struct {
+	process  *recordingAcquireProcess
+	instance uint64
+}
+
+func (*acquisitionStopTarget) Release() {}
+
+func (s *acquisitionStopTarget) Terminate(ctx context.Context) (cpaprocess.Observation, error) {
+	p := s.process
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return p.state, err
+	}
+	if p.state.State != cpaprocess.StateRunning || p.state.InstanceID != s.instance {
+		return p.state, cpaprocess.ErrStateConflict
+	}
+	p.state.State = cpaprocess.StateExited
+	return p.state, nil
 }
 
 func (p *recordingAcquireProcess) ExitEvents() <-chan cpaprocess.ExitEvent {
@@ -1787,4 +1812,118 @@ func TestArtifactStatusUnlocksReplaceableOfflineBaselineAfterPinnedChange(t *tes
 			t.Fatalf("ArtifactStatus() with ambiguous selection = %+v, %v; want Active=%s Required=false", status, err, env.pinnedID)
 		}
 	})
+}
+
+func TestSlimBaselineUpgradeLeavesCPAAloneDuringDownload(t *testing.T) {
+	env := newSlimAcquireTestEnv(t)
+	prepareBaselineSwitch(t, env, true)
+	prior := env.process.Observe()
+	downloadStarted, resume := make(chan struct{}), make(chan struct{})
+	release := sync.OnceFunc(func() { close(resume) })
+	t.Cleanup(release)
+	var archive []byte
+	id, archive := setNextBaseline(t, env, false, WithOfficialAcquisitionSource(&stubAcquireSource{
+		downloadFn: func(ctx context.Context, version string, dst io.Writer, _ runtimeupdate.ProgressFunc) error {
+			if version != nextBaselineVersion {
+				return fmt.Errorf("unexpected version %q", version)
+			}
+			close(downloadStarted)
+			select {
+			case <-resume:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			_, err := dst.Write(archive)
+			return err
+		},
+	}))
+	status, err := env.executor.ArtifactStatus()
+	if err != nil || !status.BaselineUpgradeAvailable || status.BundledAvailable || status.Required || status.Active == nil || status.Active.ArtifactID != env.pinnedID {
+		t.Fatalf("upgradable slim status = %+v, %v", status, err)
+	}
+	if _, _, err := env.executor.AcquireArtifact(t.Context(), ArtifactAcquireRequest{Source: ArtifactSourceGitHub}); ArtifactErrorCode(err) != ArtifactCodeArtifactConflict {
+		t.Fatalf("running replacement without opt-in = %v", err)
+	}
+	if _, started, err := env.executor.AcquireArtifact(t.Context(), ArtifactAcquireRequest{Source: ArtifactSourceGitHub, AllowBaselineUpgrade: true}); err != nil || !started {
+		t.Fatalf("opt-in acquisition not admitted: started=%v err=%v", started, err)
+	}
+	select {
+	case <-downloadStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("download did not begin")
+	}
+	if got := env.process.Observe(); got != prior {
+		t.Fatalf("download interrupted running CPA: %+v != %+v", got, prior)
+	}
+	if _, err := env.executor.AdoptBaseline(t.Context(), env.pinnedID); ArtifactErrorCode(err) != ArtifactCodeAcquisitionInProgress {
+		t.Fatalf("adoption during download = %v", err)
+	}
+	release()
+	status = awaitAcquisitionTerminal(t, env.executor)
+	if status.Operation.Phase != ArtifactPhaseSucceeded || status.Active == nil || status.Active.ArtifactID != id || status.BaselineUpgradeAvailable {
+		t.Fatalf("finished upgrade = %+v", status)
+	}
+	assertDestinationArtifact(t, env, id)
+	if got := env.process.Observe(); got.State != cpaprocess.StateRunning || got.InstanceID == prior.InstanceID {
+		t.Fatalf("new artifact does not own running CPA: %+v", got)
+	}
+	if p, err := env.selectionStore.LoadProvenance(); err != nil || p.ArtifactID != id || p.Origin != selection.OriginBaselineAcquire || p.OperationID != status.Operation.ID {
+		t.Fatalf("new selection provenance = %+v, %v", p, err)
+	}
+}
+
+func TestSlimBaselineUpgradeUploadPreservesUserSelectionAndRollsBackUnreadyCandidate(t *testing.T) {
+	for _, scenario := range []string{"stopped", "readiness failure", "user update"} {
+		t.Run(scenario, func(t *testing.T) {
+			env := newSlimAcquireTestEnv(t)
+			prepareBaselineSwitch(t, env, scenario != "stopped")
+			if scenario == "user update" {
+				p, err := env.selectionStore.LoadProvenance()
+				if err != nil {
+					t.Fatal(err)
+				}
+				p.Origin = selection.OriginUserUpdate
+				if err := env.selectionStore.WriteProvenance(p); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := readBaselineStateFile(t, env, "selection.json")
+			provenance := readBaselineStateFile(t, env, "selection-provenance.json")
+			id, archive := setNextBaseline(t, env, false)
+			prior := env.executor.active
+			if scenario == "readiness failure" {
+				env.executor.readiness = readinessFunc(func(context.Context) readiness.State {
+					if env.process.startSpec.Executable != prior.ExecutablePath {
+						return readiness.Offline
+					}
+					return readiness.Ready
+				})
+			}
+			status, err := env.executor.ArtifactStatus()
+			if err != nil || status.BaselineUpgradeAvailable != (scenario != "user update") || status.Required {
+				t.Fatalf("status before upload = %+v, %v", status, err)
+			}
+			op, err := env.executor.UploadArtifact(t.Context(), bytes.NewReader(archive), int64(len(archive)), ArtifactUploadOptions{AllowBaselineUpgrade: true})
+			if scenario == "stopped" {
+				if err != nil || op.Phase != ArtifactPhaseSucceeded || env.executor.active.ArtifactID != id || env.process.starts != 0 || env.process.stops != 0 {
+					t.Fatalf("stopped upgrade = %+v, %v; active=%+v", op, err, env.executor.active)
+				}
+				assertDestinationArtifact(t, env, id)
+				return
+			}
+			want := ArtifactCodeInstallFailed
+			if scenario == "user update" {
+				want = ArtifactCodeArtifactConflict
+				if env.process.starts != 1 || env.process.stops != 0 {
+					t.Fatal("user-selected CPA process was disturbed")
+				}
+			} else if env.process.starts != 3 || env.process.stops != 2 || env.process.startSpec.Executable != prior.ExecutablePath || env.executor.RecoveryStatus().State != RecoveryStateArmed {
+				t.Fatal("failed candidate was not reaped and rolled back")
+			}
+			if ArtifactErrorCode(err) != want || env.executor.active != prior || !bytes.Equal(before, readBaselineStateFile(t, env, "selection.json")) || !bytes.Equal(provenance, readBaselineStateFile(t, env, "selection-provenance.json")) {
+				t.Fatalf("upload must preserve prior selection, got %+v, %v", op, err)
+			}
+			assertDestinationArtifact(t, env, env.pinnedID)
+		})
+	}
 }

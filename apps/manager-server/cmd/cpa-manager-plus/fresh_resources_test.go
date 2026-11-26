@@ -21,12 +21,14 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/httpapi"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagearchive"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/fresh"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrapdiscovery"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshrouting"
 	freshstrategy "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
@@ -312,6 +314,21 @@ func TestLegacyBridgePathAllowlistCoversExistingReadAndAuthFlows(t *testing.T) {
 		{resource: "v0/management/vertex/import", method: http.MethodPost, allowed: true},
 		{resource: "usage-service/runtime/updates/prepare-upload", method: http.MethodPost, allowed: true},
 		{resource: "usage-service/runtime/updates/prepare-upload", method: http.MethodGet, allowed: false},
+		{resource: "usage-service/updates/slot/prepare", method: http.MethodPost, allowed: true},
+		{resource: "usage-service/updates/slot/prepare", method: http.MethodGet, allowed: false},
+		{resource: "usage-service/updates/slot/prepare", method: http.MethodPut, allowed: false},
+		{resource: "usage-service/updates/slot/prepare-upload", method: http.MethodPut, allowed: true},
+		{resource: "usage-service/updates/slot/prepare-upload", method: http.MethodPost, allowed: false},
+		{resource: "usage-service/updates/slot/prepare-upload", method: http.MethodGet, allowed: false},
+		{resource: "usage-service/updates/slot/activate", method: http.MethodPost, allowed: true},
+		{resource: "usage-service/updates/slot/activate", method: http.MethodGet, allowed: false},
+		{resource: "usage-service/updates/slot/activate", method: http.MethodPut, allowed: false},
+		{resource: "usage-service/updates/slot/rollback", method: http.MethodPost, allowed: true},
+		{resource: "usage-service/updates/slot/rollback", method: http.MethodGet, allowed: false},
+		{resource: "usage-service/updates/slot/rollback", method: http.MethodDelete, allowed: false},
+		{resource: "usage-service/runtime/updates/adopt-baseline", method: http.MethodPost, allowed: true},
+		{resource: "usage-service/runtime/updates/adopt-baseline", method: http.MethodGet, allowed: false},
+		{resource: "usage-service/runtime/updates/adopt-baseline", method: http.MethodPut, allowed: false},
 		{resource: "v0/management/debug", method: http.MethodDelete, allowed: false},
 		{resource: "v0/management/error-logs-max-files", method: http.MethodDelete, allowed: false},
 		{resource: "v0/management/api-call", method: http.MethodGet, allowed: false},
@@ -1659,5 +1676,60 @@ func TestFreshCanonicalLegacyBridgeForwardsMetaAPIKeyToCPA(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "sk-meta-1") {
 		t.Fatalf("unexpected response body: %s", rr.Body.String())
+	}
+}
+
+func TestTrialHoldServerHandlerWrapsStartupAndFreshSurface(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "launcher-token")
+	if err := os.WriteFile(tokenFile, []byte("trial-wiring-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CPAMP_TRIAL_HOLD", "1")
+	t.Setenv("CPAMP_LAUNCHER_TOKEN_FILE", tokenFile)
+	t.Setenv("CPAMP_BASE_VERSION", "v2.0.0-beta.1")
+	t.Setenv("CPAMP_RUNNING_SLOT", "v2.0.0-beta.2")
+
+	startup := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+	wrapped, cleanup := newTrialHoldServerHandler(startup)
+	defer cleanup()
+
+	app := newInstallationTestApplication(t)
+	startup.SetFreshHandler(app)
+
+	// GET /health succeeds during trial hold and discloses trial_hold=true.
+	healthRec := httptest.NewRecorder()
+	wrapped.ServeHTTP(healthRec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if healthRec.Code != http.StatusOK || !strings.Contains(healthRec.Body.String(), `"trial_hold":true`) {
+		t.Fatalf("GET /health during trial = %d %s", healthRec.Code, healthRec.Body.String())
+	}
+
+	// External write is held with 503 upgrade_trial_verifying.
+	postRec := httptest.NewRecorder()
+	wrapped.ServeHTTP(postRec, httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"api-keys", strings.NewReader(`{}`)))
+	if postRec.Code != http.StatusServiceUnavailable || !strings.Contains(postRec.Body.String(), middleware.TrialHoldErrorCode) {
+		t.Fatalf("POST during trial = %d %s", postRec.Code, postRec.Body.String())
+	}
+
+	// Loopback release immediately unblocks writes and clears /health trial_hold.
+	relReq := httptest.NewRequest(http.MethodPost, middleware.TrialReleasePath, nil)
+	relReq.RemoteAddr = "127.0.0.1:40000"
+	relReq.Header.Set("Authorization", "Bearer trial-wiring-token")
+	relRec := httptest.NewRecorder()
+	wrapped.ServeHTTP(relRec, relReq)
+	if relRec.Code != http.StatusOK {
+		t.Fatalf("release = %d %s", relRec.Code, relRec.Body.String())
+	}
+
+	healthAfter := httptest.NewRecorder()
+	wrapped.ServeHTTP(healthAfter, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if healthAfter.Code != http.StatusOK || strings.Contains(healthAfter.Body.String(), `"trial_hold"`) {
+		t.Fatalf("GET /health after release = %d %s", healthAfter.Code, healthAfter.Body.String())
+	}
+
+	wrapped.BeginShutdown()
+	select {
+	case <-startup.shutdownCtx.Done():
+	default:
+		t.Fatal("BeginShutdown was not forwarded to startupHTTPHandler")
 	}
 }

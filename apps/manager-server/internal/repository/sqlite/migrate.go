@@ -283,6 +283,18 @@ var (
 	ErrIncompatibleSchemaVersion = ErrIncompatibleNewerSchema
 )
 
+// testOverrideCurrentSchemaGeneration allows package tests to simulate a
+// future schema generation upgrade through Migrate without changing the
+// exported CurrentSchemaGeneration constant.
+var testOverrideCurrentSchemaGeneration int64
+
+func effectiveCurrentSchemaGeneration() int64 {
+	if testOverrideCurrentSchemaGeneration > 0 {
+		return testOverrideCurrentSchemaGeneration
+	}
+	return CurrentSchemaGeneration
+}
+
 type schemaCompatibilityQueryer interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
@@ -307,8 +319,9 @@ func checkSchemaCompatibilityOn(ctx context.Context, q schemaCompatibilityQuerye
 	if err := q.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&userVersion); err != nil {
 		return "", 0, fmt.Errorf("read sqlite user_version: %w", err)
 	}
-	if userVersion < 0 || userVersion > CurrentSchemaGeneration {
-		return "", 0, fmt.Errorf("%w: user_version=%d outside supported generation 0..%d (current version %q); use a compatible version or restore a pre-upgrade backup before downgrading", ErrIncompatibleNewerSchema, userVersion, CurrentSchemaGeneration, buildinfo.Version)
+	targetGen := effectiveCurrentSchemaGeneration()
+	if userVersion < 0 || userVersion > targetGen {
+		return "", 0, fmt.Errorf("%w: user_version=%d outside supported generation 0..%d (current version %q); use a compatible version or restore a pre-upgrade backup before downgrading", ErrIncompatibleNewerSchema, userVersion, targetGen, buildinfo.Version)
 	}
 	var tableMarker int
 	err := q.QueryRowContext(ctx, `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'upgrade_schema_meta'`).Scan(&tableMarker)
@@ -340,7 +353,7 @@ func checkSchemaCompatibilityOn(ctx context.Context, q schemaCompatibilityQuerye
 	required, requiredErr := parseCompatibleReleaseTag(minimum)
 	floor, _ := updatecheck.ParseVersion(minimumCompatibleAppVersion)
 	current, currentErr := updatecheck.ParseVersion(buildinfo.Version)
-	if generation < 1 || generation > CurrentSchemaGeneration || userVersion != generation || requiredErr != nil ||
+	if generation < 1 || generation > targetGen || userVersion != generation || requiredErr != nil ||
 		updatecheck.Compare(required, floor) < 0 ||
 		(currentErr == nil && updatecheck.Compare(current, required) < 0) {
 		return "", 0, fmt.Errorf("%w: user_version=%d, schema_generation=%d, min_compatible_app_version=%q (current version %q); use a compatible version or restore a pre-upgrade backup before downgrading", ErrIncompatibleNewerSchema, userVersion, generation, minimum, buildinfo.Version)
@@ -382,8 +395,9 @@ func writeSchemaCompatibility(db *sql.DB, _ string) error {
 	if err != nil {
 		return err
 	}
-	if userVersion < CurrentSchemaGeneration {
-		if _, err := conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, CurrentSchemaGeneration)); err != nil {
+	targetGen := effectiveCurrentSchemaGeneration()
+	if userVersion < targetGen {
+		if _, err := conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, targetGen)); err != nil {
 			return fmt.Errorf("write sqlite user_version: %w", err)
 		}
 	}
@@ -401,7 +415,7 @@ func writeSchemaCompatibility(db *sql.DB, _ string) error {
         min_compatible_app_version = excluded.min_compatible_app_version,
         updated_at = excluded.updated_at
         WHERE upgrade_schema_meta.schema_generation <= excluded.schema_generation`,
-		CurrentSchemaGeneration, effectiveMin, time.Now().UTC().Format(time.RFC3339Nano))
+		targetGen, effectiveMin, time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("write schema compatibility metadata: %w", err)
 	}
@@ -418,9 +432,16 @@ func writeSchemaCompatibility(db *sql.DB, _ string) error {
 }
 
 func Migrate(db *sql.DB) error {
-	minimum, err := checkSchemaCompatibility(db)
+	ctx := context.Background()
+	minimum, recordedGeneration, err := checkSchemaCompatibilityOn(ctx, db)
 	if err != nil {
 		return err
+	}
+	targetGen := effectiveCurrentSchemaGeneration()
+	if recordedGeneration > 0 && recordedGeneration < targetGen {
+		if err := ensurePreMigrateFallbackSnapshot(ctx, db, recordedGeneration, targetGen); err != nil {
+			return err
+		}
 	}
 	monitoringSnapshot, err := inspectUsageMonitoringMigrationSnapshot(db)
 	if err != nil {

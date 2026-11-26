@@ -196,13 +196,15 @@ var CPAManagementPaths = []string{"/v8/management"}
 
 func privateRoutingCandidate(candidates []string) bool {
 	for _, value := range candidates {
-		if strings.HasPrefix(value, PrivateChatAdmissionPath) {
-			suffix := strings.TrimPrefix(value, PrivateChatAdmissionPath)
-			if suffix == "" || strings.ContainsRune("/%?#;", rune(suffix[0])) {
-				return true
+		for _, prefix := range []string{PrivateChatAdmissionPath, "/internal/v1/trial/release", "/internal/v1/trial"} {
+			if strings.HasPrefix(value, prefix) {
+				suffix := strings.TrimPrefix(value, prefix)
+				if suffix == "" || strings.ContainsRune("/%?#;", rune(suffix[0])) {
+					return true
+				}
 			}
 		}
-		for _, private := range []string{FreshRoutingControlPath, FreshRoutingAuthorityPath, "/internal/fresh-client-key-stage/probe", PrivateChatAdmissionPath} {
+		for _, private := range []string{FreshRoutingControlPath, FreshRoutingAuthorityPath, "/internal/fresh-client-key-stage/probe", PrivateChatAdmissionPath, "/internal/v1/trial/release", "/internal/v1/trial"} {
 			if value == private || strings.HasPrefix(value, private+"/") {
 				return true
 			}

@@ -24,6 +24,7 @@ LAYOUTS = {
         "binRoot": "/usr/local/bin/",
         "artifact": "/usr/local/share/cpamp/runtime/cpa-artifact.json",
         "webManifest": "/usr/local/share/cpamp/release/fullweb-manifest.json",
+        "baseAbi": "/usr/local/share/cpamp/release/base-abi.json",
         "platforms": ("linux/amd64", "linux/arm64"),
     },
     "native": {
@@ -34,6 +35,7 @@ LAYOUTS = {
         "binRoot": "bin/",
         "artifact": "share/cpamp/runtime/cpa-artifact.json",
         "webManifest": "share/cpamp/release/fullweb-manifest.json",
+        "baseAbi": "share/cpamp/release/base-abi.json",
         # The Native package ships linux/amd64 only; other platforms fall back
         # to 1.x Stable and must never be relabelled with this evidence.
         "platforms": ("linux/amd64",),
@@ -43,6 +45,8 @@ LICENSE_ROOT = LAYOUTS["image"]["licenseRoot"]
 INVENTORY = LAYOUTS["image"]["inventory"]
 PROVENANCE = LAYOUTS["image"]["provenance"]
 SOURCE_INVENTORY = LAYOUTS["image"]["sourceInventory"]
+BASE_ABI = LAYOUTS["image"]["baseAbi"]
+BASE_ABI_EPOCH = 1
 COMPONENTS = {"manager": ("manager", "web", "base-image"),
               "ingress": ("ingress", "base-image"),
               "runtime": ("runtime-supervisor", "base-image"),
@@ -235,7 +239,20 @@ def validate_inventory(value, role, read_file, expected_source=None, allow_unpin
         require(read_file(lay["licenseRoot"] + "cli-proxy-api/LICENSE"), "missing CPA LICENSE")
 
 
-def validate_provenance(value, role, version, commit, read_file, allow_unpinned=False, cpa_bundled=None):
+def validate_base_abi(value, role, expected_platform=None):
+    lay = layout(role)
+    require(type(value) is dict and set(value) == {"schema_version", "base_epoch", "platform"},
+            "invalid base-abi.json schema")
+    require(type(value.get("schema_version")) is int and value["schema_version"] == 1,
+            "invalid base-abi schema_version")
+    require(type(value.get("base_epoch")) is int and value["base_epoch"] >= 1,
+            "invalid base-abi base_epoch")
+    require(value.get("platform") in lay["platforms"], "invalid base-abi platform")
+    if expected_platform is not None:
+        require(value.get("platform") == expected_platform, "base-abi platform mismatch")
+
+
+def validate_provenance(value, role, version, commit, read_file, allow_unpinned=False, cpa_bundled=None, require_base_abi=False):
     lay = layout(role)
     identity(version, commit)
     require(type(value) is dict and type(value.get("schemaVersion")) is int and value["schemaVersion"] == 1,
@@ -291,6 +308,14 @@ def validate_provenance(value, role, version, commit, read_file, allow_unpinned=
         if item["name"] in BINARY_MODULES:
             require(item.get("module") == "github.com/seakee/cpa-manager-plus/" + BINARY_MODULES[item["name"]],
                     "component Go module identity mismatch")
+    try:
+        base_abi_bytes = read_file(lay["baseAbi"])
+    except (KeyError, FileNotFoundError):
+        if require_base_abi:
+            raise ValueError("missing base-abi.json: " + lay["baseAbi"])
+        base_abi_bytes = None
+    if base_abi_bytes is not None:
+        validate_base_abi(json.loads(base_abi_bytes), role, expected_platform=value.get("platform"))
 
 
 def build(root, role, version, commit, platform, source_inventory, cpa_official=True, cpa_bundled=True):
@@ -341,6 +366,18 @@ def build(root, role, version, commit, platform, source_inventory, cpa_official=
         path = lay["webManifest"]
         items.append({"name": "web", "path": path, "sha256": digest(read_file(path)),
                       "version": version, "source": SOURCE, "sourceCommit": commit})
+    base_abi = {
+        "schema_version": 1,
+        "base_epoch": BASE_ABI_EPOCH,
+        "platform": platform,
+    }
+    validate_base_abi(base_abi, role, expected_platform=platform)
+    base_abi_path = root / lay["baseAbi"].lstrip("/")
+    base_abi_path.parent.mkdir(parents=True, exist_ok=True)
+    if base_abi_path.exists():
+        base_abi_path.chmod(0o644)
+    base_abi_path.write_bytes(encoded(base_abi))
+    base_abi_path.chmod(0o444)
     provenance = {"schemaVersion": 1, "role": role, "version": version, "sourceCommit": commit,
                   "source": SOURCE, "platform": platform, "components": items,
                   "licenseCoverage": inventory["licenseCoverage"],
@@ -350,8 +387,12 @@ def build(root, role, version, commit, platform, source_inventory, cpa_official=
     if not cpa_bundled:
         provenance["cpaBundled"] = False
     validate_provenance(provenance, role, version, commit, read_file,
-                        allow_unpinned=not cpa_official, cpa_bundled=cpa_bundled)
-    (root / lay["provenance"].lstrip("/")).write_bytes(encoded(provenance))
+                        allow_unpinned=not cpa_official, cpa_bundled=cpa_bundled,
+                        require_base_abi=True)
+    prov_path = root / lay["provenance"].lstrip("/")
+    if prov_path.exists():
+        prov_path.chmod(0o644)
+    prov_path.write_bytes(encoded(provenance))
     return provenance
 
 

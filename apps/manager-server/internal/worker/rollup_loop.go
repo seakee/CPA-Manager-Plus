@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 )
 
 type workerLifecycle struct {
@@ -76,7 +78,19 @@ func runRollupLoop(
 
 	run := func() {
 		stopContinuation()
-		if !catchUp(ctx) || ctx.Err() != nil {
+		done, blocked := middleware.BeginBackgroundMutation()
+		if blocked {
+			if ctx.Err() == nil {
+				continuationTimer = time.NewTimer(continuationDelay)
+				continuation = continuationTimer.C
+			}
+			return
+		}
+		hasMore := func() bool {
+			defer done()
+			return catchUp(ctx)
+		}()
+		if !hasMore || ctx.Err() != nil {
 			return
 		}
 		continuationTimer = time.NewTimer(continuationDelay)

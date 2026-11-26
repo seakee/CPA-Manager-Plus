@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,12 +13,14 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/codexquota"
 	collectorpkg "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	codexinspectionrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/codexinspection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/collector"
@@ -6041,4 +6044,126 @@ func newCodexInspectionTestService(t *testing.T, db *store.Store) *Service {
 	collectorService := collector.New(manager)
 	managerCfg := managerconfigsvc.New(cfg, db, collectorService)
 	return New(db, managerCfg, &http.Client{})
+}
+
+type blockingFinalizeCodexInspectionRepository struct {
+	codexinspectionrepo.Repository
+	enteredFinalize chan struct{}
+	allowFinalize   chan struct{}
+	finalizeDone    atomic.Bool
+	enterOnce       sync.Once
+}
+
+func (r *blockingFinalizeCodexInspectionRepository) FinalizeRun(
+	ctx context.Context,
+	run model.CodexInspectionRun,
+	ownerID string,
+	log *model.CodexInspectionLog,
+) error {
+	if r.enteredFinalize != nil {
+		r.enterOnce.Do(func() { close(r.enteredFinalize) })
+	}
+	if r.allowFinalize != nil {
+		<-r.allowFinalize
+	}
+	err := r.Repository.FinalizeRun(ctx, run, ownerID, log)
+	r.finalizeDone.Store(true)
+	return err
+}
+
+func TestManualCodexInspectionRunFencesThroughFinalSQLiteWriteAndBlocksUnderTrialHold(t *testing.T) {
+	t.Cleanup(func() {
+		middleware.SetProcessTrialHoldGate(nil)
+	})
+	gate := middleware.NewTrialHoldGate(false, "")
+	middleware.SetProcessTrialHoldGate(gate)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v0/management/auth-files" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"files":[]}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(upstream.Close)
+
+	db := newCodexInspectionTestStore(t)
+	if err := db.SaveManagerConfig(context.Background(), newCodexInspectionManagerConfig(upstream.URL)); err != nil {
+		t.Fatalf("save manager config: %v", err)
+	}
+	blockingRepo := &blockingFinalizeCodexInspectionRepository{
+		Repository:      db.CodexInspections,
+		enteredFinalize: make(chan struct{}),
+		allowFinalize:   make(chan struct{}),
+	}
+	db.CodexInspections = blockingRepo
+	service := newCodexInspectionTestService(t, db)
+
+	// Start a manual detached run and immediately cancel the caller's request context
+	// to simulate an HTTP handler that already returned 202 and closed its request scope.
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	detail, err := service.Start(reqCtx, RunRequest{
+		TriggerType: model.CodexInspectionTriggerManual,
+		TriggerKey:  "manual-detached-fence-test",
+	})
+	if err != nil {
+		cancelReq()
+		t.Fatalf("start manual codex inspection: %v", err)
+	}
+	cancelReq()
+
+	select {
+	case <-blockingRepo.enteredFinalize:
+	case <-time.After(3 * time.Second):
+		t.Fatal("manual codex inspection run did not reach FinalizeRun")
+	}
+
+	// Engage TrialHold while runTask is inside its final SQLite FinalizeRun write.
+	middleware.EngageProcessTrialHold()
+	drainDone := make(chan error, 1)
+	go func() {
+		drainDone <- middleware.WaitOtherInflightMutations(context.Background())
+	}()
+
+	select {
+	case drainErr := <-drainDone:
+		t.Fatalf("WaitOtherInflightMutations returned before FinalizeRun completed: %v", drainErr)
+	case <-time.After(40 * time.Millisecond):
+	}
+
+	close(blockingRepo.allowFinalize)
+	select {
+	case drainErr := <-drainDone:
+		if drainErr != nil {
+			t.Fatalf("WaitOtherInflightMutations returned error: %v", drainErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for manual codex inspection final write drain")
+	}
+
+	if !blockingRepo.finalizeDone.Load() {
+		t.Fatal("expected FinalizeRun SQLite write to complete before WaitOtherInflightMutations returned")
+	}
+	if _, active := service.ActiveRunID(); active {
+		t.Fatal("expected ActiveRunID to be cleared before WaitOtherInflightMutations returned")
+	}
+	persisted, found, err := db.GetCodexInspectionRun(context.Background(), detail.Run.ID)
+	if err != nil || !found || persisted.Status != model.CodexInspectionStatusCompleted {
+		t.Fatalf("expected completed run persisted before drain returned, found=%t status=%q err=%v", found, persisted.Status, err)
+	}
+
+	// While TrialHold remains active, manual Start, Recover, CancelRun, and ExecuteManualActions fail closed with ErrTrialHoldActive.
+	if _, err := service.Start(context.Background(), RunRequest{TriggerType: model.CodexInspectionTriggerManual}); !errors.Is(err, ErrTrialHoldActive) {
+		t.Fatalf("expected Start under TrialHold to return ErrTrialHoldActive, got %v", err)
+	}
+	if err := service.Recover(context.Background()); !errors.Is(err, ErrTrialHoldActive) {
+		t.Fatalf("expected Recover under TrialHold to return ErrTrialHoldActive, got %v", err)
+	}
+	if _, err := service.CancelRun(context.Background(), detail.Run.ID); !errors.Is(err, ErrTrialHoldActive) {
+		t.Fatalf("expected CancelRun under TrialHold to return ErrTrialHoldActive, got %v", err)
+	}
+	if _, err := service.ExecuteManualActions(context.Background(), detail.Run.ID, ExecuteActionsRequest{}); !errors.Is(err, ErrTrialHoldActive) {
+		t.Fatalf("expected ExecuteManualActions under TrialHold to return ErrTrialHoldActive, got %v", err)
+	}
 }

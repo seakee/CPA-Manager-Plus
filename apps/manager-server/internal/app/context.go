@@ -2,15 +2,18 @@ package app
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-
+	"time"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	accountactionsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/accountaction"
 	adminauthsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/adminauth"
@@ -168,8 +171,63 @@ func fromExisting(
 		AggregateReadsEnabled: cfg.DashboardHourlyRollupEnabled,
 	}))
 	authFileMutationCoordinator := cpaauthfiles.NewMutationCoordinator()
+	updateCheckService := updatechecksvc.New(st, buildinfo.Version, buildinfo.SourceCommit, os.Getenv("CPAMP_UPDATE_CHECK_ENABLED") != "false")
+	updateCheckService.SetCurrentSchemaGeneration(sqliterepo.CurrentSchemaGeneration)
+	updateCheckService.SetPreActivateFence(func(ctx context.Context) (func(), error) {
+		middleware.EngageProcessTrialHold()
+		release := func() {
+			middleware.ReleaseProcessTrialHold()
+		}
+		if collectorManager != nil {
+			if err := collectorManager.QuiesceForTrialHold(ctx); err != nil {
+				release()
+				return nil, err
+			}
+		}
+		if err := middleware.WaitOtherInflightMutations(ctx); err != nil {
+			release()
+			return nil, err
+		}
+		return release, nil
+	})
+	updateCheckService.SetPreSlotSnapshot(func(ctx context.Context, targetVersion string) (string, int, error) {
+		if st == nil || st.SQLDB() == nil {
+			return "", 0, errors.New("database store is unavailable")
+		}
+		dbPath := strings.TrimSpace(cfg.DBPath)
+		lowerDB := strings.ToLower(dbPath)
+		if dbPath == "" || dbPath == ":memory:" || strings.HasPrefix(lowerDB, "file::memory:") || strings.Contains(lowerDB, "mode=memory") {
+			return "", 0, errors.New("on-disk database path is unavailable")
+		}
+		absDBPath, err := filepath.Abs(dbPath)
+		if err != nil {
+			return "", 0, fmt.Errorf("resolve database path: %w", err)
+		}
+		absDBPath = filepath.Clean(absDBPath)
+		dataKeyPath := strings.TrimSpace(cfg.DataKeyPath)
+		if dataKeyPath == "" {
+			dataKeyPath = filepath.Join(filepath.Dir(absDBPath), "data.key")
+		}
+		backupsDir := filepath.Join(filepath.Dir(absDBPath), "backups")
+		snapshotDir := filepath.Join(
+			backupsDir,
+			fmt.Sprintf(
+				"pre-slot-%s-to-%s-%s",
+				sanitizeSnapshotVersionSegment(buildinfo.Version),
+				sanitizeSnapshotVersionSegment(targetVersion),
+				time.Now().UTC().Format("20060102T150405.000000000Z"),
+			),
+		)
+		if err := sqliterepo.CreateOnlineSnapshot(ctx, st.SQLDB(), absDBPath, dataKeyPath, snapshotDir); err != nil {
+			return "", 0, err
+		}
+		if err := sqliterepo.PrunePreSlotSnapshots(backupsDir, 2, snapshotDir); err != nil {
+			return "", 0, err
+		}
+		return snapshotDir, sqliterepo.CurrentSchemaGeneration, nil
+	})
 	return &Context{
-		UpdateCheckService:   updatechecksvc.New(st, buildinfo.Version, buildinfo.SourceCommit, os.Getenv("CPAMP_UPDATE_CHECK_ENABLED") != "false"),
+		UpdateCheckService:   updateCheckService,
 		Config:               cfg,
 		Store:                st,
 		Collector:            collectorManager,
@@ -205,4 +263,20 @@ func fromExisting(
 		PanelService:             panelsvc.New(cfg.PanelPath, embeddedPanel),
 		AutomationRuntimeService: runtimeService,
 	}
+}
+
+func sanitizeSnapshotVersionSegment(raw string) string {
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(raw) {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('-')
+		}
+	}
+	out := strings.Trim(b.String(), ".-")
+	if out == "" {
+		return "unknown"
+	}
+	return out
 }

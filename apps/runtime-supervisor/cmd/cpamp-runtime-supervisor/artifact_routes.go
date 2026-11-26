@@ -9,10 +9,12 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/artifact"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/lifecycle"
 	runtimeupdate "github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/update"
 )
@@ -22,6 +24,7 @@ const (
 	artifactProbePath                = "/v1/runtime/artifact/probe"
 	artifactAcquirePath              = "/v1/runtime/artifact/acquire"
 	artifactUploadPath               = "/v1/runtime/artifact/upload"
+	artifactAdoptBaselinePath        = "/v1/runtime/artifact/adopt-baseline"
 	uploadArtifactBudgetTimeout      = lifecycle.AcquireArtifactExecutionTimeout
 	uploadArtifactWriteBudgetTimeout = 12 * time.Minute
 	maxArtifactJSONRequestBytes      = 4 << 10
@@ -50,7 +53,8 @@ func enableArtifactRoutes(cfg config, runtime *runtimeHandler, opts ...lifecycle
 		return errors.New("runtime handler is required")
 	}
 	if !cfg.privateConfiguration && runtime.executor != nil && strings.TrimSpace(cfg.cpaArtifactManifest) != "" {
-		_ = runtime.executor.EnableArtifactAcquisition(cfg.cpaArtifactManifest, opts...)
+		options := append([]lifecycle.AcquisitionOption{lifecycle.WithBundledArtifactExecutable(cfg.cpaExecutable)}, opts...)
+		_ = runtime.executor.EnableArtifactAcquisition(cfg.cpaArtifactManifest, options...)
 	}
 	runtime.Handler = newArtifactRoutesHandler(cfg.token, runtime.executor, runtime.Handler)
 	return nil
@@ -69,7 +73,7 @@ func (h *artifactRoutesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 	switch r.URL.Path {
 	case artifactStatusPath:
 		expectedMethod = http.MethodGet
-	case artifactProbePath, artifactAcquirePath:
+	case artifactProbePath, artifactAcquirePath, artifactAdoptBaselinePath:
 		expectedMethod = http.MethodPost
 	case artifactUploadPath:
 		expectedMethod = http.MethodPut
@@ -107,6 +111,8 @@ func (h *artifactRoutesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 		h.serveProbe(w, r)
 	case artifactAcquirePath:
 		h.serveAcquire(w, r)
+	case artifactAdoptBaselinePath:
+		h.serveAdoptBaseline(w, r)
 	case artifactUploadPath:
 		h.serveUpload(w, r)
 	}
@@ -162,7 +168,34 @@ func (h *artifactRoutesHandler) serveAcquire(w http.ResponseWriter, r *http.Requ
 	writeArtifactJSON(w, status, lifecycle.ArtifactOperationResponse{Operation: op})
 }
 
+func (h *artifactRoutesHandler) serveAdoptBaseline(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ExpectedActiveArtifactID artifact.ID `json:"expectedActiveArtifactId"`
+	}
+	if err := decodeStrictArtifactJSON(r.Body, &req); err != nil || !req.ExpectedActiveArtifactID.IsValid() {
+		writeArtifactError(w, http.StatusBadRequest, lifecycle.ArtifactCodeInvalidRequest)
+		return
+	}
+	controller := http.NewResponseController(w)
+	if err := controller.SetWriteDeadline(time.Now().Add(3 * time.Minute)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		writeArtifactError(w, http.StatusInternalServerError, lifecycle.ArtifactCodeInstallFailed)
+		return
+	}
+	status, err := h.executor.AdoptBaseline(r.Context(), req.ExpectedActiveArtifactID)
+	if err != nil {
+		writeMappedArtifactError(w, err)
+		return
+	}
+	writeArtifactJSON(w, http.StatusOK, status)
+}
+
 func (h *artifactRoutesHandler) serveUpload(w http.ResponseWriter, r *http.Request) {
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	upgrade := query["allow_baseline_upgrade"]
+	if err != nil || (len(upgrade) != 0 && (len(upgrade) != 1 || upgrade[0] != "1")) {
+		writeArtifactError(w, http.StatusBadRequest, lifecycle.ArtifactCodeInvalidRequest)
+		return
+	}
 	if len(r.Header.Values("Content-Type")) > 1 || !validUploadContentType(r.Header.Get("Content-Type")) {
 		writeArtifactError(w, http.StatusBadRequest, lifecycle.ArtifactCodeInvalidRequest)
 		return
@@ -191,7 +224,7 @@ func (h *artifactRoutesHandler) serveUpload(w http.ResponseWriter, r *http.Reque
 	}()
 
 	body := http.MaxBytesReader(unwrapArtifactResponseWriter(w), r.Body, runtimeupdate.MaxAcquisitionArchiveBytes)
-	op, err := h.executor.UploadArtifact(r.Context(), body, r.ContentLength)
+	op, err := h.executor.UploadArtifact(r.Context(), body, r.ContentLength, lifecycle.ArtifactUploadOptions{AllowBaselineUpgrade: len(upgrade) == 1})
 	if err != nil {
 		writeMappedArtifactError(w, err)
 		return

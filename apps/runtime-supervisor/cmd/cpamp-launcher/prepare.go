@@ -129,6 +129,12 @@ type PrepareConfig struct {
 	CPAArtifactManifestPath string
 	RuntimeCPAAddr          string
 	manifestFromEnv         bool
+	LauncherControlAddr     string
+	BaseVersion             string
+	RunningSlot             string
+	BaseInstallRoot         string
+	TrialHold               bool
+	trustedSlotRoot         string
 }
 
 // PreparedRuntime holds the resolved paths, validated identities, and secret
@@ -151,6 +157,8 @@ type PreparedRuntime struct {
 	TokenDir                string
 	TokenFile               string
 	RuntimeToken            string
+	LauncherTokenFile       string
+	LauncherToken           string
 	CPAUID                  int
 	CPAGID                  int
 	ManagerUID              int
@@ -162,6 +170,11 @@ type PreparedRuntime struct {
 	CPAExecutablePath       string
 	CPAArtifactManifestPath string
 	RuntimeCPAAddr          string
+	LauncherControlAddr     string
+	BaseVersion             string
+	BaseInstallRoot         string
+	RunningSlot             string
+	TrialHold               bool
 }
 
 // SupervisorEnv returns the environment variables required by cpamp-runtime-supervisor.
@@ -201,6 +214,7 @@ func PrepareConfigFromEnv() PrepareConfig {
 		CPAArtifactManifestPath: envOrDefault("CPAMP_CPA_ARTIFACT_MANIFEST", DefaultCPAArtifactManifestPath),
 		RuntimeCPAAddr:          envOrDefault("CPAMP_RUNTIME_CPA_ADDR", DefaultRuntimeCPAAddr),
 		manifestFromEnv:         os.Getenv("CPAMP_CPA_ARTIFACT_MANIFEST") != "",
+		LauncherControlAddr:     envOrDefault("CPAMP_LAUNCHER_CONTROL_ADDR", DefaultLauncherControlAddr),
 	}
 }
 
@@ -312,6 +326,20 @@ func prepareContext(ctx context.Context, cfg PrepareConfig, sys System) (*Prepar
 	if err := sys.Chmod(layout.RuntimeRoot, RuntimeRootMode); err != nil {
 		return nil, fmt.Errorf("failed to chmod runtime root %s: %w", layout.RuntimeRoot, err)
 	}
+	for _, slotRootDir := range []struct {
+		path string
+		mode fs.FileMode
+	}{
+		{layout.CPAMPRoot, CPAMPRootMode},
+		{layout.SlotsDir, SlotsDirMode},
+	} {
+		if err := sys.Chown(slotRootDir.path, RootUID, RootGID); err != nil {
+			return nil, fmt.Errorf("failed to chown %s: %w", slotRootDir.path, err)
+		}
+		if err := sys.Chmod(slotRootDir.path, slotRootDir.mode); err != nil {
+			return nil, fmt.Errorf("failed to chmod %s: %w", slotRootDir.path, err)
+		}
+	}
 
 	if err := sys.Chown(layout.TokenDir, RootUID, ManagerGID); err != nil {
 		return nil, fmt.Errorf("failed to chown token directory %s: %w", layout.TokenDir, err)
@@ -330,6 +358,10 @@ func prepareContext(ctx context.Context, cfg PrepareConfig, sys System) (*Prepar
 	}
 
 	runtimeToken, err := prepareRuntimeToken(layout.TokenFile, cfg.ExplicitRuntimeToken, sys)
+	if err != nil {
+		return nil, err
+	}
+	launcherToken, err := prepareLauncherToken(layout.LauncherTokenFile, ManagerUID, ManagerGID, sys)
 	if err != nil {
 		return nil, err
 	}
@@ -376,6 +408,8 @@ func prepareContext(ctx context.Context, cfg PrepareConfig, sys System) (*Prepar
 		TokenDir:                layout.TokenDir,
 		TokenFile:               layout.TokenFile,
 		RuntimeToken:            runtimeToken,
+		LauncherTokenFile:       layout.LauncherTokenFile,
+		LauncherToken:           launcherToken,
 		CPAUID:                  cpaUID,
 		CPAGID:                  cpaGID,
 		ManagerUID:              ManagerUID,
@@ -387,6 +421,11 @@ func prepareContext(ctx context.Context, cfg PrepareConfig, sys System) (*Prepar
 		CPAExecutablePath:       cfg.CPAExecutablePath,
 		CPAArtifactManifestPath: cfg.CPAArtifactManifestPath,
 		RuntimeCPAAddr:          cfg.RuntimeCPAAddr,
+		LauncherControlAddr:     cfg.LauncherControlAddr,
+		BaseVersion:             cfg.BaseVersion,
+		BaseInstallRoot:         cfg.BaseInstallRoot,
+		RunningSlot:             cfg.RunningSlot,
+		TrialHold:               cfg.TrialHold,
 	}, nil
 }
 
@@ -434,8 +473,14 @@ func applyPrepareDefaults(cfg PrepareConfig) PrepareConfig {
 	if strings.TrimSpace(cfg.CPAArtifactManifestPath) == "" {
 		cfg.CPAArtifactManifestPath = DefaultCPAArtifactManifestPath
 	}
+	if strings.TrimSpace(cfg.BaseInstallRoot) == "" {
+		cfg.BaseInstallRoot = "/"
+	}
 	if cfg.RuntimeCPAAddr == "" {
 		cfg.RuntimeCPAAddr = DefaultRuntimeCPAAddr
+	}
+	if cfg.LauncherControlAddr == "" {
+		cfg.LauncherControlAddr = DefaultLauncherControlAddr
 	}
 	return cfg
 }
@@ -660,6 +705,9 @@ func resolveBootstrapManifestPath(cfg PrepareConfig, layout RuntimeLayout) strin
 	manifestPath := strings.TrimSpace(cfg.CPAArtifactManifestPath)
 	if manifestPath == "" || cfg.manifestFromEnv {
 		return DefaultCPAArtifactManifestPath
+	}
+	if cfg.trustedSlotRoot != "" && isPathWithin(manifestPath, cfg.trustedSlotRoot) {
+		return manifestPath
 	}
 	if isPathWithin(manifestPath, layout.DataDir) ||
 		isPathWithin(manifestPath, layout.RuntimeRoot) ||
@@ -953,6 +1001,60 @@ func prepareRuntimeToken(tokenFile, explicitToken string, sys System) (string, e
 		return "", fmt.Errorf("failed to chmod token file %s: %w", tokenFile, err)
 	}
 	return runtimeToken, nil
+}
+
+func prepareLauncherToken(tokenFile string, managerUID, managerGID int, sys System) (string, error) {
+	launcherToken, err := checkLauncherToken(tokenFile, sys)
+	if err != nil {
+		return "", err
+	}
+	if launcherToken == "" {
+		var randomBytes [32]byte
+		if randErr := sys.ReadRandom(randomBytes[:]); randErr != nil {
+			return "", fmt.Errorf("failed to generate Launcher control secret: %w", randErr)
+		}
+		candidate := hex.EncodeToString(randomBytes[:])
+		tmpFile := fmt.Sprintf("%s.tmp.%d", tokenFile, os.Getpid())
+		_ = sys.Remove(tmpFile)
+		if writeErr := sys.WriteFile(tmpFile, []byte(candidate), TempSecretFileMode); writeErr != nil {
+			_ = sys.Remove(tmpFile)
+			return "", errors.New("failed to initialize Launcher control secret")
+		}
+		if chmodErr := sys.Chmod(tmpFile, TempSecretFileMode); chmodErr != nil {
+			_ = sys.Remove(tmpFile)
+			return "", errors.New("failed to initialize Launcher control secret")
+		}
+		linkErr := sys.Link(tmpFile, tokenFile)
+		_ = sys.Remove(tmpFile)
+		if linkErr != nil {
+			checkStat, checkErr := sys.Lstat(tokenFile)
+			if checkErr != nil || checkStat.Mode&fs.ModeSymlink != 0 || !checkStat.Mode.IsRegular() {
+				return "", errors.New("failed to initialize Launcher control secret")
+			}
+		}
+	}
+
+	launcherToken, err = checkLauncherToken(tokenFile, sys)
+	if err != nil {
+		return "", err
+	}
+	if launcherToken == "" {
+		return "", errors.New("failed to initialize Launcher control secret")
+	}
+
+	targetGID := managerGID
+	targetMode := LauncherTokenFileModeDocker
+	if managerUID == RootUID {
+		targetGID = RootGID
+		targetMode = LauncherTokenFileModeNative
+	}
+	if err := sys.Chown(tokenFile, RootUID, targetGID); err != nil {
+		return "", fmt.Errorf("failed to chown launcher token file %s: %w", tokenFile, err)
+	}
+	if err := sys.Chmod(tokenFile, targetMode); err != nil {
+		return "", fmt.Errorf("failed to chmod launcher token file %s: %w", tokenFile, err)
+	}
+	return launcherToken, nil
 }
 
 func ensureGatewayConfig(configPath string, seedBytes []byte, uid, gid int, sys System) error {

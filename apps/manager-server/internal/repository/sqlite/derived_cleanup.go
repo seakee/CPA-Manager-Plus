@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	quotasnapshotrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotasnapshot"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
@@ -293,8 +294,15 @@ func StartDerivedMaintenanceTracked(ctx context.Context, db *sql.DB) func() {
 func runDerivedMaintenance(ctx context.Context, db *sql.DB) {
 	ticker := time.NewTicker(derivedCheckInterval)
 	defer ticker.Stop()
+	var holdRetryTimer *time.Timer
+	var holdRetryC <-chan time.Time
+	defer func() {
+		if holdRetryTimer != nil {
+			holdRetryTimer.Stop()
+		}
+	}()
 	for {
-		processed, err := cleanupDerivedUntilIdle(ctx, db)
+		processed, held, err := cleanupDerivedUntilIdleOnline(ctx, db)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -303,20 +311,58 @@ func runDerivedMaintenance(ctx context.Context, db *sql.DB) {
 		} else if processed > 0 {
 			log.Printf("[derived-migration] periodic cleanup completed processed=%d", processed)
 		}
+		if held {
+			if holdRetryTimer == nil {
+				holdRetryTimer = time.NewTimer(250 * time.Millisecond)
+			} else {
+				holdRetryTimer.Reset(250 * time.Millisecond)
+			}
+			holdRetryC = holdRetryTimer.C
+		} else if holdRetryTimer != nil {
+			if !holdRetryTimer.Stop() {
+				select {
+				case <-holdRetryTimer.C:
+				default:
+				}
+			}
+			holdRetryC = nil
+		}
 		select {
 		case <-ctx.Done():
 			return
+		case <-holdRetryC:
+			holdRetryC = nil
 		case <-ticker.C:
 		}
 	}
 }
 
 func cleanupDerivedUntilIdle(ctx context.Context, db *sql.DB) (int64, error) {
+	processed, _, err := cleanupDerivedUntilIdleInternal(ctx, db, false)
+	return processed, err
+}
+
+func cleanupDerivedUntilIdleOnline(ctx context.Context, db *sql.DB) (int64, bool, error) {
+	return cleanupDerivedUntilIdleInternal(ctx, db, true)
+}
+
+func cleanupDerivedUntilIdleInternal(ctx context.Context, db *sql.DB, leasePerBatch bool) (int64, bool, error) {
 	processed := int64(0)
 	for {
+		var done func()
+		if leasePerBatch {
+			var blocked bool
+			done, blocked = middleware.BeginBackgroundMutation()
+			if blocked {
+				return processed, true, nil
+			}
+		}
 		batchProcessed, pending, err := cleanupDerivedBatch(ctx, db, derivedCleanupBatchLimit)
+		if done != nil {
+			done()
+		}
 		if err != nil {
-			return processed, err
+			return processed, false, err
 		}
 		processed += batchProcessed
 		if batchProcessed > 0 && processed == batchProcessed {
@@ -326,10 +372,10 @@ func cleanupDerivedUntilIdle(ctx context.Context, db *sql.DB) (int64, error) {
 			log.Printf("[derived-migration] cleanup progress processed=%d", processed)
 		}
 		if !pending {
-			return processed, nil
+			return processed, false, nil
 		}
 		if !waitDerivedMaintenance(ctx, derivedCleanupPause) {
-			return processed, ctx.Err()
+			return processed, false, ctx.Err()
 		}
 	}
 }

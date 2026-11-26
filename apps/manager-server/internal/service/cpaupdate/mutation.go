@@ -149,6 +149,27 @@ func (s *Service) Activate(ctx context.Context, request MutationRequest) (Mutati
 	return s.mutate(ctx, MutationPhaseActivate, request, nil, 0)
 }
 
+func (s *Service) requireEmbeddedProductComplete(ctx context.Context) error {
+	mode := s.currentMode()
+	if !mode.IsValid() {
+		return newMutationError(MutationErrorUnavailable, "runtime_mode_invalid")
+	}
+	if mode != model.RuntimeModeEmbedded {
+		return newMutationError(MutationErrorConflict, "managed_externally")
+	}
+	if s.isProductComplete == nil {
+		return newMutationError(MutationErrorUnavailable, "product_completion_unavailable")
+	}
+	complete, err := s.isProductComplete(ctx)
+	if err != nil {
+		return newMutationError(MutationErrorUnavailable, "product_completion_unavailable")
+	}
+	if !complete {
+		return newMutationError(MutationErrorConflict, "product_incomplete")
+	}
+	return nil
+}
+
 func (s *Service) mutate(ctx context.Context, phase MutationPhase, request MutationRequest, uploadArchive io.Reader, uploadLength int64) (MutationResult, error) {
 	if err := request.Validate(); err != nil {
 		return MutationResult{}, err
@@ -158,22 +179,8 @@ func (s *Service) mutate(ctx context.Context, phase MutationPhase, request Mutat
 	}
 	result := newMutationResult(phase, request)
 
-	mode := s.currentMode()
-	if !mode.IsValid() {
-		return MutationResult{}, newMutationError(MutationErrorUnavailable, "runtime_mode_invalid")
-	}
-	if mode != model.RuntimeModeEmbedded {
-		return MutationResult{}, newMutationError(MutationErrorConflict, "managed_externally")
-	}
-	if s.isProductComplete == nil {
-		return MutationResult{}, newMutationError(MutationErrorUnavailable, "product_completion_unavailable")
-	}
-	complete, err := s.isProductComplete(ctx)
-	if err != nil {
-		return MutationResult{}, newMutationError(MutationErrorUnavailable, "product_completion_unavailable")
-	}
-	if !complete {
-		return MutationResult{}, newMutationError(MutationErrorConflict, "product_incomplete")
+	if err := s.requireEmbeddedProductComplete(ctx); err != nil {
+		return MutationResult{}, err
 	}
 	state, now, err := s.discoverySnapshot(ctx)
 	if err != nil {

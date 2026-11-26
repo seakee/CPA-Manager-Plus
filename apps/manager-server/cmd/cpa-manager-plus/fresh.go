@@ -49,6 +49,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -338,8 +339,17 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	}
 	legacyCollector := collector.NewManager(cfg, legacyStore)
 	legacyCollectorService := collectorservice.New(legacyCollector)
+	appCfg := cfg
+	if strings.TrimSpace(appCfg.DBPath) == "" {
+		if dbPath := strings.TrimSpace(opened.Record.Operation.Identity.DatabasePath); dbPath != "" {
+			appCfg.DBPath = dbPath
+			if strings.TrimSpace(appCfg.DataKeyPath) == "" {
+				appCfg.DataKeyPath = filepath.Join(filepath.Dir(dbPath), "data.key")
+			}
+		}
+	}
 	legacyContext := app.FromExistingWithModelsDev(
-		cfg,
+		appCfg,
 		legacyStore,
 		legacyCollector,
 		time.Now().UnixMilli(),
@@ -500,7 +510,7 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 		legacyStore,
 		freshRuntimeClientAdapter{app: a},
 		a.runtimeModeFor(opened.Record.Operation),
-	).WithModeResolver(func() model.RuntimeMode {
+	).WithArtifactClient(a.artifact).WithModeResolver(func() model.RuntimeMode {
 		return a.effectiveRuntimeMode(context.Background())
 	}).WithProductCompleteProbe(func(ctx context.Context) (bool, error) {
 		op, err := a.current(ctx)

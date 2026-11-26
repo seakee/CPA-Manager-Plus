@@ -2,7 +2,8 @@
 
 - Status: Accepted
 - Date: 2026-09-14
-- Scope: Phase 1 Runtime Foundation
+- Updated: 2026-11-26 (Phase 2 signed-slot self-update)
+- Scope: Phase 1 Runtime Foundation + Phase 2 Signed-Slot Control-Plane Self-Update
 
 ## Context
 
@@ -394,25 +395,30 @@ auth
 
 The logical architecture is identical across platforms. Platform differences are deployment adapters only.
 
-#### Docker Embedded — Phase 1 priority
+#### Docker Embedded — Phase 1 & Phase 2 topology
 
 ```text
 seakee/cpa-manager-plus container
-  -> cpamp-launcher (PID 1, root)
+  -> cpamp-launcher (PID 1, root, launcher control 127.0.0.1:9083)
        -> cpamp-runtime-supervisor (root, loopback 127.0.0.1:9081)
             -> cli-proxy-api (uid 10001:10001, loopback 127.0.0.1:8317)
        -> cpa-manager-plus (uid 10002:10002, loopback 127.0.0.1:18319)
        -> cpamp-ingress (uid 10003:10003, public 0.0.0.0:18317, control 127.0.0.1:9082)
 ```
 
-Docker Embedded ships as a single container image (`seakee/cpa-manager-plus`) with `cpamp-launcher` as PID 1. Only Ingress (`0.0.0.0:18317`) publishes a host port by default; Runtime Supervisor (`127.0.0.1:9081`), CPA (`127.0.0.1:8317`), Manager (`127.0.0.1:18319`), and Ingress control (`127.0.0.1:9082`) bind to container loopback. Runtime Supervisor does not require Docker socket access to manage CPA.
+Docker Embedded ships as a single container image (`seakee/cpa-manager-plus`) with `cpamp-launcher` as PID 1. Only Ingress (`0.0.0.0:18317`) publishes a host port by default; Launcher control (`127.0.0.1:9083`), Runtime Supervisor (`127.0.0.1:9081`), CPA (`127.0.0.1:8317`), Manager (`127.0.0.1:18319`), and Ingress control (`127.0.0.1:9082`) bind to container loopback. Runtime Supervisor and `cpamp-launcher` do not require Docker socket access or a sidecar container.
 
 State is consolidated under a single `/data` volume (`root:10002`, mode `01771` sticky) with strict filesystem ownership separation:
 
-- Manager state (`/data/usage.sqlite*`, `/data/data.key`, `/data/usage-archives/`) is owned by `cpamp-manager` (`10002:10002`). The sticky bit on `/data` prevents Manager from renaming or unlinking root-owned subdirectories.
+- Manager state (`/data/usage.sqlite*`, `/data/data.key`, `/data/usage-archives/`, `/data/backups/`) is owned by `cpamp-manager` (`10002:10002`). The sticky bit on `/data` prevents Manager from renaming or unlinking root-owned subdirectories.
 - Runtime transport secret lives at `/data/runtime-secret/token` (directory `root:10002` `0750`, file `root:10002` `0640`), readable by Supervisor and Manager (`CPAMP_RUNTIME_TOKEN_FILE`) and inaccessible to CPA (`10001`) and Ingress (`10003`).
-- Runtime root defaults to `/data/runtime` (or `/runtime` when mounted as a dedicated mount point), owned by `root:root` (`0711`). Within it, `<runtimeRoot>/supervisor` (`root:10001`, `0710`) holds the Supervisor private journal and finalized artifact store, and `<runtimeRoot>/gateway` (`10001:10001`, `0700`) holds CPA-writable Gateway state (`config.yaml`, `auth/`, `logs/`, `plugins/`).
-- Ingress (`10003:10003`) owns no persistent directory and cannot read Manager databases, the Runtime transport secret, or Supervisor/Gateway private state.
+- Launcher slot-control secret lives at `<tokenDir>/launcher-token` (`/data/runtime-secret/launcher-token` in Docker, `root:10002` `0640`; `root:root` `0600` in Native when Manager runs as root), shared exclusively between `cpamp-launcher` and `cpa-manager-plus` (`CPAMP_LAUNCHER_CONTROL_URL=http://127.0.0.1:9083`, `CPAMP_LAUNCHER_TOKEN_FILE`). It MUST NEVER be passed to Runtime Supervisor, CPA (`10001`), or Ingress (`10003`).
+- Runtime root defaults to `/data/runtime` (or `/runtime` when mounted as a dedicated mount point), owned by `root:root` (`0711`). Within it:
+  - `<runtimeRoot>/supervisor` (`root:10001`, `0710`) holds the Supervisor private journal and finalized CPA artifact store.
+  - `<runtimeRoot>/gateway` (`10001:10001`, `0700`) holds CPA-writable Gateway state (`config.yaml`, `auth/`, `logs/`, `plugins/`).
+  - `<runtimeRoot>/cpamp` (`root:root`, `0755`, `O_NOFOLLOW`, included in `RuntimeLayout.TrustedRootOwnedDirs()`) holds signed control-plane slots at `<runtimeRoot>/cpamp/slots/<ver>/` (`0755` `0:0`, `bin/*` read-only `0555`, `share/**` `0444`) and `<runtimeRoot>/cpamp/slot-state.json` (`0600`, `0:0`). `cpamp-manager` (`10002`) has zero write permissions to `<runtimeRoot>/cpamp` and its slots.
+- Base ABI epoch metadata lives at `/usr/local/share/cpamp/release/base-abi.json` (`0444`, `0:0`) in Docker images and `<home>/share/cpamp/release/base-abi.json` (`0444`, `0:0`) in Native installations, alongside compile-time `-ldflags` `main.Version` and `main.SourceCommit` stamps on `cpamp-launcher`.
+- Ingress (`10003:10003`) owns no persistent directory and cannot read Manager databases, the Runtime or Launcher transport secrets, `<runtimeRoot>/cpamp`, or Supervisor/Gateway private state.
 
 Docker Embedded keeps Runtime Supervisor as the privileged execution owner and
 runs every CPA child as the fixed image-owned non-root identity `10001:10001`.
@@ -488,8 +494,8 @@ Logical ownership, security/authority, state ownership, process role, and proces
 
 - Manager decides update recommendation/channel/policy.
 - Supervisor executes exact-version CPA runtime operations, staging, switch, readiness verification, and rollback.
-- Manager and CPA updates are independent recovery domains; `Update All` is orchestration, not one atomic rollback transaction.
-- Supervisor self-replacement is not part of the first Runtime Foundation implementation. Supervisor is updated by the outer CPAMP package/container/install mechanism.
+- Manager and CPA updates are independent recovery domains; `Update All` is orchestration, not one atomic rollback transaction. Likewise, Phase 2 CPAMP control-plane slots (`<runtimeRoot>/cpamp/slots/...` managed by `cpamp-launcher`) and CPA Data-Plane artifacts (`<runtimeRoot>/supervisor/artifacts/cpa/...` managed by `cpamp-runtime-supervisor`) are independent recovery domains that never mutate each other's trust root or active selection.
+- In Phase 1, Supervisor self-replacement was out of scope; Phase 2 delegates control-plane self-update to `cpamp-launcher` (`PID 1` `unix.Exec` over offline Ed25519-signed slots) while `cpamp-runtime-supervisor` itself never self-replaces at runtime and outer container/package upgrades (`docker pull` / `cpa-manager-plusctl upgrade`) always retain cold-start precedence.
 - A build-time checksum-pinned embedded CPA artifact establishes image contents; it does not grant Runtime, Ingress, or container bootstrap updater authority.
 
 The first updater mutation is the private Runtime Protocol v1
@@ -610,6 +616,28 @@ intentionally outside the destination qualification pin while preserving the
 pinned Fresh gate requirement that `ActiveGatewayArtifact` equals the qualified
 `artifactId`, matching the existing prepare and activate update paths.
 
+#### Phase 2: CPAMP control-plane self-update via offline Ed25519-signed slots
+
+Phase 2 (`v2.0.0-beta.2+`) adds in-place control-plane self-update without Docker socket access or a sidecar container by letting `cpamp-launcher` execute verified slot binaries as `PID 1`:
+
+1. **Offline Ed25519-signed slot archives & read-only root storage**:
+   - Slot releases (`cpamp-slot_<tag>_linux_<arch>.tar.gz`) bundle the four CPAMP binaries (`bin/cpamp-launcher`, `bin/cpamp-runtime-supervisor`, `bin/cpa-manager-plus`, `bin/cpamp-ingress` at `0555`), required release/runtime metadata (`share/cpamp/release/base-abi.json`, `share/cpamp/release/fullweb-manifest.json`, `share/cpamp/release/public-api-transport-contract.json`, `share/cpamp/runtime/cpa-artifact.json`, `share/cpamp/runtime/config.seed.yaml`, `share/cpamp/runtime/seed-lineage.json` at `0444`), third-party notices (`share/licenses/...` at `0444` files / `0555` dirs), `slot-manifest.json` (`0444`, canonical JSON listing every member except the manifest and signature), and `slot-manifest.json.sig` (`0444`). Slot archives intentionally exclude `share/cpamp/provenance.json` so base-installation provenance remains anchored at `CPAMP_BASE_INSTALL_ROOT` while active slot version identity comes from `slot-manifest.json` / `CPAMP_RUNNING_SLOT`.
+   - `slot-manifest.json.sig` signs the domain-separated payload `"cpamp-slot-manifest-v1\n" || raw(slot-manifest.json)` using offline Ed25519 keys. `cpamp-launcher` verifies signatures exclusively against its compile-time embedded root keyring (`cpamp-root-2026-01`, plus optional build-time `-ldflags -X main.ExtraTrustedSlotPublicKey=...` for testing; never overridable via runtime env vars or unprivileged files) and checks `min_base_epoch <= base-abi.json.base_epoch`.
+   - Verified slots are atomically staged under `<runtimeRoot>/cpamp/slots/<ver>/` owned `root:root` (`0:0`), with `0555` read-only binaries and `0444` metadata/notices. `Manager` (`10002`) has zero write permissions to `<runtimeRoot>/cpamp`, and path validation uses `O_NOFOLLOW` to reject symlinks.
+2. **Cold-start `BaseVersion >= SlotVersion` precedence**:
+   - On every cold start, `cpamp-launcher` compares its compiled `BaseVersion` (`CPAMP_BASE_VERSION` / `main.Version`) against persisted `<runtimeRoot>/cpamp/slot-state.json`. Whenever `BaseVersion >= SlotVersion`, the outer container image (`docker pull` + container recreate) or Native package (`cpa-manager-plusctl upgrade`) always wins: `cpamp-launcher` clears/ignores superseded slot activation and boots directly from the base binaries.
+3. **Dedicated Launcher IPC (`127.0.0.1:9083`), separate from `RuntimeClient`**:
+   - `cpamp-launcher` exposes a dedicated loopback HTTP control endpoint (`DefaultLauncherControlAddr = "127.0.0.1:9083"`, overridable via loopback-only `CPAMP_LAUNCHER_CONTROL_ADDR`) authenticated by Bearer `<launcher-token>` (`CPAMP_LAUNCHER_TOKEN_FILE`).
+   - Manager accesses forward-only slot prepare/activate operations (`GET /v1/launcher/slot/status`, `POST /v1/launcher/slot/prepare`, `PUT /v1/launcher/slot/prepare-upload`, `POST /v1/launcher/slot/activate`, `POST /v1/launcher/slot/rollback`) through a dedicated launcher-control adapter completely separate from `RuntimeClient` (`127.0.0.1:9081`, `runtime-token`).
+4. **Ordered drain and `PID 1 unix.Exec` replacement**:
+   - On `POST /v1/launcher/slot/activate` (or `rollback`), `cpamp-launcher` re-verifies the staged slot's Ed25519 signature, required `bin/*` and `share/cpamp/*` entries, `schema_generation` forward compatibility, and non-empty `snapshot_dir` manifest, generates `attempt-<hex>`, returns `202 Accepted` (`trial_timeout_seconds: 60`, `attempt_id`), flushes the HTTP response, drains `Ingress -> Manager -> Supervisor+CPA` in order, writes `slot-state.json`, and invokes `unix.Exec` into `<runtimeRoot>/cpamp/slots/<ver>/bin/cpamp-launcher` (or the prior/base launcher on rollback) in-place as `PID 1`.
+5. **60s `trial -> committed` watchdog, sustained stability soak, base-compatible `manager-data-snapshot restore`, and fail-closed `recovery_required`**:
+   - Before activating a slot, Manager creates an online `VACUUM INTO` snapshot (`managerdatasnapshot` v1 manifest recording `target_db_path` and `target_data_key_path` under `<dataDir>/backups/pre-slot-...`, required non-empty on `slot/activate`). Additionally, whenever `sqlite.Migrate(db)` detects a persisted `schema_generation < CurrentSchemaGeneration` at startup, it takes an automatic `PRAGMA wal_checkpoint(TRUNCATE)` + `copy_file_range` (`io.Copy` fallback) backup under `<dataDir>/backups/pre-migrate-gen<old>-to-gen<new>/` before applying DDL changes.
+   - While `slot-state.json` is in `state="trial"` (single-boot guarded via `trial_boot_count` so a cold-start crash loop immediately rolls back with `trial_boot_loop`), `cpamp-launcher` launches Manager with `CPAMP_TRIAL_HOLD=1` and `CPAMP_BASE_INSTALL_ROOT`. Manager's trial-hold middleware rejects non-read (`!GET/HEAD/OPTIONS`) external HTTP writes and internal state-mutating paths with `503 upgrade_trial_verifying` while `cpamp-launcher` requires `GET /health == 200` (`"ok": true`), runs a sustained stability soak (`DefaultTrialStabilizationWindow = 5s` inside the 60s trial window) verifying continuous `/health == 200`, Ingress listeners, and zero child restarts before transitioning `slot-state.json` to `committed` (clearing `active_attempt_id` while preserving `last_attempt_id`) and notifying Manager via loopback-only `POST /internal/v1/trial/release` (Bearer `<launcher-token>`).
+   - If pre-supervision setup fails, any child fails readiness or exits during the sustained soak, the 60s trial window expires, or a cold start detects `trial_boot_count >= 1`, `cpamp-launcher` re-verifies the rollback target (`previous_slot` or base binaries) and invokes base-compatible `<RollbackManagerExe> manager-data-snapshot restore --db-path <target_db_path> --data-key-path <target_data_key_path> --snapshot-dir <snapshot_dir>` before transitioning `slot-state.json` to `rolled_back` and `unix.Exec`ing back into the rollback target launcher.
+   - If rollback target verification fails or `manager-data-snapshot restore` fails, `cpamp-launcher` transitions `slot-state.json` to `state="recovery_required"` (preserving `snapshot_dir`, `active_slot`, `previous_slot`, and `last_attempt_id`) and fails closed without ever booting an older Manager binary over an unrestored database; on subsequent cold starts, `cpamp-launcher` retries verification and `manager-data-snapshot restore` once before failing closed with `cpa-manager-plus restore-pre-migrate --confirm` recovery instructions.
+   - Once `committed`, `POST /v1/launcher/slot/rollback` permits same-schema rollback (`current_schema_generation == previous_schema_generation`) and refuses cross-schema rollback with `409 schema_rollback_forbidden` (requiring explicit offline `cpa-manager-plus restore-pre-migrate --confirm`).
+
 ## Phase 1 implementation boundary
 
 Phase 1 MUST establish:
@@ -661,3 +689,6 @@ A separate local SQLite journal adds a small persistence component, but avoids u
 13. Exact active executable SHA-256 is Embedded update-fencing authority; human version metadata is trusted only when CPAMP-owned metadata binds it to that exact digest, and future updater side effects require a Supervisor-enforced expected-active-artifact fence.
 14. Trusted CPA prepare/staging resolves only an exact official release in Supervisor, verifies both source archive and extracted executable identities, persists only an inactive immutable stage in Runtime-owned storage, and grants no activation or rollback authority.
 15. Docker Embedded keeps Supervisor privileged while every CPA child runs as the fixed non-root image identity; Gateway state is CPA-writable, transport credentials and Supervisor private state are CPA-inaccessible, finalized artifacts expose only a non-enumerable execution corridor, and identity setup failure never falls back to root execution.
+16. Control-plane self-update slots under `<runtimeRoot>/cpamp` are root-owned (`0:0`), read-only (`0555` binaries, `0444` files), verified offline by `cpamp-launcher` via domain-separated Ed25519 signatures against compile-time trusted keys, and replaced in-place via ordered drain + `PID 1 unix.Exec` over a dedicated `127.0.0.1:9083` `launcher-token` IPC separate from `RuntimeClient`; outer base images/packages always take precedence whenever `BaseVersion >= SlotVersion`.
+17. During a 60s slot trial (`CPAMP_TRIAL_HOLD=1`), external writes remain gated (`503 upgrade_trial_verifying`) until `GET /health == 200` (`"ok": true`) and a sustained stability soak (`5s` default) complete with zero child restarts (`trial -> committed`); pre-supervision, startup/soak, timeout, or `trial_boot_count` failure automatically re-verifies the rollback target and restores the pre-slot SQLite + `data.key` snapshot via base-compatible `manager-data-snapshot restore` before external writes ever open, failing closed into `recovery_required` (never booting Manager over an unrestored database, with `cpa-manager-plus restore-pre-migrate --confirm` manual recovery) if verification or restore fails, and refusing cross-schema activation downgrade or post-commit cross-schema rollback (`409 schema_rollback_forbidden`).
+18. CPAMP control-plane slots and CPA Data-Plane artifacts are strictly independent recovery domains with isolated trust roots, storage trees, and rollback boundaries.

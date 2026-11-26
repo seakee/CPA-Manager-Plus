@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/codexquota"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	codexinspectionrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/codexinspection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
@@ -67,6 +68,7 @@ var (
 	ErrActionIDsRequired          = errors.New("codex inspection action result ids are required")
 	ErrNoActionableResults        = errors.New("codex inspection has no actionable results")
 	ErrInvalidActionOverride      = errors.New("codex inspection action override is invalid")
+	ErrTrialHoldActive            = errors.New("codex inspection blocked during upgrade trial verification")
 	errCPAAPICallResponseTooLarge = errors.New("CPA api-call response too large")
 )
 
@@ -461,6 +463,17 @@ func (s *Service) startRun(ctx context.Context, req RunRequest, detach bool) (*l
 	if triggerType == model.CodexInspectionTriggerScheduled && (settings.Enabled == nil || !*settings.Enabled) {
 		return nil, RunDetail{}, ErrScheduledRunDisabled
 	}
+	bgDone, blocked := middleware.BeginBackgroundMutation()
+	if blocked {
+		return nil, RunDetail{}, ErrTrialHoldActive
+	}
+	handedToTask := false
+	defer func() {
+		if !handedToTask {
+			bgDone()
+		}
+	}()
+
 	triggerKey := strings.TrimSpace(req.TriggerKey)
 	acquired, err := s.store.AcquireCodexInspectionRun(acquireCtx, model.CodexInspectionRun{
 		TriggerType:  triggerType,
@@ -508,8 +521,9 @@ func (s *Service) startRun(ctx context.Context, req RunRequest, detach bool) (*l
 		return nil, RunDetail{}, ErrRunAlreadyActive
 	}
 	s.active = task
+	handedToTask = true
 	s.mu.Unlock()
-	go s.runTask(task, executionCtx, req, run, settings, setup)
+	go s.runTask(task, executionCtx, req, run, settings, setup, bgDone)
 	initial := RunDetail{
 		Run:     run,
 		Results: []model.CodexInspectionResult{},
@@ -689,7 +703,10 @@ func (s *Service) executeRun(ctx context.Context, req RunRequest, run model.Code
 	return detail, nil
 }
 
-func (s *Service) runTask(task *localRun, ctx context.Context, req RunRequest, run model.CodexInspectionRun, settings model.ManagerCodexInspectionConfig, setup store.Setup) {
+func (s *Service) runTask(task *localRun, ctx context.Context, req RunRequest, run model.CodexInspectionRun, settings model.ManagerCodexInspectionConfig, setup store.Setup, bgDone func()) {
+	if bgDone != nil {
+		defer bgDone()
+	}
 	heartbeatCtx, stopHeartbeat := context.WithCancel(context.WithoutCancel(ctx))
 	heartbeatStopped := make(chan struct{})
 	go s.heartbeatRun(task, heartbeatCtx, heartbeatStopped)
@@ -863,6 +880,9 @@ func (s *Service) runTask(task *localRun, ctx context.Context, req RunRequest, r
 		s.active = nil
 	}
 	s.mu.Unlock()
+	if bgDone != nil {
+		bgDone()
+	}
 	close(task.done)
 }
 
@@ -1052,6 +1072,11 @@ func (s *Service) CancelRun(ctx context.Context, runID int64) (RunDetail, error)
 		return RunDetail{}, err
 	}
 	defer s.finishLifecycleOperation(operationDone)
+	bgDone, blocked := middleware.BeginBackgroundMutation()
+	if blocked {
+		return RunDetail{}, ErrTrialHoldActive
+	}
+	defer bgDone()
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1261,6 +1286,11 @@ func (s *Service) Recover(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	done, blocked := middleware.BeginBackgroundMutation()
+	if blocked {
+		return ErrTrialHoldActive
+	}
+	defer done()
 	_, err := s.store.RecoverStaleCodexInspectionRuns(ctx, time.Now().UnixMilli(), "服务重启或任务租约过期，巡检已中断")
 	return err
 }
@@ -1406,13 +1436,17 @@ func (s *Service) GetRun(ctx context.Context, id int64) (RunDetail, error) {
 }
 
 func (s *Service) ExecuteManualActions(ctx context.Context, runID int64, req ExecuteActionsRequest) (ExecuteActionsResult, error) {
+	bgDone, blocked := middleware.BeginBackgroundMutation()
+	if blocked {
+		return ExecuteActionsResult{}, ErrTrialHoldActive
+	}
+	defer bgDone()
 	operationCtx, err := s.acquireAuxiliaryRun(ctx)
 	if err != nil {
 		return ExecuteActionsResult{}, err
 	}
 	defer s.releaseRun()
 	ctx = operationCtx
-
 	if len(req.ResultIDs) == 0 {
 		return ExecuteActionsResult{}, ErrActionIDsRequired
 	}

@@ -17,12 +17,11 @@ import type { CPAUpdateIntent, CPAUpdateRecordSnapshot } from './cpaUpdateIntent
 import type { CPAUpdateFlow } from './useCPAUpdateFlow';
 import styles from './ManagerUpdatePage.module.scss';
 type Confirmation = {
-  kind: 'activate' | 'retry_activate' | 'forget';
+  kind: 'activate' | 'retry_activate' | 'forget' | 'adopt_baseline';
   scope: string;
   intent: CPAUpdateIntent | null;
   record: CPAUpdateRecordSnapshot | null;
 };
-
 export function CPAUpdateCard({ flow }: { flow: CPAUpdateFlow }) {
   const { t } = useTranslation();
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
@@ -61,15 +60,22 @@ export function CPAUpdateCard({ flow }: { flow: CPAUpdateFlow }) {
   };
   const activeConfirmation = confirmation?.scope === flow.scope ? confirmation : null;
   const forgetting = activeConfirmation?.kind === 'forget';
+  const adoptingBaseline = activeConfirmation?.kind === 'adopt_baseline';
   const confirmationAllowed =
     activeConfirmation?.kind === 'activate'
       ? flow.canActivate
       : activeConfirmation?.kind === 'retry_activate'
         ? flow.canRetry
-        : !flow.busy && !!activeConfirmation?.record;
+        : activeConfirmation?.kind === 'adopt_baseline'
+          ? !flow.busy && !!status?.baseline?.adopt_baseline_available
+          : !flow.busy && !!activeConfirmation?.record;
   const confirmAction = () => {
     if (!activeConfirmation || !confirmationAllowed) return;
     setConfirmation(null);
+    if (activeConfirmation.kind === 'adopt_baseline') {
+      void flow.adoptBaseline?.();
+      return;
+    }
     if (activeConfirmation.kind === 'forget') {
       if (activeConfirmation.record) void flow.forget(activeConfirmation.record);
     } else if (activeConfirmation.intent) {
@@ -272,6 +278,30 @@ export function CPAUpdateCard({ flow }: { flow: CPAUpdateFlow }) {
               {t(status.last_error ? 'cpa_updates.check_failed' : 'cpa_updates.stale')}
             </p>
           )}
+        {!external && status?.baseline?.baseline_upgrade_available && (
+          <p className={styles.flowHint} role="status">
+            {t('cpa_updates.baseline_upgrade_hint', {
+              version: status.baseline.pinned_version,
+            })}
+          </p>
+        )}
+        {!external && flow.baselineAdoptedVersion && (
+          <div className={styles.completedBanner} role="status" aria-live="polite">
+            <div className={styles.completedText}>
+              <IconCheck size={16} aria-hidden="true" />
+              <p>
+                {t('cpa_updates.adopt_baseline_succeeded', {
+                  version: flow.baselineAdoptedVersion,
+                })}
+              </p>
+            </div>
+          </div>
+        )}
+        {!external && flow.baselineErrorCode && (
+          <p className={styles.warning} role="alert">
+            {t('cpa_updates.adopt_baseline_failed', { code: flow.baselineErrorCode })}
+          </p>
+        )}
         {flow.storageError && (
           <p className={styles.warning} role="alert">
             {t('cpa_updates.storage_' + flow.storageError)}
@@ -535,6 +565,19 @@ export function CPAUpdateCard({ flow }: { flow: CPAUpdateFlow }) {
               {t('cpa_updates.requery')}
             </Button>
           )}
+          {!external && status?.baseline?.adopt_baseline_available && !flow.unresolved && (
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={flow.busy || !flow.available}
+              loading={!!flow.baselineBusy}
+              onClick={() => confirm('adopt_baseline')}
+            >
+              {t('cpa_updates.adopt_baseline_action', {
+                version: status.baseline.pinned_version,
+              })}
+            </Button>
+          )}
         </div>
         {((flow.unresolved && !isActiveInPage) || !!flow.storageError) && (
           <details className={styles.recoveryDangerZone}>
@@ -583,7 +626,13 @@ export function CPAUpdateCard({ flow }: { flow: CPAUpdateFlow }) {
         open={!!activeConfirmation}
         className={styles.cpaConfirmation}
         onClose={() => setConfirmation(null)}
-        title={t(forgetting ? 'cpa_updates.forget_title' : 'cpa_updates.activate_title')}
+        title={t(
+          forgetting
+            ? 'cpa_updates.forget_title'
+            : adoptingBaseline
+              ? 'cpa_updates.adopt_baseline_title'
+              : 'cpa_updates.activate_title'
+        )}
         footer={
           <>
             <Button type="button" variant="ghost" onClick={() => setConfirmation(null)}>
@@ -595,15 +644,30 @@ export function CPAUpdateCard({ flow }: { flow: CPAUpdateFlow }) {
               disabled={!confirmationAllowed}
               onClick={confirmAction}
             >
-              {t(forgetting ? 'cpa_updates.forget_confirm' : 'cpa_updates.activate_confirm')}
+              {t(
+                forgetting
+                  ? 'cpa_updates.forget_confirm'
+                  : adoptingBaseline
+                    ? 'cpa_updates.adopt_baseline_confirm'
+                    : 'cpa_updates.activate_confirm'
+              )}
             </Button>
           </>
         }
       >
         <p className={styles.confirmationText}>
-          {t(forgetting ? 'cpa_updates.forget_warning' : 'cpa_updates.activate_warning', {
-            version: activeConfirmation?.intent?.target_version,
-          })}
+          {t(
+            forgetting
+              ? 'cpa_updates.forget_warning'
+              : adoptingBaseline
+                ? 'cpa_updates.adopt_baseline_warning'
+                : 'cpa_updates.activate_warning',
+            {
+              version: adoptingBaseline
+                ? (status?.baseline?.pinned_version ?? '')
+                : activeConfirmation?.intent?.target_version,
+            }
+          )}
         </p>
       </Modal>
     </section>

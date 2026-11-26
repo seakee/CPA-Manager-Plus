@@ -110,6 +110,20 @@ func fixture(tag string) ReleaseInfo {
 		Filename: "docker-compose.v2-embedded.yml",
 		SHA256:   composeSHA,
 	}
+	if beta2, err := ParseVersion("v2.0.0-beta.2"); err == nil && Compare(v, beta2) >= 0 {
+		info.Distribution.Slot = &SlotDistribution{
+			Assets: []SlotAsset{
+				{
+					Name:             "cpamp-slot_" + tag + "_linux_amd64.tar.gz",
+					Platform:         "linux/amd64",
+					SHA256:           "sha256:" + strings.Repeat("6", 64),
+					Size:             4096,
+					MinBaseEpoch:     1,
+					SchemaGeneration: 1,
+				},
+			},
+		}
+	}
 	minCPA := "v8.0.55"
 	info.Compatibility.MinimumCPAVersion = &minCPA
 	info.SupportedModes = []string{"docker", "native", "panel-only"}

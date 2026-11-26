@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	quotasnapshotrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotasnapshot"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageprojection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
@@ -997,5 +998,55 @@ func assertDerivedCleanupCursor(t testing.TB, db *sql.DB, targetName string, wan
 	}
 	if lastRowID != wantRowID {
 		t.Fatalf("derived cleanup cursor %s = %d, want %d", targetName, lastRowID, wantRowID)
+	}
+}
+
+func TestCleanupDerivedOnlineDefersDuringTrialHoldAndResumesAfterRelease(t *testing.T) {
+	t.Cleanup(func() {
+		middleware.SetProcessTrialHoldGate(nil)
+		middleware.ReleaseProcessTrialHold()
+	})
+	gate := middleware.NewTrialHoldGate(false, "launcher-secret-token")
+	middleware.SetProcessTrialHoldGate(gate)
+	db, err := Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if _, err := db.Exec(`insert into usage_events (
+		id, request_id, event_hash, timestamp_ms, timestamp, model, created_at_ms
+	) values (1, 1, 1, 1, 1, 'model', 1)`); err != nil {
+		t.Fatalf("seed usage event: %v", err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin projection seed: %v", err)
+	}
+	if err := usageprojection.UpsertEventRange(ctx, tx, 0, 1, 1); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("seed projection event: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit projection event: %v", err)
+	}
+	if _, err := db.Exec(`delete from settings where key = ?`, usageMonitoringModelFormatVersionKey); err != nil {
+		t.Fatalf("force monitoring projection recovery: %v", err)
+	}
+	if err := ensureUsageMonitoringProjectionIdentity(db); err != nil {
+		t.Fatalf("recover monitoring projection: %v", err)
+	}
+
+	middleware.EngageProcessTrialHold()
+	processed, held, err := cleanupDerivedUntilIdleOnline(ctx, db)
+	if err != nil || !held || processed != 0 {
+		t.Fatalf("expected online derived cleanup deferred under TrialHold, got processed=%d held=%t err=%v", processed, held, err)
+	}
+
+	middleware.ReleaseProcessTrialHold()
+	processed, held, err = cleanupDerivedUntilIdleOnline(ctx, db)
+	if err != nil || held || processed == 0 {
+		t.Fatalf("expected online derived cleanup to resume after release, got processed=%d held=%t err=%v", processed, held, err)
 	}
 }

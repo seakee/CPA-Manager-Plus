@@ -45,9 +45,10 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 	isPrepare := suffix == "/prepare" && r.Method == http.MethodPost
 	isPrepareUpload := suffix == "/prepare-upload" && r.Method == http.MethodPost
 	isActivate := suffix == "/activate" && r.Method == http.MethodPost
+	isAdoptBaseline := suffix == "/adopt-baseline" && r.Method == http.MethodPost
 	isObservePrepare := suffix == "/operations/prepare" && r.Method == http.MethodGet
 	isObserveActivate := suffix == "/operations/activate" && r.Method == http.MethodGet
-	if !isStatus && !isCheck && !isPrepare && !isPrepareUpload && !isActivate && !isObservePrepare && !isObserveActivate {
+	if !isStatus && !isCheck && !isPrepare && !isPrepareUpload && !isActivate && !isAdoptBaseline && !isObservePrepare && !isObserveActivate {
 		closeUnreadRequestBody(w, r)
 		response.MethodNotAllowed(w)
 		return
@@ -63,6 +64,21 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 			closeUnreadRequestBody(w, r)
 		}
 		response.Error(w, http.StatusServiceUnavailable, errors.New("CPA update state unavailable"))
+		return
+	}
+	if isAdoptBaseline {
+		expected, err := decodeAdoptBaselineRequest(w, r)
+		if err != nil {
+			writeMutationError(w, cpaupdateservice.MutationResult{}, err)
+			return
+		}
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(4 * time.Minute))
+		result, err := service.AdoptBaseline(r.Context(), expected)
+		if err != nil {
+			writeMutationError(w, cpaupdateservice.MutationResult{}, err)
+			return
+		}
+		response.JSON(w, http.StatusOK, result)
 		return
 	}
 	if isObservePrepare || isObserveActivate {
@@ -157,6 +173,43 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.JSON(w, http.StatusOK, payload)
+}
+
+func decodeAdoptBaselineRequest(w http.ResponseWriter, r *http.Request) (model.RuntimeArtifactID, error) {
+	invalid := &cpaupdateservice.MutationError{Kind: cpaupdateservice.MutationErrorInvalid, Code: "invalid_request"}
+	if r.Body == nil {
+		return "", invalid
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(requestbody.UnwrapRootResponseWriter(w), r.Body, maxMutationBodyBytes))
+	if err != nil {
+		closeUnreadRequestBody(w, r)
+		return "", invalid
+	}
+	if !utf8.Valid(body) {
+		return "", invalid
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('{') {
+		return "", invalid
+	}
+	field, err := decoder.Token()
+	if err != nil || field != "expected_active_artifact_id" {
+		return "", invalid
+	}
+	var expected model.RuntimeArtifactID
+	if err := decoder.Decode(&expected); err != nil || !expected.IsValid() {
+		return "", invalid
+	}
+	closing, err := decoder.Token()
+	if err != nil || closing != json.Delim('}') {
+		return "", invalid
+	}
+	var trailing any
+	if decoder.Decode(&trailing) != io.EOF {
+		return "", invalid
+	}
+	return expected, nil
 }
 
 func decodeObservationRequest(w http.ResponseWriter, r *http.Request) (cpaupdateservice.ObservationRequest, error) {

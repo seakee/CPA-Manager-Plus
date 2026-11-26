@@ -22,11 +22,17 @@ import {
 } from './managerUpdateApi';
 import styles from './ManagerUpdates.module.scss';
 
+export interface ManagerUpdateConnection {
+  base: string;
+  key: string;
+}
+
 interface Updates {
   status: UpdateStatus | null;
   available: boolean;
   busy: boolean;
   error: boolean;
+  connection?: ManagerUpdateConnection | null;
   refresh: () => Promise<void>;
   check: () => Promise<void>;
   setChannel: (channel: UpdateChannel) => Promise<void>;
@@ -36,11 +42,11 @@ const Context = createContext<Updates>({
   available: false,
   busy: false,
   error: false,
+  connection: null,
   refresh: async () => {},
   check: async () => {},
   setChannel: async () => {},
 });
-// 与概览和更新页共享同一个生命周期。
 // eslint-disable-next-line react-refresh/only-export-components
 export const useManagerUpdates = () => useContext(Context);
 
@@ -193,6 +199,7 @@ export function ManagerUpdates({ children }: { children: ReactNode }) {
         available,
         busy,
         error,
+        connection: available ? { base, key } : null,
         refresh,
         check: () => mutate('/check', 'POST'),
         setChannel: (channel) => mutate('/channel', 'PUT', { channel_preference: channel }),

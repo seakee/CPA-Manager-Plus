@@ -15,14 +15,16 @@ import (
 )
 
 const (
-	artifactStatusPath     = "/v1/runtime/artifact"
-	artifactProbePath      = "/v1/runtime/artifact/probe"
-	artifactAcquirePath    = "/v1/runtime/artifact/acquire"
-	artifactUploadPath     = "/v1/runtime/artifact/upload"
-	artifactStatusTimeout  = 5 * time.Second
-	artifactProbeTimeout   = 10 * time.Second
-	artifactAcquireTimeout = 15 * time.Second
-	artifactUploadTimeout  = 15 * time.Minute
+	artifactStatusPath           = "/v1/runtime/artifact"
+	artifactProbePath            = "/v1/runtime/artifact/probe"
+	artifactAcquirePath          = "/v1/runtime/artifact/acquire"
+	artifactUploadPath           = "/v1/runtime/artifact/upload"
+	artifactAdoptBaselinePath    = "/v1/runtime/artifact/adopt-baseline"
+	artifactStatusTimeout        = 5 * time.Second
+	artifactProbeTimeout         = 10 * time.Second
+	artifactAcquireTimeout       = 15 * time.Second
+	artifactUploadTimeout        = 15 * time.Minute
+	artifactAdoptBaselineTimeout = 3 * time.Minute
 )
 
 const (
@@ -148,11 +150,14 @@ func (o ArtifactOperation) Validate() error {
 }
 
 type ArtifactStatus struct {
-	SchemaVersion int                `json:"schemaVersion"`
-	Pinned        ArtifactPinned     `json:"pinned"`
-	Active        *ArtifactActive    `json:"active"`
-	Required      bool               `json:"required"`
-	Operation     *ArtifactOperation `json:"operation"`
+	SchemaVersion            int                `json:"schemaVersion"`
+	Pinned                   ArtifactPinned     `json:"pinned"`
+	Active                   *ArtifactActive    `json:"active"`
+	Required                 bool               `json:"required"`
+	Operation                *ArtifactOperation `json:"operation"`
+	BundledAvailable         bool               `json:"bundledAvailable,omitempty"`
+	AdoptBaselineAvailable   bool               `json:"adoptBaselineAvailable,omitempty"`
+	BaselineUpgradeAvailable bool               `json:"baselineUpgradeAvailable,omitempty"`
 }
 
 func (s ArtifactStatus) Validate() error {
@@ -214,8 +219,15 @@ type ArtifactOperationEnvelope struct {
 }
 
 type artifactAcquireRequest struct {
-	Source    string `json:"source"`
-	CDNPrefix string `json:"cdnPrefix,omitempty"`
+	Source               string `json:"source"`
+	CDNPrefix            string `json:"cdnPrefix,omitempty"`
+	AllowBaselineUpgrade bool   `json:"allowBaselineUpgrade,omitempty"`
+}
+
+// ArtifactAcquisitionOptions explicitly authorizes moving an installed slim
+// baseline forward. It does not permit replacing a user-selected update.
+type ArtifactAcquisitionOptions struct {
+	AllowBaselineUpgrade bool
 }
 
 type artifactErrorEnvelope struct {
@@ -231,6 +243,7 @@ type ArtifactClient struct {
 	probeHTTPClient   *http.Client
 	acquireHTTPClient *http.Client
 	uploadHTTPClient  *http.Client
+	adoptHTTPClient   *http.Client
 }
 
 func NewArtifactClient(baseURL string, token string) *ArtifactClient {
@@ -247,6 +260,7 @@ func NewArtifactClientWithTokenSource(baseURL string, tokenSource RuntimeTokenSo
 		probeHTTPClient:   newRuntimeHTTPClient(transport, artifactProbeTimeout),
 		acquireHTTPClient: newRuntimeHTTPClient(transport, artifactAcquireTimeout),
 		uploadHTTPClient:  newRuntimeHTTPClient(transport, artifactUploadTimeout),
+		adoptHTTPClient:   newRuntimeHTTPClient(transport, artifactAdoptBaselineTimeout),
 	}
 }
 
@@ -280,6 +294,54 @@ func (c *ArtifactClient) Status(ctx context.Context) (ArtifactStatus, error) {
 	}
 	if err := status.Validate(); err != nil {
 		return ArtifactStatus{}, fmt.Errorf("validate Runtime artifact status: %w", err)
+	}
+	return status, nil
+}
+
+// AdoptBundledBaseline switches to the Supervisor's pinned bundled CPA only
+// if the currently selected artifact still matches the caller's digest.
+func (c *ArtifactClient) AdoptBundledBaseline(ctx context.Context, expectedActiveArtifactID string) (ArtifactStatus, error) {
+	if !model.RuntimeArtifactID(expectedActiveArtifactID).IsValid() {
+		return ArtifactStatus{}, errors.New("invalid expected active artifact ID")
+	}
+	token, err := c.runtimeToken(ctx)
+	if err != nil {
+		return ArtifactStatus{}, err
+	}
+	encoded, err := json.Marshal(struct {
+		ExpectedActiveArtifactID string `json:"expectedActiveArtifactId"`
+	}{expectedActiveArtifactID})
+	if err != nil {
+		return ArtifactStatus{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+artifactAdoptBaselinePath, bytes.NewReader(encoded))
+	if err != nil {
+		return ArtifactStatus{}, fmt.Errorf("create Runtime baseline adoption request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	res, err := c.adoptHTTPClient.Do(req)
+	if err != nil {
+		return ArtifactStatus{}, fmt.Errorf("adopt Runtime baseline: %w", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		if artifactErr := decodeArtifactError(res); artifactErr != nil {
+			return ArtifactStatus{}, artifactErr
+		}
+		return ArtifactStatus{}, fmt.Errorf("adopt Runtime baseline: unexpected HTTP status %s", res.Status)
+	}
+	var status ArtifactStatus
+	if err := decodeStrictJSON(res.Body, &status); err != nil {
+		return ArtifactStatus{}, fmt.Errorf("decode Runtime baseline adoption: %w", err)
+	}
+	if err := status.Validate(); err != nil {
+		return ArtifactStatus{}, fmt.Errorf("validate Runtime baseline adoption: %w", err)
+	}
+	if !status.BundledAvailable || status.Active == nil || status.Active.Origin != "bundled" || status.Active.ArtifactID != status.Pinned.ArtifactID ||
+		status.Active.ArtifactID == expectedActiveArtifactID || status.AdoptBaselineAvailable || status.BaselineUpgradeAvailable {
+		return ArtifactStatus{}, errors.New("Runtime did not confirm bundled baseline adoption")
 	}
 	return status, nil
 }
@@ -320,13 +382,18 @@ func (c *ArtifactClient) Probe(ctx context.Context) (ArtifactProbeResult, error)
 }
 
 func (c *ArtifactClient) Acquire(ctx context.Context, source, cdnPrefix string) (ArtifactOperationEnvelope, error) {
+	return c.AcquireArtifact(ctx, source, cdnPrefix, ArtifactAcquisitionOptions{})
+}
+
+func (c *ArtifactClient) AcquireArtifact(ctx context.Context, source, cdnPrefix string, options ArtifactAcquisitionOptions) (ArtifactOperationEnvelope, error) {
 	token, err := c.runtimeToken(ctx)
 	if err != nil {
 		return ArtifactOperationEnvelope{}, err
 	}
 	encoded, err := json.Marshal(artifactAcquireRequest{
-		Source:    source,
-		CDNPrefix: cdnPrefix,
+		Source:               source,
+		CDNPrefix:            cdnPrefix,
+		AllowBaselineUpgrade: options.AllowBaselineUpgrade,
 	})
 	if err != nil {
 		return ArtifactOperationEnvelope{}, fmt.Errorf("encode Runtime artifact acquire request: %w", err)
@@ -366,6 +433,10 @@ func (c *ArtifactClient) Acquire(ctx context.Context, source, cdnPrefix string) 
 }
 
 func (c *ArtifactClient) Upload(ctx context.Context, body io.Reader, contentLength int64) (ArtifactOperationEnvelope, error) {
+	return c.UploadArtifact(ctx, body, contentLength, ArtifactAcquisitionOptions{})
+}
+
+func (c *ArtifactClient) UploadArtifact(ctx context.Context, body io.Reader, contentLength int64, options ArtifactAcquisitionOptions) (ArtifactOperationEnvelope, error) {
 	if body == nil {
 		return ArtifactOperationEnvelope{}, errors.New("Runtime artifact upload body is nil")
 	}
@@ -373,7 +444,11 @@ func (c *ArtifactClient) Upload(ctx context.Context, body io.Reader, contentLeng
 	if err != nil {
 		return ArtifactOperationEnvelope{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.baseURL+artifactUploadPath, body)
+	endpoint := c.baseURL + artifactUploadPath
+	if options.AllowBaselineUpgrade {
+		endpoint += "?allow_baseline_upgrade=1"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, body)
 	if err != nil {
 		return ArtifactOperationEnvelope{}, fmt.Errorf("create Runtime artifact upload request: %w", err)
 	}

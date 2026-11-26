@@ -174,6 +174,32 @@ func validateBundled(bundled Descriptor) error {
 	return nil
 }
 
+// Clear atomically removes the authoritative selection. The advisory provenance
+// is removed afterwards: a crash between removals cannot select the old artifact.
+func (s *Store) Clear(bundled Descriptor) (Descriptor, error) {
+	if err := validateBundled(bundled); err != nil {
+		return Descriptor{}, err
+	}
+	info, err := os.Lstat(bundled.ExecutablePath)
+	if err != nil {
+		return Descriptor{}, fmt.Errorf("%w: inspect bundled executable: %w", ErrSelectionInvalid, err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return Descriptor{}, fmt.Errorf("%w: bundled path is not a regular executable", ErrSelectionInvalid)
+	}
+	if err := os.Remove(filepath.Join(s.root, selectionName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return Descriptor{}, fmt.Errorf("%w: remove selection: %w", ErrSelectionNotPublished, err)
+	}
+	removeErr := os.Remove(filepath.Join(s.root, provenanceName))
+	if errors.Is(removeErr, os.ErrNotExist) {
+		removeErr = nil
+	}
+	if err := errors.Join(removeErr, s.syncRoot(s.root)); err != nil {
+		return Descriptor{}, fmt.Errorf("%w: clear selection: %w", ErrSelectionPublicationAmbiguous, err)
+	}
+	return bundled, nil
+}
+
 // ResolveFinalized fully revalidates exact staged bytes without network I/O.
 func (s *Store) ResolveFinalized(version string) (Descriptor, error) {
 	finalized, err := s.stages.ResolveFinalized(version)

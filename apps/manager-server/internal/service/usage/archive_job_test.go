@@ -3,10 +3,13 @@ package usage
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagearchive"
 )
 
@@ -484,4 +487,277 @@ func TestArchiveJobDoesNotRetryUnrestorableEventHash(t *testing.T) {
 	if found {
 		t.Fatalf("expected no run to be claimed after request cleared, claimed %#v", nextRun)
 	}
+}
+
+func TestArchiveJobTrialHoldFencesThroughClearRequestedStageAndDefersQueuedRuns(t *testing.T) {
+	resetGate := func() {
+		middleware.SetProcessTrialHoldGate(nil)
+	}
+	t.Cleanup(resetGate)
+
+	t.Run("running detached stage blocks WaitOtherInflightMutations through ClearRequestedStage", func(t *testing.T) {
+		resetGate()
+		gate := middleware.NewTrialHoldGate(false, "")
+		middleware.SetProcessTrialHoldGate(gate)
+
+		service, _, _ := newArchiveTestService(t, 1, 1, archiveTestServiceEvents(2))
+		rootCtx, stop := context.WithCancel(context.Background())
+		t.Cleanup(stop)
+		if err := service.StartArchiveJobs(rootCtx); err != nil {
+			t.Fatalf("start archive jobs: %v", err)
+		}
+		created, err := service.CreateArchive(context.Background(), 3_000)
+		if err != nil {
+			t.Fatalf("create archive: %v", err)
+		}
+
+		reachedBeforeClear := make(chan struct{})
+		allowClear := make(chan struct{})
+		var clearOnce sync.Once
+		service.archiveJobs.beforeClearHook = func(runID, stage string) {
+			if runID == created.Run.ID && stage == usagearchive.StatusArchiving {
+				clearOnce.Do(func() { close(reachedBeforeClear) })
+				<-allowClear
+			}
+		}
+
+		if _, _, err := service.SubmitArchiveResume(
+			context.Background(),
+			created.Run.ID,
+			usagearchive.StatusArchiving,
+			false,
+		); err != nil {
+			t.Fatalf("submit detached archive resume: %v", err)
+		}
+
+		select {
+		case <-reachedBeforeClear:
+		case <-time.After(3 * time.Second):
+			t.Fatal("archive stage did not reach pre-ClearRequestedStage checkpoint")
+		}
+
+		// executeArchiveStage has already returned, and only ClearRequestedStage remains!
+		preClearStatus, err := service.ArchiveStatus(context.Background(), created.Run.ID)
+		if err != nil {
+			t.Fatalf("load archive status before ClearRequestedStage: %v", err)
+		}
+		if preClearStatus.Run.RequestedStage != usagearchive.StatusArchiving {
+			t.Fatalf("expected requested_stage=%q before ClearRequestedStage, got %#v", usagearchive.StatusArchiving, preClearStatus.Run)
+		}
+
+		middleware.EngageProcessTrialHold()
+		drainDone := make(chan error, 1)
+		go func() {
+			drainDone <- middleware.WaitOtherInflightMutations(context.Background())
+		}()
+
+		select {
+		case drainErr := <-drainDone:
+			t.Fatalf("WaitOtherInflightMutations returned before ClearRequestedStage completed: %v", drainErr)
+		case <-time.After(40 * time.Millisecond):
+		}
+
+		close(allowClear)
+		select {
+		case drainErr := <-drainDone:
+			if drainErr != nil {
+				t.Fatalf("WaitOtherInflightMutations returned error: %v", drainErr)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for archive ClearRequestedStage drain")
+		}
+
+		postDrainStatus, err := service.ArchiveStatus(context.Background(), created.Run.ID)
+		if err != nil {
+			t.Fatalf("load archive status after drain: %v", err)
+		}
+		if postDrainStatus.Run.Status != usagearchive.StatusArchived || postDrainStatus.Run.RequestedStage != "" {
+			t.Fatalf("expected ClearRequestedStage finished before WaitOtherInflightMutations returned, got %#v", postDrainStatus.Run)
+		}
+	})
+
+	t.Run("queued stage recovery, runAvailable, and new triggers defer or fail closed while TrialHold is active", func(t *testing.T) {
+		resetGate()
+		gate := middleware.NewTrialHoldGate(false, "")
+		middleware.SetProcessTrialHoldGate(gate)
+
+		service, st, _ := newArchiveTestService(t, 1, 1, archiveTestServiceEvents(2))
+		ctx := context.Background()
+		created, err := service.CreateArchive(ctx, 3_000)
+		if err != nil {
+			t.Fatalf("create archive: %v", err)
+		}
+		if _, newlyRequested, err := st.UsageArchives.RequestStage(
+			ctx,
+			created.Run.ID,
+			usagearchive.StatusArchiving,
+			time.Now().UnixMilli(),
+		); err != nil || !newlyRequested {
+			t.Fatalf("request archive stage: new=%t err=%v", newlyRequested, err)
+		}
+
+		middleware.EngageProcessTrialHold()
+
+		// recoverRequestedStages defers while held.
+		if service.archiveJobs.recoverRequestedStages(ctx) {
+			t.Fatal("expected recoverRequestedStages to return false while TrialHold is active")
+		}
+		// runAvailable leaves queued stage untouched while held.
+		service.archiveJobs.runAvailable(ctx)
+		whileHeld, err := service.ArchiveStatus(ctx, created.Run.ID)
+		if err != nil {
+			t.Fatalf("load archive status while held: %v", err)
+		}
+		if whileHeld.Run.Status != usagearchive.StatusPreviewed || whileHeld.Run.RequestedStage != usagearchive.StatusArchiving {
+			t.Fatalf("expected queued archive stage preserved during TrialHold, got %#v", whileHeld.Run)
+		}
+
+		// New archive stage trigger fails closed while TrialHold is active.
+		if _, _, triggerErr := service.SubmitArchiveResume(ctx, created.Run.ID, usagearchive.StatusArchiving, true); !errors.Is(triggerErr, ErrArchiveUnavailable) {
+			t.Fatalf("expected SubmitArchiveResume to fail closed with ErrArchiveUnavailable under TrialHold, got %v", triggerErr)
+		}
+
+		// Once TrialHold releases, recovery and queued stage execution proceed cleanly.
+		middleware.ReleaseProcessTrialHold()
+		if !service.archiveJobs.recoverRequestedStages(ctx) {
+			t.Fatal("expected recoverRequestedStages to succeed after TrialHold release")
+		}
+		service.archiveJobs.runAvailable(ctx)
+		afterRelease, err := service.ArchiveStatus(ctx, created.Run.ID)
+		if err != nil {
+			t.Fatalf("load archive status after release: %v", err)
+		}
+		if afterRelease.Run.Status != usagearchive.StatusArchived || afterRelease.Run.RequestedStage != "" {
+			t.Fatalf("expected queued archive stage completed after TrialHold release, got %#v", afterRelease.Run)
+		}
+	})
+}
+
+func TestArchiveJobSynchronousWaiterUnblocksOnTrialHoldWithoutDeadlock(t *testing.T) {
+	t.Cleanup(func() {
+		middleware.SetProcessTrialHoldGate(nil)
+		middleware.ReleaseProcessTrialHold()
+	})
+	gate := middleware.NewTrialHoldGate(false, "")
+	middleware.SetProcessTrialHoldGate(gate)
+
+	service, _, _ := newArchiveTestService(t, 1, 1, archiveTestServiceEvents(1))
+	ctx := context.Background()
+
+	runnerBlocked := make(chan struct{})
+	allowRunner := make(chan struct{})
+	var armBlock sync.Map
+	var blockOnce sync.Once
+	service.archiveJobs.beforeRunHook = func() {
+		if _, armed := armBlock.Load("armed"); !armed {
+			return
+		}
+		blockOnce.Do(func() {
+			close(runnerBlocked)
+			<-allowRunner
+		})
+	}
+
+	rootCtx, stop := context.WithCancel(context.Background())
+	t.Cleanup(stop)
+	if err := service.StartArchiveJobs(rootCtx); err != nil {
+		t.Fatalf("start archive jobs: %v", err)
+	}
+
+	created, err := service.CreateArchive(ctx, 2_000)
+	if err != nil {
+		t.Fatalf("create archive: %v", err)
+	}
+	armBlock.Store("armed", true)
+
+	// Issue a synchronous (wait=true) HTTP-tracked archive resume: it persists requested_stage="archiving",
+	// wakes runner (which pauses at beforeRunHook prior to claiming), and parks on waiter while holding gate.inflight!
+	syncWaitErrCh := make(chan error, 1)
+	wrappedSyncHandler := gate.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _, submitErr := service.SubmitArchiveResume(r.Context(), created.Run.ID, usagearchive.StatusArchiving, true)
+		syncWaitErrCh <- submitErr
+		if errors.Is(submitErr, ErrArchiveTrialHoldActive) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	httpDone := make(chan int, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodPost, "/v0/management/usage/archives/"+created.Run.ID+"/resume", nil)
+		rec := httptest.NewRecorder()
+		wrappedSyncHandler.ServeHTTP(rec, req)
+		httpDone <- rec.Code
+	}()
+
+	select {
+	case <-runnerBlocked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for archive runner to reach pre-claim checkpoint")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		service.archiveJobs.mu.Lock()
+		waiterCount := len(service.archiveJobs.waiters[archiveJobKey{runID: created.Run.ID, stage: usagearchive.StatusArchiving}])
+		service.archiveJobs.mu.Unlock()
+		if waiterCount == 1 {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("timed out waiting for synchronous waiter to park; waiters=%d", waiterCount)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// Run ActivateSlot's pre-activate fence inside its own gate.Wrap HTTP request:
+	// EngageProcessTrialHold MUST immediately unblock the parked waiter with ErrArchiveTrialHoldActive,
+	// breaking the circular wait so WaitOtherInflightMutations finishes immediately without deadlock!
+	fenceDrainErrCh := make(chan error, 1)
+	activateHandler := gate.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		middleware.EngageProcessTrialHold()
+		fenceDrainErrCh <- middleware.WaitOtherInflightMutations(r.Context())
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	go func() {
+		req := httptest.NewRequest(http.MethodPost, "/usage-service/updates/slot/activate", nil)
+		rec := httptest.NewRecorder()
+		activateHandler.ServeHTTP(rec, req)
+	}()
+
+	select {
+	case waitErr := <-syncWaitErrCh:
+		if !errors.Is(waitErr, ErrArchiveTrialHoldActive) {
+			t.Fatalf("expected parked synchronous waiter to unblock with ErrArchiveTrialHoldActive, got %v", waitErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("deadlock: parked synchronous archive waiter did not unblock when EngageProcessTrialHold fired")
+	}
+	if code := <-httpDone; code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 from synchronous handler, got %d", code)
+	}
+
+	select {
+	case drainErr := <-fenceDrainErrCh:
+		if drainErr != nil {
+			t.Fatalf("WaitOtherInflightMutations failed: %v", drainErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WaitOtherInflightMutations timed out")
+	}
+
+	// Release runner while TrialHold is still active: runAvailable sees blocked==true and leaves requested_stage intact!
+	close(allowRunner)
+	time.Sleep(20 * time.Millisecond)
+
+	stDuringHold, err := service.ArchiveStatus(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("status during hold: %v", err)
+	}
+	if stDuringHold.Run.Status != usagearchive.StatusPreviewed || stDuringHold.Run.RequestedStage != usagearchive.StatusArchiving {
+		t.Fatalf("expected run still previewed with requested_stage=archiving during TrialHold, got status=%s requested_stage=%q", stDuringHold.Run.Status, stDuringHold.Run.RequestedStage)
+	}
+
+	middleware.ReleaseProcessTrialHold()
+	service.archiveJobs.wakeRunner()
+	waitForArchiveRunStatus(t, service, created.Run.ID, usagearchive.StatusArchived)
 }

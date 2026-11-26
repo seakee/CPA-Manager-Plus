@@ -1,14 +1,22 @@
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { generateSlotKeypair } from '../bin/release/cpamp-slot-sign.mjs';
+import { packageSlotArchive } from '../bin/release/package-cpamp-slot.mjs';
 import { generateReleaseInfo } from '../bin/release/generate-release-info.mjs';
 import { expectedReleaseAssetNames } from '../bin/release/verify-published-release.mjs';
 import { publishUpdateIndex } from '../bin/release/publish-update-index.mjs';
-import { repository, resolveChannels, v2DockerRoleTag } from '../bin/release/update-contract.mjs';
+import {
+  repository,
+  resolveChannels,
+  v2DockerRoleTag,
+  v2SlotArchiveName,
+  v2SlotRequiresAsset,
+} from '../bin/release/update-contract.mjs';
 
 function scenario({
   tags = ['v1.14.7'],
@@ -368,11 +376,79 @@ const v2Notes = (tag) =>
     compatibility: { minimum_cpa_version: 'v8.0.55' },
   }) +
   '\n-->';
-const makeV2Info = (tag = v2Tag) =>
+const slotBytesCache = new Map();
+const getSignedSlotEntry = (tag) => {
+  if (slotBytesCache.has(tag)) return slotBytesCache.get(tag);
+  const tempBase = mkdtempSync(path.join(tmpdir(), 'cpamp-idx-slot-'));
+  try {
+    const stageRoot = path.join(tempBase, 'stage');
+    const writeMember = (rel, body, mode = 0o644) => {
+      const full = path.join(stageRoot, rel);
+      mkdirSync(path.dirname(full), { recursive: true });
+      writeFileSync(full, body);
+      chmodSync(full, mode);
+    };
+    writeMember('bin/cpamp-launcher', '#!/bin/sh\necho launcher\n', 0o755);
+    writeMember('bin/cpamp-runtime-supervisor', '#!/bin/sh\necho supervisor\n', 0o755);
+    writeMember('bin/cpa-manager-plus', '#!/bin/sh\necho manager\n', 0o755);
+    writeMember('bin/cpamp-ingress', '#!/bin/sh\necho ingress\n', 0o755);
+    writeMember(
+      'share/cpamp/release/base-abi.json',
+      JSON.stringify({ schema_version: 1, base_epoch: 1, platform: 'linux/amd64' }) + '\n',
+      0o444
+    );
+    writeMember('share/cpamp/release/fullweb-manifest.json', '{"schemaVersion":1}\n', 0o444);
+    writeMember('share/cpamp/release/public-api-transport-contract.json', '{"schemaVersion":1}\n', 0o444);
+    writeMember('share/cpamp/runtime/cpa-artifact.json', '{"schemaVersion":1}\n', 0o444);
+    writeMember('share/cpamp/runtime/config.seed.yaml', 'port: 8317\n', 0o644);
+    writeMember('share/cpamp/runtime/seed-lineage.json', '{"schema_version":1}\n', 0o644);
+    writeMember('share/licenses/cpamp/LICENSE', 'MIT\n', 0o444);
+    const outDir = path.join(tempBase, 'out');
+    const pair = generateSlotKeypair('cpamp-dry-run-2026');
+    const pkg = packageSlotArchive({
+      root: stageRoot,
+      version: tag,
+      sourceCommit: v2Sha,
+      platform: 'linux/amd64',
+      keyId: 'cpamp-dry-run-2026',
+      privateKey: pair.privateKeyPem,
+      publicKeyHex: pair.publicKeyHex,
+      out: outDir,
+    });
+    const entry = {
+      bytes: readFileSync(pkg.archivePath),
+      publicKeyHex: pair.publicKeyHex,
+      publicRecord: pair.publicRecord,
+    };
+    slotBytesCache.set(tag, entry);
+    return entry;
+  } finally {
+    rmSync(tempBase, { recursive: true, force: true });
+  }
+};
+const getSignedSlotBytes = (tag) => getSignedSlotEntry(tag).bytes;
+const v2SlotFor = (tag) => {
+  const name = v2SlotArchiveName(tag, 'amd64');
+  const bytes = getSignedSlotBytes(tag);
+  return {
+    assets: [
+      {
+        name,
+        platform: 'linux/amd64',
+        sha256: sha256Of(bytes),
+        size: bytes.length,
+        min_base_epoch: 1,
+        schema_generation: 1,
+      },
+    ],
+  };
+};
+const makeV2Info = (tag = v2Tag, { includeSlot = v2SlotRequiresAsset(tag) } = {}) =>
   generateReleaseInfo(tag, v2Sha, v2Notes(tag), {
     dryRun: true,
     allowV2Beta: true,
     pairing: v2Pairing(tag),
+    ...(includeSlot ? { slot: v2SlotFor(tag) } : {}),
   });
 const v2StablePayload = (tag) =>
   JSON.stringify({
@@ -388,30 +464,27 @@ const makeCandidateDirectory = (info) => {
   const directory = mkdtempSync(path.join(tmpdir(), 'cpamp-update-index-v2-'));
   temporaryCandidateDirectories.push(directory);
   const tag = info.release.version;
+  const slotName = v2SlotArchiveName(tag, 'amd64');
   writeFileSync(path.join(directory, 'release-info.json'), JSON.stringify(info, null, 2));
   const checksumLines = [];
   for (const name of expectedReleaseAssetNames(tag, { allowV2Beta: true })) {
     if (name === 'checksums.txt') continue;
     const relativePath = name.includes('_linux_amd64') ? `native/${name}` : name;
     const target = path.join(directory, relativePath);
-    if (name !== 'release-info.json') {
-      mkdirSync(path.dirname(target), { recursive: true });
-      writeFileSync(
-        target,
-        name === 'embedded-release-pairing.json'
+    const content =
+      name === 'release-info.json'
+        ? JSON.stringify(info, null, 2)
+        : name === 'embedded-release-pairing.json'
           ? JSON.stringify(v2Pairing(tag))
           : name === 'docker-compose.v2-embedded.yml'
             ? v2ComposeFor(tag)
-            : `${name}\n`
-      );
+            : name === slotName
+              ? getSignedSlotBytes(tag)
+              : `${name}\n`;
+    if (name !== 'release-info.json') {
+      mkdirSync(path.dirname(target), { recursive: true });
+      writeFileSync(target, content);
     }
-    const content = name === 'release-info.json' ? JSON.stringify(info, null, 2) : (
-      name === 'embedded-release-pairing.json'
-        ? JSON.stringify(v2Pairing(tag))
-        : name === 'docker-compose.v2-embedded.yml'
-          ? v2ComposeFor(tag)
-          : `${name}\n`
-    );
     checksumLines.push(`${sha256Of(content).slice(7)}  ${relativePath}\n`);
   }
   writeFileSync(path.join(directory, 'checksums.txt'), checksumLines.join(''));
@@ -435,6 +508,8 @@ function v2Scenario({
   dryRun = true,
   allowV2Beta = true,
   allowV2BetaDryRun = false,
+  allowEphemeralSlotKey = false,
+  slotPublicKeyHex,
   candidate = true,
   candidateDir,
   existingIndex = true,
@@ -586,6 +661,8 @@ function v2Scenario({
         dryRun,
         allowV2Beta,
         allowV2BetaDryRun,
+        allowEphemeralSlotKey,
+        ...(slotPublicKeyHex !== undefined ? { slotPublicKeyHex } : {}),
         candidateInfoPath,
         candidateAssetsDir:
           candidateDir ?? (candidate && !candidateInfoPath ? makeCandidateDirectory(localInfo) : undefined),
@@ -1060,5 +1137,135 @@ describe('v2 beta update index rehearsal', () => {
     await expect(
       publishUpdateIndex({ env, fetchImpl, dryRun: undefined, allowV2Beta: undefined })
     ).rejects.toThrow(/no request expected/);
+  });
+  it('requires distribution.slot for v2.0.0-beta.2+ while keeping it optional for v2.0.0-beta.1', async () => {
+    const beta1Info = makeV2Info('v2.0.0-beta.1');
+    expect(beta1Info.distribution.slot).toBeUndefined();
+    expect(() => makeV2Info('v2.0.0-beta.2', { includeSlot: false })).toThrow(
+      /slot distribution is required/
+    );
+
+    const beta2Info = makeV2Info('v2.0.0-beta.2');
+    expect(beta2Info.distribution.slot).toEqual(v2SlotFor('v2.0.0-beta.2'));
+    const beta2Dir = makeCandidateDirectory(beta2Info);
+    const rejectedWithoutOptIn = v2Scenario({
+      candidate: false,
+      candidateDir: beta2Dir,
+    });
+    await expect(rejectedWithoutOptIn.run()).rejects.toThrow(/Unknown untrusted slot key_id/);
+    const beta2SlotEntry = getSignedSlotEntry('v2.0.0-beta.2');
+    await expect(
+      v2Scenario({
+        candidate: false,
+        candidateDir: beta2Dir,
+        allowEphemeralSlotKey: true,
+      }).run()
+    ).rejects.toThrow(/Ephemeral slot key verification requires --slot-public-key/);
+    const s = v2Scenario({
+      candidate: false,
+      candidateDir: beta2Dir,
+      allowEphemeralSlotKey: true,
+      slotPublicKeyHex: beta2SlotEntry.publicKeyHex,
+    });
+    expect((await s.run()).channels.beta.version).toBe('v2.0.0-beta.2');
+
+    // Flipping 1 bit in the 64-byte Ed25519 signature of an ephemeral cpamp-dry-run-2026 slot archive must fail publishUpdateIndex even when allowEphemeralSlotKey and slotPublicKeyHex are provided
+    const bitFlipTemp = mkdtempSync(path.join(tmpdir(), 'cpamp-idx-bitflip-'));
+    temporaryCandidateDirectories.push(bitFlipTemp);
+    const bitFlipExtract = path.join(bitFlipTemp, 'extract');
+    mkdirSync(bitFlipExtract, { recursive: true });
+    const slotName = v2SlotArchiveName('v2.0.0-beta.2', 'amd64');
+    spawnSync('tar', ['-xzf', path.join(beta2Dir, 'native', slotName), '-C', bitFlipExtract]);
+    const bitFlipSigPath = path.join(bitFlipExtract, 'slot-manifest.json.sig');
+    chmodSync(bitFlipSigPath, 0o644);
+    const bitFlipSigObj = JSON.parse(readFileSync(bitFlipSigPath, 'utf8'));
+    const bitFlipSigBytes = Buffer.from(bitFlipSigObj.signature, 'base64');
+    bitFlipSigBytes[0] ^= 0x01;
+    bitFlipSigObj.signature = bitFlipSigBytes.toString('base64');
+    writeFileSync(bitFlipSigPath, JSON.stringify(bitFlipSigObj, null, 2) + '\n');
+    chmodSync(bitFlipSigPath, 0o444);
+    const bitFlipArchive = path.join(bitFlipTemp, slotName);
+    spawnSync('tar', ['-czf', bitFlipArchive, '-C', bitFlipExtract, '.']);
+    spawnSync('chmod', ['-R', 'u+rwX', bitFlipExtract]);
+    const bitFlipBytes = readFileSync(bitFlipArchive);
+    const bitFlipDir = mkdtempSync(path.join(tmpdir(), 'cpamp-idx-bitflip-dir-'));
+    temporaryCandidateDirectories.push(bitFlipDir);
+    spawnSync('cp', ['-R', `${beta2Dir}/.`, bitFlipDir]);
+    const bitFlipInfo = {
+      ...beta2Info,
+      distribution: {
+        ...beta2Info.distribution,
+        slot: {
+          assets: [
+            {
+              ...beta2Info.distribution.slot.assets[0],
+              sha256: sha256Of(bitFlipBytes),
+              size: bitFlipBytes.length,
+            },
+          ],
+        },
+      },
+    };
+    writeFileSync(path.join(bitFlipDir, 'release-info.json'), JSON.stringify(bitFlipInfo, null, 2));
+    writeFileSync(path.join(bitFlipDir, 'native', slotName), bitFlipBytes);
+    const bitFlipChecksums = readFileSync(path.join(bitFlipDir, 'checksums.txt'), 'utf8')
+      .trimEnd()
+      .split('\n')
+      .map((line) => {
+        const rel = line.slice(66);
+        return `${sha256Of(readFileSync(path.join(bitFlipDir, rel))).slice(7)}  ${rel}\n`;
+      })
+      .join('');
+    writeFileSync(path.join(bitFlipDir, 'checksums.txt'), bitFlipChecksums);
+    await expect(
+      v2Scenario({
+        candidate: false,
+        candidateDir: bitFlipDir,
+        allowEphemeralSlotKey: true,
+        slotPublicKeyHex: beta2SlotEntry.publicKeyHex,
+      }).run()
+    ).rejects.toThrow(/signature verification failed/);
+
+    // Verify CLI --slot-public-key with .pub.json rejects the bit-flipped signature before GitHub calls
+    const pubJsonPath = path.join(bitFlipTemp, 'ephemeral.pub.json');
+    writeFileSync(pubJsonPath, JSON.stringify(beta2SlotEntry.publicRecord, null, 2) + '\n');
+    const cliBitFlip = runCli(
+      { GITHUB_REPOSITORY: 'seakee/CPA-Manager-Plus', GITHUB_TOKEN: 'fixture' },
+      '--dry-run',
+      '--allow-v2-beta',
+      '--allow-ephemeral-slot-key',
+      '--slot-public-key',
+      pubJsonPath,
+      '--candidate',
+      path.join(bitFlipDir, 'release-info.json'),
+      '--candidate-assets-dir',
+      bitFlipDir
+    );
+    expect(cliBitFlip.status).toBe(1);
+    expect(cliBitFlip.stderr).toContain('signature verification failed');
+    const missingSlotPayload = JSON.stringify({
+      ...beta2Info,
+      distribution: {
+        docker: beta2Info.distribution.docker,
+        native: beta2Info.distribution.native,
+        compose: beta2Info.distribution.compose,
+      },
+    });
+    const badPublished = v2Scenario({
+      candidate: false,
+      extraRelease: {
+        id: 799,
+        tag_name: 'v2.0.0-beta.2',
+        draft: false,
+        immutable: true,
+        prerelease: true,
+        published_at: '2026-11-10T00:00:00Z',
+        target_commitish: v2Sha,
+        body: '# v2.0.0-beta.2\n',
+        assets: publishedV2Assets('v2.0.0-beta.2', missingSlotPayload),
+      },
+      extraPayload: missingSlotPayload,
+    });
+    await expect(badPublished.run()).rejects.toThrow(/slot distribution is required/);
   });
 });

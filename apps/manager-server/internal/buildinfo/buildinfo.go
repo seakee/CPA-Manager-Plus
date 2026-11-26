@@ -3,6 +3,7 @@ package buildinfo
 
 import (
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -23,6 +24,38 @@ func ShortCommit() string {
 	return commit
 }
 
+// EffectiveVersion returns the normalized running binary version, falling back
+// to ActiveSlot() when Version is unset/dev and "dev" otherwise.
+func EffectiveVersion() string {
+	v := strings.TrimSpace(Version)
+	if (v == "" || v == "dev") && ActiveSlot() != "" {
+		return ActiveSlot()
+	}
+	if v == "" {
+		return "dev"
+	}
+	return v
+}
+
+// BaseImageVersion returns CPAMP_BASE_VERSION when set by cpamp-launcher,
+// falling back to Version ("dev" when blank).
+func BaseImageVersion() string {
+	if base := strings.TrimSpace(os.Getenv("CPAMP_BASE_VERSION")); base != "" {
+		return base
+	}
+	v := strings.TrimSpace(Version)
+	if v == "" {
+		return "dev"
+	}
+	return v
+}
+
+// ActiveSlot returns CPAMP_RUNNING_SLOT when running from a staged self-update
+// slot, or empty string when running directly from the base image/install.
+func ActiveSlot() string {
+	return strings.TrimSpace(os.Getenv("CPAMP_RUNNING_SLOT"))
+}
+
 // StartupLine formats the startup build identity banner logged on server start.
 func StartupLine() string {
 	version := strings.TrimSpace(Version)
@@ -33,7 +66,11 @@ func StartupLine() string {
 	if builtAt == "" {
 		builtAt = "unknown"
 	}
-	return fmt.Sprintf("CPA Manager Plus Version: %s, Commit: %s, BuiltAt: %s", version, ShortCommit(), builtAt)
+	base := fmt.Sprintf("CPA Manager Plus Version: %s, Commit: %s, BuiltAt: %s", version, ShortCommit(), builtAt)
+	if slot := ActiveSlot(); slot != "" {
+		return fmt.Sprintf("%s, BaseVersion: %s, ActiveSlot: %s", base, BaseImageVersion(), slot)
+	}
+	return base
 }
 
 func isHex(s string) bool {

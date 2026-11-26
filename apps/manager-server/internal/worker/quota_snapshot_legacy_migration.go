@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	quotasnapshotrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotasnapshot"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
@@ -53,19 +54,44 @@ func (w *LegacyQuotaSnapshotMigrationWorker) run(ctx context.Context) {
 	total := 0
 	started := false
 	for ctx.Err() == nil {
-		result, err := w.store.BackfillLegacyQuotaSnapshotsBatch(ctx, w.groupLimit)
-		if err != nil {
-			if ctx.Err() != nil {
+		done, blocked := middleware.BeginBackgroundMutation()
+		if blocked {
+			pauseDelay := min(w.retryDelay, 200*time.Millisecond)
+			if pauseDelay <= 0 {
+				pauseDelay = 50 * time.Millisecond
+			}
+			if !waitFor(ctx, pauseDelay) {
 				return
 			}
-			if recordErr := w.store.RecordLegacyQuotaSnapshotBackfillFailure(ctx, err); recordErr != nil && ctx.Err() == nil {
-				log.Printf("[quota-snapshot-migration] record failure: %v", recordErr)
+			continue
+		}
+		var (
+			result store.LegacyQuotaSnapshotBackfillResult
+			err    error
+		)
+		stopWorker, retryAfterDelay := func() (bool, bool) {
+			defer done()
+			result, err = w.store.BackfillLegacyQuotaSnapshotsBatch(ctx, w.groupLimit)
+			if err != nil {
+				if ctx.Err() != nil {
+					return true, false
+				}
+				if recordErr := w.store.RecordLegacyQuotaSnapshotBackfillFailure(ctx, err); recordErr != nil && ctx.Err() == nil {
+					log.Printf("[quota-snapshot-migration] record failure: %v", recordErr)
+				}
+				if errors.Is(err, quotasnapshotrepo.ErrLegacySnapshotGroupTooLarge) {
+					log.Printf("[quota-snapshot-migration] paused; offline cleanup required: %v", err)
+					return true, false
+				}
+				log.Printf("[quota-snapshot-migration] batch failed; will retry: %v", err)
+				return false, true
 			}
-			if errors.Is(err, quotasnapshotrepo.ErrLegacySnapshotGroupTooLarge) {
-				log.Printf("[quota-snapshot-migration] paused; offline cleanup required: %v", err)
-				return
-			}
-			log.Printf("[quota-snapshot-migration] batch failed; will retry: %v", err)
+			return false, false
+		}()
+		if stopWorker {
+			return
+		}
+		if retryAfterDelay {
 			if !waitFor(ctx, w.retryDelay) {
 				return
 			}

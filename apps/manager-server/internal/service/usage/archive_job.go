@@ -8,11 +8,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagearchive"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
 const archiveJobScanInterval = 5 * time.Second
+
+var ErrArchiveTrialHoldActive = errors.New("usage archive paused for upgrade trial verification")
 
 type archiveJobResult struct {
 	status ArchiveStatus
@@ -28,14 +31,16 @@ type archiveJobRunner struct {
 	service *Service
 	wake    chan struct{}
 
-	mu           sync.Mutex
-	started      bool
-	rootCtx      context.Context
-	done         chan struct{}
-	recovered    bool
-	inFlight     map[archiveJobKey]struct{}
-	waiters      map[archiveJobKey][]chan archiveJobResult
-	retryOnError map[archiveJobKey]bool
+	mu              sync.Mutex
+	started         bool
+	rootCtx         context.Context
+	done            chan struct{}
+	recovered       bool
+	inFlight        map[archiveJobKey]struct{}
+	waiters         map[archiveJobKey][]chan archiveJobResult
+	retryOnError    map[archiveJobKey]bool
+	beforeRunHook   func()
+	beforeClearHook func(runID, stage string)
 }
 
 func newArchiveJobRunner(service *Service) *archiveJobRunner {
@@ -175,10 +180,18 @@ func (s *Service) submitArchiveStage(ctx context.Context, runID, stage string, w
 	if archiveResumeStageOrder(stage) == 0 {
 		return ArchiveStatus{}, false, fmt.Errorf("%w: invalid archive stage", ErrArchiveInvalidRequest)
 	}
+	if middleware.IsProcessTrialHoldActive() {
+		return ArchiveStatus{}, false, fmt.Errorf("%w: %w", ErrArchiveUnavailable, ErrArchiveTrialHoldActive)
+	}
 	if s.archiveJobs == nil || !s.archiveJobs.isStarted() {
 		if !wait {
 			return ArchiveStatus{}, false, ErrArchiveUnavailable
 		}
+		done, blocked := middleware.BeginBackgroundMutation()
+		if blocked {
+			return ArchiveStatus{}, false, fmt.Errorf("%w: %w", ErrArchiveUnavailable, ErrArchiveTrialHoldActive)
+		}
+		defer done()
 		status, err := s.executeArchiveStage(ctx, runID, stage)
 		return status, false, err
 	}
@@ -211,7 +224,13 @@ func (r *archiveJobRunner) submit(ctx context.Context, runID, stage string, wait
 		r.mu.Unlock()
 		return ArchiveStatus{}, false, ErrArchiveUnavailable
 	}
+	reqDone, blocked := middleware.BeginBackgroundMutation()
+	if blocked {
+		r.mu.Unlock()
+		return ArchiveStatus{}, false, fmt.Errorf("%w: %w", ErrArchiveUnavailable, ErrArchiveTrialHoldActive)
+	}
 	run, newlyRequested, err := r.service.archive.store.UsageArchives.RequestStage(ctx, runID, stage, time.Now().UnixMilli())
+	reqDone()
 	if err != nil {
 		r.mu.Unlock()
 		return ArchiveStatus{}, false, err
@@ -237,9 +256,23 @@ func (r *archiveJobRunner) submit(ctx context.Context, runID, stage string, wait
 	if !wait {
 		return ArchiveStatus{Run: run}, true, nil
 	}
+	trialHoldCh := middleware.TrialHoldActivatedChan()
 	select {
 	case result := <-waiter:
 		return result.status, true, result.err
+	case <-trialHoldCh:
+		r.removeWaiter(key, waiter)
+		select {
+		case result := <-waiter:
+			return result.status, true, result.err
+		default:
+		}
+		r.mu.Lock()
+		if _, ok := r.retryOnError[key]; ok && len(r.waiters[key]) == 0 {
+			r.retryOnError[key] = true
+		}
+		r.mu.Unlock()
+		return ArchiveStatus{}, true, ErrArchiveTrialHoldActive
 	case <-ctx.Done():
 		r.removeWaiter(key, waiter)
 		return ArchiveStatus{}, true, ctx.Err()
@@ -316,6 +349,11 @@ func (r *archiveJobRunner) recoverRequestedStages(ctx context.Context) bool {
 	if r.recovered {
 		return true
 	}
+	done, blocked := middleware.BeginBackgroundMutation()
+	if blocked {
+		return false
+	}
+	defer done()
 	if err := r.service.archive.store.UsageArchives.RecoverRequestedStages(ctx); err != nil {
 		if ctx.Err() == nil {
 			log.Printf("[usage-archive] recover requested stages; will retry: %v", err)
@@ -328,35 +366,52 @@ func (r *archiveJobRunner) recoverRequestedStages(ctx context.Context) bool {
 
 func (r *archiveJobRunner) runAvailable(ctx context.Context) {
 	for ctx.Err() == nil {
-		run, key, found, err := r.claimNext(ctx)
-		if err != nil {
-			log.Printf("[usage-archive] inspect requested stage: %v", err)
+		if r.beforeRunHook != nil {
+			r.beforeRunHook()
+		}
+		done, blocked := middleware.BeginBackgroundMutation()
+		if blocked {
 			return
 		}
-		if !found {
-			return
-		}
-		status, runErr := r.service.executeArchiveStage(ctx, run.ID, key.stage)
-		retry := runErr != nil && ctx.Err() == nil && r.shouldRetry(key, runErr)
-		clearRequest := !retry && (runErr == nil || ctx.Err() == nil)
-		clearFailed := false
-		if clearRequest {
-			clearCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-			clearErr := r.service.archive.store.UsageArchives.ClearRequestedStage(clearCtx, run.ID, key.stage)
-			cancel()
-			if clearErr != nil {
-				clearFailed = true
-				runErr = errors.Join(runErr, fmt.Errorf("clear requested usage archive stage: %w", clearErr))
+		keepRunning := func() bool {
+			defer done()
+			run, key, found, err := r.claimNext(ctx)
+			if err != nil {
+				log.Printf("[usage-archive] inspect requested stage: %v", err)
+				return false
 			}
-		}
-		if runErr != nil && ctx.Err() == nil {
-			log.Printf("[usage-archive] process run %s stage %s: %v", run.ID, key.stage, runErr)
-		}
-		r.finish(key, archiveJobResult{status: status, err: runErr}, retry || clearFailed)
-		if ctx.Err() != nil {
-			return
-		}
-		if retry || clearFailed {
+			if !found {
+				return false
+			}
+			status, runErr := r.service.executeArchiveStage(ctx, run.ID, key.stage)
+			retry := runErr != nil && ctx.Err() == nil && r.shouldRetry(key, runErr)
+			clearRequest := !retry && (runErr == nil || ctx.Err() == nil)
+			clearFailed := false
+			if clearRequest {
+				if r.beforeClearHook != nil {
+					r.beforeClearHook(run.ID, key.stage)
+				}
+				clearCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+				clearErr := r.service.archive.store.UsageArchives.ClearRequestedStage(clearCtx, run.ID, key.stage)
+				cancel()
+				if clearErr != nil {
+					clearFailed = true
+					runErr = errors.Join(runErr, fmt.Errorf("clear requested usage archive stage: %w", clearErr))
+				}
+			}
+			if runErr != nil && ctx.Err() == nil {
+				log.Printf("[usage-archive] process run %s stage %s: %v", run.ID, key.stage, runErr)
+			}
+			r.finish(key, archiveJobResult{status: status, err: runErr}, retry || clearFailed)
+			if ctx.Err() != nil {
+				return false
+			}
+			if retry || clearFailed {
+				return false
+			}
+			return true
+		}()
+		if !keepRunning {
 			return
 		}
 	}

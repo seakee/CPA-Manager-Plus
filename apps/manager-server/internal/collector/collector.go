@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/httpqueue"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/resp"
 	quotasnapshotsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/quotasnapshot"
@@ -85,8 +86,11 @@ type Manager struct {
 	// starts counts how many runs this Manager has opened. It is the identity of
 	// the running Collector: every Start supersedes the previous run, so a caller
 	// that must not restart one can prove it did not by seeing this unchanged.
-	starts   uint64
-	inFlight map[uint64]chan struct{}
+	starts         uint64
+	inFlight       map[uint64]chan struct{}
+	activePollMu   sync.Mutex
+	activePollCond *sync.Cond
+	activePolls    int
 }
 
 func NewManager(base config.Config, store *store.Store) *Manager {
@@ -102,6 +106,82 @@ func NewManager(base config.Config, store *store.Store) *Manager {
 		},
 		inFlight: make(map[uint64]chan struct{}),
 	}
+}
+
+const trialHoldCollectorPollInterval = 100 * time.Millisecond
+
+func (m *Manager) ensurePollCondLocked() *sync.Cond {
+	if m.activePollCond == nil {
+		m.activePollCond = sync.NewCond(&m.activePollMu)
+	}
+	return m.activePollCond
+}
+
+func (m *Manager) beginPoll() (func(), bool) {
+	m.activePollMu.Lock()
+	if middleware.IsProcessTrialHoldActive() {
+		m.activePollMu.Unlock()
+		return nil, false
+	}
+	m.ensurePollCondLocked()
+	m.activePolls++
+	m.activePollMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.activePollMu.Lock()
+			m.activePolls--
+			m.ensurePollCondLocked().Broadcast()
+			m.activePollMu.Unlock()
+		})
+	}, true
+}
+
+// QuiesceForTrialHold waits until any in-flight CPA batch pop and SQLite event
+// persistence has completed while the process-wide trial hold is active.
+func (m *Manager) QuiesceForTrialHold(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	stop := context.AfterFunc(ctx, func() {
+		m.activePollMu.Lock()
+		m.ensurePollCondLocked().Broadcast()
+		m.activePollMu.Unlock()
+	})
+	defer stop()
+
+	m.activePollMu.Lock()
+	defer m.activePollMu.Unlock()
+	cond := m.ensurePollCondLocked()
+	for m.activePolls > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		cond.Wait()
+	}
+	return ctx.Err()
+}
+
+func waitWhileTrialHoldActive(ctx context.Context) error {
+	for middleware.IsProcessTrialHoldActive() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		timer := time.NewTimer(trialHoldCollectorPollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return ctx.Err()
 }
 
 func (m *Manager) Start(ctx context.Context, cfg RuntimeConfig) {
@@ -512,6 +592,12 @@ func (m *Manager) runSubscribe(ctx context.Context, cancel context.CancelFunc, c
 		if ctx.Err() != nil {
 			return true
 		}
+		if middleware.IsProcessTrialHoldActive() {
+			if waitWhileTrialHoldActive(ctx) != nil {
+				return true
+			}
+			continue
+		}
 		client, err := resp.DialContext(ctx, cfg.CPAUpstreamURL, cfg.TLSSkipVerify)
 		if err != nil {
 			if mode == "auto" && !subscribed {
@@ -591,6 +677,9 @@ func (m *Manager) consumeSubscribe(ctx context.Context, cfg RuntimeConfig, clien
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		if middleware.IsProcessTrialHoldActive() {
+			return nil
+		}
 		window := readWindow
 		if m.needsRunningProof(runID) {
 			if poll := m.pollInterval(cfg); poll < window {
@@ -626,8 +715,19 @@ func (m *Manager) consumeSubscribe(ctx context.Context, cfg RuntimeConfig, clien
 		if strings.TrimSpace(payload) == "" {
 			continue
 		}
-		if err := m.processItems(ctx, cfg, []string{payload}); err != nil {
-			return err
+		for {
+			endPoll, ok := m.beginPoll()
+			if ok {
+				err := m.processItems(ctx, cfg, []string{payload})
+				endPoll()
+				if err != nil {
+					return err
+				}
+				break
+			}
+			if err := waitWhileTrialHoldActive(ctx); err != nil {
+				return err
+			}
 		}
 	}
 }
@@ -725,14 +825,25 @@ func (m *Manager) consumeHTTP(ctx context.Context, cfg RuntimeConfig, client *ht
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		endPoll, ok := m.beginPoll()
+		if !ok {
+			if err := waitWhileTrialHoldActive(ctx); err != nil {
+				return err
+			}
+			cadenceElapsed = true
+			continue
+		}
 		items, err := client.Pop(ctx, m.batchSize(cfg))
 		if err != nil {
+			endPoll()
 			return err
 		}
 		m.markRunningPoll(ctx, runID, cfg, "http", cadenceElapsed)
 		if err := m.processItems(ctx, cfg, items); err != nil {
+			endPoll()
 			return err
 		}
+		endPoll()
 		if len(items) == 0 {
 			select {
 			case <-ctx.Done():
@@ -755,14 +866,25 @@ func (m *Manager) consumeRESP(ctx context.Context, cfg RuntimeConfig, client *re
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		endPoll, ok := m.beginPoll()
+		if !ok {
+			if err := waitWhileTrialHoldActive(ctx); err != nil {
+				return err
+			}
+			cadenceElapsed = true
+			continue
+		}
 		items, err := client.Pop(queue, popSide, m.batchSize(cfg))
 		if err != nil {
+			endPoll()
 			return err
 		}
 		m.markRunningPoll(ctx, runID, cfg, "resp", cadenceElapsed)
 		if err := m.processItems(ctx, cfg, items); err != nil {
+			endPoll()
 			return err
 		}
+		endPoll()
 		if len(items) == 0 {
 			select {
 			case <-ctx.Done():

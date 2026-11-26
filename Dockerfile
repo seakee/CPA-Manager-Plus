@@ -66,7 +66,7 @@ RUN test "$TARGETOS" = "linux"
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags="-s -w" -o /out/cpamp-runtime-supervisor ./cmd/cpamp-runtime-supervisor
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags="-s -w" -o /out/cpamp-launcher ./cmd/cpamp-launcher
+    go build -trimpath -ldflags="-s -w -X main.Version=$VERSION -X main.SourceCommit=$SOURCE_COMMIT" -o /out/cpamp-launcher ./cmd/cpamp-launcher
 
 FROM --platform=$BUILDPLATFORM node:22.23.4-alpine AS web-build
 ARG VERSION
@@ -261,7 +261,8 @@ COPY --from=cpa-v8-download /out/cpa-artifact.json /image/usr/local/share/cpamp/
 RUN python3 /tools/collect-third-party-licenses.py base --kind alpine --root /base --output /image/usr/local/share/licenses/base-image \
     && python3 /tools/collect-third-party-licenses.py base --kind debian --component glibc-runtime --root /glibc-base --output /image/usr/local/share/licenses/glibc-runtime \
     && python3 /tools/image-evidence.py --root /image --role cpamp --without-cpa --version "$VERSION" --source-commit "$SOURCE_COMMIT" \
-      --platform "$TARGETOS/$TARGETARCH" --source-inventory /source-inventory.json
+      --platform "$TARGETOS/$TARGETARCH" --source-inventory /source-inventory.json \
+    && test -s /image/usr/local/share/cpamp/release/base-abi.json
 
 FROM slim-evidence AS full-evidence
 ARG VERSION

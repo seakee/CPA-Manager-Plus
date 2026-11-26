@@ -84,6 +84,17 @@ func Compare(a, b Version) int {
 	}
 	return 0
 }
+
+// CompareSemVer parses and compares two semantic version strings, returning 1
+// when a > b, -1 when a < b, and 0 when equal or if either version is invalid.
+func CompareSemVer(a, b string) int {
+	va, errA := ParseVersion(strings.TrimSpace(a))
+	vb, errB := ParseVersion(strings.TrimSpace(b))
+	if errA != nil || errB != nil {
+		return 0
+	}
+	return Compare(va, vb)
+}
 func allowed(channel, stage string) bool {
 	return stage == "stable" || channel == "rc" && stage == "rc" || channel == "beta" && (stage == "beta" || stage == "rc")
 }

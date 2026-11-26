@@ -349,4 +349,36 @@ describe('one-time update notification', () => {
     expect(controls.error).toBe(true);
     expect(renderer!.root.findAllByType('aside')).toHaveLength(0);
   });
+
+  it('exposes connection and self_update fields from status', async () => {
+    mocks.request.mockResolvedValue({
+      current_version: 'v2.0.0-beta.2',
+      base_image_version: 'v2.0.0-beta.1',
+      active_slot: 'v2.0.0-beta.2',
+      state: 'up_to_date',
+      stale: false,
+      self_update: {
+        supported: true,
+        state: 'committed',
+        active_slot: 'v2.0.0-beta.2',
+        base_version: 'v2.0.0-beta.1',
+        rollback_available: true,
+        rollback_target_version: 'v2.0.0-beta.1',
+        rollback_same_schema: true,
+        rollback_blocked_reason: '',
+        staged_slots: ['v2.0.0-beta.2'],
+        prepare_operation: null,
+        last_failure_code: '',
+        last_rolled_back_slot: '',
+        cdn_presets: ['https://ghfast.top/', 'https://gh-proxy.com/'],
+      },
+    } as UpdateStatus);
+    await mount();
+    expect(controls.status?.active_slot).toBe('v2.0.0-beta.2');
+    expect(controls.status?.self_update?.supported).toBe(true);
+    expect(controls.connection).toEqual({
+      base: 'http://manager.test',
+      key: 'test',
+    });
+  });
 });
