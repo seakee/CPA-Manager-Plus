@@ -645,7 +645,7 @@ function DashboardPageContent({
     },
   ];
 
-  const routingStrategyRaw = config?.routingStrategy?.trim() || '';
+  const routingStrategyRaw = config?.routingStrategy?.trim() || (config ? 'round-robin' : '');
   const routingStrategy = normalizeRoutingStrategy(routingStrategyRaw);
   const routingStrategyDisplay = !routingStrategyRaw
     ? '-'
@@ -846,11 +846,15 @@ function DashboardPageContent({
                 <div className={styles.bentoContent}>
                   <span className={styles.bentoLabel}>{stat.label}</span>
                   <span className={styles.bentoValue}>{stat.loading ? '...' : stat.value}</span>
-                  {stat.sublabel && !stat.loading && (
-                    <span className={styles.bentoSublabel}>{stat.sublabel}</span>
-                  )}
                 </div>
-                <div className={styles.bentoArrow}>{t('dashboard.manage')} →</div>
+                <div className={styles.bentoFooter}>
+                  {stat.sublabel && !stat.loading ? (
+                    <span className={styles.bentoSublabel} title={stat.sublabel}>
+                      {stat.sublabel}
+                    </span>
+                  ) : null}
+                  <div className={styles.bentoArrow}>{t('dashboard.manage')} →</div>
+                </div>
               </Link>
             ))}
           </div>
@@ -860,9 +864,6 @@ function DashboardPageContent({
           <div className={styles.configCard}>
             <div className={styles.configHeader}>
               <h3>{t('dashboard.current_config_summary')}</h3>
-              <Link to="/config" className={styles.configLink}>
-                {t('dashboard.view_full_config')} →
-              </Link>
             </div>
             <div className={styles.configGrid}>
               <div className={styles.configItem}>
@@ -893,19 +894,27 @@ function DashboardPageContent({
                   {config.wsAuth ? t('common.enabled') : t('common.disabled')}
                 </span>
               </div>
-              <div className={styles.configItem}>
+              <div className={`${styles.configItem} ${styles.fullWidth}`}>
                 <span className={styles.configLabel}>{t('dashboard.routing_strategy')}</span>
-                <span className={`${styles.configBadge} ${routingStrategyBadgeClass}`}>
+                <span
+                  className={`${styles.configBadge} ${routingStrategyBadgeClass}`}
+                  title={routingStrategyDisplay}
+                >
                   {routingStrategyDisplay}
                 </span>
               </div>
               {config.proxyUrl && (
                 <div className={`${styles.configItem} ${styles.fullWidth}`}>
                   <span className={styles.configLabel}>Proxy URL</span>
-                  <span className={styles.configValueMono}>{config.proxyUrl}</span>
+                  <span className={styles.configValueMono} title={config.proxyUrl}>
+                    {config.proxyUrl}
+                  </span>
                 </div>
               )}
             </div>
+            <Link to="/config" className={styles.configLink}>
+              {t('dashboard.view_full_config')} →
+            </Link>
           </div>
         )}
       </section>

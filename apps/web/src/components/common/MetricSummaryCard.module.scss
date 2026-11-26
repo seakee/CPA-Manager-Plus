@@ -52,14 +52,14 @@
 }
 
 .gridCompact {
-  grid-auto-rows: minmax(96px, auto);
+  grid-auto-rows: minmax(78px, auto);
   gap: 8px;
 }
 
 .cardCompact {
-  gap: 16px;
-  min-height: 96px;
-  padding: 10px;
+  gap: 10px;
+  min-height: 78px;
+  padding: 10px 12px;
 
   .icon {
     width: 24px;
@@ -77,12 +77,14 @@
   }
 
   .body {
-    margin-top: 0;
+    margin-top: auto;
   }
 
   .value {
-    font-size: 15px;
-    line-height: 1.1;
+    font-size: 17px;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.015em;
+    line-height: 1.15;
   }
 }
 

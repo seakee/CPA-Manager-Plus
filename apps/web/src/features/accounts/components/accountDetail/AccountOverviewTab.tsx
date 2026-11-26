@@ -248,8 +248,8 @@ export function AccountOverviewTab({ detailView, getHealthStatusClass }: Account
       </div>
 
       <DrawerSectionCard
-        variant="highlight"
-        icon={<IconChartLine size={18} />}
+        variant="default"
+        icon={<IconChartLine size={15} />}
         title={t('accounts.detail_overview_activity_title')}
         headingLevel="h3"
         metaActions={

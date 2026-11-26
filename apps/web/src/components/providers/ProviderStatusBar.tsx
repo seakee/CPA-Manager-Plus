@@ -110,11 +110,12 @@ export function ProviderStatusBar({
   const isSingleTrack = hideRate && !trailingText;
   return (
     <div
+      data-status-bar="true"
       className={`${s.statusBar} ${
         isSingleTrack ? s.statusBarSolo : hideRate ? s.statusBarNoRate : ''
       }`.trim()}
     >
-      <div className={s.statusBlocks} ref={blocksRef}>
+      <div data-status-blocks="true" className={s.statusBlocks} ref={blocksRef}>
         {statusData.blockDetails.map((detail, idx) => {
           const isIdle = detail.rate === -1;
           const blockStyle = isIdle ? undefined : { backgroundColor: interpolateStatusBarColor(detail.rate) };
@@ -123,12 +124,14 @@ export function ProviderStatusBar({
           return (
             <div
               key={idx}
+              data-status-block-wrapper="true"
               className={`${s.statusBlockWrapper} ${isActive ? s.statusBlockActive : ''}`}
               onPointerEnter={(e) => handlePointerEnter(e, idx)}
               onPointerLeave={handlePointerLeave}
               onPointerDown={(e) => handlePointerDown(e, idx)}
             >
               <div
+                data-status-block="true"
                 className={`${s.statusBlock} ${isIdle ? s.statusBlockIdle : ''}`}
                 style={blockStyle}
               />
@@ -138,7 +141,7 @@ export function ProviderStatusBar({
         })}
       </div>
       {!hideRate ? (
-        <span className={`${s.statusRate} ${rateClass}`}>
+        <span data-status-rate="true" className={`${s.statusRate} ${rateClass}`}>
           {hasData ? formatSuccessRate(statusData.successRate) : '--'}
         </span>
       ) : trailingText ? (

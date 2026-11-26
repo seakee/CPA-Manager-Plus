@@ -246,7 +246,7 @@ export function ProviderOverviewTab({
         meta: '',
         icon: 'failure',
         accent: 'red',
-        tone: row.stats.failure > 0 ? 'bad' : 'good',
+        tone: row.stats.failure > 0 ? 'bad' : undefined,
       },
     ];
   }, [
@@ -350,7 +350,7 @@ export function ProviderOverviewTab({
         scopeLabel={t('accounts.detail_overview_recent_status_scope', {
           defaultValue: '最近 200 分钟 · 20 个 10 分钟区间',
         })}
-        statusData={row.statusData}
+        statusData={row.recentStatusData ?? row.statusData}
         successLabel={t('accounts.detail_overview_recent_status_success', {
           defaultValue: '成功请求',
         })}
@@ -387,8 +387,8 @@ export function ProviderOverviewTab({
       />
 
       <DrawerSectionCard
-        variant="highlight"
-        icon={<IconChartLine size={18} />}
+        variant="default"
+        icon={<IconChartLine size={15} />}
         title={t('ai_providers.card_history_title', { defaultValue: '历史用量' })}
         metaActions={
           <DrawerScopePill fallback={!hasHistoryMetrics && hasActivity}>

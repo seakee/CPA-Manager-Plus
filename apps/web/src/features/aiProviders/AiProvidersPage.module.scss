@@ -237,7 +237,7 @@
 }
 .statusBlocks {
   display: flex;
-  gap: 2px;
+  gap: 2.5px;
   width: 100%;
   min-width: 0;
   position: relative;
@@ -253,7 +253,7 @@
 
 .statusBlock {
   width: 100%;
-  height: 8px;
+  height: 6px;
   border-radius: var(--radius-data-sm);
   transition:
     transform 0.15s ease,
@@ -261,13 +261,13 @@
 
   .statusBlockWrapper:hover &,
   .statusBlockWrapper.statusBlockActive & {
-    transform: scaleY(1.8);
+    transform: scaleY(1.6);
     opacity: 0.9;
   }
 }
 
 .statusBlockIdle {
-  background-color: color-mix(in srgb, var(--border-primary) 62%, transparent);
+  background-color: var(--border-subtle);
 }
 
 .statusTooltip {
@@ -365,30 +365,33 @@
   align-items: center;
   justify-content: center;
   gap: 4px;
-  min-width: 48px;
-  font-size: 12px;
-  font-weight: 600;
+  min-width: 44px;
+  height: 20px;
+  font-size: 11px;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
+  line-height: 16px;
   white-space: nowrap;
-  padding: 4px 8px;
-  border-radius: var(--app-radius-xs);
+  padding: 2px 7px;
+  border-radius: var(--app-radius-pill);
   color: var(--text-secondary);
   background: var(--surface-subtle);
+  flex-shrink: 0;
 }
 
 .statusRateHigh {
   color: var(--data-badge-success-text);
-  background: var(--success-badge-bg);
+  background: var(--data-badge-success-bg);
 }
 
 .statusRateMedium {
   color: var(--data-badge-warning-text);
-  background: var(--warning-bg);
+  background: var(--data-badge-warning-bg);
 }
 
 .statusRateLow {
   color: var(--data-badge-danger-text);
-  background: var(--failure-badge-bg);
+  background: var(--data-badge-danger-bg);
 }
 
 .statusTrailingTime {
