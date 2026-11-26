@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -55,11 +56,11 @@ func TestCreateOnlineSnapshotLiveWALAndRestore(t *testing.T) {
 	}
 
 	snapDirInfo, err := os.Lstat(snapshotDir)
-	if err != nil || !snapDirInfo.IsDir() || snapDirInfo.Mode().Perm() != 0o700 {
+	if err != nil || !snapDirInfo.IsDir() || (runtime.GOOS != "windows" && snapDirInfo.Mode().Perm() != 0o700) {
 		t.Fatalf("snapshot dir info=%v err=%v", snapDirInfo, err)
 	}
 	backupsInfo, err := os.Lstat(filepath.Dir(snapshotDir))
-	if err != nil || !backupsInfo.IsDir() || backupsInfo.Mode().Perm() != 0o700 {
+	if err != nil || !backupsInfo.IsDir() || (runtime.GOOS != "windows" && backupsInfo.Mode().Perm() != 0o700) {
 		t.Fatalf("backups parent info=%v err=%v", backupsInfo, err)
 	}
 

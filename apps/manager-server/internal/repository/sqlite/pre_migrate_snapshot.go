@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
@@ -461,7 +462,7 @@ func findVerifiedPreSlotSnapshot(ctx context.Context, absDBPath, absDataKeyPath,
 
 func linkOrCopyVerifiedSnapshotFile(ctx context.Context, sourcePath, targetPath, expectedSHA256 string, expectedSize int64, mode os.FileMode) error {
 	srcInfo, err := os.Lstat(sourcePath)
-	if err == nil && srcInfo.Mode()&os.ModeSymlink == 0 && srcInfo.Mode().IsRegular() && srcInfo.Mode().Perm() == mode.Perm() && srcInfo.Size() == expectedSize {
+	if err == nil && srcInfo.Mode()&os.ModeSymlink == 0 && srcInfo.Mode().IsRegular() && (runtime.GOOS == "windows" || srcInfo.Mode().Perm() == mode.Perm()) && srcInfo.Size() == expectedSize {
 		if linkErr := os.Link(sourcePath, targetPath); linkErr == nil {
 			dstInfo, statErr := os.Lstat(targetPath)
 			if statErr == nil && dstInfo.Mode()&os.ModeSymlink == 0 && dstInfo.Mode().IsRegular() && os.SameFile(srcInfo, dstInfo) && dstInfo.Size() == expectedSize {
