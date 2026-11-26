@@ -740,6 +740,7 @@ const createLicenseTestHarness = (baseDir) => {
       '        cpa-manager-plus) printf \'%s: %s\\n\' "${3}" "${CPAMP_TEST_MANAGER_GO_VERSION:-${binary_version}}" ;;',
       '        cpa-manager-plus-ingress) printf \'%s: %s\\n\' "${3}" "${CPAMP_TEST_INGRESS_GO_VERSION:-${binary_version}}" ;;',
       '        cpa-manager-plus-runtime-supervisor) printf \'%s: %s\\n\' "${3}" "${CPAMP_TEST_SUPERVISOR_GO_VERSION:-${binary_version}}" ;;',
+      '        cpamp-launcher) printf \'%s: %s\\n\' "${3}" "${CPAMP_TEST_LAUNCHER_GO_VERSION:-${binary_version}}" ;;',
       '        *) printf \'%s: %s\\n\' "${3}" "${binary_version}" ;;',
       '      esac',
       '      exit 0',
@@ -762,6 +763,7 @@ const createLicenseTestHarness = (baseDir) => {
       '      cpa-manager-plus) cp "${CPAMP_TEST_BUILD_MANAGER_BIN}" "${out}" ;;',
       '      cpa-manager-plus-ingress) cp "${CPAMP_TEST_BUILD_INGRESS_BIN}" "${out}" ;;',
       '      cpa-manager-plus-runtime-supervisor) cp "${CPAMP_TEST_BUILD_RUNTIME_SUPERVISOR_BIN}" "${out}" ;;',
+      '      cpamp-launcher) cp "${CPAMP_TEST_BUILD_LAUNCHER_BIN:-${CPAMP_TEST_BUILD_RUNTIME_SUPERVISOR_BIN}}" "${out}" ;;',
       '      *) echo "stub go build: unknown output ${out}" >&2; exit 1 ;;',
       '    esac',
       '    chmod 0755 "${out}"',
@@ -5476,6 +5478,178 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
       assert.equal(readFileSync(unitPath, 'utf8'), origUnit);
       assert.equal(readdirSync(targetHome).filter((n) => n.startsWith('.upgrade-backup.')).length, 0);
       assert.equal(existsSync(path.join(targetHome, '.upgrade.lock')), false);
+    }
+  });
+
+  it('hands off cpa-manager-plus-launcher to cpamp-launcher in go engine mode and resets superseded slot-state.json on cpa-manager-plusctl upgrade', async () => {
+    // 1. Native launcher --engine=go / CPAMP_NATIVE_ENGINE=go execs bin/cpamp-launcher --mode=native --home=<home> preserving PID
+    {
+      const { homeDir } = createMockNativeHome(makeTempDir('cpamp-go-handoff-'));
+      const markerFile = path.join(homeDir, 'go-launcher-handoff.json');
+      const mockGoLauncher = path.join(homeDir, 'bin/cpamp-launcher');
+      writeFileSync(
+        mockGoLauncher,
+        [
+          '#!/usr/bin/env bash',
+          'set -euo pipefail',
+          `printf '{"pid":%s,"args":%s}\\n' "$$" "$(node -e 'console.log(JSON.stringify(process.argv.slice(1)))' -- "$@")" > ${JSON.stringify(markerFile)}`,
+          'exit 0',
+          '',
+        ].join('\n'),
+        { mode: 0o755 }
+      );
+      chmodSync(mockGoLauncher, 0o755);
+
+      const res = spawnSync('bash', [path.join(homeDir, 'bin/cpa-manager-plus-launcher'), '--engine=go', 'run'], {
+        env: { ...process.env, CPA_MANAGER_PLUS_HOME: homeDir },
+        encoding: 'utf8',
+      });
+      assert.equal(res.status, 0, res.stderr);
+      const recorded = JSON.parse(readFileSync(markerFile, 'utf8'));
+      assert.deepEqual(recorded.args, ['--mode=native', `--home=${homeDir}`]);
+    }
+
+    // 2. cpa-manager-plusctl upgrade resets slot-state.json and prunes superseded slots when new bundle version >= active_slot
+    {
+      const baseDir = makeTempDir('cpamp-upgrade-slot-reset-');
+      const createBundleDir = (parentDir, name, versionTag) => {
+        const { homeDir: bundleDir } = createMockNativeHome(path.join(parentDir, name));
+        mkdirSync(path.join(bundleDir, 'share/cpamp'), { recursive: true });
+        mkdirSync(path.join(bundleDir, 'licenses'), { recursive: true });
+        mkdirSync(path.join(bundleDir, 'docs'), { recursive: true });
+        writeFileSync(path.join(bundleDir, 'share/cpamp/provenance.json'), JSON.stringify({ version: versionTag }) + '\n');
+        writeFileSync(path.join(bundleDir, 'share/cpamp/runtime/seed-lineage.json'), JSON.stringify({ seed: versionTag }) + '\n');
+        writeFileSync(path.join(bundleDir, 'README.md'), `release ${versionTag}\n`);
+        writeFileSync(path.join(bundleDir, 'LICENSE'), 'MIT\n');
+        writeFileSync(path.join(bundleDir, 'THIRD_PARTY_NOTICES.txt'), `notices ${versionTag}\n`);
+        writeFileSync(path.join(bundleDir, 'licenses/app.txt'), `license ${versionTag}\n`);
+        writeFileSync(path.join(bundleDir, 'docs/notes.md'), `docs ${versionTag}\n`);
+        return bundleDir;
+      };
+
+      const targetHome = createBundleDir(baseDir, 'target', 'v2.0.0-beta.1');
+      const bundleDir = createBundleDir(baseDir, 'bundle', 'v2.0.0-beta.2');
+      const systemdDir = path.join(baseDir, 'systemd');
+      mkdirSync(systemdDir, { recursive: true });
+
+      const cpampDir = path.join(targetHome, 'data/runtime/cpamp');
+      const slotsDir = path.join(cpampDir, 'slots');
+      mkdirSync(path.join(slotsDir, 'v2.0.0-beta.2/bin'), { recursive: true });
+      mkdirSync(path.join(slotsDir, 'v2.0.0-beta.3/bin'), { recursive: true });
+      writeFileSync(path.join(slotsDir, 'v2.0.0-beta.2/bin/marker'), 'old-slot', { mode: 0o444 });
+      chmodSync(path.join(slotsDir, 'v2.0.0-beta.2/bin'), 0o555);
+      writeFileSync(path.join(slotsDir, 'v2.0.0-beta.3/bin/marker'), 'newer-slot');
+
+      const slotStatePath = path.join(cpampDir, 'slot-state.json');
+      writeFileSync(
+        slotStatePath,
+        JSON.stringify(
+          {
+            schema_version: 1,
+            state: 'committed',
+            active_slot: 'v2.0.0-beta.2',
+            previous_slot: '',
+            base_version_at_switch: 'v2.0.0-beta.1',
+            trial_id: '',
+            snapshot_dir: '',
+            schema_generation: 1,
+            previous_schema_generation: 1,
+            last_failure_code: '',
+            last_rolled_back_slot: '',
+            updated_at: '2026-11-26T00:00:00Z',
+          },
+          null,
+          2
+        ) + '\n',
+        { mode: 0o600 }
+      );
+
+      const rawEnv = await buildPortEnv(targetHome, {
+        CPAMP_TEST_ALLOW_NON_ROOT_UPGRADE: '1',
+      });
+      const { _ports: _ports, ...env } = rawEnv;
+      const res = spawnSync(
+        'bash',
+        [path.join(bundleDir, 'cpa-manager-plusctl'), 'upgrade', '--home', targetHome, '--unit-dir', systemdDir, '--no-systemctl', '--no-restart'],
+        { env, encoding: 'utf8' }
+      );
+      assert.equal(res.status, 0, res.stderr);
+
+      const updatedState = JSON.parse(readFileSync(slotStatePath, 'utf8'));
+      assert.equal(updatedState.state, 'none');
+      assert.equal(updatedState.active_slot, '');
+      assert.equal(existsSync(path.join(slotsDir, 'v2.0.0-beta.2')), false);
+      assert.equal(existsSync(path.join(slotsDir, 'v2.0.0-beta.3')), true);
+    }
+
+    // 3. Test auto mode handoff on Linux (with root or CPAMP_NATIVE_AUTO_ALLOW_NON_ROOT=1)
+    // even when slot-state.json is absent or active_slot is "".
+    {
+      const baseDir = makeTempDir('cpamp-auto-handoff-');
+      const { homeDir: autoHome } = createMockNativeHome(path.join(baseDir, 'inst'));
+      const autoLauncherScript = path.join(autoHome, 'bin/cpa-manager-plus-launcher');
+      const goHandoffLog = path.join(autoHome, 'auto-handoff.json');
+      writeFileSync(
+        path.join(autoHome, 'bin/cpamp-launcher'),
+        [
+          '#!/usr/bin/env bash',
+          'set -euo pipefail',
+          `printf '{"args":%s,"home":"%s"}\\n' "$(node -e 'console.log(JSON.stringify(process.argv.slice(1)))' -- "$@")" "\${CPAMP_NATIVE_HOME:-}" > ${JSON.stringify(goHandoffLog)}`,
+          'exit 0',
+          '',
+        ].join('\n'),
+        { mode: 0o755 }
+      );
+      chmodSync(path.join(autoHome, 'bin/cpamp-launcher'), 0o755);
+
+      const stubLinuxBinDir = path.join(baseDir, 'stub-linux-bin');
+      mkdirSync(stubLinuxBinDir, { recursive: true });
+      writeFileSync(path.join(stubLinuxBinDir, 'uname'), '#!/usr/bin/env bash\nprintf "Linux\\n"\n', { mode: 0o755 });
+      writeFileSync(path.join(stubLinuxBinDir, 'id'), '#!/usr/bin/env bash\nif [ "${1:-}" = "-u" ]; then printf "1000\\n"; else exec /usr/bin/id "$@"; fi\n', {
+        mode: 0o755,
+      });
+
+      const rawAutoEnv = await buildPortEnv(autoHome, {
+        PATH: `${stubLinuxBinDir}:${process.env.PATH || ''}`,
+        CPAMP_NATIVE_AUTO_ALLOW_NON_ROOT: '1',
+      });
+      const { _ports: _autoPorts, ...autoEnv } = rawAutoEnv;
+
+      // 3a. slot-state.json completely absent -> auto mode still hands off to cpamp-launcher!
+      const absentRes = spawnSync('bash', [autoLauncherScript, 'run'], { env: autoEnv, encoding: 'utf8' });
+      assert.equal(absentRes.status, 0, absentRes.stderr);
+      const absentPayload = JSON.parse(readFileSync(goHandoffLog, 'utf8'));
+      assert.deepEqual(absentPayload.args, ['--mode=native', `--home=${autoHome}`]);
+      assert.equal(absentPayload.home, autoHome);
+
+      // 3b. slot-state.json present with state="none" and active_slot="" -> auto mode still hands off to cpamp-launcher!
+      rmSync(goHandoffLog, { force: true });
+      const autoSlotDir = path.join(autoHome, 'data/runtime/cpamp');
+      mkdirSync(autoSlotDir, { recursive: true });
+      writeFileSync(
+        path.join(autoSlotDir, 'slot-state.json'),
+        JSON.stringify({ schema_version: 1, state: 'none', active_slot: '' }, null, 2) + '\n',
+        { mode: 0o600 }
+      );
+      const emptyActiveRes = spawnSync('bash', [autoLauncherScript], { env: autoEnv, encoding: 'utf8' });
+      assert.equal(emptyActiveRes.status, 0, emptyActiveRes.stderr);
+      const emptyActivePayload = JSON.parse(readFileSync(goHandoffLog, 'utf8'));
+      assert.deepEqual(emptyActivePayload.args, ['--mode=native', `--home=${autoHome}`]);
+
+      // 3c. Non-root without CPAMP_NATIVE_AUTO_ALLOW_NON_ROOT=1 does NOT exec cpamp-launcher!
+      rmSync(goHandoffLog, { force: true });
+      const nonRootEnv = { ...autoEnv, CPAMP_RUNTIME_ADDR: '0.0.0.0:9081' };
+      delete nonRootEnv.CPAMP_NATIVE_AUTO_ALLOW_NON_ROOT;
+      spawnSync('bash', [autoLauncherScript], { env: nonRootEnv, encoding: 'utf8' });
+      assert.equal(existsSync(goHandoffLog), false);
+
+      // 3d. Symlinked bin/cpamp-launcher is never executed in auto mode!
+      const symTarget = path.join(baseDir, 'real-cpamp-launcher');
+      writeFileSync(symTarget, '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+      rmSync(path.join(autoHome, 'bin/cpamp-launcher'), { force: true });
+      symlinkSync(symTarget, path.join(autoHome, 'bin/cpamp-launcher'));
+      spawnSync('bash', [autoLauncherScript], { env: { ...autoEnv, CPAMP_RUNTIME_ADDR: '0.0.0.0:9081' }, encoding: 'utf8' });
+      assert.equal(existsSync(goHandoffLog), false);
     }
   });
 });

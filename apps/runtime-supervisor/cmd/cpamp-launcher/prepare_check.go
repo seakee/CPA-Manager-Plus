@@ -64,6 +64,15 @@ func checkPreparationState(layout RuntimeLayout, explicitToken string, sys Syste
 	if _, err := checkRuntimeToken(layout.TokenFile, explicitToken, sys); err != nil {
 		return err
 	}
+	if _, err := checkLauncherToken(layout.LauncherTokenFile, sys); err != nil {
+		return err
+	}
+	if err := checkSlotStateFile(layout.SlotStatePath, sys); err != nil {
+		return err
+	}
+	if err := checkSlotsDirectoryEntries(layout.SlotsDir, sys); err != nil {
+		return err
+	}
 	if _, err := checkGatewayConfigFile(layout.GatewayConfigPath, sys); err != nil {
 		return err
 	}
@@ -192,6 +201,76 @@ func checkRuntimeToken(tokenFile, explicitToken string, sys System) (string, err
 		return "", errors.New("explicit Runtime transport secret does not match existing secret source")
 	}
 	return token, nil
+}
+
+// checkLauncherToken returns the existing validated launcher control token, or empty when absent.
+func checkLauncherToken(tokenFile string, sys System) (string, error) {
+	stat, err := sys.Lstat(tokenFile)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to stat Launcher control secret %s: %w", tokenFile, err)
+	}
+	if stat.Mode&fs.ModeSymlink != 0 || !stat.Mode.IsRegular() {
+		return "", errors.New("failed to initialize Launcher control secret")
+	}
+	if stat.UID != RootUID {
+		return "", fmt.Errorf("Launcher control secret owner is not root: %s (uid %d)", tokenFile, stat.UID)
+	}
+	tokenBytes, err := sys.ReadFile(tokenFile)
+	if err != nil {
+		return "", errors.New("failed to initialize Launcher control secret")
+	}
+	token := string(tokenBytes)
+	if err := validateRuntimeToken(token); err != nil {
+		return "", fmt.Errorf("invalid Launcher control secret: %w", err)
+	}
+	return token, nil
+}
+
+func checkSlotStateFile(slotStatePath string, sys System) error {
+	stat, err := sys.Lstat(slotStatePath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to stat slot state file %s: %w", slotStatePath, err)
+	}
+	if stat.Mode&fs.ModeSymlink != 0 || !stat.Mode.IsRegular() {
+		return fmt.Errorf("Slot state file is not a regular file: %s", slotStatePath)
+	}
+	if stat.UID != RootUID || stat.GID != RootGID {
+		return fmt.Errorf("Slot state file owner is not root:root: %s (%d:%d)", slotStatePath, stat.UID, stat.GID)
+	}
+	if stat.UnixPerm() != SlotStateFileMode {
+		return fmt.Errorf("Slot state file must have mode 0600: %s (%#o)", slotStatePath, stat.UnixPerm())
+	}
+	return nil
+}
+
+func checkSlotsDirectoryEntries(slotsDir string, sys System) error {
+	if _, err := sys.Lstat(slotsDir); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	entries, err := sys.ReadDir(slotsDir)
+	if err != nil {
+		return fmt.Errorf("failed to read slots directory %s: %w", slotsDir, err)
+	}
+	for _, entry := range entries {
+		childPath := filepath.Join(slotsDir, entry.Name())
+		stat, statErr := sys.Lstat(childPath)
+		if statErr != nil {
+			return fmt.Errorf("failed to stat slot entry %s: %w", childPath, statErr)
+		}
+		if stat.Mode&fs.ModeSymlink != 0 {
+			return fmt.Errorf("Refusing symlink inside slots directory: %s", childPath)
+		}
+		if stat.UID != RootUID {
+			return fmt.Errorf("Slot entry owner is not root: %s (uid %d)", childPath, stat.UID)
+		}
+	}
+	return nil
 }
 
 // validatePrivatePIDNamespaceAndProcfs enforces that cpamp-launcher is PID 1 of

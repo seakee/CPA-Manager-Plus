@@ -5,6 +5,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -53,6 +55,8 @@ type TimingConfig struct {
 	ReadinessPollInterval                 time.Duration
 	UpgradeWorkerReadyTimeout             time.Duration
 	UpgradeWorkerMaxInitialFailures       int
+	TrialWatchdogTimeout                  time.Duration
+	TrialStabilizationWindow              time.Duration
 }
 
 func (t TimingConfig) withDefaults(getenv func(string) string) TimingConfig {
@@ -101,7 +105,34 @@ func (t TimingConfig) withDefaults(getenv func(string) string) TimingConfig {
 	if t.UpgradeWorkerMaxInitialFailures <= 0 {
 		t.UpgradeWorkerMaxInitialFailures = UpgradeWorkerMaxInitialFailures
 	}
+	if t.TrialWatchdogTimeout <= 0 {
+		t.TrialWatchdogTimeout = DefaultTrialWatchdogTimeout
+	}
+	if t.TrialStabilizationWindow <= 0 {
+		t.TrialStabilizationWindow = parseTrialStabilizationWindowEnv(getenv)
+	}
+	if t.TrialWatchdogTimeout > 0 && t.TrialWatchdogTimeout < 15*time.Second {
+		maxSoak := min(DefaultTrialStabilizationWindow, t.TrialWatchdogTimeout/3)
+		if maxSoak > 0 && t.TrialStabilizationWindow > maxSoak {
+			t.TrialStabilizationWindow = maxSoak
+		}
+	}
 	return t
+}
+
+func parseTrialStabilizationWindowEnv(getenv func(string) string) time.Duration {
+	if getenv == nil {
+		return DefaultTrialStabilizationWindow
+	}
+	raw := strings.TrimSpace(getenv("CPAMP_TRIAL_STABILIZATION_WINDOW"))
+	if raw == "" {
+		return DefaultTrialStabilizationWindow
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return DefaultTrialStabilizationWindow
+	}
+	return d
 }
 
 func parseDrainTimeoutEnv(getenv func(string) string) time.Duration {
@@ -127,12 +158,27 @@ type SupervisorConfig struct {
 	UpgradeSocket         string
 	IngressSpec           ChildSpec
 	SupervisorTCPAddr     string
+	SupervisorReadyFunc   func(ctx context.Context) bool
 	ManagerHealthURL      string
+	IngressPublicTCPAddr  string
+	IngressAdminTCPAddr   string
 	Timings               TimingConfig
 	Stdout                io.Writer
 	Stderr                io.Writer
 	SetCredentials        bool
 	BeforeSupervisorStart func(context.Context, ChildSpec) (ChildSpec, error)
+	SlotControl           *SlotControlServer
+	SlotStore             *SlotStore
+	BaseInstallRoot       string
+	BaseVersion           string
+	ActiveSlot            string
+	LauncherArgs          []string
+	BaseEnviron           []string
+	Trial                 *TrialWatchdogConfig
+	OnChildStart          func(name string, pid int)
+	OnAllReady            func()
+	OnBeforeExec          func()
+	beforeTrialCommit     func()
 }
 
 // NewSupervisorConfig builds the production SupervisorConfig from PreparedRuntime
@@ -177,6 +223,8 @@ func NewSupervisorConfig(prepared *PreparedRuntime, environ []string) Supervisor
 		},
 		SupervisorTCPAddr:     prepared.RuntimeAddr,
 		ManagerHealthURL:      "http://" + DefaultManagerAddr + "/health",
+		IngressPublicTCPAddr:  NormalizeTCPProbeAddr(DefaultIngressPublicAddr),
+		IngressAdminTCPAddr:   DefaultIngressAdminAddr,
 		Timings:               timings,
 		Stdout:                os.Stdout,
 		Stderr:                os.Stderr,
@@ -232,14 +280,45 @@ func BuildSupervisorChildEnv(prepared *PreparedRuntime, containerEnv map[string]
 			env[k] = v
 		}
 	}
+	stripLauncherOnlyEnvVars(env)
 	return formatEnvMap(env)
+}
+
+func stripLauncherOnlyEnvVars(env map[string]string) {
+	for k := range env {
+		if strings.HasPrefix(k, "CPAMP_LAUNCHER_") {
+			delete(env, k)
+		}
+	}
+	delete(env, "CPAMP_TRIAL_HOLD")
+	delete(env, "CPAMP_ACTIVE_SLOT")
+	delete(env, "CPAMP_BASE_INSTALL_ROOT")
+	delete(env, "CPAMP_BASE_VERSION")
+	delete(env, "CPAMP_RUNNING_SLOT")
 }
 
 // BuildManagerChildEnv builds the environment for cpa-manager-plus by passing
 // through the container environment (which carries image ENV defaults and user
 // overrides), stripping launcher/Supervisor-only secrets, and forcing the
-// single-container loopback addresses and token file path.
+// single-container loopback addresses and token file paths.
 func BuildManagerChildEnv(prepared *PreparedRuntime, containerEnv map[string]string) []string {
+	return BuildManagerChildEnvWithAddrs(
+		prepared,
+		DefaultManagerAddr,
+		DefaultRuntimeAddr,
+		DefaultIngressAdminAddr,
+		containerEnv,
+	)
+}
+
+// BuildManagerChildEnvWithAddrs builds Manager environment variables with explicit service addresses.
+func BuildManagerChildEnvWithAddrs(
+	prepared *PreparedRuntime,
+	managerAddr string,
+	runtimeAddr string,
+	ingressControlAddr string,
+	containerEnv map[string]string,
+) []string {
 	env := baseScratchEnv(containerEnv)
 	for k, v := range containerEnv {
 		if k != "" {
@@ -251,26 +330,102 @@ func BuildManagerChildEnv(prepared *PreparedRuntime, containerEnv map[string]str
 	if tokenFile == "" {
 		tokenFile = DefaultRuntimeTokenFile
 	}
-	env["HTTP_ADDR"] = DefaultManagerAddr
-	env["CPAMP_RUNTIME_URL"] = "http://" + DefaultRuntimeAddr
+	launcherTokenFile := prepared.LauncherTokenFile
+	if launcherTokenFile == "" {
+		launcherTokenFile = filepath.Join(filepath.Dir(tokenFile), "launcher-token")
+	}
+	launcherControlAddr := prepared.LauncherControlAddr
+	if launcherControlAddr == "" {
+		launcherControlAddr = DefaultLauncherControlAddr
+	}
+	baseVersion := prepared.BaseVersion
+	if baseVersion == "" {
+		baseVersion = NormalizeVersionOrRaw(Version)
+	}
+	if managerAddr == "" {
+		managerAddr = DefaultManagerAddr
+	}
+	if runtimeAddr == "" {
+		runtimeAddr = prepared.RuntimeAddr
+	}
+	if runtimeAddr == "" {
+		runtimeAddr = DefaultRuntimeAddr
+	}
+	if ingressControlAddr == "" {
+		ingressControlAddr = DefaultIngressAdminAddr
+	}
+
+	env["HTTP_ADDR"] = managerAddr
+	env["CPAMP_RUNTIME_URL"] = "http://" + runtimeAddr
 	env["CPAMP_RUNTIME_TOKEN_FILE"] = tokenFile
-	env["CPAMP_INGRESS_CONTROL_URL"] = "http://" + DefaultIngressAdminAddr
+	env["CPAMP_INGRESS_CONTROL_URL"] = "http://" + ingressControlAddr
+	env["CPAMP_LAUNCHER_CONTROL_URL"] = "http://" + launcherControlAddr
+	env["CPAMP_LAUNCHER_TOKEN_FILE"] = launcherTokenFile
+	env["CPAMP_BASE_VERSION"] = baseVersion
+	env["CPAMP_RUNNING_SLOT"] = prepared.RunningSlot
+	if prepared.TrialHold {
+		env["CPAMP_TRIAL_HOLD"] = "1"
+	} else {
+		delete(env, "CPAMP_TRIAL_HOLD")
+	}
+
+	baseInstallRoot := strings.TrimSpace(prepared.BaseInstallRoot)
+	if baseInstallRoot != "" {
+		env["CPAMP_BASE_INSTALL_ROOT"] = baseInstallRoot
+	} else {
+		delete(env, "CPAMP_BASE_INSTALL_ROOT")
+	}
 
 	delete(env, "CPAMP_RUNTIME_TOKEN")
+	delete(env, "CPAMP_LAUNCHER_TOKEN")
+	delete(env, "CPAMP_LAUNCHER_CONTROL_ADDR")
+	delete(env, "CPAMP_ACTIVE_SLOT")
 	return formatEnvMap(env)
 }
 
 // BuildIngressChildEnv builds the clean environment for cpamp-ingress.
-// CPAMP_RUNTIME_TOKEN is never included.
+// CPAMP_RUNTIME_TOKEN and CPAMP_LAUNCHER_* are never included.
 func BuildIngressChildEnv(drainTimeout time.Duration, containerEnv map[string]string) []string {
+	return BuildIngressChildEnvWithAddrs(
+		drainTimeout,
+		DefaultIngressPublicAddr,
+		DefaultManagerAddr,
+		DefaultRuntimeCPAAddr,
+		DefaultIngressAdminAddr,
+		containerEnv,
+	)
+}
+
+// BuildIngressChildEnvWithAddrs builds Ingress environment variables with explicit addresses.
+func BuildIngressChildEnvWithAddrs(
+	drainTimeout time.Duration,
+	ingressPublicAddr string,
+	managerAddr string,
+	gatewayAddr string,
+	ingressControlAddr string,
+	containerEnv map[string]string,
+) []string {
 	if drainTimeout <= 0 {
 		drainTimeout = DefaultDrainTimeout
 	}
+	if ingressPublicAddr == "" {
+		ingressPublicAddr = DefaultIngressPublicAddr
+	}
+	if managerAddr == "" {
+		managerAddr = DefaultManagerAddr
+	}
+	if gatewayAddr == "" {
+		gatewayAddr = DefaultRuntimeCPAAddr
+	}
+	if ingressControlAddr == "" {
+		ingressControlAddr = DefaultIngressAdminAddr
+	}
 	env := baseScratchEnv(containerEnv)
-	env["CPAMP_INGRESS_ADDR"] = DefaultIngressPublicAddr
-	env["CPAMP_MANAGER_URL"] = "http://" + DefaultManagerAddr
-	env["CPAMP_GATEWAY_URL"] = "http://" + DefaultRuntimeCPAAddr
-	env["CPAMP_INGRESS_CONTROL_ADDR"] = DefaultIngressAdminAddr
+	stripLauncherOnlyEnvVars(env)
+	env["CPAMP_INGRESS_ADDR"] = ingressPublicAddr
+	env["CPAMP_MANAGER_URL"] = "http://" + managerAddr
+	env["CPAMP_GATEWAY_URL"] = "http://" + gatewayAddr
+	env["CPAMP_INGRESS_CONTROL_ADDR"] = ingressControlAddr
 	env["CPAMP_INGRESS_SHUTDOWN_TIMEOUT"] = drainTimeout.String()
 	delete(env, "CPAMP_RUNTIME_TOKEN")
 	return formatEnvMap(env)
@@ -286,8 +441,9 @@ type lineWriteReq struct {
 // stdout/stderr sinks so a stalled consumer cannot hold up child pipe draining
 // or ordered shutdown.
 type lineSink struct {
-	ch     chan lineWriteReq
-	stopCh chan struct{}
+	ch       chan lineWriteReq
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 func newLineSink() *lineSink {
@@ -313,21 +469,23 @@ func (s *lineSink) flushAndStop(timeout time.Duration) {
 	if s == nil {
 		return
 	}
-	if timeout <= 0 {
-		timeout = 50 * time.Millisecond
-	}
-	flushCh := make(chan struct{})
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case s.ch <- lineWriteReq{flushCh: flushCh}:
+	s.stopOnce.Do(func() {
+		if timeout <= 0 {
+			timeout = 50 * time.Millisecond
+		}
+		flushCh := make(chan struct{})
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
 		select {
-		case <-flushCh:
+		case s.ch <- lineWriteReq{flushCh: flushCh}:
+			select {
+			case <-flushCh:
+			case <-timer.C:
+			}
 		case <-timer.C:
 		}
-	case <-timer.C:
-	}
-	close(s.stopCh)
+		close(s.stopCh)
+	})
 }
 
 type syncLineWriter struct {
@@ -366,17 +524,18 @@ func (w *syncLineWriter) writePrefixedLine(prefix, line string) {
 // residual grandchild) is automatically reaped without stealing supervised PIDs.
 type centralReaper struct {
 	mu       sync.Mutex
-	children map[int]chan syscall.WaitStatus
+	children map[int]*runningChild
 	sigchld  chan os.Signal
 	stopCh   chan struct{}
 	doneCh   chan struct{}
+	stopOnce sync.Once
 }
 
 func newCentralReaper() *centralReaper {
 	sigchld := make(chan os.Signal, 8)
 	signal.Notify(sigchld, syscall.SIGCHLD)
 	r := &centralReaper{
-		children: make(map[int]chan syscall.WaitStatus),
+		children: make(map[int]*runningChild),
 		sigchld:  sigchld,
 		stopCh:   make(chan struct{}),
 		doneCh:   make(chan struct{}),
@@ -386,9 +545,11 @@ func newCentralReaper() *centralReaper {
 }
 
 func (r *centralReaper) stop() {
-	signal.Stop(r.sigchld)
-	close(r.stopCh)
-	<-r.doneCh
+	r.stopOnce.Do(func() {
+		signal.Stop(r.sigchld)
+		close(r.stopCh)
+		<-r.doneCh
+	})
 }
 
 func (r *centralReaper) loop() {
@@ -413,12 +574,17 @@ func (r *centralReaper) reapAvailable() {
 		var status syscall.WaitStatus
 		wpid, err := syscall.Wait4(-1, &status, syscall.WNOHANG, nil)
 		if wpid > 0 {
-			if ch, ok := r.children[wpid]; ok {
+			reapedChild, ok := r.children[wpid]
+			if ok {
 				delete(r.children, wpid)
-				ch <- status
-				close(ch)
+				reapedChild.waitStatus = status
+				reapedChild.reaped = true
+				close(reapedChild.exitCh)
 			}
 			r.mu.Unlock()
+			if ok && reapedChild != nil && reapedChild.onReap != nil {
+				reapedChild.onReap(status)
+			}
 			continue
 		}
 		r.mu.Unlock()
@@ -434,7 +600,10 @@ type runningChild struct {
 	pid            int
 	pgid           int
 	startedAt      time.Time
-	exitCh         <-chan syscall.WaitStatus
+	exitCh         chan struct{}
+	waitStatus     syscall.WaitStatus
+	reaped         bool
+	onReap         func(syscall.WaitStatus)
 	ioDone         chan struct{}
 	closePipesOnce sync.Once
 	outR           *os.File
@@ -462,6 +631,7 @@ func (r *centralReaper) startChild(
 	spec ChildSpec,
 	setCreds bool,
 	stdoutWriter, stderrWriter *syncLineWriter,
+	onReap func(syscall.WaitStatus),
 ) (*runningChild, error) {
 	outR, outW, err := os.Pipe()
 	if err != nil {
@@ -481,7 +651,15 @@ func (r *centralReaper) startChild(
 	cmd.Stderr = errW
 	cmd.SysProcAttr = buildSysProcAttr(spec, setCreds)
 
-	exitCh := make(chan syscall.WaitStatus, 1)
+	ioDone := make(chan struct{})
+	child := &runningChild{
+		spec:   spec,
+		exitCh: make(chan struct{}),
+		onReap: onReap,
+		ioDone: ioDone,
+		outR:   outR,
+		errR:   errR,
+	}
 
 	r.mu.Lock()
 	var oldUmask int
@@ -492,10 +670,12 @@ func (r *centralReaper) startChild(
 	if spec.HasUmask {
 		syscall.Umask(oldUmask)
 	}
-	var pid int
 	if startErr == nil && cmd.Process != nil {
-		pid = cmd.Process.Pid
-		r.children[pid] = exitCh
+		pid := cmd.Process.Pid
+		child.pid = pid
+		child.pgid = pid
+		child.startedAt = time.Now()
+		r.children[pid] = child
 		_ = cmd.Process.Release()
 	}
 	r.mu.Unlock()
@@ -509,7 +689,6 @@ func (r *centralReaper) startChild(
 		return nil, startErr
 	}
 
-	ioDone := make(chan struct{})
 	var ioWG sync.WaitGroup
 	ioWG.Add(2)
 	go func() {
@@ -527,16 +706,7 @@ func (r *centralReaper) startChild(
 		close(ioDone)
 	}()
 
-	return &runningChild{
-		spec:      spec,
-		pid:       pid,
-		pgid:      pid,
-		startedAt: time.Now(),
-		exitCh:    exitCh,
-		ioDone:    ioDone,
-		outR:      outR,
-		errR:      errR,
-	}, nil
+	return child, nil
 }
 
 func copyPrefixedLines(r io.Reader, dst *syncLineWriter, prefix string) {
@@ -557,6 +727,8 @@ type managedService struct {
 	mu           sync.Mutex
 	current      *runningChild
 	stopped      bool
+	starts       int
+	reapedCount  int
 	nonZeroExits int
 	exitNotify   chan struct{}
 	doneCh       chan struct{}
@@ -570,10 +742,7 @@ func newManagedService(spec ChildSpec) *managedService {
 	}
 }
 
-func (s *managedService) recordNonZeroExit() {
-	s.mu.Lock()
-	s.nonZeroExits++
-	s.mu.Unlock()
+func (s *managedService) notifyExit() {
 	if s.exitNotify != nil {
 		select {
 		case s.exitNotify <- struct{}{}:
@@ -582,16 +751,92 @@ func (s *managedService) recordNonZeroExit() {
 	}
 }
 
+func (s *managedService) recordNonZeroExit() {
+	s.mu.Lock()
+	s.nonZeroExits++
+	s.mu.Unlock()
+	s.notifyExit()
+}
+
+func (s *managedService) startCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.starts
+}
+
 func (s *managedService) nonZeroFailureCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.nonZeroExits
 }
 
+func (s *managedService) isCurrentlyRunning() bool {
+	s.mu.Lock()
+	cur := s.current
+	reaped := s.reapedCount >= s.starts
+	s.mu.Unlock()
+	if cur == nil || reaped {
+		return false
+	}
+	select {
+	case <-cur.exitCh:
+		return false
+	default:
+		return true
+	}
+}
+
+func (s *managedService) stripEnvKey(key string) {
+	prefix := key + "="
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	filtered := s.spec.Env[:0]
+	for _, entry := range s.spec.Env {
+		if !strings.HasPrefix(entry, prefix) {
+			filtered = append(filtered, entry)
+		}
+	}
+	s.spec.Env = filtered
+}
+
+func (s *managedService) terminateCurrentForReload() {
+	s.mu.Lock()
+	cur := s.current
+	s.mu.Unlock()
+	if cur != nil && cur.pid > 0 {
+		_ = syscall.Kill(cur.pid, syscall.SIGTERM)
+	}
+}
+
+type syncLineIoWriter struct {
+	w *syncLineWriter
+}
+
+func (s syncLineIoWriter) Write(p []byte) (int, error) {
+	if s.w != nil {
+		s.w.writePrefixedLine("", string(p))
+	}
+	return len(p), nil
+}
+
 // RunSupervisor starts Supervisor, Manager, and Ingress in order with readiness
 // gating, supervises and restarts crashed children with exponential backoff,
 // and performs ordered drain on ctx cancellation.
 func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
+	tr, err := RunSupervisorWithSlotTransition(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	if tr != nil {
+		return ExecuteProcessReplacement(tr)
+	}
+	return nil
+}
+
+// RunSupervisorWithSlotTransition runs child supervision and returns a non-nil
+// *ExecTransition when an online slot activate, rollback, or 60s trial rollback
+// requests an in-place unix.Exec replacement of cpamp-launcher.
+func RunSupervisorWithSlotTransition(ctx context.Context, cfg SupervisorConfig) (*ExecTransition, error) {
 	cfg.Timings = cfg.Timings.withDefaults(os.Getenv)
 	if cfg.Stdout == nil {
 		cfg.Stdout = os.Stdout
@@ -629,6 +874,129 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 	if cfg.UpgradeSpec != nil {
 		upgradeSvc = newManagedService(*cfg.UpgradeSpec)
 	}
+
+	var (
+		trialMu       sync.Mutex
+		trialFailCode string
+		trialDoneCh   = make(chan struct{})
+		trialStopOnce sync.Once
+	)
+	stopTrialWatchdog := func() {
+		trialStopOnce.Do(func() {
+			close(trialDoneCh)
+		})
+	}
+	defer stopTrialWatchdog()
+
+	recordTrialFailure := func(code string) {
+		trialMu.Lock()
+		if trialFailCode == "" {
+			trialFailCode = code
+		}
+		trialMu.Unlock()
+		beginShutdown()
+	}
+	getTrialFailure := func() string {
+		trialMu.Lock()
+		defer trialMu.Unlock()
+		return trialFailCode
+	}
+
+	var initialTrialState SlotState
+	if cfg.Trial != nil {
+		initialTrialState = SlotState{
+			SchemaVersion:            1,
+			State:                    SlotStateTrial,
+			ActiveSlot:               firstNonEmptyString(cfg.ActiveSlot, cfg.Trial.ActiveSlot),
+			BaseVersionAtSwitch:      firstNonEmptyString(cfg.BaseVersion, cfg.Trial.BaseVersion),
+			SchemaGeneration:         1,
+			PreviousSchemaGeneration: 1,
+		}
+		trialStore := cfg.SlotStore
+		if trialStore == nil {
+			trialStore = cfg.Trial.Store
+		}
+		if trialStore != nil {
+			if st, exists, err := trialStore.ReadSlotStateIfExists(); err == nil && exists {
+				initialTrialState = st
+			}
+		}
+	}
+
+	checkTrialProcessesHealthy := func() string {
+		reaper.reapAvailable()
+		if failCode := getTrialFailure(); failCode != "" {
+			return failCode
+		}
+		if supSvc.startCount() != 1 || supSvc.nonZeroFailureCount() > 0 || !supSvc.isCurrentlyRunning() {
+			return FailureCodeSupervisorStartupFailed
+		}
+		if upgradeSvc != nil && (upgradeSvc.nonZeroFailureCount() > 0 || upgradeSvc.startCount() > 1) {
+			return FailureCodeManagerStartupFailed
+		}
+		if mgrSvc.startCount() != 1 || mgrSvc.nonZeroFailureCount() > 0 || !mgrSvc.isCurrentlyRunning() {
+			return FailureCodeManagerStartupFailed
+		}
+		if ingSvc.startCount() != 1 || ingSvc.nonZeroFailureCount() > 0 || !ingSvc.isCurrentlyRunning() {
+			return FailureCodeIngressStartupFailed
+		}
+		return ""
+	}
+	if cfg.Trial != nil {
+		var upgradeExitCh <-chan struct{}
+		if upgradeSvc != nil {
+			upgradeExitCh = upgradeSvc.exitNotify
+		}
+		go func() {
+			timer := time.NewTimer(cfg.Timings.TrialWatchdogTimeout)
+			defer timer.Stop()
+			for {
+				if shutdownCtx.Err() == nil && ctx.Err() == nil {
+					if supSvc.nonZeroFailureCount() > 0 || supSvc.startCount() > 1 || (supSvc.startCount() == 1 && !supSvc.isCurrentlyRunning()) {
+						recordTrialFailure(FailureCodeSupervisorStartupFailed)
+						return
+					}
+					if upgradeSvc != nil && (upgradeSvc.nonZeroFailureCount() > 0 || upgradeSvc.startCount() > 1) {
+						recordTrialFailure(FailureCodeManagerStartupFailed)
+						return
+					}
+					if mgrSvc.nonZeroFailureCount() > 0 || mgrSvc.startCount() > 1 || (mgrSvc.startCount() == 1 && !mgrSvc.isCurrentlyRunning()) {
+						recordTrialFailure(FailureCodeManagerStartupFailed)
+						return
+					}
+					if ingSvc.nonZeroFailureCount() > 0 || ingSvc.startCount() > 1 || (ingSvc.startCount() == 1 && !ingSvc.isCurrentlyRunning()) {
+						recordTrialFailure(FailureCodeIngressStartupFailed)
+						return
+					}
+				}
+				select {
+				case <-trialDoneCh:
+					return
+				case <-shutdownCtx.Done():
+					return
+				case <-ctx.Done():
+					return
+				case <-supSvc.exitNotify:
+				case <-upgradeExitCh:
+				case <-mgrSvc.exitNotify:
+				case <-ingSvc.exitNotify:
+				case <-timer.C:
+					recordTrialFailure(FailureCodeTrialTimeout)
+					return
+				}
+			}
+		}()
+	}
+
+	shutdownControlServer := func() {
+		if cfg.SlotControl != nil {
+			ctrlCtx, ctrlCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = cfg.SlotControl.Shutdown(ctrlCtx)
+			ctrlCancel()
+		}
+	}
+	defer shutdownControlServer()
+
 	shutdownAll := func() {
 		var upgradeStopped chan struct{}
 		if upgradeSvc != nil {
@@ -647,6 +1015,40 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 		}
 	}
 
+	rollbackTrialAndReturn := func(code string) (*ExecTransition, error) {
+		stopTrialWatchdog()
+		shutdownControlServer()
+		beginShutdown()
+		shutdownAll()
+		reaper.stop()
+		if cfg.OnBeforeExec != nil {
+			cfg.OnBeforeExec()
+		}
+		sink.flushAndStop(cfg.Timings.SIGKILLReapWait)
+		tr, _, rbErr := ExecuteTrialRollback(*cfg.Trial, initialTrialState, code, cfg.Stderr)
+		if rbErr != nil {
+			return nil, rbErr
+		}
+		return tr, nil
+	}
+
+	shutdownAndReturn := func() (*ExecTransition, error) {
+		if cfg.Trial != nil {
+			if failCode := getTrialFailure(); failCode != "" {
+				return rollbackTrialAndReturn(failCode)
+			}
+		}
+		beginShutdown()
+		shutdownControlServer()
+		shutdownAll()
+		select {
+		case err := <-fatalErrCh:
+			return nil, err
+		default:
+			return nil, nil
+		}
+	}
+
 	supFirstStart := make(chan struct{})
 	go superviseService(
 		shutdownCtx,
@@ -658,6 +1060,9 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 		true,
 		supFirstStart,
 		func(err error) {
+			if cfg.Trial != nil {
+				recordTrialFailure(FailureCodeSupervisorStartupFailed)
+			}
 			select {
 			case fatalErrCh <- err:
 			default:
@@ -666,38 +1071,43 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 		},
 	)
 
-	shutdownAndReturn := func() error {
-		beginShutdown()
-		shutdownAll()
-		select {
-		case err := <-fatalErrCh:
-			return err
-		default:
-			return nil
-		}
-	}
-
 	select {
 	case <-supFirstStart:
+	case <-shutdownCtx.Done():
+		return shutdownAndReturn()
 	case err := <-fatalErrCh:
+		if cfg.Trial != nil {
+			return rollbackTrialAndReturn(FailureCodeSupervisorStartupFailed)
+		}
 		shutdownAll()
-		return err
+		return nil, err
 	case <-ctx.Done():
 		return shutdownAndReturn()
 	}
 
-	if cfg.SupervisorTCPAddr != "" {
-		if err := waitForReadiness(ctx, shutdownCtx, "runtime supervisor", stderrW, func(checkCtx context.Context) bool {
-			return tcpProbeReady(checkCtx, cfg.SupervisorTCPAddr, cfg.Timings.ReadinessPollInterval)
-		}, cfg.Timings.ReadinessPollInterval); err != nil {
+	if cfg.SupervisorReadyFunc != nil || cfg.SupervisorTCPAddr != "" {
+		supReadyCheck := cfg.SupervisorReadyFunc
+		if supReadyCheck == nil {
+			supReadyCheck = func(checkCtx context.Context) bool {
+				return tcpProbeReady(checkCtx, cfg.SupervisorTCPAddr, cfg.Timings.ReadinessPollInterval)
+			}
+		}
+		if err := waitForReadiness(ctx, shutdownCtx, "runtime supervisor", stderrW, supReadyCheck, cfg.Timings.ReadinessPollInterval); err != nil {
 			return shutdownAndReturn()
 		}
 	}
 
+	if cfg.Trial != nil && getTrialFailure() != "" {
+		return rollbackTrialAndReturn(getTrialFailure())
+	}
+
 	select {
 	case err := <-fatalErrCh:
+		if cfg.Trial != nil {
+			return rollbackTrialAndReturn(FailureCodeSupervisorStartupFailed)
+		}
 		shutdownAll()
-		return err
+		return nil, err
 	case <-ctx.Done():
 		return shutdownAndReturn()
 	default:
@@ -716,13 +1126,19 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 			cfg.Timings,
 		)
 		if fatalErr != nil {
+			if cfg.Trial != nil {
+				return rollbackTrialAndReturn(FailureCodeSupervisorStartupFailed)
+			}
 			shutdownAll()
-			return fatalErr
+			return nil, fatalErr
 		}
 		if canceled {
 			return shutdownAndReturn()
 		}
 		if !ready {
+			if cfg.Trial != nil {
+				return rollbackTrialAndReturn(FailureCodeManagerStartupFailed)
+			}
 			stderrW.writePrefixedLine("[launcher] ", fmt.Sprintf(
 				"upgrade worker not ready (%s); proceeding to start manager and ingress in degraded recovery mode",
 				warnReason,
@@ -745,26 +1161,44 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 
 	select {
 	case <-mgrFirstStart:
+	case <-shutdownCtx.Done():
+		return shutdownAndReturn()
 	case err := <-fatalErrCh:
+		if cfg.Trial != nil {
+			return rollbackTrialAndReturn(FailureCodeSupervisorStartupFailed)
+		}
 		shutdownAll()
-		return err
+		return nil, err
 	case <-ctx.Done():
 		return shutdownAndReturn()
 	}
 
 	if cfg.ManagerHealthURL != "" {
 		bootstrapURL := managerBootstrapURL(cfg.ManagerHealthURL)
+		if cfg.Trial != nil {
+			bootstrapURL = ""
+		}
 		if err := waitForReadiness(ctx, shutdownCtx, "manager", stderrW, func(checkCtx context.Context) bool {
+			if cfg.Trial != nil {
+				return trialManagerHealthOK(checkCtx, trialReadinessHTTPClient(cfg.Timings.ReadinessPollInterval), cfg.ManagerHealthURL)
+			}
 			return httpEndpointStatusOK(checkCtx, readinessHTTPClient(cfg.Timings.ReadinessPollInterval), cfg.ManagerHealthURL, bootstrapURL)
 		}, cfg.Timings.ReadinessPollInterval); err != nil {
 			return shutdownAndReturn()
 		}
 	}
 
+	if cfg.Trial != nil && getTrialFailure() != "" {
+		return rollbackTrialAndReturn(getTrialFailure())
+	}
+
 	select {
 	case err := <-fatalErrCh:
+		if cfg.Trial != nil {
+			return rollbackTrialAndReturn(FailureCodeSupervisorStartupFailed)
+		}
 		shutdownAll()
-		return err
+		return nil, err
 	case <-ctx.Done():
 		return shutdownAndReturn()
 	default:
@@ -783,11 +1217,118 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 		nil,
 	)
 
+	if cfg.Trial != nil || cfg.OnAllReady != nil {
+		select {
+		case <-ingFirstStart:
+		case <-shutdownCtx.Done():
+			return shutdownAndReturn()
+		case err := <-fatalErrCh:
+			if cfg.Trial != nil {
+				return rollbackTrialAndReturn(FailureCodeSupervisorStartupFailed)
+			}
+			shutdownAll()
+			return nil, err
+		case <-ctx.Done():
+			return shutdownAndReturn()
+		}
+
+		pubProbeAddr := NormalizeTCPProbeAddr(cfg.IngressPublicTCPAddr)
+		if pubProbeAddr != "" {
+			if err := waitForReadiness(ctx, shutdownCtx, "ingress public", stderrW, func(checkCtx context.Context) bool {
+				return tcpProbeReady(checkCtx, pubProbeAddr, cfg.Timings.ReadinessPollInterval)
+			}, cfg.Timings.ReadinessPollInterval); err != nil {
+				return shutdownAndReturn()
+			}
+		}
+		adminProbeAddr := NormalizeTCPProbeAddr(cfg.IngressAdminTCPAddr)
+		if adminProbeAddr != "" {
+			if err := waitForReadiness(ctx, shutdownCtx, "ingress admin", stderrW, func(checkCtx context.Context) bool {
+				return tcpProbeReady(checkCtx, adminProbeAddr, cfg.Timings.ReadinessPollInterval)
+			}, cfg.Timings.ReadinessPollInterval); err != nil {
+				return shutdownAndReturn()
+			}
+		}
+	}
+
+	if cfg.Trial != nil {
+		if failCode := runTrialStabilizationSoak(ctx, shutdownCtx, cfg, reaper, supSvc, mgrSvc, ingSvc, fatalErrCh, getTrialFailure); failCode != "" {
+			if failCode == "canceled" {
+				return shutdownAndReturn()
+			}
+			return rollbackTrialAndReturn(failCode)
+		}
+		if cfg.beforeTrialCommit != nil {
+			cfg.beforeTrialCommit()
+		}
+		var preCommitFailCode string
+		committedState, commitErr := persistCommittedTrialState(*cfg.Trial, func() error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if code := checkTrialProcessesHealthy(); code != "" {
+				preCommitFailCode = code
+				return fmt.Errorf("trial child unhealthy before commit: %s", code)
+			}
+			return nil
+		})
+		if commitErr != nil {
+			if ctx.Err() != nil && preCommitFailCode == "" && getTrialFailure() == "" {
+				return shutdownAndReturn()
+			}
+			code := firstNonEmptyString(preCommitFailCode, getTrialFailure(), SlotCodeInternalError)
+			return rollbackTrialAndReturn(code)
+		}
+		if code := checkTrialProcessesHealthy(); code != "" {
+			return rollbackTrialAndReturn(code)
+		}
+		stopTrialWatchdog()
+		mgrSvc.stripEnvKey("CPAMP_TRIAL_HOLD")
+		released := finalizeCommittedTrialRelease(ctx, *cfg.Trial, committedState, syncLineIoWriter{w: stderrW})
+		if !released {
+			mgrSvc.terminateCurrentForReload()
+		}
+	}
+
+	if cfg.OnAllReady != nil {
+		cfg.OnAllReady()
+	}
+
+	var switchCh <-chan SlotSwitchAction
+	if cfg.SlotControl != nil {
+		switchCh = cfg.SlotControl.SwitchChan()
+	}
+
 	select {
-	case err := <-fatalErrCh:
+	case action := <-switchCh:
+		shutdownControlServer()
 		beginShutdown()
 		shutdownAll()
-		return err
+		reaper.stop()
+		if cfg.OnBeforeExec != nil {
+			cfg.OnBeforeExec()
+		}
+		if cfg.SlotStore != nil {
+			if err := WriteSwitchSlotState(cfg.SlotStore, cfg.BaseVersion, cfg.ActiveSlot, action); err != nil {
+				return nil, fmt.Errorf("failed writing slot-state for transition: %w", err)
+			}
+		}
+		var nextActiveSlot string
+		if action.Kind == SlotSwitchActivate {
+			nextActiveSlot = action.TargetVersion
+		} else {
+			nextActiveSlot = action.RollbackTargetSlot
+		}
+		sink.flushAndStop(cfg.Timings.SIGKILLReapWait)
+		return &ExecTransition{
+			Path: action.TargetLauncherPath,
+			Args: cloneArgsOrDefault(cfg.LauncherArgs, action.TargetLauncherPath),
+			Env:  buildLauncherExecEnv(cfg.BaseEnviron, cfg.BaseInstallRoot, cfg.BaseVersion, nextActiveSlot),
+		}, nil
+	case err := <-fatalErrCh:
+		beginShutdown()
+		shutdownControlServer()
+		shutdownAll()
+		return nil, err
 	case <-ctx.Done():
 		return shutdownAndReturn()
 	}
@@ -831,13 +1372,28 @@ func superviseService(
 		if isSupervisor && cfg.BeforeSupervisorStart != nil {
 			spec, err = cfg.BeforeSupervisorStart(withChildReaper(shutdownCtx, reaper.reapAvailable), spec)
 		}
+		var recordExitOnce sync.Once
+		recordChildExit := func(status syscall.WaitStatus, reaped bool) {
+			recordExitOnce.Do(func() {
+				svc.mu.Lock()
+				svc.reapedCount++
+				if !reaped || !status.Exited() || status.ExitStatus() != 0 {
+					svc.nonZeroExits++
+				}
+				svc.mu.Unlock()
+				svc.notifyExit()
+			})
+		}
 		var child *runningChild
 		if err == nil && shutdownCtx.Err() == nil {
-			child, err = reaper.startChild(spec, cfg.SetCredentials, stdoutW, stderrW)
+			child, err = reaper.startChild(spec, cfg.SetCredentials, stdoutW, stderrW, func(st syscall.WaitStatus) {
+				recordChildExit(st, true)
+			})
 		} else if err == nil {
 			err = shutdownCtx.Err()
 		}
 		if err == nil {
+			svc.starts++
 			svc.current = child
 		} else {
 			svc.current = nil
@@ -849,9 +1405,13 @@ func superviseService(
 			uptime = 0
 			svc.recordNonZeroExit()
 		} else {
+			if cfg.OnChildStart != nil {
+				cfg.OnChildStart(svc.spec.Name, child.pid)
+			}
 			notifyStarted()
-			status, ok := <-child.exitCh
+			<-child.exitCh
 			uptime = time.Since(child.startedAt)
+			recordChildExit(child.waitStatus, child.reaped)
 			if isSupervisor {
 				terminateAndReapProcessGroup(child.pgid, reaper, cfg.Timings.ProcessGroupKillGrace, cfg.Timings.SIGKILLReapWait)
 			}
@@ -861,9 +1421,6 @@ func superviseService(
 				svc.current = nil
 			}
 			svc.mu.Unlock()
-			if !ok || !status.Exited() || status.ExitStatus() != 0 {
-				svc.recordNonZeroExit()
-			}
 		}
 
 		svc.mu.Lock()
@@ -1199,6 +1756,152 @@ func readinessHTTPClient(interval time.Duration) *http.Client {
 	return &http.Client{Timeout: interval * 2}
 }
 
+func trialReadinessHTTPClient(interval time.Duration) *http.Client {
+	if interval <= 0 {
+		interval = DefaultReadinessPollInterval
+	}
+	timeout := max(interval*2, 500*time.Millisecond)
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			DisableKeepAlives: true,
+		},
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+func trialManagerHealthOK(ctx context.Context, client *http.Client, healthURL string) bool {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	var payload struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&payload); err != nil {
+		return false
+	}
+	return payload.OK
+}
+
+func runTrialStabilizationSoak(
+	ctx context.Context,
+	shutdownCtx context.Context,
+	cfg SupervisorConfig,
+	reaper *centralReaper,
+	supSvc, mgrSvc, ingSvc *managedService,
+	fatalErrCh <-chan error,
+	getTrialFailure func() string,
+) string {
+	pubProbeAddr := NormalizeTCPProbeAddr(cfg.IngressPublicTCPAddr)
+	adminProbeAddr := NormalizeTCPProbeAddr(cfg.IngressAdminTCPAddr)
+	probeTimeout := max(cfg.Timings.ReadinessPollInterval, 250*time.Millisecond)
+	httpClient := trialReadinessHTTPClient(cfg.Timings.ReadinessPollInterval)
+
+	checkProcesses := func() string {
+		if reaper != nil {
+			reaper.reapAvailable()
+		}
+		if failCode := getTrialFailure(); failCode != "" {
+			return failCode
+		}
+		if supSvc.startCount() != 1 || supSvc.nonZeroFailureCount() > 0 || !supSvc.isCurrentlyRunning() {
+			return FailureCodeSupervisorStartupFailed
+		}
+		if mgrSvc.startCount() != 1 || mgrSvc.nonZeroFailureCount() > 0 || !mgrSvc.isCurrentlyRunning() {
+			return FailureCodeManagerStartupFailed
+		}
+		if ingSvc.startCount() != 1 || ingSvc.nonZeroFailureCount() > 0 || !ingSvc.isCurrentlyRunning() {
+			return FailureCodeIngressStartupFailed
+		}
+		return ""
+	}
+
+	checkOnce := func() string {
+		if failCode := checkProcesses(); failCode != "" {
+			return failCode
+		}
+		if cfg.SupervisorTCPAddr != "" && !tcpProbeReady(ctx, cfg.SupervisorTCPAddr, probeTimeout) {
+			return FailureCodeSupervisorStartupFailed
+		}
+		if cfg.ManagerHealthURL != "" && !trialManagerHealthOK(ctx, httpClient, cfg.ManagerHealthURL) {
+			return FailureCodeManagerStartupFailed
+		}
+		if pubProbeAddr != "" && !tcpProbeReady(ctx, pubProbeAddr, probeTimeout) {
+			return FailureCodeIngressStartupFailed
+		}
+		if adminProbeAddr != "" && !tcpProbeReady(ctx, adminProbeAddr, probeTimeout) {
+			return FailureCodeIngressStartupFailed
+		}
+		return checkProcesses()
+	}
+
+	if failCode := checkOnce(); failCode != "" {
+		return failCode
+	}
+	soakDur := cfg.Timings.TrialStabilizationWindow
+	if soakDur <= 0 {
+		return ""
+	}
+
+	pollInterval := cfg.Timings.ReadinessPollInterval
+	if pollInterval <= 0 {
+		pollInterval = DefaultReadinessPollInterval
+	}
+	if pollInterval > soakDur {
+		pollInterval = soakDur
+	}
+
+	soakTimer := time.NewTimer(soakDur)
+	defer soakTimer.Stop()
+	pollTicker := time.NewTicker(pollInterval)
+	defer pollTicker.Stop()
+
+	for {
+		select {
+		case <-soakTimer.C:
+			return checkOnce()
+		case <-pollTicker.C:
+			if failCode := checkOnce(); failCode != "" {
+				return failCode
+			}
+		case <-supSvc.exitNotify:
+			if failCode := checkProcesses(); failCode != "" {
+				return failCode
+			}
+		case <-mgrSvc.exitNotify:
+			if failCode := checkProcesses(); failCode != "" {
+				return failCode
+			}
+		case <-ingSvc.exitNotify:
+			if failCode := checkProcesses(); failCode != "" {
+				return failCode
+			}
+		case <-fatalErrCh:
+			return FailureCodeSupervisorStartupFailed
+		case <-shutdownCtx.Done():
+			if failCode := getTrialFailure(); failCode != "" {
+				return failCode
+			}
+			return "canceled"
+		case <-ctx.Done():
+			if failCode := getTrialFailure(); failCode != "" {
+				return failCode
+			}
+			return "canceled"
+		}
+	}
+}
 func managerBootstrapURL(healthURL string) string {
 	if strings.HasSuffix(healthURL, "/health") {
 		return strings.TrimSuffix(healthURL, "/health") + "/.well-known/cpamp-bootstrap"

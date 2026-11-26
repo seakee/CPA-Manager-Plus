@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"time"
@@ -32,6 +33,7 @@ const (
 	DefaultProcPath                 = "/proc"
 	DefaultRuntimeSecretDir         = "/data/runtime-secret"
 	DefaultRuntimeTokenFile         = "/data/runtime-secret/token"
+	DefaultLauncherTokenFile        = "/data/runtime-secret/launcher-token"
 	DefaultSeedConfigPath           = "/usr/local/share/cpamp/runtime/config.seed.yaml"
 	DefaultSeedLineagePath          = "/usr/local/share/cpamp/runtime/seed-lineage.json"
 	DefaultSupervisorExecutablePath = "/usr/local/bin/cpamp-runtime-supervisor"
@@ -42,12 +44,13 @@ const (
 	DefaultPasswdPath               = "/etc/passwd"
 	DefaultGroupPath                = "/etc/group"
 
-	DefaultRuntimeIdentity   = "embedded-default"
-	DefaultRuntimeAddr       = "127.0.0.1:9081"
-	DefaultManagerAddr       = "127.0.0.1:18319"
-	DefaultIngressPublicAddr = "0.0.0.0:18317"
-	DefaultIngressAdminAddr  = "127.0.0.1:9082"
-	DefaultRuntimeCPAAddr    = "127.0.0.1:8317"
+	DefaultRuntimeIdentity     = "embedded-default"
+	DefaultRuntimeAddr         = "127.0.0.1:9081"
+	DefaultManagerAddr         = "127.0.0.1:18319"
+	DefaultIngressPublicAddr   = "0.0.0.0:18317"
+	DefaultIngressAdminAddr    = "127.0.0.1:9082"
+	DefaultRuntimeCPAAddr      = "127.0.0.1:8317"
+	DefaultLauncherControlAddr = "127.0.0.1:9083"
 
 	BootstrapMarkerName     = ".cpamp-v8-bootstrap"
 	BootstrapIdentityPrefix = "official-cpa-v8-bootstrap:"
@@ -71,6 +74,18 @@ const (
 	UpgradeWorkerMaxInitialFailures = 3
 	CPAQuiescenceTimeout            = 5 * time.Second
 	CPAQuiescencePollInterval       = 10 * time.Millisecond
+	DefaultTrialWatchdogTimeout     = 60 * time.Second
+	DefaultTrialStabilizationWindow = 5 * time.Second
+
+	CPAMPRootMode               fs.FileMode = 0o0755
+	SlotsDirMode                fs.FileMode = 0o0755
+	SlotDirMode                 fs.FileMode = 0o0755
+	SlotBinMode                 fs.FileMode = 0o0555
+	SlotShareDirMode            fs.FileMode = 0o0555
+	SlotFileMode                fs.FileMode = 0o0444
+	SlotStateFileMode           fs.FileMode = 0o0600
+	LauncherTokenFileModeDocker fs.FileMode = 0o0640
+	LauncherTokenFileModeNative fs.FileMode = 0o0600
 
 	// ShutdownFixedBudgetLimit bounds every stop-stage budget that is not the
 	// configurable drain window. The container stop grace must be at least
@@ -97,6 +112,9 @@ type RuntimeLayout struct {
 	DataDir             string
 	RuntimeRoot         string
 	BootstrapMarkerPath string
+	CPAMPRoot           string
+	SlotsDir            string
+	SlotStatePath       string
 	SupervisorDir       string
 	ArtifactRoot        string
 	ArtifactCPARoot     string
@@ -108,6 +126,7 @@ type RuntimeLayout struct {
 	GatewayConfigPath   string
 	TokenDir            string
 	TokenFile           string
+	LauncherTokenFile   string
 }
 
 // TrustedRootOwnedDirs returns the persisted directories that must be real
@@ -115,6 +134,8 @@ type RuntimeLayout struct {
 func (l RuntimeLayout) TrustedRootOwnedDirs() []string {
 	return []string{
 		l.RuntimeRoot,
+		l.CPAMPRoot,
+		l.SlotsDir,
 		l.SupervisorDir,
 		l.ArtifactRoot,
 		l.ArtifactCPARoot,
@@ -154,13 +175,19 @@ func ResolveRuntimeLayout(dataDir, runtimeRoot, tokenFile string) RuntimeLayout 
 	if tokenFile == "" {
 		tokenFile = filepath.Join(dataDir, "runtime-secret", "token")
 	}
+	cpampRoot := filepath.Join(runtimeRoot, "cpamp")
+	slotsDir := filepath.Join(cpampRoot, "slots")
 	supervisorDir := filepath.Join(runtimeRoot, "supervisor")
 	artifactRoot := filepath.Join(supervisorDir, "artifacts")
 	gatewayDir := filepath.Join(runtimeRoot, "gateway")
+	tokenDir := filepath.Dir(tokenFile)
 	return RuntimeLayout{
 		DataDir:             dataDir,
 		RuntimeRoot:         runtimeRoot,
 		BootstrapMarkerPath: filepath.Join(runtimeRoot, BootstrapMarkerName),
+		CPAMPRoot:           cpampRoot,
+		SlotsDir:            slotsDir,
+		SlotStatePath:       filepath.Join(cpampRoot, "slot-state.json"),
 		SupervisorDir:       supervisorDir,
 		ArtifactRoot:        artifactRoot,
 		ArtifactCPARoot:     filepath.Join(artifactRoot, "cpa"),
@@ -170,8 +197,9 @@ func ResolveRuntimeLayout(dataDir, runtimeRoot, tokenFile string) RuntimeLayout 
 		GatewayLogsDir:      filepath.Join(gatewayDir, "logs"),
 		GatewayPluginsDir:   filepath.Join(gatewayDir, "plugins"),
 		GatewayConfigPath:   filepath.Join(gatewayDir, "config.yaml"),
-		TokenDir:            filepath.Dir(tokenFile),
+		TokenDir:            tokenDir,
 		TokenFile:           tokenFile,
+		LauncherTokenFile:   filepath.Join(tokenDir, "launcher-token"),
 	}
 }
 

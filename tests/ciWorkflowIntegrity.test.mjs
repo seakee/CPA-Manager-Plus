@@ -477,6 +477,7 @@ describe('GitHub Actions workflow integrity', () => {
       'Build native smoke images',
       'Run normal default CPA v8 Compose smoke',
       'Run slim runtime CPA acquisition smoke',
+      'Run signed-slot self-update and rollback smoke',
       'Reject unsupported CPA v8 architecture without fallback',
       'Run single-public-port Runtime smoke',
       'Run Runtime failure-behavior E2E',
@@ -487,12 +488,13 @@ describe('GitHub Actions workflow integrity', () => {
     expect(lifecycleSteps[0]).toContain('run: docker compose build');
     expect(lifecycleSteps[1]).toContain('python3 bin/ci/runtime-v8-default-smoke.py');
     expect(lifecycleSteps[2]).toContain('python3 bin/ci/runtime-slim-acquire-smoke.py');
-    expect(lifecycleSteps[3]).toContain('--platform linux/riscv64 --target cpa-v8-download');
+    expect(lifecycleSteps[3]).toContain('python3 bin/ci/runtime-slot-self-update-smoke.py');
+    expect(lifecycleSteps[4]).toContain('--platform linux/riscv64 --target cpa-v8-download');
     // The refusal must still exercise the architecture check, so the build
     // carries valid identity instead of failing the early identity guard.
-    expect(lifecycleSteps[3]).toContain('--build-arg VERSION=ci');
-    expect(lifecycleSteps[3]).toContain('--build-arg SOURCE_COMMIT=${{ github.sha }}');
-    expect(lifecycleSteps[3]).toContain(
+    expect(lifecycleSteps[4]).toContain('--build-arg VERSION=ci');
+    expect(lifecycleSteps[4]).toContain('--build-arg SOURCE_COMMIT=${{ github.sha }}');
+    expect(lifecycleSteps[4]).toContain(
       'unsupported official CPA v8 target: linux/riscv64 (no v7 fallback)'
     );
     const focusedSmoke = dockerJob.indexOf('run: bin/ci/runtime12-docker-smoke.sh');

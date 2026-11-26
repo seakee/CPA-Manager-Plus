@@ -176,6 +176,7 @@ const triggersRuntimeLifecycle = (filePath) =>
   startsWithPath(filePath, 'docker/runtime') ||
   filePath === 'bin/ci/runtime-v8-default-smoke.py' ||
   filePath === 'bin/ci/runtime-slim-acquire-smoke.py' ||
+  filePath === 'bin/ci/runtime-slot-self-update-smoke.py' ||
   filePath === 'bin/ci/runtime-lifecycle-manager-baseline.sh' ||
   filePath === 'bin/ci/runtime-v8-upload-stage.py' ||
   filePath.startsWith('bin/ci/runtime12-') ||
@@ -210,6 +211,7 @@ const triggersDocker = (filePath) =>
   startsWithPath(filePath, 'docker') ||
   filePath === 'bin/ci/runtime-v8-default-smoke.py' ||
   filePath === 'bin/ci/runtime-slim-acquire-smoke.py' ||
+  filePath === 'bin/ci/runtime-slot-self-update-smoke.py' ||
   filePath === 'bin/ci/runtime-lifecycle-manager-baseline.sh' ||
   filePath === 'bin/ci/runtime-v8-upload-stage.py' ||
   filePath.startsWith('bin/ci/runtime12-') ||

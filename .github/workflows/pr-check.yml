@@ -995,6 +995,13 @@ jobs:
             seakee/cpa-manager-plus:latest \
             bin/tmp/runtime-slim-acquire-ci
 
+
+      - name: Run signed-slot self-update and rollback smoke
+        if: needs.changes.outputs.runtime_lifecycle == 'true'
+        run: |
+          python3 bin/ci/runtime-slot-self-update-smoke.py \
+            seakee/cpa-manager-plus:ci-slim \
+            bin/tmp/runtime-slot-self-update-ci
       - name: Reject unsupported CPA v8 architecture without fallback
         if: needs.changes.outputs.runtime_lifecycle == 'true'
         run: |

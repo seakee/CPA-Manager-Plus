@@ -89,7 +89,7 @@ ingress_shutdown_timeout="90s"
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [run|--help]
+Usage: $(basename "$0") [--engine=auto|go|bash] [run|--help]
 
 Starts and supervises the v2 3-process CPA Manager Plus native stack:
   1. Runtime Supervisor (cpa-manager-plus-runtime-supervisor)
@@ -146,9 +146,39 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ] || [ "${1:-}" = "help" ]; then
   exit 0
 fi
 
-if [ "${1:-}" = "run" ]; then
-  shift
-fi
+engine_mode="${CPAMP_NATIVE_ENGINE:-auto}"
+passthrough_args=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --engine)
+      if [ "$#" -lt 2 ]; then
+        printf '[cpamp-launcher] --engine requires a value (auto|go|bash)\n' >&2
+        exit 1
+      fi
+      engine_mode="$2"
+      shift 2
+      ;;
+    --engine=*)
+      engine_mode="${1#--engine=}"
+      shift
+      ;;
+    run)
+      shift
+      ;;
+    *)
+      passthrough_args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+case "${engine_mode}" in
+  auto | go | bash) ;;
+  *)
+    printf '[cpamp-launcher] Invalid launcher engine mode: %s (expected auto, go, or bash)\n' "${engine_mode}" >&2
+    exit 1
+    ;;
+esac
 
 log_msg() {
   printf '[cpamp-launcher] %s\n' "$*"
@@ -184,6 +214,50 @@ check_upgrade_swap_lock() {
 }
 
 check_upgrade_swap_lock
+
+go_launcher_bin="${bin_dir}/cpamp-launcher"
+
+export_native_go_launcher_env() {
+  export CPAMP_NATIVE_HOME="${home_dir}"
+  export CPAMP_NATIVE_BIN_DIR="${bin_dir}"
+  export CPAMP_NATIVE_DATA_DIR="${data_dir}"
+  export CPAMP_NATIVE_RUN_DIR="${run_dir}"
+  export CPAMP_NATIVE_LOG_DIR="${log_dir}"
+  export CPAMP_NATIVE_PID_FILE="${pid_file}"
+  export CPAMP_NATIVE_LOG_FILE="${log_file}"
+  if [ -z "${CPAMP_GATEWAY_URL:-}" ] && [ -n "${CPA_UPSTREAM_URL:-}" ]; then
+    export CPAMP_GATEWAY_URL="${CPA_UPSTREAM_URL}"
+  fi
+}
+
+if [ "${engine_mode}" = "go" ]; then
+  if [ -L "${go_launcher_bin}" ] || [ ! -f "${go_launcher_bin}" ] || [ ! -x "${go_launcher_bin}" ]; then
+    printf '[cpamp-launcher] Native Go launcher binary is missing or untrusted: %s\n' "${go_launcher_bin}" >&2
+    exit 1
+  fi
+  export_native_go_launcher_env
+  if [ "${#passthrough_args[@]}" -gt 0 ]; then
+    exec "${go_launcher_bin}" --mode=native --home="${home_dir}" "${passthrough_args[@]}"
+  else
+    exec "${go_launcher_bin}" --mode=native --home="${home_dir}"
+  fi
+fi
+
+if [ "${engine_mode}" = "auto" ] &&
+  [ "$(uname -s 2>/dev/null || true)" = "Linux" ] &&
+  { [ "$(id -u)" -eq 0 ] || [ "${CPAMP_NATIVE_AUTO_ALLOW_NON_ROOT:-0}" = "1" ]; } &&
+  [ ! -L "${go_launcher_bin}" ] && [ -f "${go_launcher_bin}" ] && [ -x "${go_launcher_bin}" ]; then
+  export_native_go_launcher_env
+  if [ "${#passthrough_args[@]}" -gt 0 ]; then
+    exec "${go_launcher_bin}" --mode=native --home="${home_dir}" "${passthrough_args[@]}"
+  else
+    exec "${go_launcher_bin}" --mode=native --home="${home_dir}"
+  fi
+fi
+
+if [ "${#passthrough_args[@]}" -gt 0 ]; then
+  set -- "${passthrough_args[@]}"
+fi
 
 apply_service_stop_budget_clamp() {
   local drain_source_label="$1"

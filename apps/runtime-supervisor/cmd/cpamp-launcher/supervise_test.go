@@ -21,6 +21,9 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if maybeRunSlotSubprocessFromTestMain() {
+		return
+	}
 	if role := os.Getenv("CPAMP_TEST_HELPER_ROLE"); role != "" {
 		runTestHelperProcess(role)
 		return
