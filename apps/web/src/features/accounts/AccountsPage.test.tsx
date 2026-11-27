@@ -750,7 +750,7 @@ vi.mock('@/features/authFiles/hooks/useAuthFilesModels', () => ({
     modelDefinitionsError: null,
     modelsFileName: '',
     modelsFileType: '',
-    modelsSelectionKey: getAuthFileSelectionKey(mocks.files[0]),
+    modelsSelectionKey: mocks.files[0] ? getAuthFileSelectionKey(mocks.files[0]) : '',
     modelsError: null,
     showModels: mocks.showModels,
     refreshModels: mocks.refreshModels,
@@ -20523,6 +20523,55 @@ describe('AccountsPage replacement flows', () => {
       expect(invalidTableBadge?.findAllByType('span')[0]?.props.className).toContain('invalid');
       expect(unboundTableBadge).toBeDefined();
       expect(unboundTableBadge?.props.title).toBeUndefined();
+    });
+
+    it('distinguishes empty credential store from filtered zero-match state and clears filters', async () => {
+      mocks.files = [];
+      mocks.location = {
+        pathname: '/accounts',
+        search: '',
+      };
+
+      const renderer = await renderAccountsPage();
+      await flushPromises();
+
+      const emptyStoreText = readText(renderer.root);
+      expect(emptyStoreText).toContain('accounts.empty_no_credentials_title');
+      expect(emptyStoreText).toContain('accounts.empty_no_credentials_desc');
+      expect(emptyStoreText).not.toContain('accounts.empty_title');
+      expect(emptyStoreText).not.toContain('accounts.batch_hint');
+
+      mocks.files = [makeCodexFile('codex-only.json', 'auth-only', 'only@example.com')];
+      mocks.location = {
+        pathname: '/accounts',
+        search: '',
+      };
+      await renderer.unmount();
+
+      const filteredRenderer = await renderAccountsPage();
+      await flushPromises();
+      await act(async () => {
+        findInputByAriaLabel(filteredRenderer, 'accounts.search_label').props.onChange({
+          target: { value: 'unmatched-search-term' },
+        });
+        await Promise.resolve();
+      });
+      await flushPromises();
+      const filteredText = readText(filteredRenderer.root);
+      expect(filteredText).toContain('accounts.empty_title');
+      expect(filteredText).toContain('accounts.clear_filters');
+
+      const clearBtn = filteredRenderer.root
+        .findAllByType('button')
+        .find((node) => readText(node).includes('accounts.clear_filters'));
+      expect(clearBtn).toBeDefined();
+      await act(async () => {
+        clearBtn?.props.onClick();
+        await Promise.resolve();
+      });
+      await flushPromises();
+
+      expect(readText(filteredRenderer.root)).toContain('only@example.com');
     });
   });
 });

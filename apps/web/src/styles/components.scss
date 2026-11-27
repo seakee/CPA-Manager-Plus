@@ -1079,6 +1079,14 @@ textarea {
     color: var(--text-secondary);
     margin-top: 4px;
   }
+
+  .empty-action {
+    display: flex;
+    align-items: center;
+    gap: $spacing-sm;
+    flex-wrap: wrap;
+    flex-shrink: 0;
+  }
 }
 
 .empty-state-canvas {

@@ -672,6 +672,10 @@ input {
   border-left: 1px solid var(--border-subtle);
 }
 
+.input-wrap .input-actions .btn-ghost {
+  border-color: transparent;
+}
+
 .btn.is-copied,
 .btn.is-copied:hover {
   color: var(--emerald);
@@ -3252,6 +3256,19 @@ input {
   height: var(--control-height-md);
   min-height: var(--control-height-md);
   font-size: 14px;
+}
+
+.bootstrap-main .btn.btn-sm {
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
+  font-size: 13px;
+}
+
+.bootstrap-main .btn.btn-xs {
+  height: var(--control-height-xs);
+  min-height: var(--control-height-xs);
+  padding: 0 10px;
+  font-size: 12px;
 }
 
 .bootstrap-main .btn.btn-secondary {
