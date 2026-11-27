@@ -14,11 +14,11 @@ The single build-bound `consumer.json` controls authorization. No fixture, CI
 job, request, environment variable or Runtime observation can change it in a
 running Manager.
 
-The current [CPA v8-only scoped acceptance](evidence/db9712f86edea44e62c3be81d7bd5180368a57e2fad562d47f0c5847434beb74.md)
+The current [CPA v8-only scoped acceptance](evidence/bd0935160c1f2d0aadf3edb01d2072379e7f8143acab8bf5d61c1946df4a6b0d.md)
 binds the actual source and destination executions to official CPA `v8.0.55`.
 Both real-process producers passed from immutable implementation
-`3b0145379af530506c7197c55089e73a534de698`
-(tree `585e8c870116acadeed1f4af7ee4804dce38c211`). The build read a clean
+`53b0f576f000680093a390b7f85e0a1f74320180`
+(tree `a4ec7acaec3a706593479ac8fa3a2c9884ba2bd2`). The build read a clean
 `git archive` of that commit rather than host scratch directories. Race-enabled
 Linux/amd64 test tools and the Runtime Supervisor were newly compiled under an
 unprivileged identity in `golang:1.26.11-bookworm`, then executed in a throwaway
@@ -32,7 +32,7 @@ The private `legacy_managed` class now denotes a constrained legacy-layout v0
 safe read on CPA v8, not a supported pre-v8 runtime or public Fresh admission.
 
 The current consumer implementation SHA-256 is
-`e435b439dc97f39ceb7e2eec1081ee30c9e8fdd6df3d6a4ad1c22742ac801630`.
+`f54f080a82e37b0ec080d3b593e674a9412d90f726996ce514df7d706508dae3`.
 The independently audited 11-file Runtime execution-chain pin is
 `598260a2127acff39b9e202f508325363aabc26a4392cb1952dd25ca05f41431` (updated from
 `340686a6ad37b2a6843c943f6beb2a1339edc5abcf441f1ae2483ddaa63941d6` after
@@ -41,9 +41,9 @@ with GO and 0 findings).
 
 | Current chain | Report SHA-256 | Executed source |
 | --- | --- | --- |
-| network resources | `c67ebaef8abeb7567008ef7068099754a4e3f2db800b7a9a291f833fd6521fff` | `3b0145379af530506c7197c55089e73a534de698` |
-| legacy-layout v8 resources | `33f04007018035b879a00cb70caa6b1fa1ae2fde86a693536bdc2776526bf59b` | `3b0145379af530506c7197c55089e73a534de698` |
-| legacy-managed v8 transition | `67d49d81bb7584cee8d3833d2a8dfed50385b91e48162d5497ff0fff708e7241` | `3b0145379af530506c7197c55089e73a534de698` |
+| network resources | `55ca937e96eda59eb10a9a41f12c8b56afb4b4c810e3580048c8d880aa0f2249` | `53b0f576f000680093a390b7f85e0a1f74320180` |
+| legacy-layout v8 resources | `fdec7cde09318c725b48f7addfe7e64adb0d8255b9a47e56847e1e6a40d23047` | `53b0f576f000680093a390b7f85e0a1f74320180` |
+| legacy-managed v8 transition | `4971d1512bb0e2a69ba216123a8594d48c742ff13779f2dfef27aed1986d8fd4` | `53b0f576f000680093a390b7f85e0a1f74320180` |
 
 Thirteen raw producer outputs were byte-verified; all three manifests were
 already identical and ten report/trace/observation files are new. All 115
@@ -236,7 +236,7 @@ the historical 2026-11-15 renewal
 `1d9c68bc18ad51f8abf7955e9c25e9cc3262779b1b2ccd9e29eb53081c5f867c`, the
 superseded CPA v8-only renewals `a8230400f8defdb46d7adb38b6be0872f7b7d337d6d69b63af56f341ad5e30a1`
 and `41ab4005c260ef24064cd8fa6a7a9cee88b9a2644e77bd4c2e1f10290ba8f265`, and the current
-CPA v8-only acceptance `db9712f86edea44e62c3be81d7bd5180368a57e2fad562d47f0c5847434beb74`,
+CPA v8-only acceptance `bd0935160c1f2d0aadf3edb01d2072379e7f8143acab8bf5d61c1946df4a6b0d`,
 backed by actual CPA `v8.0.55` source-read, destination-replay and verification
 evidence. The executor's per-item gate is what keeps the four-kind breadth of
 `network_existing` honest: an item is copied only when the record's decision for
