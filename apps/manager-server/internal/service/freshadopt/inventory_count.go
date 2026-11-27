@@ -118,8 +118,9 @@ func CountSourceInventory(ctx context.Context, source Source) map[string]int {
 	if n := countHostObservabilitySubtrees(document); n > 0 {
 		counts[string(bootstrap.AdoptionRefConfigObservability)] = n
 	}
-	if n := len(cpa.UnknownV8ConfigPaths(document)); n > 0 {
-		counts[string(bootstrap.AdoptionRefConfigUnknown)] = n
+	scan := cpa.InspectV8UnknownConfig(document)
+	if !scan.ArchiveScanIncomplete && len(scan.ArchiveCandidates) == 0 {
+		counts[string(bootstrap.AdoptionRefConfigUnknown)] = len(scan.JSONPaths)
 	}
 	if len(counts) == 0 {
 		return nil

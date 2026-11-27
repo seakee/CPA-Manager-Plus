@@ -30,7 +30,8 @@ func adoptionPluginFixture(t *testing.T) (*Service, *adoptionRuntime, Request) {
 			// auth directory are read where the item universe names them.
 			_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"source-auth"},"access":{"api-keys":["source-client-one","source-client-two"]},"plugins":{"enabled":true}}`))
 		case "/v8/management/config.yaml":
-			w.WriteHeader(http.StatusNotFound)
+			w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+			_, _ = w.Write([]byte("config-version: 8\nserver:\n  port: 8317\noauth:\n  auth-dir: source-auth\naccess:\n  api-keys:\n    - source-client-one\n    - source-client-two\nplugins:\n  enabled: true\n"))
 		default:
 			t.Error("source lifecycle/history/config mutated")
 			w.WriteHeader(403)

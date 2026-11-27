@@ -2458,6 +2458,7 @@ it('separates platform-managed host bindings into a collapsed disclosure when ma
       'client-api-keys': 5,
       'cpa-config-server': 2,
       'cpa-config-management': 1,
+      'cpa-config-unknown': 0,
     },
   });
   await click('adopt-read-inventory');
@@ -2557,6 +2558,38 @@ it('keeps cpa-config-unknown in manual_action when source counts were not observ
   expect(manualRowText).toContain('Other configuration');
   expect(manualRowText).not.toContain('Plugin settings');
   expect(nodeText(byID('adopt-platform-managed'))).toContain('Plugin settings');
+});
+
+it('keeps cpa-config-unknown visible in manual_action without a count badge when omitted from non-empty inventoryCounts', async () => {
+  await adoptServer({
+    decisions: [
+      adoptCheckpoint.adoptionDecisions![0],
+      adoptCheckpoint.adoptionDecisions![1],
+      {
+        ResourceRef: 'cpa-config-unknown',
+        Kind: 'cpa_configuration',
+        Scope: 'management_api_fields',
+        ReadEvidenceRef: '',
+        ReplayEvidenceRef: '',
+        VerifyEvidenceRef: '',
+        Qualification: 'pending',
+        ManualAction: 'reconfigure_after_adoption',
+        Disposition: 'manual_action',
+      },
+    ],
+    inventoryCounts: {
+      'client-api-keys': 2,
+    },
+  });
+  await click('adopt-read-inventory');
+  await settle();
+
+  const manualRowText = nodeText(byID('adopt-decision-row-manual_action'));
+  expect(manualRowText).toContain('Other configuration');
+  expect(maybe('adopt-resource-count-cpa-config-unknown')).toHaveLength(0);
+  expect(nodeText(byID('adopt-inventory-counts-banner'))).toContain(
+    adoptText('inventoryCountsBanner', { migrate: 2, manual: 1 })
+  );
 });
 
 it.each(['en', 'zh-CN', 'zh-TW', 'ru'])(

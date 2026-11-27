@@ -316,11 +316,12 @@ func TestUnknownV8ConfigPathsDetectsNestedOffTableKeysUnderNamedRoots(t *testing
 	}
 }
 
-func TestArchivedV8UnknownPathsCoversRealCPAFootCommentShapes(t *testing.T) {
+func TestScanV8YAMLArchiveCandidatesCoversRealCPAFootCommentShapes(t *testing.T) {
 	cases := []struct {
-		name string
-		yaml string
-		want []string
+		name         string
+		yaml         string
+		want         []string
+		wantComplete bool
 	}{
 		{
 			name: "flow-style map and nested multiline unknown blocks",
@@ -350,6 +351,7 @@ upstream:
 				"oauth.providers.codex.retired-setting",
 				"plugins.mystery_obj",
 			},
+			wantComplete: true,
 		},
 		{
 			name: "flow-style only document with single archived leaf",
@@ -360,7 +362,8 @@ oauth: {auth-dir: "/tmp/auth", providers: {codex: {}}}
 
 # oauth.providers.codex.retired-setting: false
 `,
-			want: []string{"oauth.providers.codex.retired-setting"},
+			want:         []string{"oauth.providers.codex.retired-setting"},
+			wantComplete: true,
 		},
 		{
 			name: "block scalar with blank archive comment line and zero-indent list",
@@ -376,7 +379,32 @@ server:
 # - one
 # - two
 `,
-			want: []string{"custom_list", "custom_script"},
+			want:         []string{"custom_list", "custom_script"},
+			wantComplete: true,
+		},
+		{
+			name: "literal dotted keys under known roots and retired unknown dotted roots",
+			yaml: `config-version: 8
+server:
+    port: 8317
+plugins: {}
+
+# plugins.retired.option: true
+# plugins.retiredOption: true
+# management.retired_flag: true
+# oauth.providers.codex.a.b: 1
+# retired.root.option: true
+# custom-operator-note: true
+`,
+			want: []string{
+				"custom-operator-note",
+				"management.retired_flag",
+				"oauth.providers.codex.a.b",
+				"plugins.retired.option",
+				"plugins.retiredOption",
+				"retired.root.option",
+			},
+			wantComplete: true,
 		},
 		{
 			name: "pre-existing top and middle comments plus example legacy comments ignored",
@@ -396,6 +424,7 @@ oauth:
 #   host: ""
 #   port: 8317
 # debug: false
+# remote-management.allow-remote: false
 # proxy-url: http://127.0.0.1:8080
 # note: check this before restart
 # TODO: clean up later
@@ -403,7 +432,8 @@ oauth:
 # oauth.providers.codex.live-media-relay.allow-private-remote-ips: true
 # codex.live-media-relay.allow-private-remote-ips: true
 `,
-			want: nil,
+			want:         nil,
+			wantComplete: true,
 		},
 		{
 			name: "multi-document stream only inspects trailing tail of first document",
@@ -418,7 +448,8 @@ server:
 # second_doc_unknown: true
 second_doc_key: 123
 `,
-			want: []string{"plugins.mystery_flag"},
+			want:         []string{"plugins.mystery_flag"},
+			wantComplete: true,
 		},
 		{
 			name: "explicit document end marker stops before subsequent comments",
@@ -430,7 +461,8 @@ server:
 ...
 # custom_after_end: true
 `,
-			want: []string{"custom_before_end"},
+			want:         []string{"custom_before_end"},
+			wantComplete: true,
 		},
 		{
 			name: "block scalar containing indented hash before active closing line",
@@ -441,26 +473,58 @@ server:
         # fake_inside_scalar: true
     port: 8317
 `,
-			want: nil,
+			want:         nil,
+			wantComplete: true,
 		},
 		{
-			name: "json payload has no archived yaml comments",
-			yaml: `{"config-version":8,"server":{"port":8317},"access":{"api-keys":["sk-1"]}}`,
-			want: nil,
+			name:         "json payload has no archived yaml comments",
+			yaml:         `{"config-version":8,"server":{"port":8317},"access":{"api-keys":["sk-1"]}}`,
+			want:         nil,
+			wantComplete: true,
+		},
+		{
+			name:         "empty yaml marks scan incomplete",
+			yaml:         "   \n",
+			want:         nil,
+			wantComplete: false,
+		},
+		{
+			name:         "comment-only yaml marks scan incomplete",
+			yaml:         "# just a comment\n",
+			want:         nil,
+			wantComplete: false,
+		},
+		{
+			name:         "non-mapping sequence yaml marks scan incomplete",
+			yaml:         "- one\n- two\n",
+			want:         nil,
+			wantComplete: false,
+		},
+		{
+			name:         "invalid yaml marks scan incomplete",
+			yaml:         "config-version: [8\n",
+			want:         nil,
+			wantComplete: false,
+		},
+		{
+			name:         "invalid utf8 marks scan incomplete",
+			yaml:         string([]byte{0xff, 0xfe, 'a'}),
+			want:         nil,
+			wantComplete: false,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ArchivedV8UnknownPaths([]byte(tc.yaml))
-			if !slices.Equal(got, tc.want) {
-				t.Fatalf("ArchivedV8UnknownPaths = %v, want %v", got, tc.want)
+			got, complete := ScanV8YAMLArchiveCandidates([]byte(tc.yaml))
+			if complete != tc.wantComplete || !slices.Equal(got, tc.want) {
+				t.Fatalf("ScanV8YAMLArchiveCandidates = (%v, %v), want (%v, %v)", got, complete, tc.want, tc.wantComplete)
 			}
 		})
 	}
 }
 
-func TestAttachArchivedUnknownV8PathsMergesDeduplicatesAndNeverEscapesWalkers(t *testing.T) {
+func TestAttachV8YAMLArchiveScanSeparatesJSONFromArchiveAndIncompleteState(t *testing.T) {
 	doc := map[string]any{
 		"config-version": 8,
 		"server": map[string]any{
@@ -469,35 +533,50 @@ func TestAttachArchivedUnknownV8PathsMergesDeduplicatesAndNeverEscapesWalkers(t 
 		},
 		"access": map[string]any{"api-keys": []any{"sk-1"}},
 	}
-	AttachArchivedUnknownV8Paths(doc, []string{
+	AttachV8YAMLArchiveScan(doc, []string{
 		"plugins.mystery_flag",
 		"oauth.providers.codex.retired-setting",
-		"server.mystery",
-	})
-	AttachArchivedUnknownV8Paths(doc, []string{
-		"custom_root",
 		"plugins.mystery_flag",
-	})
+	}, true)
 
-	got := UnknownV8ConfigPaths(doc)
-	want := []string{
-		"custom_root",
-		"oauth.providers.codex.retired-setting",
-		"plugins.mystery_flag",
-		"server.mystery",
+	// UnknownV8ConfigPaths must remain strictly definite active JSON paths and
+	// must never expose archive candidates or NUL-prefixed carrier keys.
+	gotJSON := UnknownV8ConfigPaths(doc)
+	if !slices.Equal(gotJSON, []string{"server.mystery"}) {
+		t.Fatalf("UnknownV8ConfigPaths = %v, want [server.mystery]", gotJSON)
 	}
-	if !slices.Equal(got, want) {
-		t.Fatalf("UnknownV8ConfigPaths(attached) = %v, want %v", got, want)
+	if slices.Contains(gotJSON, archivedV8YAMLScanCandidatesKey) || slices.Contains(gotJSON, archivedV8YAMLScanIncompleteKey) {
+		t.Fatalf("carrier key leaked into UnknownV8ConfigPaths: %v", gotJSON)
 	}
-	if slices.Contains(got, archivedUnknownV8PathsKey) {
-		t.Fatalf("carrier key leaked into UnknownV8ConfigPaths: %v", got)
+
+	scan := InspectV8UnknownConfig(doc)
+	wantCandidates := []string{"oauth.providers.codex.retired-setting", "plugins.mystery_flag"}
+	if !slices.Equal(scan.JSONPaths, []string{"server.mystery"}) ||
+		!slices.Equal(scan.ArchiveCandidates, wantCandidates) ||
+		scan.ArchiveScanIncomplete || !scan.HasAny() {
+		t.Fatalf("InspectV8UnknownConfig = %+v, want JSON=[server.mystery] Candidates=%v Incomplete=false", scan, wantCandidates)
 	}
-	rawOnly := map[string]any{
+
+	// Clean doc with incomplete YAML scan fails closed in HasAny() while keeping
+	// JSONPaths empty.
+	incompleteClean := map[string]any{
 		"config-version": 8,
 		"server":         map[string]any{"port": 8317},
 		"access":         map[string]any{"api-keys": []any{"sk-1"}},
 	}
-	if gotRaw := UnknownV8ConfigPaths(rawOnly); len(gotRaw) != 0 {
-		t.Fatalf("raw clean doc reported unknown paths: %v", gotRaw)
+	AttachV8YAMLArchiveScan(incompleteClean, nil, false)
+	if got := UnknownV8ConfigPaths(incompleteClean); len(got) != 0 {
+		t.Fatalf("UnknownV8ConfigPaths(incompleteClean) = %v, want empty", got)
+	}
+	incompleteScan := InspectV8UnknownConfig(incompleteClean)
+	if len(incompleteScan.JSONPaths) != 0 || len(incompleteScan.ArchiveCandidates) != 0 || !incompleteScan.ArchiveScanIncomplete || !incompleteScan.HasAny() {
+		t.Fatalf("InspectV8UnknownConfig(incompleteClean) = %+v, want ArchiveScanIncomplete=true HasAny=true", incompleteScan)
+	}
+
+	// Re-attaching a clean complete scan clears earlier incomplete/candidate markers.
+	AttachV8YAMLArchiveScan(incompleteClean, nil, true)
+	cleared := InspectV8UnknownConfig(incompleteClean)
+	if cleared.HasAny() {
+		t.Fatalf("InspectV8UnknownConfig(cleared) = %+v, want HasAny=false", cleared)
 	}
 }

@@ -33,7 +33,8 @@ func TestAdoptionSourceClassUsesOnlyItsExplicitReadSurface(t *testing.T) {
 					_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"source-auth"},"access":{"api-keys":["source-client"]},"providers":{}}`))
 				case "/v8/management/config.yaml":
 					v8Calls.Add(1)
-					w.WriteHeader(http.StatusNotFound)
+					w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+					_, _ = w.Write([]byte("config-version: 8\nserver:\n  port: 8317\noauth:\n  auth-dir: source-auth\naccess:\n  api-keys:\n    - source-client\nproviders: {}\n"))
 				case "/v0/management/config":
 					v0Calls.Add(1)
 					w.Header().Set("Content-Type", "application/json")
@@ -312,5 +313,62 @@ access:
 	}
 	if !found {
 		t.Fatalf("missing cpa-config-unknown decision in %+v", staged.Checkpoint.AdoptionDecisions)
+	}
+}
+
+func TestAdoptionNetworkExistingFailsClosedWhenConfigYAMLReadFails(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusInternalServerError} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var v0Calls atomic.Int32
+			source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer source-management" {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				switch r.URL.Path {
+				case "/v8/management/config":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"source-auth"},"access":{"api-keys":["source-client"]},"routing":{"strategy":"round-robin"},"plugins":{}}`))
+				case "/v8/management/config.yaml":
+					w.WriteHeader(status)
+				default:
+					if strings.HasPrefix(r.URL.Path, "/v0/") {
+						v0Calls.Add(1)
+					}
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer source.Close()
+
+			artifact := model.RuntimeArtifactID("sha256:" + strings.Repeat("a", 64))
+			runtime := &adoptionRuntime{managedRuntime: managedRuntime{status: model.RuntimeObservedStatus{Identity: "destination-runtime", Generation: 3, ProtocolVersion: "v1", State: model.RuntimeStateReady, Capabilities: model.RuntimeCapabilities{model.RuntimeCapabilityStart, model.RuntimeCapabilityStageDestination}, ActiveGatewayArtifact: &model.ActiveGatewayArtifact{Engine: "cpa", ArtifactID: artifact}}}}
+			target := httptest.NewServer(http.HandlerFunc(runtime.target))
+			defer target.Close()
+			protector, _ := security.NewProtector([]byte("test-only-yaml-fail-closed-key"))
+			options := Options{Runtime: runtime, Protector: protector, Qualification: qualified(), QualifiedArtifactID: artifact, AdoptionResources: acceptedKeys(), DestinationBaseURL: target.URL}
+			request := Request{Strategy: bootstrap.AdoptExisting, BaseURL: source.URL, ManagementKey: "source-management", ExpectedRuntimeIdentity: runtime.status.Identity, ExpectedRuntimeGeneration: 3, ExpectedArtifactID: artifact, AdoptSourceClass: bootstrap.AdoptNetworkExisting}
+			staged, err := New(options).Execute(t.Context(), operation(), request)
+			if err != nil {
+				t.Fatalf("Execute stage failed: %v", err)
+			}
+			if v0Calls.Load() != 0 {
+				t.Fatalf("AdoptNetworkExisting crossed to /v0/* (%d calls)", v0Calls.Load())
+			}
+			if !slices.Contains(staged.Checkpoint.AdoptionResources, bootstrap.AdoptionRefConfigUnknown) {
+				t.Fatalf("AdoptionResources = %v, want %q", staged.Checkpoint.AdoptionResources, bootstrap.AdoptionRefConfigUnknown)
+			}
+			found := false
+			for _, decision := range staged.Checkpoint.AdoptionDecisions {
+				if decision.ResourceRef == bootstrap.AdoptionRefConfigUnknown {
+					found = true
+					if decision.Disposition != bootstrap.ManualAction || decision.ManualAction != bootstrap.ReconfigureAfterAdoption {
+						t.Fatalf("cpa-config-unknown decision = %+v, want manual_action/reconfigure_after_adoption", decision)
+					}
+				}
+			}
+			if !found {
+				t.Fatalf("missing cpa-config-unknown decision in %+v", staged.Checkpoint.AdoptionDecisions)
+			}
+		})
 	}
 }

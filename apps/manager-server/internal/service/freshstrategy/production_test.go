@@ -892,6 +892,9 @@ func newScopeTestServer(t *testing.T, calls *atomic.Int32) *httptest.Server {
 		switch r.URL.Path {
 		case "/v8/management/config":
 			_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"auth"},"access":{"api-keys":["source-client"]}}`))
+		case "/v8/management/config.yaml":
+			w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+			_, _ = w.Write([]byte("config-version: 8\nserver:\n  port: 8317\noauth:\n  auth-dir: auth\naccess:\n  api-keys:\n    - source-client\n"))
 		case "/v0/management/config":
 			w.Header().Set("X-CPA-VERSION", "8.0.55")
 			_, _ = w.Write([]byte(`{"tls":{"enable":false},"api-keys":["source-client"]}`))

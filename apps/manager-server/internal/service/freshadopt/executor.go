@@ -290,8 +290,8 @@ func (e *Executor) Run(ctx context.Context, previous freshstore.AdoptionSummary,
 	// refuse is a run that stops at the offending item, and every replay then
 	// repeats that item and stops again: the loop this preflight exists to make
 	// impossible.
-	unknownPaths := cpa.UnknownV8ConfigPaths(document)
-	hasUnknown := len(unknownPaths) > 0
+	unknownScan := cpa.InspectV8UnknownConfig(document)
+	hasUnknown := unknownScan.HasAny()
 	files, err = e.preflightInventory(ctx, &summary, files, hasUnknown, checkpoint)
 	if err != nil {
 		return Result{Summary: summary}, err
@@ -325,7 +325,7 @@ func (e *Executor) Run(ctx context.Context, previous freshstore.AdoptionSummary,
 	if err := e.migrateProviderSections(ctx, &summary, document, checkpoint); err != nil {
 		return Result{Summary: summary}, err
 	}
-	if err := e.migrateUnknownConfig(ctx, &summary, unknownPaths, checkpoint); err != nil {
+	if err := e.migrateUnknownConfig(ctx, &summary, unknownScan, checkpoint); err != nil {
 		return Result{Summary: summary}, err
 	}
 	// Every planned item is now settled or recorded as retryable, so this run
@@ -1064,14 +1064,21 @@ func (e *Executor) migrateCoupledConfigGroup(ctx context.Context, summary *fresh
 	return nil
 }
 
-func (e *Executor) migrateUnknownConfig(ctx context.Context, summary *freshstore.AdoptionSummary, unknownPaths []string, checkpoint Checkpoint) error {
-	if len(unknownPaths) == 0 || summary.Settled(unknownConfigItemName) {
+func (e *Executor) migrateUnknownConfig(ctx context.Context, summary *freshstore.AdoptionSummary, unknownScan cpa.V8UnknownConfigScan, checkpoint Checkpoint) error {
+	if !unknownScan.HasAny() || summary.Settled(unknownConfigItemName) {
 		return nil
 	}
-	return e.record(ctx, summary, e.manual(freshstore.AdoptionItem{
+	item := e.manual(freshstore.AdoptionItem{
 		Item: unknownConfigItemName,
 		Kind: freshstore.AdoptionKindConfigFamily,
-	}, unknownConfigItemName, bootstrap.AdoptionRefConfigUnknown), checkpoint)
+	}, unknownConfigItemName, bootstrap.AdoptionRefConfigUnknown)
+	switch {
+	case unknownScan.ArchiveScanIncomplete:
+		item.Instruction = "Source configuration YAML could not be completely scanned for archived settings; review the source config.yaml and reconfigure any unsupported settings in the destination CPA."
+	case len(unknownScan.ArchiveCandidates) > 0 && len(unknownScan.JSONPaths) == 0:
+		item.Instruction = "Source configuration YAML contains archived or commented-out settings that may have been omitted; review the source config.yaml and reconfigure any needed settings in the destination CPA."
+	}
+	return e.record(ctx, summary, item, checkpoint)
 }
 
 // writeLeaf writes one leaf and resolves the outcome by reading it back. A

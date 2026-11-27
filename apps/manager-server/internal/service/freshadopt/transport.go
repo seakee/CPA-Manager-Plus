@@ -196,10 +196,11 @@ func (s *SourceWire) ReadConfigDocument(ctx context.Context) (map[string]any, er
 		return nil, err
 	}
 	yamlCode, yamlBody, yamlErr := s.w.doAccept(ctx, http.MethodGet, "/v8/management/config.yaml", "application/yaml, text/yaml", nil, maxConfigBytes)
-	if yamlErr == nil && yamlCode == http.StatusOK {
-		if archived := cpa.ArchivedV8UnknownPaths(yamlBody); len(archived) > 0 {
-			cpa.AttachArchivedUnknownV8Paths(doc, archived)
-		}
+	if yamlErr != nil || yamlCode != http.StatusOK {
+		cpa.AttachV8YAMLArchiveScan(doc, nil, false)
+	} else {
+		candidates, complete := cpa.ScanV8YAMLArchiveCandidates(yamlBody)
+		cpa.AttachV8YAMLArchiveScan(doc, candidates, complete)
 	}
 	if iceVal, presence := cpa.LookupConfigValue(doc, iceServersSectionPath); presence == cpa.ConfigPresent {
 		if iceSlice, ok := iceVal.([]any); ok && len(iceSlice) > 0 {

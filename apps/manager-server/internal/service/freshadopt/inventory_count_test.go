@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 )
 
 type countFakeSource struct {
@@ -71,6 +72,9 @@ func TestCountSourceInventoryReportsNonSecretCounts(t *testing.T) {
 	if counts[string(bootstrap.AdoptionRefConfigServer)] != 2 {
 		t.Fatalf("server manual count = %d, want 2", counts[string(bootstrap.AdoptionRefConfigServer)])
 	}
+	if val, ok := counts[string(bootstrap.AdoptionRefConfigUnknown)]; !ok || val != 0 {
+		t.Fatalf("unknown count = (%d, %v), want (0, true)", val, ok)
+	}
 }
 
 func TestCountSourceInventorySeparatesSharedRootsAndCountsUnknown(t *testing.T) {
@@ -133,4 +137,35 @@ func TestCountSourceInventorySeparatesSharedRootsAndCountsUnknown(t *testing.T) 
 	if got := counts[string(bootstrap.AdoptionRefConfigUnknown)]; got != 2 {
 		t.Fatalf("unknown count = %d, want 2", got)
 	}
+}
+
+func TestCountSourceInventoryOmitsUnknownCountOnArchiveCandidatesOrIncompleteScan(t *testing.T) {
+	t.Run("omits cpa-config-unknown when heuristic archive candidates exist", func(t *testing.T) {
+		doc := map[string]any{
+			"config-version": 8,
+			"access":         map[string]any{"api-keys": []any{"sk-1"}},
+		}
+		cpa.AttachV8YAMLArchiveScan(doc, []string{"plugins.retired.option"}, true)
+		counts := CountSourceInventory(context.Background(), countFakeSource{doc: doc})
+		if val, ok := counts[string(bootstrap.AdoptionRefConfigUnknown)]; ok {
+			t.Fatalf("expected cpa-config-unknown omitted when archive candidates exist, got (%d, true) in %v", val, counts)
+		}
+	})
+
+	t.Run("omits cpa-config-unknown when YAML archive scan is incomplete even with zero or nonzero JSON unknowns", func(t *testing.T) {
+		for _, withJSONUnknown := range []bool{false, true} {
+			doc := map[string]any{
+				"config-version": 8,
+				"access":         map[string]any{"api-keys": []any{"sk-1"}},
+			}
+			if withJSONUnknown {
+				doc["mystery"] = map[string]any{"flag": true}
+			}
+			cpa.AttachV8YAMLArchiveScan(doc, nil, false)
+			counts := CountSourceInventory(context.Background(), countFakeSource{doc: doc})
+			if val, ok := counts[string(bootstrap.AdoptionRefConfigUnknown)]; ok {
+				t.Fatalf("withJSONUnknown=%v: expected cpa-config-unknown omitted on incomplete scan, got (%d, true) in %v", withJSONUnknown, val, counts)
+			}
+		}
+	})
 }

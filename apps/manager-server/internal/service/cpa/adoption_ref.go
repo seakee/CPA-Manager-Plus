@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"gopkg.in/yaml.v3"
@@ -408,15 +409,19 @@ var knownV8ConfigSchema = sync.OnceValue(func() v8ConfigSchemaIndex {
 	return v8ConfigSchemaIndex{leaves: leaves, wholes: wholes, parents: parents}
 })
 
-// archivedUnknownV8PathsKey is a reserved in-memory map key used to carry
-// CPA-archived unknown YAML paths attached to a decoded v8 config document.
-// Its NUL prefix cannot exist in JSON or YAML config keys, and UnknownV8ConfigPaths
-// ignores it as a config entry while merging its paths into the sorted result.
-const archivedUnknownV8PathsKey = "\x00cpamp_archived_unknown_v8_paths"
+// archivedV8YAMLScanKeyPrefix reserves NUL-prefixed in-memory map keys used to
+// carry YAML archive scan state on a decoded v8 config document. A NUL-prefixed
+// key cannot exist in JSON or YAML config objects, and UnknownV8ConfigPaths skips
+// all keys carrying this prefix at top level.
+const (
+	archivedV8YAMLScanKeyPrefix     = "\x00cpamp_"
+	archivedV8YAMLScanCandidatesKey = "\x00cpamp_archived_unknown_v8_paths"
+	archivedV8YAMLScanIncompleteKey = "\x00cpamp_archived_yaml_scan_incomplete"
+)
 
 var (
-	archivedTopLevelKeyPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
-	proseArchiveCommentTags    = map[string]bool{
+	archivedSectionPathPattern = regexp.MustCompile(`^[a-z0-9][a-zA-Z0-9_.-]*$`)
+	proseArchiveCommentTags = map[string]bool{
 		"todo":    true,
 		"fixme":   true,
 		"note":    true,
@@ -497,68 +502,121 @@ var (
 	}
 )
 
-// AttachArchivedUnknownV8Paths attaches sorted, deduplicated unknown paths
-// recovered from GET /v8/management/config.yaml comments to doc so
-// UnknownV8ConfigPaths reports both JSON-visible and CPA-archived unknown keys.
-func AttachArchivedUnknownV8Paths(doc map[string]any, paths []string) {
-	if doc == nil || len(paths) == 0 {
-		return
-	}
-	merged := append([]string(nil), attachedArchivedUnknownV8Paths(doc)...)
-	for _, path := range paths {
-		trimmed := strings.TrimSpace(path)
-		if trimmed != "" {
-			merged = append(merged, trimmed)
-		}
-	}
-	if len(merged) == 0 {
-		return
-	}
-	slices.Sort(merged)
-	merged = slices.Compact(merged)
-	doc[archivedUnknownV8PathsKey] = merged
+// V8UnknownConfigScan separates definite JSON-visible unknown configuration
+// paths from heuristic trailing YAML archive comment candidates and incomplete
+// YAML scan state.
+type V8UnknownConfigScan struct {
+	JSONPaths             []string
+	ArchiveCandidates     []string
+	ArchiveScanIncomplete bool
 }
 
-func attachedArchivedUnknownV8Paths(doc map[string]any) []string {
+// HasAny reports whether the source carries definite JSON unknown keys,
+// possible archived/commented YAML unknown candidates, or an incomplete YAML
+// archive scan that must fail closed as a manual review item.
+func (s V8UnknownConfigScan) HasAny() bool {
+	return len(s.JSONPaths) > 0 || len(s.ArchiveCandidates) > 0 || s.ArchiveScanIncomplete
+}
+
+// AttachV8YAMLArchiveScan attaches the YAML archive scan result from
+// GET /v8/management/config.yaml to doc using reserved NUL-prefixed carrier keys
+// so InspectV8UnknownConfig can read both definite JSON unknowns and heuristic/
+// incomplete YAML scan state without polluting UnknownV8ConfigPaths.
+func AttachV8YAMLArchiveScan(doc map[string]any, candidates []string, complete bool) {
+	if doc == nil {
+		return
+	}
+	cleaned := normalizeV8ArchiveCandidates(candidates)
+	if len(cleaned) > 0 {
+		doc[archivedV8YAMLScanCandidatesKey] = cleaned
+	} else {
+		delete(doc, archivedV8YAMLScanCandidatesKey)
+	}
+	if !complete {
+		doc[archivedV8YAMLScanIncompleteKey] = true
+	} else {
+		delete(doc, archivedV8YAMLScanIncompleteKey)
+	}
+}
+
+// InspectV8UnknownConfig returns the combined definite JSON unknown paths and
+// attached YAML archive scan state from doc.
+func InspectV8UnknownConfig(doc map[string]any) V8UnknownConfigScan {
+	if len(doc) == 0 {
+		return V8UnknownConfigScan{}
+	}
+	incomplete, _ := doc[archivedV8YAMLScanIncompleteKey].(bool)
+	return V8UnknownConfigScan{
+		JSONPaths:             UnknownV8ConfigPaths(doc),
+		ArchiveCandidates:     attachedV8YAMLArchiveCandidates(doc),
+		ArchiveScanIncomplete: incomplete,
+	}
+}
+
+func normalizeV8ArchiveCandidates(candidates []string) []string {
+	if len(candidates) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if trimmed := strings.TrimSpace(candidate); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+func attachedV8YAMLArchiveCandidates(doc map[string]any) []string {
 	if doc == nil {
 		return nil
 	}
-	raw, ok := doc[archivedUnknownV8PathsKey]
+	raw, ok := doc[archivedV8YAMLScanCandidatesKey]
 	if !ok || raw == nil {
 		return nil
 	}
 	switch typed := raw.(type) {
 	case []string:
-		return typed
+		return normalizeV8ArchiveCandidates(typed)
 	case []any:
 		out := make([]string, 0, len(typed))
 		for _, item := range typed {
-			if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
-				out = append(out, strings.TrimSpace(s))
+			if s, ok := item.(string); ok {
+				out = append(out, s)
 			}
 		}
-		return out
+		return normalizeV8ArchiveCandidates(out)
 	default:
 		return nil
 	}
 }
 
-// ArchivedV8UnknownPaths extracts genuinely unknown configuration paths that
-// CPA v8.0.55 stripped from JSON and archived as trailing `# <dotted.section>: ...`
-// comments on root.FootComment of GET /v8/management/config.yaml. Only the
-// trailing comment tail after the last active YAML line of the first YAML
-// document (before `...` or any subsequent `---`) is inspected, and pre-existing
-// comments, prose tags, legacy CPA v7 top-level keys, and known aliases are excluded.
-func ArchivedV8UnknownPaths(projectedV8YAML []byte) []string {
+// ScanV8YAMLArchiveCandidates inspects the trailing root.FootComment archive
+// block of GET /v8/management/config.yaml for possible CPA-archived or
+// operator-commented `# <dotted.section>: ...` entries after the last active YAML
+// line of the first YAML document (before `...` or any subsequent `---`).
+//
+// complete is true only when projectedV8YAML is valid UTF-8, non-empty, and its
+// first YAML document decodes cleanly as a mapping node. Heuristic trailing
+// comment matches are returned as candidates rather than exact active key
+// counts, because operator comments in `# path: value` form are syntactically
+// indistinguishable from CPA archive blocks.
+func ScanV8YAMLArchiveCandidates(projectedV8YAML []byte) (candidates []string, complete bool) {
+	if !utf8.Valid(projectedV8YAML) {
+		return nil, false
+	}
 	raw := bytes.TrimPrefix(projectedV8YAML, []byte("\xef\xbb\xbf"))
 	if len(bytes.TrimSpace(raw)) == 0 {
-		return nil
+		return nil, false
 	}
 	normalized := strings.ReplaceAll(string(raw), "\r\n", "\n")
 	dec := yaml.NewDecoder(strings.NewReader(normalized))
 	var doc yaml.Node
 	if err := dec.Decode(&doc); err != nil || doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 || doc.Content[0] == nil || doc.Content[0].Kind != yaml.MappingNode {
-		return nil
+		return nil, false
 	}
 	lines := strings.Split(normalized, "\n")
 	maxLine := maxYAMLNodeLine(doc.Content[0])
@@ -583,7 +641,7 @@ func ArchivedV8UnknownPaths(projectedV8YAML []byte) []string {
 		break
 	}
 	if tailStart >= len(firstDocLines) {
-		return nil
+		return nil, true
 	}
 	trailing := firstDocLines[tailStart:]
 	var found []string
@@ -594,7 +652,7 @@ func ArchivedV8UnknownPaths(projectedV8YAML []byte) []string {
 		}
 		blockText := strings.Join(cur, "\n")
 		cur = nil
-		if section, ok := decodeArchivedYAMLMappingSection(blockText); ok && isArchivedUnknownV8Section(section) {
+		if section, ok := decodeArchivedYAMLMappingSection(blockText); ok && isPossibleArchivedV8Section(section) {
 			found = append(found, section)
 		}
 	}
@@ -634,10 +692,10 @@ func ArchivedV8UnknownPaths(projectedV8YAML []byte) []string {
 	}
 	flush()
 	if len(found) == 0 {
-		return nil
+		return nil, true
 	}
 	slices.Sort(found)
-	return slices.Compact(found)
+	return slices.Compact(found), true
 }
 
 func maxYAMLNodeLine(node *yaml.Node) int {
@@ -724,41 +782,42 @@ func decodeArchivedYAMLMappingSection(blockText string) (string, bool) {
 	return section, true
 }
 
-func isArchivedUnknownV8Section(section string) bool {
+func isPossibleArchivedV8Section(section string) bool {
 	if section == "" || strings.ContainsAny(section, " \t\r\n") {
 		return false
 	}
-	index := knownV8ConfigSchema()
-	if strings.Contains(section, ".") {
-		if section == "oauth.providers.codex.live-media-relay.allow-private-remote-ips" ||
-			section == "codex.live-media-relay.allow-private-remote-ips" {
-			return false
-		}
-		lastDot := strings.LastIndexByte(section, '.')
-		if lastDot <= 0 || lastDot == len(section)-1 {
-			return false
-		}
-		parent := section[:lastDot]
-		return index.parents[parent] && !index.leaves[section] && !index.wholes[section] && !index.parents[section]
+	if strings.HasPrefix(section, ".") || strings.HasSuffix(section, ".") || strings.Contains(section, "..") {
+		return false
 	}
-	if !archivedTopLevelKeyPattern.MatchString(section) {
+	if !archivedSectionPathPattern.MatchString(section) {
+		return false
+	}
+	if section == "oauth.providers.codex.live-media-relay.allow-private-remote-ips" ||
+		section == "codex.live-media-relay.allow-private-remote-ips" {
 		return false
 	}
 	if proseArchiveCommentTags[section] {
 		return false
 	}
+	index := knownV8ConfigSchema()
 	if section == "config-version" || index.leaves[section] || index.wholes[section] || index.parents[section] {
 		return false
 	}
-	return !legacyCPAV7TopLevelKeys[section]
+	firstSeg := section
+	if dot := strings.IndexByte(section, '.'); dot >= 0 {
+		firstSeg = section[:dot]
+	}
+	if !index.leaves[firstSeg] && !index.wholes[firstSeg] && !index.parents[firstSeg] {
+		return !legacyCPAV7TopLevelKeys[firstSeg]
+	}
+	return true
 }
 
-// UnknownV8ConfigPaths returns the sorted dotted paths of unrecognized non-nil
-// configuration entries in a CPA v8 config document (including off-table
-// sibling keys nested under named roots such as server, plugins, oauth, routing,
-// or observability, as well as any CPA-archived unknown paths attached from
-// GET /v8/management/config.yaml). It is the single authoritative unknown-key
-// scanner shared by v8 discovery, source inventory counting, and adoption execution.
+// UnknownV8ConfigPaths returns the sorted dotted paths of definite active
+// unrecognized non-nil configuration entries in a decoded CPA v8 JSON config
+// document (including off-table sibling keys nested under named roots such as
+// server, plugins, oauth, routing, or observability). Reserved in-memory scan
+// carrier keys prefixed with `\x00cpamp_` are ignored.
 func UnknownV8ConfigPaths(doc map[string]any) []string {
 	if len(doc) == 0 {
 		return nil
@@ -768,7 +827,7 @@ func UnknownV8ConfigPaths(doc map[string]any) []string {
 	var walk func(prefix string, obj map[string]any)
 	walk = func(prefix string, obj map[string]any) {
 		for key, val := range obj {
-			if prefix == "" && key == archivedUnknownV8PathsKey {
+			if prefix == "" && strings.HasPrefix(key, archivedV8YAMLScanKeyPrefix) {
 				continue
 			}
 			path := key
@@ -795,9 +854,6 @@ func UnknownV8ConfigPaths(doc map[string]any) []string {
 		}
 	}
 	walk("", doc)
-	if attached := attachedArchivedUnknownV8Paths(doc); len(attached) > 0 {
-		unknown = append(unknown, attached...)
-	}
 	if len(unknown) == 0 {
 		return nil
 	}

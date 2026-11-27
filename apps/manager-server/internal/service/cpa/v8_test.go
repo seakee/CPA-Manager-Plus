@@ -264,17 +264,19 @@ upstream:
 		}
 	})
 
-	t.Run("clean alias YAML and non-200 YAML fallback do not fail or mark unknown", func(t *testing.T) {
-		for _, status := range []int{http.StatusOK, http.StatusNotFound, http.StatusInternalServerError} {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch r.URL.Path {
-				case "/v8/management/config":
-					w.Header().Set("Content-Type", "application/json")
-					_, _ = w.Write([]byte(safeV8Config))
-				case "/v8/management/config.yaml":
-					w.WriteHeader(status)
-					if status == http.StatusOK {
-						_, _ = w.Write([]byte(`# operator comment
+	t.Run("clean alias YAML emits zero unknowns while failed or malformed YAML fails closed without v0 fallback", func(t *testing.T) {
+		type yamlOutcome struct {
+			name        string
+			status      int
+			body        string
+			hang        bool
+			wantUnknown bool
+		}
+		cases := []yamlOutcome{
+			{
+				name:   "clean allow-private-remote-ips alias",
+				status: http.StatusOK,
+				body: `# operator comment
 config-version: 8
 server:
     port: 8317
@@ -285,20 +287,86 @@ oauth:
             live-media-relay: {}
 
 # oauth.providers.codex.live-media-relay.allow-private-remote-ips: true
-`))
+`,
+				wantUnknown: false,
+			},
+			{
+				name:        "404 not found fails closed",
+				status:      http.StatusNotFound,
+				wantUnknown: true,
+			},
+			{
+				name:        "500 internal error fails closed",
+				status:      http.StatusInternalServerError,
+				wantUnknown: true,
+			},
+			{
+				name:        "empty body fails closed",
+				status:      http.StatusOK,
+				body:        "   \n",
+				wantUnknown: true,
+			},
+			{
+				name:        "malformed YAML fails closed",
+				status:      http.StatusOK,
+				body:        "config-version: [8\n",
+				wantUnknown: true,
+			},
+			{
+				name:        "oversized YAML >1 MiB fails closed",
+				status:      http.StatusOK,
+				body:        strings.Repeat("# comment\n", (safeReadLimit/len("# comment\n"))+16) + "config-version: 8\n",
+				wantUnknown: true,
+			},
+			{
+				name:        "timeout on config.yaml fails closed",
+				hang:        true,
+				wantUnknown: true,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				var v0Calls atomic.Int32
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case "/v8/management/config":
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = w.Write([]byte(safeV8Config))
+					case "/v8/management/config.yaml":
+						if tc.hang {
+							<-r.Context().Done()
+							return
+						}
+						w.WriteHeader(tc.status)
+						if tc.body != "" {
+							_, _ = w.Write([]byte(tc.body))
+						}
+					default:
+						if strings.HasPrefix(r.URL.Path, "/v0/") {
+							v0Calls.Add(1)
+						}
+						w.WriteHeader(http.StatusNotFound)
 					}
-				default:
-					w.WriteHeader(http.StatusNotFound)
+				}))
+				defer server.Close()
+
+				ctx, cancel := context.WithTimeout(t.Context(), 150*time.Millisecond)
+				defer cancel()
+				if !tc.hang {
+					ctx = t.Context()
 				}
-			}))
-			snapshot, err := ReadV8AdoptionSnapshot(t.Context(), server.URL, "secret-mgmt")
-			server.Close()
-			if err != nil {
-				t.Fatalf("status=%d ReadV8AdoptionSnapshot failed: %v", status, err)
-			}
-			if slices.Contains(snapshot.ResourceSections, "unknown_cpa_native_resource") {
-				t.Fatalf("status=%d unexpected unknown_cpa_native_resource in %v", status, snapshot.ResourceSections)
-			}
+				snapshot, err := ReadV8AdoptionSnapshot(ctx, server.URL, "secret-mgmt")
+				if err != nil {
+					t.Fatalf("ReadV8AdoptionSnapshot failed: %v", err)
+				}
+				if v0Calls.Load() != 0 {
+					t.Fatalf("unexpected v0 calls: %d", v0Calls.Load())
+				}
+				gotUnknown := slices.Contains(snapshot.ResourceSections, "unknown_cpa_native_resource")
+				if gotUnknown != tc.wantUnknown {
+					t.Fatalf("unknown_cpa_native_resource=%v, want %v (sections=%v)", gotUnknown, tc.wantUnknown, snapshot.ResourceSections)
+				}
+			})
 		}
 	})
 

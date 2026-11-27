@@ -263,7 +263,8 @@ func readV8ConfigWithClient(ctx context.Context, client *http.Client, baseURL, m
 			keys = append(keys, key)
 		}
 		if !slices.Contains(observation.ResourceSections, unknownSection) {
-			if len(readArchivedV8UnknownPaths(ctx, client, baseURL, managementKey)) > 0 {
+			candidates, complete := probeV8YAMLArchive(ctx, client, baseURL, managementKey)
+			if !complete || len(candidates) > 0 {
 				observation.ResourceSections = append(observation.ResourceSections, unknownSection)
 			}
 		}
@@ -272,10 +273,10 @@ func readV8ConfigWithClient(ctx context.Context, client *http.Client, baseURL, m
 	return observation, nil
 }
 
-func readArchivedV8UnknownPaths(ctx context.Context, client *http.Client, baseURL, managementKey string) []string {
+func probeV8YAMLArchive(ctx context.Context, client *http.Client, baseURL, managementKey string) ([]string, bool) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/v8/management/config.yaml", nil)
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	request.Header.Set("Authorization", "Bearer "+managementKey)
 	request.Header.Set("Accept", "application/yaml, text/yaml")
@@ -283,17 +284,17 @@ func readArchivedV8UnknownPaths(ctx context.Context, client *http.Client, baseUR
 	request.Header.Set("Cache-Control", "no-store")
 	response, err := client.Do(request)
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil
+		return nil, false
 	}
 	yamlData, ok := readBoundedJSONBody(response)
 	if !ok {
-		return nil
+		return nil, false
 	}
-	return ArchivedV8UnknownPaths(yamlData)
+	return ScanV8YAMLArchiveCandidates(yamlData)
 }
 
 var _ error = V8ReadError("")

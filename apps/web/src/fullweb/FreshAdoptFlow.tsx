@@ -129,7 +129,6 @@ function groupDecisions(
   list: AdoptionDecision[],
   countsMap?: Readonly<Record<string, number>>
 ) {
-  const hasCounts = Boolean(countsMap && Object.keys(countsMap).length > 0);
   const groups: Record<
     'migrate' | 'manual_action' | 'platform_managed' | 'unsupported',
     AdoptionDecision[]
@@ -144,7 +143,7 @@ function groupDecisions(
       groups.migrate.push(decision);
     } else if (decision?.Disposition === 'manual_action') {
       const ref = decision.ResourceRef;
-      if (ref === 'cpa-config-unknown' && hasCounts && (countsMap?.[ref] ?? 0) === 0) {
+      if (ref === 'cpa-config-unknown' && countsMap?.[ref] === 0) {
         continue;
       }
       if (PLATFORM_MANAGED_CONFIG_REFS[ref] === true) {

@@ -158,7 +158,8 @@ func TestAdoptionStagesEncryptedSnapshotBeforeDestinationAndVerifiesActualAuth(t
 				}
 				if class == bootstrap.AdoptNetworkExisting && r.URL.Path == "/v8/management/config.yaml" {
 					sourceReads++
-					w.WriteHeader(http.StatusNotFound)
+					w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+					_, _ = w.Write([]byte("config-version: 8\nserver:\n  port: 8317\noauth:\n  auth-dir: source-auth\naccess:\n  api-keys:\n    - source-client-one\n    - source-client-two\nproviders:\n  secret: never-migrate\nusage:\n  history: never-migrate\n"))
 					return
 				}
 				path, body := "/v8/management/config", `{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"source-auth"},"access":{"api-keys":["source-client-one","source-client-two"]},"providers":{"secret":"never-migrate"},"usage":{"history":"never-migrate"}}`
