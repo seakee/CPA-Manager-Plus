@@ -16,7 +16,7 @@ A self-hosted CPA / CLIProxyAPI management panel and AI gateway observability da
 
 Operate providers, credentials, OAuth, plugins, and configuration while keeping persistent request history, cost analytics, and account automation in local storage.
 
-[中文](README_CN.md) ｜ [Live Demo](https://cpamp-demo.seakee.dev/) ｜ [Documentation](https://cpamp-docs.seakee.dev/en/) ｜ [Homepage](https://cpamp.seakee.dev/) ｜ [Install](#quick-start)
+[中文](README_CN.md) ｜ [日本語](README_JA.md) ｜ [Live Demo](https://cpamp-demo.seakee.dev/) ｜ [Documentation](https://cpamp-docs.seakee.dev/en/) ｜ [Homepage](https://cpamp.seakee.dev/) ｜ [Install](#quick-start)
 
 </div>
 
