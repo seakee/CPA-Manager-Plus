@@ -19,8 +19,12 @@ package upgrade
 import (
 	"encoding/json"
 	"os"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshadopt"
 )
 
 const (
@@ -47,9 +51,10 @@ type cpaMappingFixture struct {
 	} `json:"sources"`
 	Versions   []string                  `json:"versions"`
 	TagCommits map[string]string         `json:"tagCommits"`
-	Families   []cpaMappingAlias         `json:"families"`
-	Paths      []cpaMappingAlias         `json:"paths"`
-	Presence   map[string]cpaMappingSeen `json:"presence"`
+	Families    []cpaMappingAlias         `json:"families"`
+	Paths       []cpaMappingAlias         `json:"paths"`
+	NativePaths []string                  `json:"nativePaths"`
+	Presence    map[string]cpaMappingSeen `json:"presence"`
 }
 
 type cpaMappingAlias struct {
@@ -94,7 +99,7 @@ func loadCPAMappingFixture(t *testing.T) cpaMappingFixture {
 	if !aliasTable || !structWalk {
 		t.Fatalf("the mapping oracle does not name both upstream sources: %+v", fixture.Sources)
 	}
-	if len(fixture.Versions) == 0 || len(fixture.Families) == 0 || len(fixture.Paths) == 0 || len(fixture.Presence) == 0 {
+	if len(fixture.Versions) == 0 || len(fixture.Families) == 0 || len(fixture.Paths) == 0 || len(fixture.NativePaths) == 0 || len(fixture.Presence) == 0 {
 		t.Fatal("the mapping oracle is empty")
 	}
 	for _, version := range fixture.Versions {
@@ -160,13 +165,33 @@ func upstreamDestinationPath(fixture cpaMappingFixture, legacy string) (string, 
 func TestCPASourceMappingMatchesTheUpstreamAliasTable(t *testing.T) {
 	fixture := loadCPAMappingFixture(t)
 	for _, row := range cpaConfigPaths {
-		expected, ok := upstreamDestinationPath(fixture, row.legacy)
-		if !ok {
-			t.Fatalf("mapping row %q -> %q has no upstream alias: v8 does not load that spelling",
-				row.legacy, row.current)
+		if row.legacy == row.current {
+			if remapped, ok := upstreamDestinationPath(fixture, row.current); ok {
+				t.Fatalf("native mapping row %q is actually remapped upstream to %q", row.current, remapped)
+			}
+			if !slices.Contains(fixture.NativePaths, row.current) {
+				t.Fatalf("native mapping row %q is absent from upstream native Config paths", row.current)
+			}
+		} else {
+			expected, ok := upstreamDestinationPath(fixture, row.legacy)
+			if !ok {
+				t.Fatalf("mapping row %q -> %q has no upstream alias: v8 does not load that spelling",
+					row.legacy, row.current)
+			}
+			if row.current != expected {
+				t.Fatalf("mapping row %q = %q, upstream v8 loads it as %q", row.legacy, row.current, expected)
+			}
 		}
-		if row.current != expected {
-			t.Fatalf("mapping row %q = %q, upstream v8 loads it as %q", row.legacy, row.current, expected)
+		for _, alias := range row.aliases {
+			expected, ok := upstreamDestinationPath(fixture, alias)
+			if !ok {
+				t.Fatalf("mapping row %q alias %q has no upstream alias: v8 does not load that spelling",
+					row.current, alias)
+			}
+			if row.current != expected {
+				t.Fatalf("mapping row %q alias %q = %q, upstream v8 loads it as %q",
+					row.current, alias, row.current, expected)
+			}
 		}
 	}
 }
@@ -239,6 +264,10 @@ func TestCPASourceMappingRowsDoNotContradictTheOtherTables(t *testing.T) {
 	mapped := map[string]bool{}
 	for _, row := range cpaConfigPaths {
 		mapped[row.legacy] = true
+		mapped[row.current] = true
+		for _, alias := range row.aliases {
+			mapped[alias] = true
+		}
 	}
 	for _, removed := range cpaRemovedConfigPaths {
 		if mapped[removed.legacy] {
@@ -250,9 +279,68 @@ func TestCPASourceMappingRowsDoNotContradictTheOtherTables(t *testing.T) {
 			t.Fatalf("%q is both mapped and excluded as a Manager-owned section", section)
 		}
 	}
+	for _, hostPath := range cpaHostExclusivePaths {
+		if mapped[hostPath.path] {
+			t.Fatalf("%q is both mapped and marked host-exclusive", hostPath.path)
+		}
+	}
 	for _, clientKeyPath := range []string{cpaClientKeyPathV7, cpaClientKeyPathV8} {
 		if mapped[clientKeyPath] {
 			t.Fatalf("%q is mapped as configuration, but the client key list is installed by the stage", clientKeyPath)
+		}
+	}
+}
+
+// TestCPASourceCoversEveryAdoptableLeafRuleFamilyAndSection proves cpaConfigPaths
+// covers the full adoptable CPA universe (97 leaves, 6 rule families, 18
+// whole-PUT provider/structured sections) with no drift against cpa or freshadopt.
+func TestCPASourceCoversEveryAdoptableLeafRuleFamilyAndSection(t *testing.T) {
+	byCurrent := map[string]cpaConfigPath{}
+	for _, row := range cpaConfigPaths {
+		if _, dup := byCurrent[row.current]; dup {
+			t.Fatalf("duplicate cpaConfigPaths destination %q", row.current)
+		}
+		byCurrent[row.current] = row
+	}
+
+	allowed := map[string]bool{}
+	for _, leaf := range cpa.ConfigLeafPaths() {
+		allowed[leaf] = true
+		row, ok := byCurrent[leaf]
+		if !ok {
+			t.Fatalf("cpa.ConfigLeafPaths() leaf %q is missing from cpaConfigPaths", leaf)
+		}
+		if cpa.IsConfigKVMapLeaf(leaf) && !row.whole {
+			t.Fatalf("KVMap leaf %q must set whole: true so user map keys are not reported unmapped", leaf)
+		}
+	}
+	for _, familyID := range cpa.ConfigRuleFamilyIDs() {
+		entry, ok := cpa.LookupConfigRuleFamily(familyID)
+		if !ok {
+			t.Fatalf("cpa.LookupConfigRuleFamily(%q) failed", familyID)
+		}
+		allowed[entry.Path] = true
+		row, ok := byCurrent[entry.Path]
+		if !ok {
+			t.Fatalf("cpa.ConfigRuleFamilyIDs() path %q (%s) is missing from cpaConfigPaths", entry.Path, familyID)
+		}
+		if !row.whole {
+			t.Fatalf("rule family %q must set whole: true", entry.Path)
+		}
+	}
+	for _, section := range freshadopt.ProviderSections() {
+		allowed[section] = true
+		row, ok := byCurrent[section]
+		if !ok {
+			t.Fatalf("freshadopt.ProviderSections() section %q is missing from cpaConfigPaths", section)
+		}
+		if !row.whole {
+			t.Fatalf("provider/structured section %q must set whole: true", section)
+		}
+	}
+	for current := range byCurrent {
+		if !allowed[current] {
+			t.Fatalf("cpaConfigPaths entry %q is outside cpa/freshadopt adoptable universe", current)
 		}
 	}
 }
