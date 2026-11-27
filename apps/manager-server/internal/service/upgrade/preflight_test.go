@@ -3123,3 +3123,34 @@ func TestPreflightAlignsZeroByteDatabaseSidecarClassificationWithCopyIn(t *testi
 		}
 	})
 }
+
+func TestPreflightAllowsMissingArchivesDirOnlyWhenNoArchiveRecordsExist(t *testing.T) {
+	t.Run("missing usage-archives passes when SQLite holds zero archive rows", func(t *testing.T) {
+		fixture := newSourceFixture(t, func(t *testing.T, db *sql.DB) {
+			for _, stmt := range []string{
+				`delete from usage_archive_deleted_coverage_daily`,
+				`delete from usage_archive_event_refs`,
+				`delete from usage_archive_segments`,
+				`delete from usage_archive_runs`,
+			} {
+				execFixture(t, db, stmt)
+			}
+		})
+		if err := os.RemoveAll(filepath.Join(fixture.root, archivesDirName)); err != nil {
+			t.Fatalf("remove usage-archives: %v", err)
+		}
+		report := preflight(t, fixture.root, declared())
+		if !report.Ready || len(report.Blocked) != 0 {
+			t.Fatalf("Preflight(no archive rows, no usage-archives dir) = ready=%t blocked=%v, want ready=true", report.Ready, report.Blocked)
+		}
+	})
+
+	t.Run("missing usage-archives blocks with CodeSourceMissing when SQLite holds archive rows", func(t *testing.T) {
+		fixture := newSourceFixture(t, nil)
+		if err := os.RemoveAll(filepath.Join(fixture.root, archivesDirName)); err != nil {
+			t.Fatalf("remove usage-archives: %v", err)
+		}
+		report := preflight(t, fixture.root, declared())
+		requireBlocked(t, report, CodeSourceMissing)
+	})
+}

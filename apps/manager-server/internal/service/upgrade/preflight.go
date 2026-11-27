@@ -512,6 +512,19 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 			check.Status = StatusBlocked
 			check.Code, check.Detail = fingerprintFailure(afterFingerprintErr, "source files could not be read after the snapshot: ")
 			block(check.Code)
+		default:
+			if readable && report.SourceKind == SourceKindLegacyManager && schema.requiresArchives {
+				if _, statErr := os.Lstat(filepath.Join(root, archivesDirName)); os.IsNotExist(statErr) {
+					check.Status = StatusBlocked
+					check.Code = CodeSourceMissing
+					check.Detail = "source usage-archives directory is missing while archive records exist"
+					block(CodeSourceMissing)
+				} else if statErr != nil {
+					check.Status = StatusBlocked
+					check.Code, check.Detail = fingerprintFailure(statErr, "source files could not be read: ")
+					block(check.Code)
+				}
+			}
 		}
 		report.Checks = append(report.Checks, check)
 	}
