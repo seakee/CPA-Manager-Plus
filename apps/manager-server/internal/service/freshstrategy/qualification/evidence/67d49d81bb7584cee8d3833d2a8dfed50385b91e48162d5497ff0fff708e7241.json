@@ -10,7 +10,7 @@
     {
       "id": "fresh-legacy-managed-stage-v8-r1",
       "kind": "sanitized-trace",
-      "sha256": "2178a70cec42b93ad43d097961964432a8d2a92c68f7e35a739b0efad21419a3"
+      "sha256": "bec4ff33aea686138827ceeb8f90ef49068df78e17b8db4af6b6345b02799fd7"
     }
   ],
   "manifestRevision": "fresh-legacy-managed-stage-v8-r1",
@@ -27,9 +27,9 @@
     }
   ],
   "run": {
-    "id": "cpamp-fresh-legacy-transition-62d90b6c0485",
-    "runnerCommit": "62d90b6c04853b7e18853a14ec0fdb059cd7cd13",
-    "testedTree": "926cd2eb803a7f16efa0199567f2e158e51fdc99"
+    "id": "cpamp-fresh-legacy-transition-3b0145379af5",
+    "runnerCommit": "3b0145379af530506c7197c55089e73a534de698",
+    "testedTree": "585e8c870116acadeed1f4af7ee4804dce38c211"
   },
   "schemaVersion": 1
 }
