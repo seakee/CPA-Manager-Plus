@@ -233,8 +233,10 @@ superseded re-verification record
 previous independent re-verification record
 `025f517544f71ba83eac62b104c3ae381b454b5d07c29b7b46c86962fb562e3d`, followed by
 the historical 2026-11-15 renewal
-`1d9c68bc18ad51f8abf7955e9c25e9cc3262779b1b2ccd9e29eb53081c5f867c` and the current
-CPA v8-only acceptance `a8230400f8defdb46d7adb38b6be0872f7b7d337d6d69b63af56f341ad5e30a1`,
+`1d9c68bc18ad51f8abf7955e9c25e9cc3262779b1b2ccd9e29eb53081c5f867c`, the
+superseded CPA v8-only renewals `a8230400f8defdb46d7adb38b6be0872f7b7d337d6d69b63af56f341ad5e30a1`
+and `41ab4005c260ef24064cd8fa6a7a9cee88b9a2644e77bd4c2e1f10290ba8f265`, and the current
+CPA v8-only acceptance `a1ecc7c35bc91624af2c559ccf93da9173b1cf558142b6897bab29fdb6cd5507`,
 backed by actual CPA `v8.0.55` source-read, destination-replay and verification
 evidence. The executor's per-item gate is what keeps the four-kind breadth of
 `network_existing` honest: an item is copied only when the record's decision for
@@ -246,10 +248,12 @@ of every item-to-reference pair are part of the consumer digest):
 derived set every item under a discovered root carries. Discovery records a
 decision for every reference in each reported root's set, so a root is no longer
 one resource — `oauth` contributes `cpa-auth-files`, `provider-state-api-keys` and
-`cpa-config-unknown` (the source keys nothing copies: its refresh worker count and
-its `providers` runtime block), and the reader's unknown catch-all (where
-`requests`/`multimedia`/`upstream` arrive) both `cpa-config-routing` and
-`cpa-config-unknown`. No set contains a reference that no item under that root
+`cpa-config-routing` (its refresh worker count and `providers` configuration),
+shared host roots (`server`, `plugins`, `observability`) contribute both their
+platform-managed host reference and `cpa-config-routing`, and the reader's
+unknown catch-all (where `requests`/`multimedia`/`upstream`/`models`/`credentials`
+arrive) contributes both `cpa-config-routing` and `cpa-config-unknown`.
+No set contains a reference that no item under that root
 produces, so an item is never recorded as manual work under one reference while
 being copied under another, and the record never asks the operator to redo work
 the executor never does. A source key that no copyable item carries is named in
