@@ -48,3 +48,16 @@ func (f *UsageEventFanout) UpdateRuntimeConfig(ctx context.Context, cfg collecto
 		runtimeHandler.UpdateRuntimeConfig(ctx, cfg)
 	}
 }
+
+func (f *UsageEventFanout) RejectRuntimeConfig(cfg collectorpkg.RuntimeConfig) {
+	if f == nil {
+		return
+	}
+	for _, handler := range f.handlers {
+		rejecter, ok := handler.(collectorpkg.UsageRuntimeConfigRejecter)
+		if !ok {
+			continue
+		}
+		rejecter.RejectRuntimeConfig(cfg)
+	}
+}

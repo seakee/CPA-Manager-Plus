@@ -10,10 +10,12 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
@@ -612,6 +614,11 @@ var proxiedEntityHeaders = []string{
 func (a *freshApplication) noteExternalRejection(ctx context.Context, grant externalReadGrant, err error) {
 	if a == nil || a.rejection == nil || err == nil || !errors.Is(err, cpa.ErrManagementRejected) {
 		return
+	}
+	if a.legacyApp != nil && a.legacyApp.Collector != nil && strings.TrimSpace(grant.Credential) != "" {
+		a.legacyApp.Collector.RejectRuntimeConfig(collector.RuntimeConfig{
+			ManagementKey: strings.TrimSpace(grant.Credential),
+		})
 	}
 	if recErr := a.rejection.record(ctx, grant.Identity, grant.Credential); recErr != nil {
 		log.Printf("Fresh external rejection durable write failed (enforced in-memory fail-closed blocker): %v", recErr)

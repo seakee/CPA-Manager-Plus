@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -4556,5 +4557,204 @@ func TestRateLimitAutoDisableWorkerDoesNotEnableWithoutClaim(t *testing.T) {
 	}
 	if len(due) != 1 || due[0].ID != seeded.ID {
 		t.Fatalf("due cooldowns = %#v, want the still-retryable generation", due)
+	}
+}
+
+func TestRateLimitAutoDisableWorkerStopsPresentingRejectedCredentialUntilRebound(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.sqlite")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	var authHeaders []string
+	var mu sync.Mutex
+	disabled := true
+	var worker *RateLimitAutoDisableWorker
+	var rejectOnFirstMidBatchGet atomic.Bool
+	var midBatchURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hdr := r.Header.Get("Authorization")
+		mu.Lock()
+		authHeaders = append(authHeaders, hdr)
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+			if rejectOnFirstMidBatchGet.CompareAndSwap(true, false) {
+				mu.Unlock()
+				worker.RejectRuntimeConfig(collectorpkg.RuntimeConfig{
+					CPAUpstreamURL: midBatchURL,
+					ManagementKey:  "midbatch-mgmt",
+				})
+				http.Error(w, `{"error":"invalid management key"}`, http.StatusUnauthorized)
+				return
+			}
+			curDisabled := disabled
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode([]map[string]any{quotaEnableFixtures()[0].authFilePayload(curDisabled)})
+		case r.Method == http.MethodPatch && r.URL.Path == "/v0/management/auth-files/status":
+			disabled = false
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			mu.Unlock()
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	midBatchURL = server.URL
+
+	ctx := context.Background()
+	now := time.Now()
+	fixture := quotaEnableFixtures()[0]
+	seeded := seedDueQuotaCooldown(t, st, fixture, "evt-rejected-cred")
+	worker = NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{
+		CPAUpstreamURL: server.URL,
+		ManagementKey:  "rejected-mgmt",
+	})
+	_, genA := worker.setRuntimeConfig(server.URL, "rejected-mgmt")
+	staleCandidateFromGenA := quotaAutoDisableCandidate{
+		ConfigGen:      genA,
+		BaseURL:        server.URL,
+		ManagementKey:  "rejected-mgmt",
+		FileName:       "auth.json",
+		AuthIndex:      "auth-1",
+		DisplayAccount: "auth.json",
+		Provider:       "codex",
+		ReasonCode:     quotaReasonCodexUsageLimit,
+		WindowKind:     "five_hour",
+		ResetAt:        now.Add(10 * time.Minute),
+		EventHash:      "evt-stale-candidate",
+		Reason:         "rate limit",
+	}
+
+	// Retire the rejected credential via the collector rejection hook.
+	worker.RejectRuntimeConfig(collectorpkg.RuntimeConfig{
+		CPAUpstreamURL: server.URL,
+		ManagementKey:  "rejected-mgmt",
+	})
+	// An out-of-order UpdateRuntimeConfig carrying the same rejected credential must not re-enable it.
+	worker.UpdateRuntimeConfig(ctx, collectorpkg.RuntimeConfig{
+		CPAUpstreamURL: server.URL,
+		ManagementKey:  "rejected-mgmt",
+	})
+	worker.enableDue(ctx, now)
+	worker.handleCandidate(ctx, staleCandidateFromGenA)
+
+	mu.Lock()
+	hitsWhileRejected := len(authHeaders)
+	mu.Unlock()
+	if hitsWhileRejected != 0 {
+		t.Fatalf("CPA requests while credential is rejected = %d (%v), want 0", hitsWhileRejected, authHeaders)
+	}
+
+	// Mid-batch rejection: with 2 due cooldowns under "midbatch-mgmt", if item #1 triggers
+	// RejectRuntimeConfig("midbatch-mgmt"), item #2 in the same enableDue batch must NOT send a 2nd request.
+	fixture2 := quotaEnableFixtures()[1]
+	_ = seedDueQuotaCooldown(t, st, fixture2, "evt-rejected-cred-2")
+	_, _ = worker.setRuntimeConfig(server.URL, "midbatch-mgmt")
+	rejectOnFirstMidBatchGet.Store(true)
+	worker.enableDue(ctx, now)
+	mu.Lock()
+	midBatchHits := append([]string(nil), authHeaders...)
+	authHeaders = nil
+	mu.Unlock()
+	if len(midBatchHits) != 1 || midBatchHits[0] != "Bearer midbatch-mgmt" {
+		t.Fatalf("mid-batch CPA requests = %v, want exactly 1 request before rejection halted batch", midBatchHits)
+	}
+
+	// Rebinding to a new credential restores recovery, while draining the old genA candidate
+	// AFTER rebind still drops it without ever presenting "rejected-mgmt".
+	worker.UpdateRuntimeConfig(ctx, collectorpkg.RuntimeConfig{
+		CPAUpstreamURL: server.URL,
+		ManagementKey:  "rebound-mgmt",
+	})
+	worker.handleCandidate(ctx, staleCandidateFromGenA)
+
+	status, _, _ := readQuotaCooldownRow(t, path, seeded.ID)
+	if status != model.QuotaCooldownStatusRecovered {
+		t.Fatalf("cooldown status after rebind = %q, want %q", status, model.QuotaCooldownStatusRecovered)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(authHeaders) == 0 {
+		t.Fatal("expected recovery requests after credential rebind")
+	}
+	for _, got := range authHeaders {
+		if got != "Bearer rebound-mgmt" {
+			t.Fatalf("Authorization header after rebind = %q, want Bearer rebound-mgmt (stale candidate leaked?)", got)
+		}
+	}
+}
+
+func TestRateLimitAutoDisableWorkerSkipsFollowUpVerificationAndPreservesTerminalClaimWhenRejectedDuringPatch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.sqlite")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	type recordedReq struct {
+		method string
+		path   string
+		auth   string
+	}
+	var reqs []recordedReq
+	var mu sync.Mutex
+	disabled := true
+	var worker *RateLimitAutoDisableWorker
+	var srvURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		reqs = append(reqs, recordedReq{
+			method: r.Method,
+			path:   r.URL.Path,
+			auth:   r.Header.Get("Authorization"),
+		})
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+			curDisabled := disabled
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode([]map[string]any{quotaEnableFixtures()[0].authFilePayload(curDisabled)})
+		case r.Method == http.MethodPatch && r.URL.Path == "/v0/management/auth-files/status":
+			disabled = false
+			mu.Unlock()
+			// Rejection arrives from another probe while this enable PATCH is in flight and succeeds.
+			worker.RejectRuntimeConfig(collectorpkg.RuntimeConfig{
+				CPAUpstreamURL: srvURL,
+				ManagementKey:  "inflight-patch-mgmt",
+			})
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			mu.Unlock()
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	srvURL = server.URL
+
+	ctx := context.Background()
+	now := time.Now()
+	fixture := quotaEnableFixtures()[0]
+	seeded := seedDueQuotaCooldown(t, st, fixture, "evt-inflight-patch-reject")
+	worker = NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{
+		CPAUpstreamURL: server.URL,
+		ManagementKey:  "inflight-patch-mgmt",
+	})
+	worker.enableDue(ctx, now)
+
+	mu.Lock()
+	gotReqs := append([]recordedReq(nil), reqs...)
+	mu.Unlock()
+	if len(gotReqs) != 2 ||
+		gotReqs[0].method != http.MethodGet || gotReqs[0].path != "/v0/management/auth-files" ||
+		gotReqs[1].method != http.MethodPatch || gotReqs[1].path != "/v0/management/auth-files/status" {
+		t.Fatalf("requests = %+v, want only pre-claim GET + enable PATCH with zero post-rejection follow-up GET/PATCH", gotReqs)
+	}
+
+	status, reason, _ := readQuotaCooldownRow(t, path, seeded.ID)
+	if status != model.QuotaCooldownStatusSkipped {
+		t.Fatalf("cooldown status after in-flight PATCH rejection = %q (reason=%q), want %q (terminal claim preserved)", status, reason, model.QuotaCooldownStatusSkipped)
 	}
 }

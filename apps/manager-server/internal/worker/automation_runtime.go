@@ -122,3 +122,12 @@ func (h *automationUsageHandler) UpdateRuntimeConfig(ctx context.Context, cfg co
 		h.quotaWorker.UpdateRuntimeConfig(ctx, cfg)
 	}
 }
+
+func (h *automationUsageHandler) RejectRuntimeConfig(cfg collectorpkg.RuntimeConfig) {
+	if h == nil || h.quotaWorker == nil {
+		return
+	}
+	if rejecter, ok := h.quotaWorker.(collectorpkg.UsageRuntimeConfigRejecter); ok {
+		rejecter.RejectRuntimeConfig(cfg)
+	}
+}

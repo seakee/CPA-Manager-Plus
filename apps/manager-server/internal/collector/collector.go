@@ -62,6 +62,10 @@ type UsageRuntimeConfigHandler interface {
 	UpdateRuntimeConfig(ctx context.Context, cfg RuntimeConfig)
 }
 
+type UsageRuntimeConfigRejecter interface {
+	RejectRuntimeConfig(cfg RuntimeConfig)
+}
+
 type Manager struct {
 	base              config.Config
 	store             *store.Store
@@ -243,6 +247,21 @@ func (m *Manager) Stop() {
 		m.cancel = nil
 	}
 	m.status.Collector = "stopped"
+}
+
+// RejectRuntimeConfig notifies the registered usage event handler that cfg's
+// management credential was refused so downstream automation workers immediately
+// stop presenting that credential on background retries or cooldown ticks.
+func (m *Manager) RejectRuntimeConfig(cfg RuntimeConfig) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	handler := m.usageEventHandler
+	m.mu.Unlock()
+	if rejecter, ok := handler.(UsageRuntimeConfigRejecter); ok {
+		rejecter.RejectRuntimeConfig(cfg)
+	}
 }
 
 // StopAndWait cancels the active run and blocks until every started Collector
@@ -494,10 +513,15 @@ func (m *Manager) refuseAuthRun(ctx context.Context, cancel context.CancelFunc, 
 			m.status.LastError += "; " + message
 		}
 	}
+	rejectedCfg := m.runtimeCfg
+	handler := m.usageEventHandler
 	report := m.authRejected
 	m.mu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+	if rejecter, ok := handler.(UsageRuntimeConfigRejecter); ok {
+		rejecter.RejectRuntimeConfig(rejectedCfg)
 	}
 	if report != nil {
 		report(runID)
