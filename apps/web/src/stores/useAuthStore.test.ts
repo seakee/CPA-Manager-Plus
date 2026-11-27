@@ -474,4 +474,28 @@ describe('useAuthStore legacy cache session restoration', () => {
     });
     expectLegacyBytes(bytes);
   });
+
+  it.each(['：cpamp-admin-key', 'cpamp-admin-key│', 'cpamp-admin\nkey'])(
+    'rejects invalid header credential %j with 401 ApiError before issuing API requests',
+    async (invalidKey) => {
+      // Dynamic import is required after vi.resetModules() + stubbed localStorage in beforeEach.
+      const { useAuthStore } = await import('./useAuthStore');
+      await expect(
+        useAuthStore.getState().login({
+          apiBase: 'http://manager.test:18317',
+          managementKey: invalidKey,
+          sessionMode: 'manager_embedded',
+        })
+      ).rejects.toMatchObject({
+        name: 'ApiError',
+        status: 401,
+      });
+      expect(fetchConfigMock).not.toHaveBeenCalled();
+      expect(usageServiceGetManagerConfigMock).not.toHaveBeenCalled();
+      expect(useAuthStore.getState()).toMatchObject({
+        isAuthenticated: false,
+        connectionStatus: 'error',
+      });
+    }
+  );
 });

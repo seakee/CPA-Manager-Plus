@@ -320,4 +320,22 @@ describe('upgradeArtifactTransport', () => {
       expect(formatArtifactError(caught, '8.0.55', 'en').code).toBe('upgrade_bootstrap_retired');
     }
   });
+
+  it.each(['：legacy-1x-key', 'legacy-1x-key│', 'legacy-1x-key\r\nx'])(
+    'rejects invalid header credential %j as 401 unauthorized without calling fetch',
+    async (invalidKey) => {
+      const fetcher = vi.fn();
+      const transport = createUpgradeArtifactTransport(
+        () => invalidKey,
+        undefined,
+        fetcher as unknown as typeof fetch
+      );
+      await expect(transport.readStatus()).rejects.toMatchObject({
+        kind: 'authentication',
+        status: 401,
+        code: 'unauthorized',
+      });
+      expect(fetcher).not.toHaveBeenCalled();
+    }
+  );
 });

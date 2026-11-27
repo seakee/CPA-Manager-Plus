@@ -436,4 +436,18 @@ describe('existing Manager credential provenance', () => {
     rememberCommittedUpgradeStatus(snapshot, { revision: revB });
     expect(rememberedCommittedUpgradeStatus(revB)?.activationRequested).toBeUndefined();
   });
+
+  it.each(['：old-key', 'old-key│', 'old-key\nnext', ''])(
+    'rejects invalid header credential %j as invalid authentication without calling fetch',
+    async (invalidCredential) => {
+      const fetcher = vi.fn();
+      vi.stubGlobal('fetch', fetcher);
+      await expect(
+        verifyUpgradeCredential(invalidCredential, new AbortController().signal)
+      ).rejects.toMatchObject({
+        reason: 'invalid',
+      });
+      expect(fetcher).not.toHaveBeenCalled();
+    }
+  );
 });

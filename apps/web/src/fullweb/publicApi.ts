@@ -2,6 +2,9 @@ import { readRoutingContext, resolveRoutingContext, type RoutingContext } from '
 import { isAdoptBlocker } from './freshAdoption';
 import { parseGatewayJSON, stringifyGatewayJSON } from './gatewayRuleJSON';
 import { parseRuntimeJSON, runtimeRequestJSON } from './runtimeGeneration';
+import { isValidHeaderCredentialValue } from '../utils/headerCredential';
+
+export { isValidHeaderCredentialValue };
 
 export type PublicApiErrorKind = 'routing_unavailable' | 'network' | 'http' | 'authentication';
 
@@ -235,6 +238,9 @@ export function createPublicApiClient(
     const isGzipUpload = resource === 'runtime/artifact/upload' && method === 'PUT';
     const headers: Record<string, string> = { Accept: 'application/json' };
     if (credential) {
+      if (!isValidHeaderCredentialValue(credential.value)) {
+        throw new PublicApiError('authentication', 401);
+      }
       headers.Authorization = `${credential.kind === 'session' ? 'Fresh' : 'Bearer'} ${credential.value}`;
     }
     if (body !== undefined) {

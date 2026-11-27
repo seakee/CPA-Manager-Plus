@@ -621,6 +621,25 @@ describe('Full Web upgrade wizard', () => {
     expect(transport).not.toHaveBeenCalled();
   });
 
+  it.each(['：legacy-1x-key', 'legacy-1x-key│', 'legacy-1x-key\nnext'])(
+    'maps non-ByteString or multiline credential %j to 401 authentication without invoking transport',
+    async (invalidKey) => {
+      const transport = vi.fn() as unknown as typeof fetch;
+      vi.stubGlobal('document', { getElementById: () => null });
+      vi.stubGlobal('window', {
+        setTimeout,
+        clearTimeout,
+        location: { origin: 'http://manager.test' },
+      });
+
+      const read = createUpgradeWizardRead(() => invalidKey, transport);
+      await expect(
+        read('installation/upgrade/status', new AbortController().signal)
+      ).rejects.toMatchObject({ failure: 'authentication', status: 401 });
+      expect(transport).not.toHaveBeenCalled();
+    }
+  );
+
   it('treats a contradictory preflight report as a typed read failure', async () => {
     await mount(
       wizardRead({
