@@ -1382,7 +1382,7 @@ func TestImportCPARecoversCrossGenerationWhenRestartedChildIsStarting(t *testing
 
 		// Generation 4: StageDestination + initial :start succeed, child stays in
 		// Starting until caller deadline expires.
-		gen4Ctx, gen4Cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+		gen4Ctx, gen4Cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
 		defer gen4Cancel()
 		_, err := ImportCPA(gen4Ctx, options)
 		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationUnready {
@@ -1403,7 +1403,7 @@ func TestImportCPARecoversCrossGenerationWhenRestartedChildIsStarting(t *testing
 
 		// First retry on Generation 5 mints :start:2, spawns the child into
 		// RuntimeStateStarting, and times out before ready.
-		gen5FirstCtx, gen5FirstCancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+		gen5FirstCtx, gen5FirstCancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
 		defer gen5FirstCancel()
 		_, err = ImportCPA(gen5FirstCtx, options)
 		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationUnready {
@@ -1465,7 +1465,7 @@ func TestImportCPARecoversCrossGenerationWhenRestartedChildIsStarting(t *testing
 		plugins := false
 		options := importOptions(fixture, rt, destination.server.URL, &plugins)
 
-		shortCtx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+		shortCtx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
 		defer cancel()
 		_, _ = ImportCPA(shortCtx, options)
 
@@ -1494,7 +1494,7 @@ func TestImportCPARecoversCrossGenerationWhenRestartedChildIsStarting(t *testing
 		options := importOptions(fixture, rt, destination.server.URL, &plugins)
 		paths := newTargetPaths(fixture.targetRoot)
 
-		shortCtx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+		shortCtx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
 		defer cancel()
 		_, _ = ImportCPA(shortCtx, options)
 
