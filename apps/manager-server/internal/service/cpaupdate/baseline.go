@@ -21,7 +21,10 @@ type AdoptBaselineResult struct {
 	Baseline         BaselineStatus `json:"baseline"`
 }
 
-type baselineArtifactClient interface {
+// BaselineArtifactClient supplies Supervisor baseline inspection and adoption
+// for Embedded installations, allowing callers to wrap the raw client with
+// installation authority, lifecycle locking, and post-adoption reconciliation.
+type BaselineArtifactClient interface {
 	Status(context.Context) (runtimeservice.ArtifactStatus, error)
 	AdoptBundledBaseline(context.Context, string) (runtimeservice.ArtifactStatus, error)
 }

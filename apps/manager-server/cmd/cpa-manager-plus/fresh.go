@@ -510,7 +510,7 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 		legacyStore,
 		freshRuntimeClientAdapter{app: a},
 		a.runtimeModeFor(opened.Record.Operation),
-	).WithArtifactClient(a.artifact).WithModeResolver(func() model.RuntimeMode {
+	).WithArtifactClient(freshBaselineArtifactAdapter{app: a}).WithModeResolver(func() model.RuntimeMode {
 		return a.effectiveRuntimeMode(context.Background())
 	}).WithProductCompleteProbe(func(ctx context.Context) (bool, error) {
 		op, err := a.current(ctx)

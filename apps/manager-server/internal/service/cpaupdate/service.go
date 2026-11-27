@@ -82,7 +82,7 @@ type Service struct {
 	mu                     sync.Mutex
 	store                  Store
 	runtime                runtimeservice.RuntimeClient
-	artifact               baselineArtifactClient
+	artifact               BaselineArtifactClient
 	mode                   model.RuntimeMode
 	modeResolver           func() model.RuntimeMode
 	isProductComplete      func(context.Context) (bool, error)
@@ -119,12 +119,16 @@ func (s *Service) WithProductCompleteProbe(probe func(context.Context) (bool, er
 }
 
 // WithArtifactClient adds Supervisor baseline support to Embedded installations.
-func (s *Service) WithArtifactClient(client *runtimeservice.ArtifactClient) *Service {
-	if client != nil {
-		s.artifact = client
-	} else {
+func (s *Service) WithArtifactClient(client BaselineArtifactClient) *Service {
+	if client == nil {
 		s.artifact = nil
+		return s
 	}
+	if typed, ok := client.(*runtimeservice.ArtifactClient); ok && typed == nil {
+		s.artifact = nil
+		return s
+	}
+	s.artifact = client
 	return s
 }
 
