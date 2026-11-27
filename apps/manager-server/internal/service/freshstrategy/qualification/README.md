@@ -236,7 +236,7 @@ the historical 2026-11-15 renewal
 `1d9c68bc18ad51f8abf7955e9c25e9cc3262779b1b2ccd9e29eb53081c5f867c`, the
 superseded CPA v8-only renewals `a8230400f8defdb46d7adb38b6be0872f7b7d337d6d69b63af56f341ad5e30a1`
 and `41ab4005c260ef24064cd8fa6a7a9cee88b9a2644e77bd4c2e1f10290ba8f265`, and the current
-CPA v8-only acceptance `a1ecc7c35bc91624af2c559ccf93da9173b1cf558142b6897bab29fdb6cd5507`,
+CPA v8-only acceptance `6636dd1be7909f6bfd75735ffe2d294325bb4f81ab330e3e108762d9583222e3`,
 backed by actual CPA `v8.0.55` source-read, destination-replay and verification
 evidence. The executor's per-item gate is what keeps the four-kind breadth of
 `network_existing` honest: an item is copied only when the record's decision for
