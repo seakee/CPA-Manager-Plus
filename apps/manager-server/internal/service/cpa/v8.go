@@ -231,8 +231,12 @@ func readV8ConfigWithClient(ctx context.Context, client *http.Client, baseURL, m
 		}
 	}
 	delete(sections, "config-version")
-	if len(sections) > 0 {
-		observation.ResourceSections = append(observation.ResourceSections, "unknown_cpa_native_resource")
+	rawDoc, docErr := DecodeConfigDocument(data)
+	if docErr != nil {
+		return V8ConfigObservation{}, V8InvalidConfig
+	}
+	if len(sections) > 0 || len(UnknownV8ConfigPaths(rawDoc)) > 0 {
+		observation.ResourceSections = append(observation.ResourceSections, unknownSection)
 	}
 	if adoptionKeys != nil {
 		// A well-formed source with no client Key has nothing to adopt and would

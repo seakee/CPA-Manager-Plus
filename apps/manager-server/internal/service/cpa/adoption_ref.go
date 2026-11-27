@@ -356,3 +356,93 @@ func AdoptionUniverseDigest(items ...string) string {
 	}
 	return hex.EncodeToString(hash.Sum(nil))
 }
+
+type v8ConfigSchemaIndex struct {
+	leaves  map[string]bool
+	wholes  map[string]bool
+	parents map[string]bool
+}
+
+var knownV8ConfigSchema = sync.OnceValue(func() v8ConfigSchemaIndex {
+	leaves := make(map[string]bool, len(ConfigLeafPaths()))
+	for _, path := range ConfigLeafPaths() {
+		leaves[path] = true
+	}
+	wholes := map[string]bool{
+		"config-version":  true,
+		"access.api-keys": true,
+		"oauth.auth-dir":  true,
+		"management":      true,
+		"providers":       true,
+		"logging":         true,
+		"usage":           true,
+	}
+	for key := range adoptionHostManagedSourceKeys {
+		wholes[key] = true
+	}
+	for _, path := range ConfigRuleFamilyPaths() {
+		wholes[path] = true
+	}
+	for _, section := range adoptionProviderSections {
+		wholes[section] = true
+	}
+	for _, section := range adoptionStructuredConfigSections {
+		wholes[section] = true
+	}
+	parents := make(map[string]bool)
+	addParents := func(path string) {
+		parts := strings.Split(path, ".")
+		for i := 1; i < len(parts); i++ {
+			parents[strings.Join(parts[:i], ".")] = true
+		}
+	}
+	for path := range leaves {
+		addParents(path)
+	}
+	for path := range wholes {
+		addParents(path)
+	}
+	return v8ConfigSchemaIndex{leaves: leaves, wholes: wholes, parents: parents}
+})
+
+// UnknownV8ConfigPaths returns the sorted dotted paths of unrecognized non-nil
+// configuration entries in a CPA v8 config document (including off-table
+// sibling keys nested under named roots such as server, plugins, oauth, routing,
+// or observability). It is the single authoritative unknown-key scanner shared
+// by v8 discovery, source inventory counting, and adoption execution.
+func UnknownV8ConfigPaths(doc map[string]any) []string {
+	if len(doc) == 0 {
+		return nil
+	}
+	index := knownV8ConfigSchema()
+	var unknown []string
+	var walk func(prefix string, obj map[string]any)
+	walk = func(prefix string, obj map[string]any) {
+		for key, val := range obj {
+			path := key
+			if prefix != "" {
+				path = prefix + "." + key
+			}
+			if index.leaves[path] || index.wholes[path] {
+				continue
+			}
+			if index.parents[path] {
+				if val == nil {
+					continue
+				}
+				if child, ok := val.(map[string]any); ok {
+					walk(path, child)
+				} else {
+					unknown = append(unknown, path)
+				}
+				continue
+			}
+			if val != nil {
+				unknown = append(unknown, path)
+			}
+		}
+	}
+	walk("", doc)
+	slices.Sort(unknown)
+	return unknown
+}

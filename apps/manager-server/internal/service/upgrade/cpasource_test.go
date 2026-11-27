@@ -1615,3 +1615,49 @@ credentials:
 		t.Fatalf("manual items = %v, want %v", gotManual, wantManual)
 	}
 }
+
+func TestCPASourceAllowPrivateRemoteIPsNullSetsDisablePrivateRemoteIPsTrue(t *testing.T) {
+	cases := []struct {
+		name   string
+		config string
+	}{
+		{
+			name: "canonical v8 null",
+			config: `config-version: 8
+access:
+  api-keys:
+    - "client-key-1"
+oauth:
+  providers:
+    codex:
+      live-media-relay:
+        allow-private-remote-ips: null
+`,
+		},
+		{
+			name: "legacy v7 null",
+			config: `api-keys:
+  - "client-key-1"
+codex:
+  live-media-relay:
+    allow-private-remote-ips: null
+`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			legacyRoot, _ := writeCPAFixture(t, tc.config, nil)
+			source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "8.0.55"})
+			if err != nil {
+				t.Fatalf("openManagedCPASource: %v", err)
+			}
+			if len(source.manual) != 0 {
+				t.Fatalf("unexpected manual items: %+v", source.manual)
+			}
+			got, presence := lookupDocumentPath(source.document, "oauth.providers.codex.live-media-relay.disable-private-remote-ips")
+			if presence != documentPresent || got != true {
+				t.Fatalf("disable-private-remote-ips = (%#v, %v), want (true, present)", got, presence)
+			}
+		})
+	}
+}

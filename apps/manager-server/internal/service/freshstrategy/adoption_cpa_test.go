@@ -199,6 +199,10 @@ func TestAdoptionExactCPAV8WithSupervisor(t *testing.T) {
 						"providers": map[string]any{
 							"codex": map[string]any{
 								"live-media-relay": map[string]any{
+									"enabled":                    true,
+									"disable-private-remote-ips": true,
+									"udp-port-min":               json.Number("40000"),
+									"udp-port-max":               json.Number("40100"),
 									"ice-servers": []any{
 										map[string]any{
 											"urls":       []any{"turns:relay.internal:5349"},
@@ -221,7 +225,7 @@ func TestAdoptionExactCPAV8WithSupervisor(t *testing.T) {
 						"logs": map[string]any{"debug": true, "request-log": true},
 					},
 					"credentials": map[string]any{
-						"concurrency": map[string]any{"default": json.Number("8"), "wait-timeout": "15s", "overflow-status": json.Number("429")},
+						"concurrency": map[string]any{"max-limit": json.Number("8"), "reclaim-grace": "15s", "lifecycle-config-revision": json.Number("99")},
 					},
 					"routing": map[string]any{
 						"strategy":           "round-robin",
@@ -737,6 +741,8 @@ func witnessMigrationKinds(t *testing.T, class bootstrap.AdoptSourceClass, sourc
 	if err != nil {
 		t.Fatalf("source configuration unavailable: %v", err)
 	}
+	initialConcurrency, initialConcPresence, _ := destination.ReadConfigValue(t.Context(), "credentials.concurrency")
+	initialConcurrencyRevs := extractWitnessConcurrencyRevisions(initialConcurrency)
 	// The checkpoint is the durable record the run is building; a run whose
 	// record the store would refuse is not evidence of anything.
 	var durable freshstore.AdoptionSummary
@@ -835,6 +841,50 @@ func witnessMigrationKinds(t *testing.T, class bootstrap.AdoptSourceClass, sourc
 		t.Fatalf("destination read-back disagrees with the recorded outcomes: routing %d/%d, provider %d/%d",
 			verifiedRouting, counts["cpa-config-routing"], verifiedProvider, counts["provider-state-api-keys"])
 	}
+	// Verify coupled live-media-relay ports, disable-private-remote-ips, and
+	// unredacted TURN ice-servers landed accurately on the real CPA destination.
+	for _, check := range []struct {
+		path string
+		want any
+	}{
+		{path: "oauth.providers.codex.live-media-relay.enabled", want: true},
+		{path: "oauth.providers.codex.live-media-relay.disable-private-remote-ips", want: true},
+		{path: "oauth.providers.codex.live-media-relay.udp-port-min", want: json.Number("40000")},
+		{path: "oauth.providers.codex.live-media-relay.udp-port-max", want: json.Number("40100")},
+	} {
+		got, seen, err := destination.ReadConfigValue(t.Context(), check.path)
+		if err != nil || seen != cpa.ConfigPresent || !reflect.DeepEqual(got, check.want) {
+			t.Fatalf("destination %s = (%#v, %v, %v), want (%#v, present, nil)", check.path, got, seen, err, check.want)
+		}
+	}
+	gotICE, seenICE, err := destination.ReadConfigValue(t.Context(), "oauth.providers.codex.live-media-relay.ice-servers")
+	iceSlice, _ := gotICE.([]any)
+	if err != nil || seenICE != cpa.ConfigPresent || len(iceSlice) != 1 {
+		t.Fatalf("destination live-media-relay.ice-servers = (%#v, %v, %v), want 1 entry", gotICE, seenICE, err)
+	}
+	iceEntry, _ := iceSlice[0].(map[string]any)
+	if iceEntry["username"] != "test-turn-user" || iceEntry["credential"] != "test-turn-cred" {
+		t.Fatalf("destination live-media-relay.ice-servers credentials mismatch: %#v", iceEntry)
+	}
+	// Verify credentials.concurrency migrated without copying source's
+	// lifecycle-config-revision and preserved any initial non-zero destination
+	// revisions if present.
+	afterConc, afterConcPresence, err := destination.ReadConfigValue(t.Context(), "credentials.concurrency")
+	if err != nil || afterConcPresence != cpa.ConfigPresent {
+		t.Fatalf("destination credentials.concurrency missing after migration: (%#v, %v, %v)", afterConc, afterConcPresence, err)
+	}
+	afterConcMap, _ := afterConc.(map[string]any)
+	if !reflect.DeepEqual(afterConcMap["max-limit"], json.Number("8")) || afterConcMap["reclaim-grace"] != "15s" {
+		t.Fatalf("destination credentials.concurrency values mismatch: %#v", afterConcMap)
+	}
+	if initialConcPresence == cpa.ConfigPresent && len(initialConcurrencyRevs) > 0 {
+		afterRevs := extractWitnessConcurrencyRevisions(afterConc)
+		if !reflect.DeepEqual(afterRevs, initialConcurrencyRevs) {
+			t.Fatalf("destination credentials.concurrency revisions changed: got %#v, want %#v", afterRevs, initialConcurrencyRevs)
+		}
+	} else if rev, ok := afterConcMap["lifecycle-config-revision"]; ok && rev == json.Number("99") {
+		t.Fatalf("source credentials.concurrency lifecycle-config-revision leaked to destination: %#v", afterConcMap)
+	}
 	t.Logf("adoption executor witness: %v", counts)
 	return counts
 }
@@ -852,6 +902,20 @@ func stripWitnessMapKeys(value any, drop ...string) map[string]any {
 		delete(out, key)
 	}
 	return out
+}
+
+func extractWitnessConcurrencyRevisions(value any) map[string]any {
+	mapping, ok := value.(map[string]any)
+	if !ok || mapping == nil {
+		return nil
+	}
+	revs := map[string]any{}
+	for _, key := range []string{"lifecycle-config-revision", "observation-barrier-revision"} {
+		if raw, exists := mapping[key]; exists && raw != nil && raw != "" && raw != json.Number("0") {
+			revs[key] = raw
+		}
+	}
+	return revs
 }
 
 // writeAdoptionResourceEvidence emits the class-specific client-key resource

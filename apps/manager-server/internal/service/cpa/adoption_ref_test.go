@@ -244,3 +244,74 @@ func TestAdoptionUniverseDigestTracksClassification(t *testing.T) {
 		t.Fatal("two differently classified items produced the same digest")
 	}
 }
+
+func TestUnknownV8ConfigPathsDetectsNestedOffTableKeysUnderNamedRoots(t *testing.T) {
+	clean := map[string]any{
+		"config-version": 8,
+		"server": map[string]any{
+			"port":            8317,
+			"commercial-mode": true,
+			"kv-store":        map[string]any{"path": "/var/lib/kv.db", "disabled": false},
+		},
+		"access": map[string]any{"api-keys": []any{"sk-1"}},
+		"plugins": map[string]any{
+			"enabled": true,
+			"configs": map[string]any{"custom-plugin": map[string]any{"flag": true}},
+		},
+		"oauth": map[string]any{
+			"auth-dir": "/var/lib/auth",
+			"providers": map[string]any{
+				"antigravity": map[string]any{
+					"sensitive-words-replace": map[string]any{"user-key": "mask"},
+				},
+			},
+		},
+		"requests": map[string]any{
+			"proxy-url": "http://127.0.0.1:8080",
+		},
+		"credentials": map[string]any{
+			"concurrency": map[string]any{"max-limit": 4},
+		},
+		"providers": map[string]any{},
+	}
+	if got := UnknownV8ConfigPaths(clean); len(got) != 0 {
+		t.Fatalf("clean v8 config reported unknown paths: %v", got)
+	}
+
+	withNestedUnknown := map[string]any{
+		"config-version": 8,
+		"server": map[string]any{
+			"port":    8317,
+			"mystery": 1,
+		},
+		"access": map[string]any{"api-keys": []any{"sk-1"}},
+		"plugins": map[string]any{
+			"enabled":      false,
+			"mystery_flag": true,
+		},
+		"oauth": map[string]any{
+			"auth-dir": "/var/lib/auth",
+			"providers": map[string]any{
+				"codex": map[string]any{
+					"live-media-relay": map[string]any{
+						"enabled": false,
+						"unknown": "x",
+					},
+				},
+			},
+		},
+		"credentials": map[string]any{
+			"extra-flag": true,
+		},
+	}
+	got := UnknownV8ConfigPaths(withNestedUnknown)
+	want := []string{
+		"credentials.extra-flag",
+		"oauth.providers.codex.live-media-relay.unknown",
+		"plugins.mystery_flag",
+		"server.mystery",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("UnknownV8ConfigPaths = %v, want %v", got, want)
+	}
+}

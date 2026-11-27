@@ -3,7 +3,6 @@ package freshadopt
 import (
 	"context"
 	"strings"
-	"sync"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
@@ -119,7 +118,7 @@ func CountSourceInventory(ctx context.Context, source Source) map[string]int {
 	if n := countHostObservabilitySubtrees(document); n > 0 {
 		counts[string(bootstrap.AdoptionRefConfigObservability)] = n
 	}
-	if n := countUnknownConfigItems(document); n > 0 {
+	if n := len(cpa.UnknownV8ConfigPaths(document)); n > 0 {
 		counts[string(bootstrap.AdoptionRefConfigUnknown)] = n
 	}
 	if len(counts) == 0 {
@@ -200,88 +199,3 @@ func countHostObservabilitySubtrees(document map[string]any) int {
 	return n
 }
 
-type configInventoryIndex struct {
-	leaves  map[string]bool
-	wholes  map[string]bool
-	parents map[string]bool
-}
-
-var sourceInventoryIndex = sync.OnceValue(func() configInventoryIndex {
-	leaves := make(map[string]bool, len(cpa.ConfigLeafPaths()))
-	for _, path := range cpa.ConfigLeafPaths() {
-		leaves[path] = true
-	}
-	wholes := map[string]bool{
-		"config-version":                           true,
-		"access.api-keys":                          true,
-		"oauth.auth-dir":                           true,
-		"management":                               true,
-		"server.server-id":                         true,
-		"server.host":                              true,
-		"server.port":                              true,
-		"server.tls":                               true,
-		"server.discovery":                         true,
-		"server.kv-store.path":                     true,
-		"plugins.enabled":                          true,
-		"plugins.dir":                              true,
-		"plugins.auth-revision":                    true,
-		"observability.usage":                      true,
-		"observability.pprof":                      true,
-		"observability.logs.logging-to-file":       true,
-		"observability.logs.logs-max-total-size-mb": true,
-		"observability.logs.error-logs-max-files":  true,
-	}
-	for _, path := range cpa.ConfigRuleFamilyPaths() {
-		wholes[path] = true
-	}
-	for _, section := range ProviderSections() {
-		wholes[section] = true
-	}
-	parents := make(map[string]bool)
-	addParents := func(path string) {
-		parts := strings.Split(path, ".")
-		for i := 1; i < len(parts); i++ {
-			parents[strings.Join(parts[:i], ".")] = true
-		}
-	}
-	for path := range leaves {
-		addParents(path)
-	}
-	for path := range wholes {
-		addParents(path)
-	}
-	return configInventoryIndex{leaves: leaves, wholes: wholes, parents: parents}
-})
-
-func countUnknownConfigItems(document map[string]any) int {
-	index := sourceInventoryIndex()
-	var walk func(prefix string, obj map[string]any) int
-	walk = func(prefix string, obj map[string]any) int {
-		unknown := 0
-		for key, val := range obj {
-			path := key
-			if prefix != "" {
-				path = prefix + "." + key
-			}
-			if index.leaves[path] || index.wholes[path] {
-				continue
-			}
-			if index.parents[path] {
-				if val == nil {
-					continue
-				}
-				if child, ok := val.(map[string]any); ok {
-					unknown += walk(path, child)
-				} else {
-					unknown++
-				}
-				continue
-			}
-			if val != nil {
-				unknown++
-			}
-		}
-		return unknown
-	}
-	return walk("", document)
-}

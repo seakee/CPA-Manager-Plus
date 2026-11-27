@@ -121,16 +121,41 @@ func configLeafPrefix(path string) (string, error) {
 // group mapping instead of setting one leaf: the body must nest from the prefix
 // down to the leaf, exactly like the gateway page's group save does.
 func leafPatchPayload(prefix, path string, value any) ([]byte, error) {
-	prefixParts := strings.Split(prefix, ".")
-	parts := strings.Split(path, ".")
-	if len(parts) <= len(prefixParts) {
+	return groupPatchPayload(prefix, map[string]any{path: value})
+}
+
+// groupPatchPayload builds one atomic PATCH body merging every leaf in
+// leafValues below its shared group prefix. CPA merges PATCH mappings key by
+// key and validates the whole config after each PATCH, so coupled sibling leaves
+// must travel together in one JSON object.
+func groupPatchPayload(prefix string, leafValues map[string]any) ([]byte, error) {
+	if len(leafValues) == 0 {
 		return nil, cpa.ErrInvalidConfigPath
 	}
-	var body any = map[string]any{parts[len(parts)-1]: value}
-	for index := len(parts) - 2; index >= len(prefixParts); index-- {
-		body = map[string]any{parts[index]: body}
+	prefixParts := strings.Split(prefix, ".")
+	root := make(map[string]any)
+	for path, value := range leafValues {
+		parts := strings.Split(path, ".")
+		if len(parts) <= len(prefixParts) {
+			return nil, cpa.ErrInvalidConfigPath
+		}
+		for i, part := range prefixParts {
+			if parts[i] != part {
+				return nil, cpa.ErrInvalidConfigPath
+			}
+		}
+		cur := root
+		for _, segment := range parts[len(prefixParts) : len(parts)-1] {
+			next, ok := cur[segment].(map[string]any)
+			if !ok {
+				next = make(map[string]any)
+				cur[segment] = next
+			}
+			cur = next
+		}
+		cur[parts[len(parts)-1]] = value
 	}
-	return encodeJSONValue(body)
+	return encodeJSONValue(root)
 }
 
 // encodeJSONValue renders one whole section or rule family as the exact JSON CPA
@@ -148,13 +173,58 @@ func encodeJSONValue(value any) ([]byte, error) {
 // errorCode maps one failed destination write to a bounded reason. It never
 // carries a value: CPA can quote the offending YAML in a validation message, so
 // only a stable code is kept.
+// allowedAdoptionReasons is the closed Manager-owned set of AdoptionItem.Reason
+// codes matching adoptionPublicReasons in cmd/cpa-manager-plus/fresh_adoption_summary.go.
+// Any unexpected upstream error code is mapped into this allowlist before
+// checkpointing so arbitrary upstream strings never persist in AdoptionSummary.
+var allowedAdoptionReasons = map[string]bool{
+	"not_authorized":                true,
+	"reauthenticate_after_adoption": true,
+	"reconfigure_after_adoption":    true,
+	"download_failed":               true,
+	"not_uploadable":                true,
+	"runtime_only_credential":       true,
+	"type_diverged":                 true,
+	"status_write_failed":           true,
+	"status_unverified":             true,
+	"adoption_item_name_too_long":   true,
+	"adoption_inventory_too_large":  true,
+	"manager_owned":                 true,
+	"value_shape_unsupported":       true,
+	"path_unresolved":               true,
+	"payload_unresolved":            true,
+	"family_unresolved":             true,
+	"verify_mismatch":               true,
+	"cpa_rejected":                  true,
+	"apply_unknown":                 true,
+	"destination_unavailable":       true,
+	"value_not_canonical":           true,
+	"write_failed":                  true,
+	"source_unreadable":             true,
+}
+
+// boundedAdoptionReason maps an arbitrary or upstream reason string into the
+// closed Manager-owned allowlist for the given item outcome.
+func boundedAdoptionReason(outcome freshstore.AdoptionOutcome, reason string) string {
+	reason = strings.TrimSpace(reason)
+	if allowedAdoptionReasons[reason] {
+		return reason
+	}
+	if outcome == freshstore.AdoptionManual {
+		return "reconfigure_after_adoption"
+	}
+	return "write_failed"
+}
+
+// errorCode maps one failed destination write to a bounded Manager-owned reason.
+// It never persists arbitrary upstream error codes or quoted YAML values.
 func errorCode(err error) string {
 	var rejection cpa.ConfigWriteError
 	if errors.As(err, &rejection) {
-		if rejection.Code != "" {
-			return rejection.Code
+		if rejection.Definite() {
+			return boundedAdoptionReason(freshstore.AdoptionManual, rejection.Code)
 		}
-		return "cpa_rejected"
+		return boundedAdoptionReason(freshstore.AdoptionFailed, rejection.Code)
 	}
 	switch {
 	case errors.Is(err, cpa.ErrApplyUnknown):

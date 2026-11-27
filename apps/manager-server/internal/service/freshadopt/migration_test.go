@@ -45,7 +45,15 @@ type fakeCPA struct {
 	config map[string]any
 	// writeFailures makes one dotted path fail with the given status.
 	writeFailures map[string]int
-	// readOverrides replaces the value readConfig returns for one dotted path,
+	// customWriteErrors makes one dotted path fail with a custom status + upstream
+	// JSON error string so tests can verify the closed reason allowlist.
+	customWriteErrors map[string]struct {
+		status int
+		code   string
+	}
+	// validateLiveMediaRelay enforces upstream CPA's codex_live.go Validate()
+	// cross-field rule on every PATCH/PUT before committing.
+	validateLiveMediaRelay bool
 	// letting a test simulate a divergent or malformed read-back after PUT.
 	readOverrides map[string]any
 	// uploadStatus > 0 makes the upload answer that status but still store the
@@ -88,7 +96,8 @@ func newFakeCPA(t *testing.T, auth string) *fakeCPA {
 		runtimeOnly:     map[string]bool{},
 		refuseUpload:    map[string]string{},
 		config:          map[string]any{},
-		writeFailures:   map[string]int{},
+		writeFailures:     map[string]int{},
+		customWriteErrors: map[string]struct{ status int; code string }{},
 	}
 	cpa.server = httptest.NewServer(http.HandlerFunc(cpa.serve))
 	t.Cleanup(cpa.server.Close)
@@ -292,6 +301,14 @@ func (c *fakeCPA) writeConfig(w http.ResponseWriter, r *http.Request, slashPath 
 	// CPA refuses the WHOLE write when one value in it is unacceptable, so a
 	// failing leaf is matched against the leaves the body would actually set.
 	c.mu.Lock()
+	for _, leaf := range append(leafPaths(dotted, body), dotted) {
+		if custom, ok := c.customWriteErrors[leaf]; ok {
+			c.mu.Unlock()
+			w.WriteHeader(custom.status)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": custom.code, "message": "upstream details"})
+			return
+		}
+	}
 	failing := ""
 	for _, leaf := range append(leafPaths(dotted, body), dotted) {
 		if c.writeFailures[leaf] != 0 {
@@ -338,11 +355,21 @@ func (c *fakeCPA) writeConfig(w http.ResponseWriter, r *http.Request, slashPath 
 			}
 		}
 	}
+	candidate := cloneFakeValue(c.config).(map[string]any)
 	if r.Method == http.MethodPut {
-		replaceAtPath(c.config, strings.Split(dotted, "."), value)
+		replaceAtPath(candidate, strings.Split(dotted, "."), value)
 	} else {
-		mergeInto(c.config, strings.Split(dotted, "."), value)
+		mergeInto(candidate, strings.Split(dotted, "."), value)
 	}
+	if c.validateLiveMediaRelay {
+		if err := validateFakeLiveMediaRelay(candidate); err != nil {
+			c.mu.Unlock()
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "invalid_config", "message": err.Error()})
+			return
+		}
+	}
+	c.config = candidate
 	c.mu.Unlock()
 	_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "config-version": 8})
 }
@@ -3369,5 +3396,311 @@ func TestICEServersMigratesViaYAMLAndFailsClosedWhenYAMLUnavailable(t *testing.T
 	}
 	if got := lookup(failDest.config, strings.Split(iceServersSectionPath, ".")); got != nil {
 		t.Fatalf("redacted ice-servers must not be written to destination: %+v", got)
+	}
+}
+
+func fakeInt64(raw any) (int64, bool) {
+	switch v := raw.(type) {
+	case int:
+		return int64(v), true
+	case int64:
+		return v, true
+	case float64:
+		return int64(v), true
+	case json.Number:
+		n, err := v.Int64()
+		return n, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func validateFakeLiveMediaRelay(doc map[string]any) error {
+	raw := lookup(doc, []string{"oauth", "providers", "codex", "live-media-relay"})
+	relay, ok := raw.(map[string]any)
+	if !ok || relay == nil {
+		return nil
+	}
+	enabled, _ := relay["enabled"].(bool)
+	if !enabled {
+		return nil
+	}
+	maxSessions := int64(0)
+	if rawMax, ok := relay["max-sessions"]; ok && rawMax != nil {
+		parsed, ok := fakeInt64(rawMax)
+		if !ok || parsed < 0 {
+			return fmt.Errorf("max-sessions must be non-negative numeric")
+		}
+		maxSessions = parsed
+	}
+	effectiveMax := maxSessions
+	if effectiveMax == 0 {
+		effectiveMax = 32
+	}
+	portMin := int64(0)
+	if rawMin, ok := relay["udp-port-min"]; ok && rawMin != nil {
+		parsed, ok := fakeInt64(rawMin)
+		if !ok {
+			return fmt.Errorf("udp-port-min invalid")
+		}
+		portMin = parsed
+	}
+	portMax := int64(0)
+	if rawMax, ok := relay["udp-port-max"]; ok && rawMax != nil {
+		parsed, ok := fakeInt64(rawMax)
+		if !ok {
+			return fmt.Errorf("udp-port-max invalid")
+		}
+		portMax = parsed
+	}
+	if portMin <= 0 || portMax <= 0 || portMin > portMax {
+		return fmt.Errorf("oauth.providers.codex.live-media-relay udp-port-min and udp-port-max must form a valid port range when enabled")
+	}
+	if portMax-portMin+1 < effectiveMax*2 {
+		return fmt.Errorf("oauth.providers.codex.live-media-relay UDP range requires at least %d ports for %d sessions", effectiveMax*2, effectiveMax)
+	}
+	return nil
+}
+
+func TestCoupledLiveMediaRelayMigratesAtomicallyUnderStrictValidation(t *testing.T) {
+	t.Run("valid coupled group applies in single atomic PATCH", func(t *testing.T) {
+		source := newFakeCPA(t, "src-key")
+		source.config = map[string]any{
+			"oauth": map[string]any{
+				"providers": map[string]any{
+					"codex": map[string]any{
+						"live-media-relay": map[string]any{
+							"enabled":                    true,
+							"disable-private-remote-ips": true,
+							"udp-port-min":               json.Number("40000"),
+							"udp-port-max":               json.Number("40100"),
+						},
+					},
+				},
+			},
+		}
+		destination := destinationFixture(t)
+		destination.validateLiveMediaRelay = true
+		summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+
+		var patchCount int
+		for _, m := range destination.requestMethods() {
+			if m == "PATCH /v8/management/config/oauth/providers/codex/live-media-relay" {
+				patchCount++
+			}
+		}
+		if patchCount != 1 {
+			t.Fatalf("live-media-relay PATCH count = %d, want 1 atomic PATCH (%v)", patchCount, destination.requestMethods())
+		}
+		for _, path := range []string{
+			"oauth.providers.codex.live-media-relay.enabled",
+			"oauth.providers.codex.live-media-relay.disable-private-remote-ips",
+			"oauth.providers.codex.live-media-relay.udp-port-min",
+			"oauth.providers.codex.live-media-relay.udp-port-max",
+		} {
+			got := itemByName(t, summary, configLeafItemName(path))
+			if got.Outcome != freshstore.AdoptionMigrated {
+				t.Fatalf("%s outcome = %+v, want migrated", path, got)
+			}
+		}
+		for _, absent := range []string{
+			"oauth.providers.codex.live-media-relay.max-sessions",
+			"oauth.providers.codex.live-media-relay.public-ip",
+		} {
+			got := itemByName(t, summary, configLeafItemName(absent))
+			if got.Outcome != freshstore.AdoptionAbsentAtSource {
+				t.Fatalf("%s outcome = %+v, want absent_at_source", absent, got)
+			}
+		}
+
+		// Replay idempotently: zero additional PATCH requests.
+		before := len(destination.requestMethods())
+		replayed := runMigration(t, source, destination, summary)
+		if !replayed.Finished || len(destination.requestMethods()) != before {
+			t.Fatalf("replay mutated destination or did not finish: finished=%v methods=%v", replayed.Finished, destination.requestMethods()[before:])
+		}
+	})
+
+	t.Run("cross-field rejection leaves zero half-applied state and maps manual reason", func(t *testing.T) {
+		source := newFakeCPA(t, "src-key")
+		source.config = map[string]any{
+			"oauth": map[string]any{
+				"providers": map[string]any{
+					"codex": map[string]any{
+						"live-media-relay": map[string]any{
+							"enabled":      true,
+							"udp-port-min": json.Number("40000"),
+							"udp-port-max": json.Number("40010"), // too narrow for default 32 sessions (needs 64)
+						},
+					},
+				},
+			},
+			"routing": map[string]any{
+				"strategy": "round-robin",
+			},
+		}
+		destination := destinationFixture(t)
+		destination.validateLiveMediaRelay = true
+		summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+		for _, path := range []string{
+			"oauth.providers.codex.live-media-relay.enabled",
+			"oauth.providers.codex.live-media-relay.udp-port-min",
+			"oauth.providers.codex.live-media-relay.udp-port-max",
+		} {
+			got := itemByName(t, summary, configLeafItemName(path))
+			if got.Outcome != freshstore.AdoptionManual || got.Reason != "reconfigure_after_adoption" {
+				t.Fatalf("%s outcome = %+v, want manual reconfigure_after_adoption", path, got)
+			}
+		}
+		if got := lookup(destination.config, []string{"oauth", "providers", "codex", "live-media-relay"}); got != nil {
+			t.Fatalf("destination left half-applied live-media-relay state: %#v", got)
+		}
+		if got := itemByName(t, summary, configLeafItemName("routing.strategy")); got.Outcome != freshstore.AdoptionMigrated {
+			t.Fatalf("subsequent leaf routing.strategy = %+v, want migrated", got)
+		}
+	})
+
+	t.Run("local validation failure aborts atomic batch without half-writing siblings", func(t *testing.T) {
+		source := newFakeCPA(t, "src-key")
+		source.config = map[string]any{
+			"oauth": map[string]any{
+				"providers": map[string]any{
+					"codex": map[string]any{
+						"live-media-relay": map[string]any{
+							"enabled":      true,
+							"udp-port-min": "not-an-int",
+							"udp-port-max": json.Number("40100"),
+						},
+					},
+				},
+			},
+		}
+		destination := destinationFixture(t)
+		destination.validateLiveMediaRelay = true
+		summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+		for _, m := range destination.requestMethods() {
+			if m == "PATCH /v8/management/config/oauth/providers/codex/live-media-relay" {
+				t.Fatalf("local validation failure must not issue live-media-relay PATCH (%v)", destination.requestMethods())
+			}
+		}
+		if got := itemByName(t, summary, configLeafItemName("oauth.providers.codex.live-media-relay.udp-port-min")); got.Outcome != freshstore.AdoptionManual || got.Reason != "value_shape_unsupported" {
+			t.Fatalf("invalid leaf = %+v, want manual value_shape_unsupported", got)
+		}
+		for _, sibling := range []string{
+			"oauth.providers.codex.live-media-relay.enabled",
+			"oauth.providers.codex.live-media-relay.udp-port-max",
+		} {
+			got := itemByName(t, summary, configLeafItemName(sibling))
+			if got.Outcome != freshstore.AdoptionManual || got.Reason != "reconfigure_after_adoption" {
+				t.Fatalf("sibling %s = %+v, want manual reconfigure_after_adoption", sibling, got)
+			}
+		}
+	})
+}
+
+func TestNamedRootsOnlyWithNestedUnknownKeyEmitsStep3DecisionInventoryCountAndStep4ManualItem(t *testing.T) {
+	source := newFakeCPA(t, "src-key")
+	source.config = map[string]any{
+		"config-version": 8,
+		"server": map[string]any{
+			"port": 8317,
+		},
+		"oauth": map[string]any{
+			"auth-dir": "/source/auth",
+		},
+		"access": map[string]any{
+			"api-keys": []any{"sk-client-1"},
+		},
+		"plugins": map[string]any{
+			"enabled":      false,
+			"mystery_flag": true,
+		},
+	}
+
+	// (a) ReadV8Config emits unknown_cpa_native_resource, producing cpa-config-unknown decision.
+	obs, err := cpa.ReadV8Config(t.Context(), source.server.URL, source.auth)
+	if err != nil {
+		t.Fatalf("ReadV8Config: %v", err)
+	}
+	if !slices.Contains(obs.ResourceSections, "unknown_cpa_native_resource") {
+		t.Fatalf("ReadV8Config ResourceSections = %v, want unknown_cpa_native_resource", obs.ResourceSections)
+	}
+	refs := cpa.AdoptionRootRefs("unknown_cpa_native_resource")
+	if !slices.Contains(refs, bootstrap.AdoptionRefConfigUnknown) {
+		t.Fatalf("AdoptionRootRefs(unknown_cpa_native_resource) = %v, want cpa-config-unknown", refs)
+	}
+	decision, ok := bootstrap.FreshAdoptionDecision(bootstrap.AdoptionRefConfigUnknown, bootstrap.AdoptionResourceDecision{})
+	if !ok || decision.Disposition != bootstrap.ManualAction || decision.ManualAction != "reconfigure_after_adoption" {
+		t.Fatalf("FreshAdoptionDecision(cpa-config-unknown) = (%+v, %v)", decision, ok)
+	}
+
+	// (b) CountSourceInventory reports cpa-config-unknown: 1.
+	srcEndpoint, err := NewSource(t.Context(), source.endpoint())
+	if err != nil {
+		t.Fatalf("NewSource: %v", err)
+	}
+	defer srcEndpoint.Close()
+	counts := CountSourceInventory(t.Context(), srcEndpoint)
+	if counts[string(bootstrap.AdoptionRefConfigUnknown)] != 1 {
+		t.Fatalf("CountSourceInventory[cpa-config-unknown] = %d, want 1 (%v)", counts[string(bootstrap.AdoptionRefConfigUnknown)], counts)
+	}
+
+	// (c) Executor records durable AdoptionManual reconfigure_after_adoption item.
+	destination := destinationFixture(t)
+	summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	if !summary.Finished || len(summary.Items) != summary.Planned {
+		t.Fatalf("summary did not complete cleanly: finished=%v items=%d planned=%d", summary.Finished, len(summary.Items), summary.Planned)
+	}
+	unknownItem := itemByName(t, summary, unknownConfigItemName)
+	if unknownItem.Kind != freshstore.AdoptionKindConfigFamily || unknownItem.Outcome != freshstore.AdoptionManual || unknownItem.Reason != "reconfigure_after_adoption" {
+		t.Fatalf("unknown-config item = %+v, want manual reconfigure_after_adoption", unknownItem)
+	}
+	if !CanonicalItem(unknownItem) {
+		t.Fatalf("CanonicalItem(%+v) = false, want true", unknownItem)
+	}
+	if ref := ItemRef(unknownItem); ref != bootstrap.AdoptionRefConfigUnknown {
+		t.Fatalf("ItemRef(%+v) = %q, want %q", unknownItem, ref, bootstrap.AdoptionRefConfigUnknown)
+	}
+}
+
+func TestUpstreamCustomErrorStringIsMappedToClosedAllowlistBeforeCheckpointing(t *testing.T) {
+	source := newFakeCPA(t, "src-key")
+	source.config = map[string]any{
+		"routing": map[string]any{
+			"strategy": "round-robin",
+		},
+	}
+	destination := destinationFixture(t)
+	destination.customWriteErrors["routing.strategy"] = struct {
+		status int
+		code   string
+	}{
+		status: http.StatusBadRequest,
+		code:   "custom free-text code",
+	}
+	srcEndpoint, err := NewSource(t.Context(), source.endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srcEndpoint.Close()
+	dstEndpoint, err := NewDestination(t.Context(), destination.endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dstEndpoint.Close()
+
+	var checkpointed freshstore.AdoptionSummary
+	result, err := New(srcEndpoint, dstEndpoint, migratingDecisions()).Run(t.Context(), freshstore.AdoptionSummary{}, func(current freshstore.AdoptionSummary) error {
+		checkpointed = current
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Executor.Run: %v", err)
+	}
+	for _, summary := range []freshstore.AdoptionSummary{result.Summary, checkpointed} {
+		item := itemByName(t, summary, configLeafItemName("routing.strategy"))
+		if item.Outcome != freshstore.AdoptionManual || item.Reason != "reconfigure_after_adoption" {
+			t.Fatalf("persisted item = %+v, want manual with Reason=reconfigure_after_adoption", item)
+		}
 	}
 }

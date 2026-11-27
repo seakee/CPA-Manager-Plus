@@ -1416,6 +1416,9 @@ func (s *cpaManagedSource) applyLiveRelayAllowPrivateRemoteIPs(document map[stri
 			continue
 		}
 		if presence == documentNull {
+			// Upstream CPA unmarshals allow-private-remote-ips: null as false and
+			// inverts it to disable-private-remote-ips: true.
+			setDocumentPath(s.document, canonicalDisable, true)
 			return
 		}
 		allow, ok := value.(bool)

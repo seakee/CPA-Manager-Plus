@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -170,5 +171,33 @@ func TestFreshV8CancellationAndURLBoundary(t *testing.T) {
 	start := time.Now()
 	if _, err := ReadV8Config(ctx, server.URL, "private"); err == nil || time.Since(start) > time.Second {
 		t.Fatalf("deadline not enforced: %v", err)
+	}
+}
+
+func TestReadV8ConfigEmitsUnknownResourceForNestedOffTableKeysUnderNamedRoots(t *testing.T) {
+	namedOnlyClean := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"auth"},"access":{"api-keys":["k1"]},"plugins":{"enabled":false}}`))
+	}))
+	defer namedOnlyClean.Close()
+	cleanObs, err := ReadV8Config(t.Context(), namedOnlyClean.URL, "secret")
+	if err != nil {
+		t.Fatalf("ReadV8Config clean: %v", err)
+	}
+	if slices.Contains(cleanObs.ResourceSections, "unknown_cpa_native_resource") {
+		t.Fatalf("clean named-roots config unexpectedly emitted unknown_cpa_native_resource: %v", cleanObs.ResourceSections)
+	}
+
+	namedWithMystery := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"auth"},"access":{"api-keys":["k1"]},"plugins":{"enabled":false,"mystery_flag":true}}`))
+	}))
+	defer namedWithMystery.Close()
+	mysteryObs, err := ReadV8Config(t.Context(), namedWithMystery.URL, "secret")
+	if err != nil {
+		t.Fatalf("ReadV8Config mystery: %v", err)
+	}
+	if !slices.Contains(mysteryObs.ResourceSections, "unknown_cpa_native_resource") {
+		t.Fatalf("named-roots config with plugins.mystery_flag omitted unknown_cpa_native_resource: %v", mysteryObs.ResourceSections)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"gopkg.in/yaml.v3"
 )
@@ -536,13 +537,11 @@ func classifyConfigWrite(code int, body []byte, err error) error {
 	if !code4xx {
 		return cpa.ErrApplyUnknown
 	}
-	stable := strings.TrimSpace(refused.Error)
-	if stable == "" {
-		stable = "refused"
+	outcome := freshstore.AdoptionFailed
+	if (cpa.ConfigWriteError{Status: code}).Definite() {
+		outcome = freshstore.AdoptionManual
 	}
-	if len(stable) > 64 {
-		stable = stable[:64]
-	}
+	stable := boundedAdoptionReason(outcome, refused.Error)
 	// The message is intentionally dropped: CPA can quote the offending YAML
 	// value in it, and that value may be a secret.
 	return cpa.ConfigWriteError{Status: code, Code: stable}
