@@ -315,3 +315,189 @@ func TestUnknownV8ConfigPathsDetectsNestedOffTableKeysUnderNamedRoots(t *testing
 		t.Fatalf("UnknownV8ConfigPaths = %v, want %v", got, want)
 	}
 }
+
+func TestArchivedV8UnknownPathsCoversRealCPAFootCommentShapes(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		want []string
+	}{
+		{
+			name: "flow-style map and nested multiline unknown blocks",
+			yaml: `# operator header comment
+config-version: 8
+server:
+    host: 127.0.0.1
+    port: 8317
+oauth: {auth-dir: "/tmp/auth", providers: {codex: {}}}
+plugins: {}
+upstream:
+    codex:
+        disable-codex-cloaking: true
+
+# custom_root:
+#     alpha: 1
+#     beta: [x, y]
+# oauth.providers.codex.retired-setting: false
+# plugins.mystery_obj:
+#     nested: true
+#     items:
+#         - one
+#         - two
+`,
+			want: []string{
+				"custom_root",
+				"oauth.providers.codex.retired-setting",
+				"plugins.mystery_obj",
+			},
+		},
+		{
+			name: "flow-style only document with single archived leaf",
+			yaml: `config-version: 8
+server: {host: "127.0.0.1", port: 8317}
+access: {api-keys: ["sk-client-1"]}
+oauth: {auth-dir: "/tmp/auth", providers: {codex: {}}}
+
+# oauth.providers.codex.retired-setting: false
+`,
+			want: []string{"oauth.providers.codex.retired-setting"},
+		},
+		{
+			name: "block scalar with blank archive comment line and zero-indent list",
+			yaml: `config-version: 8
+server:
+    port: 8317
+
+# custom_script: |
+#     echo hello
+#
+#     echo world
+# custom_list:
+# - one
+# - two
+`,
+			want: []string{"custom_list", "custom_script"},
+		},
+		{
+			name: "pre-existing top and middle comments plus example legacy comments ignored",
+			yaml: `# custom_top_commented: true
+# Note: operator header
+config-version: 8
+# plugins.commented_in_middle: true
+server:
+    host: 127.0.0.1
+    port: 8317
+oauth:
+    auth-dir: /tmp/auth
+    providers:
+        codex:
+            live-media-relay: {}
+# Legacy compatibility reference (comments only; not part of this v8 template).
+#   host: ""
+#   port: 8317
+# debug: false
+# proxy-url: http://127.0.0.1:8080
+# note: check this before restart
+# TODO: clean up later
+# Note: trailing operator note
+# oauth.providers.codex.live-media-relay.allow-private-remote-ips: true
+# codex.live-media-relay.allow-private-remote-ips: true
+`,
+			want: nil,
+		},
+		{
+			name: "multi-document stream only inspects trailing tail of first document",
+			yaml: `---
+# header_before_doc1: true
+config-version: 8
+server:
+    port: 8317
+
+# plugins.mystery_flag: true
+---
+# second_doc_unknown: true
+second_doc_key: 123
+`,
+			want: []string{"plugins.mystery_flag"},
+		},
+		{
+			name: "explicit document end marker stops before subsequent comments",
+			yaml: `config-version: 8
+server:
+    port: 8317
+
+# custom_before_end: true
+...
+# custom_after_end: true
+`,
+			want: []string{"custom_before_end"},
+		},
+		{
+			name: "block scalar containing indented hash before active closing line",
+			yaml: `config-version: 8
+server:
+    github-token: |
+        line-1
+        # fake_inside_scalar: true
+    port: 8317
+`,
+			want: nil,
+		},
+		{
+			name: "json payload has no archived yaml comments",
+			yaml: `{"config-version":8,"server":{"port":8317},"access":{"api-keys":["sk-1"]}}`,
+			want: nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ArchivedV8UnknownPaths([]byte(tc.yaml))
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("ArchivedV8UnknownPaths = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAttachArchivedUnknownV8PathsMergesDeduplicatesAndNeverEscapesWalkers(t *testing.T) {
+	doc := map[string]any{
+		"config-version": 8,
+		"server": map[string]any{
+			"port":    8317,
+			"mystery": 1,
+		},
+		"access": map[string]any{"api-keys": []any{"sk-1"}},
+	}
+	AttachArchivedUnknownV8Paths(doc, []string{
+		"plugins.mystery_flag",
+		"oauth.providers.codex.retired-setting",
+		"server.mystery",
+	})
+	AttachArchivedUnknownV8Paths(doc, []string{
+		"custom_root",
+		"plugins.mystery_flag",
+	})
+
+	got := UnknownV8ConfigPaths(doc)
+	want := []string{
+		"custom_root",
+		"oauth.providers.codex.retired-setting",
+		"plugins.mystery_flag",
+		"server.mystery",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("UnknownV8ConfigPaths(attached) = %v, want %v", got, want)
+	}
+	if slices.Contains(got, archivedUnknownV8PathsKey) {
+		t.Fatalf("carrier key leaked into UnknownV8ConfigPaths: %v", got)
+	}
+	rawOnly := map[string]any{
+		"config-version": 8,
+		"server":         map[string]any{"port": 8317},
+		"access":         map[string]any{"api-keys": []any{"sk-1"}},
+	}
+	if gotRaw := UnknownV8ConfigPaths(rawOnly); len(gotRaw) != 0 {
+		t.Fatalf("raw clean doc reported unknown paths: %v", gotRaw)
+	}
+}

@@ -8,14 +8,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
@@ -3703,4 +3708,327 @@ func TestUpstreamCustomErrorStringIsMappedToClosedAllowlistBeforeCheckpointing(t
 			t.Fatalf("persisted item = %+v, want manual with Reason=reconfigure_after_adoption", item)
 		}
 	}
+}
+
+func TestArchivedUnknownConfigInYAMLSurfacesInInventoryCountAndExecutor(t *testing.T) {
+	source := newFakeCPA(t, "src-key")
+	source.config = map[string]any{
+		"config-version": 8,
+		"server":         map[string]any{"port": 8317},
+		"oauth":          map[string]any{"auth-dir": "/source/auth"},
+		"access":         map[string]any{"api-keys": []any{"sk-client-1"}},
+		"upstream": map[string]any{
+			"codex": map[string]any{
+				"disable-codex-cloaking": true,
+			},
+		},
+		"plugins": map[string]any{},
+	}
+	source.configYAMLOverride = `# operator comment
+config-version: 8
+server:
+    port: 8317
+oauth: {auth-dir: "/source/auth", providers: {codex: {}}}
+plugins: {}
+upstream:
+    codex:
+        disable-codex-cloaking: true
+
+# oauth.providers.codex.retired-setting: false
+# plugins.mystery_flag: true
+`
+
+	snapshot, err := cpa.ReadV8AdoptionSnapshot(t.Context(), source.server.URL, source.auth)
+	if err != nil {
+		t.Fatalf("ReadV8AdoptionSnapshot: %v", err)
+	}
+	if !slices.Contains(snapshot.ResourceSections, "unknown_cpa_native_resource") {
+		t.Fatalf("ResourceSections = %v, want unknown_cpa_native_resource", snapshot.ResourceSections)
+	}
+	refs := cpa.AdoptionRootRefs("unknown_cpa_native_resource")
+	if !slices.Contains(refs, bootstrap.AdoptionRefConfigUnknown) {
+		t.Fatalf("AdoptionRootRefs(unknown_cpa_native_resource) = %v, want cpa-config-unknown", refs)
+	}
+
+	srcEndpoint, err := NewSource(t.Context(), source.endpoint())
+	if err != nil {
+		t.Fatalf("NewSource: %v", err)
+	}
+	defer srcEndpoint.Close()
+	counts := CountSourceInventory(t.Context(), srcEndpoint)
+	if counts[string(bootstrap.AdoptionRefConfigUnknown)] != 2 {
+		t.Fatalf("CountSourceInventory[cpa-config-unknown] = %d, want 2 (%v)", counts[string(bootstrap.AdoptionRefConfigUnknown)], counts)
+	}
+
+	destination := destinationFixture(t)
+	summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	if !summary.Finished || len(summary.Items) != summary.Planned {
+		t.Fatalf("summary did not complete cleanly: finished=%v items=%d planned=%d", summary.Finished, len(summary.Items), summary.Planned)
+	}
+	if item := itemByName(t, summary, configLeafItemName("upstream.codex.disable-codex-cloaking")); item.Outcome != freshstore.AdoptionMigrated {
+		t.Fatalf("disable-codex-cloaking = %+v, want migrated", item)
+	}
+	unknownItem := itemByName(t, summary, unknownConfigItemName)
+	if unknownItem.Kind != freshstore.AdoptionKindConfigFamily || unknownItem.Outcome != freshstore.AdoptionManual || unknownItem.Reason != "reconfigure_after_adoption" {
+		t.Fatalf("unknown-config item = %+v, want manual reconfigure_after_adoption", unknownItem)
+	}
+}
+
+func TestRealCPAV8ArchivedUnknownConfigEndToEnd(t *testing.T) {
+	cpaBin := strings.TrimSpace(os.Getenv("CPAMP_TEST_CPA_V8"))
+	if cpaBin == "" {
+		t.Skip("CPAMP_TEST_CPA_V8 is unset")
+	}
+
+	startRealCPA := func(t *testing.T, configTemplate string, mgmtKey string) (string, *http.Client) {
+		t.Helper()
+		dir := t.TempDir()
+		authDir := filepath.Join(dir, "auth")
+		if err := os.MkdirAll(authDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr := l.Addr().String()
+		_, portStr, _ := net.SplitHostPort(addr)
+		_ = l.Close()
+
+		cfgText := strings.NewReplacer("{PORT}", portStr, "{AUTH_DIR}", authDir).Replace(configTemplate)
+		cfgPath := filepath.Join(dir, "config.yaml")
+		if err := os.WriteFile(cfgPath, []byte(cfgText), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(cpaBin, "-config", cfgPath)
+		cmd.Dir = dir
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start CPA binary %s: %v", cpaBin, err)
+		}
+		t.Cleanup(func() {
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+			}
+		})
+
+		baseURL := "http://" + addr
+		client := &http.Client{Timeout: 2 * time.Second}
+		deadline := time.Now().Add(20 * time.Second)
+		for time.Now().Before(deadline) {
+			req, _ := http.NewRequest(http.MethodGet, baseURL+"/v8/management/config", nil)
+			req.Header.Set("Authorization", "Bearer "+mgmtKey)
+			resp, err := client.Do(req)
+			if err == nil {
+				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+				_ = resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					return baseURL, client
+				}
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		t.Fatalf("CPA at %s did not become ready in time", baseURL)
+		return "", nil
+	}
+
+	t.Run("case A: strips flow and block unknown keys on disk and surfaces them in discovery, inventory count, and executor", func(t *testing.T) {
+		const sourceMgmtKey = "real-cpa-source-mgmt"
+		const destMgmtKey = "real-cpa-dest-mgmt"
+		srcURL, _ := startRealCPA(t, `# operator comment
+config-version: 8
+server:
+  host: 127.0.0.1
+  port: {PORT}
+management:
+  secret-key: `+sourceMgmtKey+`
+  allow-remote: true
+  disable-control-panel: true
+access:
+  api-keys:
+    - "sk-client-1"
+oauth: {auth-dir: "{AUTH_DIR}", providers: {codex: {disable-codex-cloaking: true, retired-setting: false}}}
+plugins:
+  mystery_flag: true
+`, sourceMgmtKey)
+
+		dstURL, _ := startRealCPA(t, `config-version: 8
+server:
+  host: 127.0.0.1
+  port: {PORT}
+management:
+  secret-key: `+destMgmtKey+`
+  allow-remote: true
+  disable-control-panel: true
+access:
+  api-keys:
+    - "sk-client-1"
+oauth:
+  auth-dir: "{AUTH_DIR}"
+`, destMgmtKey)
+
+		// 1) ReadV8AdoptionSnapshot includes unknown_cpa_native_resource and Step 3 produces manual_action.
+		snapshot, err := cpa.ReadV8AdoptionSnapshot(t.Context(), srcURL, sourceMgmtKey)
+		if err != nil {
+			t.Fatalf("ReadV8AdoptionSnapshot: %v", err)
+		}
+		if !slices.Contains(snapshot.ResourceSections, "unknown_cpa_native_resource") {
+			t.Fatalf("ResourceSections = %v, want unknown_cpa_native_resource", snapshot.ResourceSections)
+		}
+		refs := cpa.AdoptionRootRefs("unknown_cpa_native_resource")
+		if !slices.Contains(refs, bootstrap.AdoptionRefConfigUnknown) {
+			t.Fatalf("AdoptionRootRefs(unknown_cpa_native_resource) = %v, want cpa-config-unknown", refs)
+		}
+		decision, ok := bootstrap.FreshAdoptionDecision(bootstrap.AdoptionRefConfigUnknown, bootstrap.AdoptionResourceDecision{})
+		if !ok || decision.Disposition != bootstrap.ManualAction || decision.ManualAction != bootstrap.ReconfigureAfterAdoption {
+			t.Fatalf("FreshAdoptionDecision(cpa-config-unknown) = (%+v, %v)", decision, ok)
+		}
+
+		// 2) CountSourceInventory reports cpa-config-unknown == 2.
+		srcWire, err := NewSource(t.Context(), Endpoint{BaseURL: srcURL, ManagementKey: sourceMgmtKey})
+		if err != nil {
+			t.Fatalf("NewSource: %v", err)
+		}
+		defer srcWire.Close()
+		counts := CountSourceInventory(t.Context(), srcWire)
+		if counts[string(bootstrap.AdoptionRefConfigUnknown)] != 2 {
+			t.Fatalf("CountSourceInventory[cpa-config-unknown] = %d, want 2 (%v)", counts[string(bootstrap.AdoptionRefConfigUnknown)], counts)
+		}
+
+		// 3) Executor against real CPA v8.0.55 destination migrates disable-codex-cloaking and records family:unknown-config manual.
+		dstWire, err := NewDestination(t.Context(), Endpoint{BaseURL: dstURL, ManagementKey: destMgmtKey})
+		if err != nil {
+			t.Fatalf("NewDestination: %v", err)
+		}
+		defer dstWire.Close()
+		result, err := New(srcWire, dstWire, migratingDecisions()).Run(t.Context(), freshstore.AdoptionSummary{}, nil)
+		if err != nil {
+			t.Fatalf("Executor.Run: %v", err)
+		}
+		if !result.Summary.Finished || len(result.Summary.Items) != result.Summary.Planned {
+			t.Fatalf("summary incomplete: finished=%v items=%d planned=%d", result.Summary.Finished, len(result.Summary.Items), result.Summary.Planned)
+		}
+		if cloaking := itemByName(t, result.Summary, configLeafItemName("upstream.codex.disable-codex-cloaking")); cloaking.Outcome != freshstore.AdoptionMigrated {
+			t.Fatalf("upstream.codex.disable-codex-cloaking = %+v, want migrated", cloaking)
+		}
+		if val, presence, readErr := dstWire.ReadConfigValue(t.Context(), "upstream.codex.disable-codex-cloaking"); readErr != nil || presence != cpa.ConfigPresent || val != true {
+			t.Fatalf("destination readback upstream.codex.disable-codex-cloaking = (%v, %v, %v), want true", val, presence, readErr)
+		}
+		unknownItem := itemByName(t, result.Summary, unknownConfigItemName)
+		if unknownItem.Kind != freshstore.AdoptionKindConfigFamily || unknownItem.Outcome != freshstore.AdoptionManual || unknownItem.Reason != "reconfigure_after_adoption" {
+			t.Fatalf("unknown-config item = %+v, want manual reconfigure_after_adoption", unknownItem)
+		}
+	})
+
+	t.Run("case B: clean v8 config with operator comment and allow-private-remote-ips alias has zero unknown keys", func(t *testing.T) {
+		const sourceMgmtKey = "real-cpa-clean-source-mgmt"
+		const destMgmtKey = "real-cpa-clean-dest-mgmt"
+		srcURL, _ := startRealCPA(t, `# operator comment
+config-version: 8
+server:
+  host: 127.0.0.1
+  port: {PORT}
+management:
+  secret-key: `+sourceMgmtKey+`
+  allow-remote: true
+  disable-control-panel: true
+access:
+  api-keys:
+    - "sk-client-1"
+oauth:
+  auth-dir: "{AUTH_DIR}"
+  providers:
+    codex:
+      live-media-relay:
+        allow-private-remote-ips: true
+`, sourceMgmtKey)
+
+		dstURL, _ := startRealCPA(t, `config-version: 8
+server:
+  host: 127.0.0.1
+  port: {PORT}
+management:
+  secret-key: `+destMgmtKey+`
+  allow-remote: true
+  disable-control-panel: true
+access:
+  api-keys:
+    - "sk-client-1"
+oauth:
+  auth-dir: "{AUTH_DIR}"
+`, destMgmtKey)
+
+		snapshot, err := cpa.ReadV8AdoptionSnapshot(t.Context(), srcURL, sourceMgmtKey)
+		if err != nil {
+			t.Fatalf("ReadV8AdoptionSnapshot: %v", err)
+		}
+		if slices.Contains(snapshot.ResourceSections, "unknown_cpa_native_resource") {
+			t.Fatalf("clean source unexpectedly reported unknown_cpa_native_resource: %v", snapshot.ResourceSections)
+		}
+		for _, section := range snapshot.ResourceSections {
+			if slices.Contains(cpa.AdoptionRootRefs(section), bootstrap.AdoptionRefConfigUnknown) {
+				t.Fatalf("clean source section %q unexpectedly mapped to cpa-config-unknown (%v)", section, snapshot.ResourceSections)
+			}
+		}
+
+		srcWire, err := NewSource(t.Context(), Endpoint{BaseURL: srcURL, ManagementKey: sourceMgmtKey})
+		if err != nil {
+			t.Fatalf("NewSource: %v", err)
+		}
+		defer srcWire.Close()
+		counts := CountSourceInventory(t.Context(), srcWire)
+		if counts[string(bootstrap.AdoptionRefConfigUnknown)] != 0 {
+			t.Fatalf("CountSourceInventory[cpa-config-unknown] = %d, want 0 (%v)", counts[string(bootstrap.AdoptionRefConfigUnknown)], counts)
+		}
+
+		dstWire, err := NewDestination(t.Context(), Endpoint{BaseURL: dstURL, ManagementKey: destMgmtKey})
+		if err != nil {
+			t.Fatalf("NewDestination: %v", err)
+		}
+		defer dstWire.Close()
+		result, err := New(srcWire, dstWire, migratingDecisions()).Run(t.Context(), freshstore.AdoptionSummary{}, nil)
+		if err != nil {
+			t.Fatalf("Executor.Run: %v", err)
+		}
+		if item, exists := result.Summary.Item(unknownConfigItemName); exists {
+			t.Fatalf("clean source unexpectedly recorded family:unknown-config item: %+v", item)
+		}
+	})
+
+	t.Run("case C: real CPA source with only named roots in JSON still surfaces archived unknown YAML key in ReadV8AdoptionSnapshot", func(t *testing.T) {
+		const sourceMgmtKey = "real-cpa-archived-only-mgmt"
+		srcURL, _ := startRealCPA(t, `# operator comment
+config-version: 8
+server:
+  host: 127.0.0.1
+  port: {PORT}
+management:
+  secret-key: `+sourceMgmtKey+`
+  allow-remote: true
+  disable-control-panel: true
+access:
+  api-keys:
+    - "sk-client-1"
+oauth: {auth-dir: "{AUTH_DIR}", providers: {codex: {retired-setting: false}}}
+plugins:
+  mystery_flag: true
+`, sourceMgmtKey)
+
+		snapshot, err := cpa.ReadV8AdoptionSnapshot(t.Context(), srcURL, sourceMgmtKey)
+		if err != nil {
+			t.Fatalf("ReadV8AdoptionSnapshot: %v", err)
+		}
+		if !slices.Contains(snapshot.ResourceSections, "unknown_cpa_native_resource") {
+			t.Fatalf("ResourceSections = %v, want unknown_cpa_native_resource", snapshot.ResourceSections)
+		}
+		srcWire, err := NewSource(t.Context(), Endpoint{BaseURL: srcURL, ManagementKey: sourceMgmtKey})
+		if err != nil {
+			t.Fatalf("NewSource: %v", err)
+		}
+		defer srcWire.Close()
+		counts := CountSourceInventory(t.Context(), srcWire)
+		if counts[string(bootstrap.AdoptionRefConfigUnknown)] != 2 {
+			t.Fatalf("CountSourceInventory[cpa-config-unknown] = %d, want 2 (%v)", counts[string(bootstrap.AdoptionRefConfigUnknown)], counts)
+		}
+	})
 }

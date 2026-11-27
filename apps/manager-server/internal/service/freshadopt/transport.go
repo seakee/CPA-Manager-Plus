@@ -195,16 +195,21 @@ func (s *SourceWire) ReadConfigDocument(ctx context.Context) (map[string]any, er
 	if err != nil {
 		return nil, err
 	}
+	yamlCode, yamlBody, yamlErr := s.w.doAccept(ctx, http.MethodGet, "/v8/management/config.yaml", "application/yaml, text/yaml", nil, maxConfigBytes)
+	if yamlErr == nil && yamlCode == http.StatusOK {
+		if archived := cpa.ArchivedV8UnknownPaths(yamlBody); len(archived) > 0 {
+			cpa.AttachArchivedUnknownV8Paths(doc, archived)
+		}
+	}
 	if iceVal, presence := cpa.LookupConfigValue(doc, iceServersSectionPath); presence == cpa.ConfigPresent {
 		if iceSlice, ok := iceVal.([]any); ok && len(iceSlice) > 0 {
-			s.hydrateIceServersFromYAML(ctx, doc)
+			hydrateIceServersFromYAML(doc, yamlCode, yamlBody, yamlErr)
 		}
 	}
 	return doc, nil
 }
 
-func (s *SourceWire) hydrateIceServersFromYAML(ctx context.Context, doc map[string]any) {
-	code, body, err := s.w.doAccept(ctx, http.MethodGet, "/v8/management/config.yaml", "application/yaml, text/yaml", nil, maxConfigBytes)
+func hydrateIceServersFromYAML(doc map[string]any, code int, body []byte, err error) {
 	if err == nil && code == http.StatusOK {
 		if yamlDoc, decErr := decodeFirstYAMLDocument(body); decErr == nil && yamlDoc != nil {
 			if rawIce, presence := cpa.LookupConfigValue(yamlDoc, iceServersSectionPath); presence == cpa.ConfigPresent {

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -261,9 +262,38 @@ func readV8ConfigWithClient(ctx context.Context, client *http.Client, baseURL, m
 			seen[key] = true
 			keys = append(keys, key)
 		}
+		if !slices.Contains(observation.ResourceSections, unknownSection) {
+			if len(readArchivedV8UnknownPaths(ctx, client, baseURL, managementKey)) > 0 {
+				observation.ResourceSections = append(observation.ResourceSections, unknownSection)
+			}
+		}
 		*adoptionKeys = keys
 	}
 	return observation, nil
+}
+
+func readArchivedV8UnknownPaths(ctx context.Context, client *http.Client, baseURL, managementKey string) []string {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/v8/management/config.yaml", nil)
+	if err != nil {
+		return nil
+	}
+	request.Header.Set("Authorization", "Bearer "+managementKey)
+	request.Header.Set("Accept", "application/yaml, text/yaml")
+	request.Header.Set("Accept-Encoding", "identity, gzip")
+	request.Header.Set("Cache-Control", "no-store")
+	response, err := client.Do(request)
+	if err != nil {
+		return nil
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil
+	}
+	yamlData, ok := readBoundedJSONBody(response)
+	if !ok {
+		return nil
+	}
+	return ArchivedV8UnknownPaths(yamlData)
 }
 
 var _ error = V8ReadError("")

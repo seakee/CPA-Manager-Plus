@@ -146,12 +146,26 @@ func TestAdoptionStagesEncryptedSnapshotBeforeDestinationAndVerifiesActualAuth(t
 	for _, class := range []bootstrap.AdoptSourceClass{bootstrap.AdoptNetworkExisting, bootstrap.AdoptLegacyManaged} {
 		t.Run(string(class), func(t *testing.T) {
 			sourceReads := 0
+			wantSourceReads := 1
+			if class == bootstrap.AdoptNetworkExisting {
+				wantSourceReads = 2
+			}
 			source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != "GET" || r.Header.Get("Authorization") != "Bearer source-management" {
+					t.Error("source lifecycle/history/config mutated or cross-generation read")
+					w.WriteHeader(403)
+					return
+				}
+				if class == bootstrap.AdoptNetworkExisting && r.URL.Path == "/v8/management/config.yaml" {
+					sourceReads++
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
 				path, body := "/v8/management/config", `{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"source-auth"},"access":{"api-keys":["source-client-one","source-client-two"]},"providers":{"secret":"never-migrate"},"usage":{"history":"never-migrate"}}`
 				if class == bootstrap.AdoptLegacyManaged {
 					path, body = "/v0/management/config", `{"tls":{"enable":false},"routing":{"strategy":"round-robin"},"usage-statistics-enabled":false,"gemini-api-key":[{"api-key":"never-migrate-provider"}],"api-keys":["source-client-one","source-client-two"]}`
 				}
-				if r.Method != "GET" || r.URL.Path != path || r.Header.Get("Authorization") != "Bearer source-management" {
+				if r.URL.Path != path {
 					t.Error("source lifecycle/history/config mutated or cross-generation read")
 					w.WriteHeader(403)
 					return
@@ -163,7 +177,6 @@ func TestAdoptionStagesEncryptedSnapshotBeforeDestinationAndVerifiesActualAuth(t
 				}
 				_, _ = w.Write([]byte(body))
 			}))
-			defer source.Close()
 			artifact := model.RuntimeArtifactID("sha256:" + strings.Repeat("a", 64))
 			runtime := &adoptionRuntime{managedRuntime: managedRuntime{status: model.RuntimeObservedStatus{Identity: "destination-runtime", Generation: 3, ProtocolVersion: "v1", State: model.RuntimeStateReady, Capabilities: model.RuntimeCapabilities{model.RuntimeCapabilityStart, model.RuntimeCapabilityStageDestination}, ActiveGatewayArtifact: &model.ActiveGatewayArtifact{Engine: "cpa", ArtifactID: artifact}}}}
 			target := httptest.NewServer(http.HandlerFunc(runtime.target))
@@ -180,8 +193,8 @@ func TestAdoptionStagesEncryptedSnapshotBeforeDestinationAndVerifiesActualAuth(t
 			}
 			op := operation()
 			staged, err := New(options).Execute(t.Context(), op, r)
-			if err != nil || staged.Checkpoint.Stage != "staged" || !security.IsValidProtectedEnvelope(staged.AdoptionCiphertext) || len(runtime.stages) != 0 || len(runtime.starts) != 0 || sourceReads != 1 {
-				t.Fatalf("stage did effects: %v", err)
+			if err != nil || staged.Checkpoint.Stage != "staged" || !security.IsValidProtectedEnvelope(staged.AdoptionCiphertext) || len(runtime.stages) != 0 || len(runtime.starts) != 0 || sourceReads != wantSourceReads {
+				t.Fatalf("stage did effects: %v reads=%d want=%d", err, sourceReads, wantSourceReads)
 			}
 			// The record covers every reference an item under the reported roots can
 			// carry, not one reference per root. This source reports the roots below;
@@ -280,8 +293,8 @@ func TestAdoptionStagesEncryptedSnapshotBeforeDestinationAndVerifiesActualAuth(t
 			cancel()
 			runtime.verifyTimeout.Store(false)
 			committed, err := New(options).Execute(t.Context(), op, r)
-			if err != nil || committed.Checkpoint.Stage != "committed" || committed.Connection == nil || !committed.GatewayPending || sourceReads != 1 {
-				t.Fatalf("verify: %v", err)
+			if err != nil || committed.Checkpoint.Stage != "committed" || committed.Connection == nil || !committed.GatewayPending || sourceReads != wantSourceReads {
+				t.Fatalf("verify: %v reads=%d want=%d", err, sourceReads, wantSourceReads)
 			}
 			for _, request := range runtime.stages {
 				if !reflect.DeepEqual(request, runtime.stages[0]) {
@@ -310,8 +323,8 @@ func TestAdoptionStagesEncryptedSnapshotBeforeDestinationAndVerifiesActualAuth(t
 					t.Fatal("conflicting replay accepted")
 				}
 			}
-			if sourceReads != 1 {
-				t.Fatal("replay rediscovered source")
+			if sourceReads != wantSourceReads {
+				t.Fatalf("replay rediscovered source: reads=%d want=%d", sourceReads, wantSourceReads)
 			}
 			plainRequest := r
 			plainRequest.AdoptionCiphertext = plainSnapshot

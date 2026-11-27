@@ -1,13 +1,16 @@
 package cpa
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"gopkg.in/yaml.v3"
 )
 
 // This file is the single adoption classification of the product: the reference
@@ -405,11 +408,357 @@ var knownV8ConfigSchema = sync.OnceValue(func() v8ConfigSchemaIndex {
 	return v8ConfigSchemaIndex{leaves: leaves, wholes: wholes, parents: parents}
 })
 
+// archivedUnknownV8PathsKey is a reserved in-memory map key used to carry
+// CPA-archived unknown YAML paths attached to a decoded v8 config document.
+// Its NUL prefix cannot exist in JSON or YAML config keys, and UnknownV8ConfigPaths
+// ignores it as a config entry while merging its paths into the sorted result.
+const archivedUnknownV8PathsKey = "\x00cpamp_archived_unknown_v8_paths"
+
+var (
+	archivedTopLevelKeyPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+	proseArchiveCommentTags    = map[string]bool{
+		"todo":    true,
+		"fixme":   true,
+		"note":    true,
+		"hack":    true,
+		"warning": true,
+		"xxx":     true,
+	}
+	legacyCPAV7TopLevelKeys = map[string]bool{
+		"host":                               true,
+		"port":                               true,
+		"max-request-body-bytes":             true,
+		"trusted-proxies":                    true,
+		"github-token":                       true,
+		"tls":                                true,
+		"shutdown-timeout":                   true,
+		"commercial-mode":                    true,
+		"discovery":                          true,
+		"kv-store":                           true,
+		"response-compression":               true,
+		"server-id":                          true,
+		"remote-management":                  true,
+		"api-keys":                           true,
+		"credential-concurrency":             true,
+		"credential-in-flight":               true,
+		"force-model-prefix":                 true,
+		"request-retry":                      true,
+		"max-retry-credentials":              true,
+		"max-retry-interval":                 true,
+		"disable-cooling":                    true,
+		"save-cooldown-status":               true,
+		"transient-error-cooldown-seconds":   true,
+		"proxy-url":                          true,
+		"tls-handshake-timeout-seconds":      true,
+		"passthrough-headers":                true,
+		"nonstream-keepalive-interval":       true,
+		"streaming":                          true,
+		"payload":                            true,
+		"auth-dir":                           true,
+		"auth-auto-refresh-workers":          true,
+		"oauth-model-alias":                  true,
+		"oauth-excluded-models":              true,
+		"oauth-request-scoped-errors":        true,
+		"oauth-settings":                     true,
+		"ws-auth":                            true,
+		"incognito-browser":                  true,
+		"codex":                              true,
+		"codex-header-defaults":              true,
+		"claude":                             true,
+		"claude-code":                        true,
+		"disable-claude-cloak-mode":          true,
+		"claude-header-defaults":             true,
+		"antigravity":                        true,
+		"antigravity-signature-cache-enabled": true,
+		"antigravity-signature-bypass-strict": true,
+		"quota-exceeded":                     true,
+		"xai":                                true,
+		"devin":                              true,
+		"disable-image-generation":           true,
+		"gpt-image-2-base-model":             true,
+		"video-result-auth-cache-ttl":        true,
+		"debug":                              true,
+		"logging-to-file":                    true,
+		"logs-max-total-size-mb":             true,
+		"request-log":                        true,
+		"error-logs-max-files":               true,
+		"usage-statistics-enabled":           true,
+		"redis-usage-queue-retention-seconds": true,
+		"pprof":                              true,
+		"gemini-api-key":                     true,
+		"interactions-api-key":               true,
+		"vertex-api-key":                     true,
+		"codex-api-key":                      true,
+		"claude-api-key":                     true,
+		"xai-api-key":                        true,
+		"meta-api-key":                       true,
+		"openai-compatibility":               true,
+		"ampcode":                            true,
+	}
+)
+
+// AttachArchivedUnknownV8Paths attaches sorted, deduplicated unknown paths
+// recovered from GET /v8/management/config.yaml comments to doc so
+// UnknownV8ConfigPaths reports both JSON-visible and CPA-archived unknown keys.
+func AttachArchivedUnknownV8Paths(doc map[string]any, paths []string) {
+	if doc == nil || len(paths) == 0 {
+		return
+	}
+	merged := append([]string(nil), attachedArchivedUnknownV8Paths(doc)...)
+	for _, path := range paths {
+		trimmed := strings.TrimSpace(path)
+		if trimmed != "" {
+			merged = append(merged, trimmed)
+		}
+	}
+	if len(merged) == 0 {
+		return
+	}
+	slices.Sort(merged)
+	merged = slices.Compact(merged)
+	doc[archivedUnknownV8PathsKey] = merged
+}
+
+func attachedArchivedUnknownV8Paths(doc map[string]any) []string {
+	if doc == nil {
+		return nil
+	}
+	raw, ok := doc[archivedUnknownV8PathsKey]
+	if !ok || raw == nil {
+		return nil
+	}
+	switch typed := raw.(type) {
+	case []string:
+		return typed
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+				out = append(out, strings.TrimSpace(s))
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+// ArchivedV8UnknownPaths extracts genuinely unknown configuration paths that
+// CPA v8.0.55 stripped from JSON and archived as trailing `# <dotted.section>: ...`
+// comments on root.FootComment of GET /v8/management/config.yaml. Only the
+// trailing comment tail after the last active YAML line of the first YAML
+// document (before `...` or any subsequent `---`) is inspected, and pre-existing
+// comments, prose tags, legacy CPA v7 top-level keys, and known aliases are excluded.
+func ArchivedV8UnknownPaths(projectedV8YAML []byte) []string {
+	raw := bytes.TrimPrefix(projectedV8YAML, []byte("\xef\xbb\xbf"))
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil
+	}
+	normalized := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	dec := yaml.NewDecoder(strings.NewReader(normalized))
+	var doc yaml.Node
+	if err := dec.Decode(&doc); err != nil || doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 || doc.Content[0] == nil || doc.Content[0].Kind != yaml.MappingNode {
+		return nil
+	}
+	lines := strings.Split(normalized, "\n")
+	maxLine := maxYAMLNodeLine(doc.Content[0])
+	firstDocEnd := len(lines)
+	for i, line := range lines {
+		if i+1 <= maxLine {
+			continue
+		}
+		if yamlDocumentMarker(line, "...") || yamlDocumentMarker(line, "---") {
+			firstDocEnd = i
+			break
+		}
+	}
+	firstDocLines := lines[:firstDocEnd]
+	tailStart := len(firstDocLines)
+	for i := len(firstDocLines) - 1; i >= 0; i-- {
+		line := strings.TrimRight(firstDocLines[i], "\r")
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(line, "#") {
+			tailStart = i
+			continue
+		}
+		break
+	}
+	if tailStart >= len(firstDocLines) {
+		return nil
+	}
+	trailing := firstDocLines[tailStart:]
+	var found []string
+	var cur []string
+	flush := func() {
+		if len(cur) == 0 {
+			return
+		}
+		blockText := strings.Join(cur, "\n")
+		cur = nil
+		if section, ok := decodeArchivedYAMLMappingSection(blockText); ok && isArchivedUnknownV8Section(section) {
+			found = append(found, section)
+		}
+	}
+	for idx, rawLine := range trailing {
+		line := strings.TrimRight(rawLine, "\r")
+		if strings.TrimSpace(line) == "" {
+			flush()
+			continue
+		}
+		if !strings.HasPrefix(line, "#") {
+			flush()
+			continue
+		}
+		if isBlankArchiveCommentLine(line) {
+			if len(cur) > 0 && hasArchiveContinuationAhead(trailing, idx+1) {
+				cur = append(cur, "")
+			} else {
+				flush()
+			}
+			continue
+		}
+		if isArchiveCommentContinuationLine(line) {
+			if len(cur) > 0 {
+				cur = append(cur, stripArchiveCommentPrefix(line))
+			}
+			continue
+		}
+		flush()
+		if !strings.HasPrefix(line, "# ") {
+			continue
+		}
+		bodyLine := line[2:]
+		if strings.HasPrefix(bodyLine, "#") {
+			continue
+		}
+		cur = []string{bodyLine}
+	}
+	flush()
+	if len(found) == 0 {
+		return nil
+	}
+	slices.Sort(found)
+	return slices.Compact(found)
+}
+
+func maxYAMLNodeLine(node *yaml.Node) int {
+	if node == nil {
+		return 0
+	}
+	maxLine := node.Line
+	for _, child := range node.Content {
+		if childLine := maxYAMLNodeLine(child); childLine > maxLine {
+			maxLine = childLine
+		}
+	}
+	return maxLine
+}
+
+func yamlDocumentMarker(line, marker string) bool {
+	line = strings.TrimRight(line, "\r")
+	if !strings.HasPrefix(line, marker) {
+		return false
+	}
+	if len(line) == len(marker) {
+		return true
+	}
+	switch line[len(marker)] {
+	case ' ', '\t':
+		return true
+	default:
+		return false
+	}
+}
+
+func isBlankArchiveCommentLine(line string) bool {
+	return strings.TrimSpace(strings.TrimPrefix(line, "#")) == ""
+}
+
+func isArchiveCommentContinuationLine(line string) bool {
+	if strings.HasPrefix(line, "#  ") || strings.HasPrefix(line, "# \t") || strings.HasPrefix(line, "#\t") {
+		return true
+	}
+	return line == "# -" || strings.HasPrefix(line, "# - ") || strings.HasPrefix(line, "# -\t")
+}
+
+func hasArchiveContinuationAhead(lines []string, start int) bool {
+	for i := start; i < len(lines); i++ {
+		next := strings.TrimRight(lines[i], "\r")
+		if strings.TrimSpace(next) == "" || !strings.HasPrefix(next, "#") {
+			return false
+		}
+		if isBlankArchiveCommentLine(next) {
+			continue
+		}
+		return isArchiveCommentContinuationLine(next)
+	}
+	return false
+}
+
+func stripArchiveCommentPrefix(line string) string {
+	if strings.HasPrefix(line, "# ") {
+		return line[2:]
+	}
+	return strings.TrimPrefix(line, "#")
+}
+
+func decodeArchivedYAMLMappingSection(blockText string) (string, bool) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(blockText), &doc); err != nil {
+		return "", false
+	}
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) != 1 || doc.Content[0] == nil {
+		return "", false
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode || len(root.Content) != 2 {
+		return "", false
+	}
+	keyNode := root.Content[0]
+	if keyNode == nil || keyNode.Kind != yaml.ScalarNode || keyNode.ShortTag() != "!!str" {
+		return "", false
+	}
+	section := strings.TrimSpace(keyNode.Value)
+	if section == "" || section != keyNode.Value {
+		return "", false
+	}
+	return section, true
+}
+
+func isArchivedUnknownV8Section(section string) bool {
+	if section == "" || strings.ContainsAny(section, " \t\r\n") {
+		return false
+	}
+	index := knownV8ConfigSchema()
+	if strings.Contains(section, ".") {
+		if section == "oauth.providers.codex.live-media-relay.allow-private-remote-ips" ||
+			section == "codex.live-media-relay.allow-private-remote-ips" {
+			return false
+		}
+		lastDot := strings.LastIndexByte(section, '.')
+		if lastDot <= 0 || lastDot == len(section)-1 {
+			return false
+		}
+		parent := section[:lastDot]
+		return index.parents[parent] && !index.leaves[section] && !index.wholes[section] && !index.parents[section]
+	}
+	if !archivedTopLevelKeyPattern.MatchString(section) {
+		return false
+	}
+	if proseArchiveCommentTags[section] {
+		return false
+	}
+	if section == "config-version" || index.leaves[section] || index.wholes[section] || index.parents[section] {
+		return false
+	}
+	return !legacyCPAV7TopLevelKeys[section]
+}
+
 // UnknownV8ConfigPaths returns the sorted dotted paths of unrecognized non-nil
 // configuration entries in a CPA v8 config document (including off-table
 // sibling keys nested under named roots such as server, plugins, oauth, routing,
-// or observability). It is the single authoritative unknown-key scanner shared
-// by v8 discovery, source inventory counting, and adoption execution.
+// or observability, as well as any CPA-archived unknown paths attached from
+// GET /v8/management/config.yaml). It is the single authoritative unknown-key
+// scanner shared by v8 discovery, source inventory counting, and adoption execution.
 func UnknownV8ConfigPaths(doc map[string]any) []string {
 	if len(doc) == 0 {
 		return nil
@@ -419,6 +768,9 @@ func UnknownV8ConfigPaths(doc map[string]any) []string {
 	var walk func(prefix string, obj map[string]any)
 	walk = func(prefix string, obj map[string]any) {
 		for key, val := range obj {
+			if prefix == "" && key == archivedUnknownV8PathsKey {
+				continue
+			}
 			path := key
 			if prefix != "" {
 				path = prefix + "." + key
@@ -443,6 +795,12 @@ func UnknownV8ConfigPaths(doc map[string]any) []string {
 		}
 	}
 	walk("", doc)
+	if attached := attachedArchivedUnknownV8Paths(doc); len(attached) > 0 {
+		unknown = append(unknown, attached...)
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
 	slices.Sort(unknown)
-	return unknown
+	return slices.Compact(unknown)
 }

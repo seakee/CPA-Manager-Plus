@@ -856,7 +856,7 @@ func TestPersistedAdoptionOperationRechecksApplicability(t *testing.T) {
 		ExpectedArtifactID: record.ArtifactID}
 	service := &Service{options: options, production: true, consumers: consumers}
 	staged, err := service.Execute(t.Context(), operation(), request)
-	if err != nil || staged.Checkpoint.Stage != "staged" || sourceCalls.Load() != 1 || len(runtime.stages) != 0 || len(runtime.starts) != 0 || !staged.GatewayPending {
+	if err != nil || staged.Checkpoint.Stage != "staged" || sourceCalls.Load() != 2 || len(runtime.stages) != 0 || len(runtime.starts) != 0 || !staged.GatewayPending {
 		t.Fatalf("stage: %+v %v source=%d", staged, err, sourceCalls.Load())
 	}
 	op := operation()
@@ -879,7 +879,7 @@ func TestPersistedAdoptionOperationRechecksApplicability(t *testing.T) {
 	result, err := restarted.Execute(t.Context(), op, request)
 	var blocker *Blocker
 	if !errors.As(err, &blocker) || blocker.Code != "adoption_source_qualification_required" || result.Checkpoint.Strategy != "" ||
-		sourceCalls.Load() != 1 || len(runtime.stages) != 0 || len(runtime.starts) != 0 || !result.GatewayPending {
+		sourceCalls.Load() != 2 || len(runtime.stages) != 0 || len(runtime.starts) != 0 || !result.GatewayPending {
 		t.Fatalf("persisted scope bypassed recheck: result=%+v err=%v source=%d", result, err, sourceCalls.Load())
 	}
 }
