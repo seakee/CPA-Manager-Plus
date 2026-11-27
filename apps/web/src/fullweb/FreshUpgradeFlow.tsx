@@ -30,7 +30,7 @@ import {
 import { FreshArtifactStep } from './FreshArtifactStep';
 import type { ArtifactTransportLike } from './freshArtifact';
 import { FullWebIcon } from './FullWebIcon';
-import { isValidHeaderCredentialValue, PublicApiError, type PublicApiClient } from './publicApi';
+import { isValidExactHeaderCredentialValue, PublicApiError, type PublicApiClient } from './publicApi';
 import { readRoutingContext } from './routingContext';
 // Recorded operations and worker observations are authoritative; accepted jobs
 // never advance a local stage or imply that the unique verification gate passed.
@@ -576,7 +576,7 @@ function createUpgradeWizardRequest(
     }
     const key = resource === 'bootstrap/identity' ? '' : credential();
     if (!key && resource !== 'bootstrap/identity') throw new UpgradeWizardError('authentication');
-    if (resource !== 'bootstrap/identity' && !isValidHeaderCredentialValue(key)) {
+    if (resource !== 'bootstrap/identity' && !isValidExactHeaderCredentialValue(key)) {
       throw new UpgradeWizardError('authentication', '', 401);
     }
     const controller = new AbortController();

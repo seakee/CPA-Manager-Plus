@@ -437,8 +437,20 @@ describe('existing Manager credential provenance', () => {
     expect(rememberedCommittedUpgradeStatus(revB)?.activationRequested).toBeUndefined();
   });
 
-  it.each(['：old-key', 'old-key│', 'old-key\nnext', ''])(
-    'rejects invalid header credential %j as invalid authentication without calling fetch',
+  it.each([
+    '：old-key',
+    'old-key│',
+    'old-key\nnext',
+    'old-key\x01ctrl',
+    'old-key\x1fctrl',
+    'old-key\x7fdel',
+    ' leading-space',
+    'trailing-space ',
+    '\tleading-tab',
+    'trailing-tab\t',
+    '',
+  ])(
+    'rejects invalid or boundary-whitespace header credential %j as invalid authentication without calling fetch',
     async (invalidCredential) => {
       const fetcher = vi.fn();
       vi.stubGlobal('fetch', fetcher);
@@ -448,6 +460,30 @@ describe('existing Manager credential provenance', () => {
         reason: 'invalid',
       });
       expect(fetcher).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each(['latin1-éß-key', 'interior space key', 'interior\ttab\tkey'])(
+    'preserves valid exact-match Latin-1 and interior-whitespace credential %j on the wire',
+    async (validCredential) => {
+      const fetcher = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ code: 'admin_unauthorized' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+      vi.stubGlobal('fetch', fetcher);
+      await expect(
+        verifyUpgradeCredential(validCredential, new AbortController().signal)
+      ).rejects.toMatchObject({
+        reason: 'invalid',
+      });
+      expect(fetcher).toHaveBeenCalledOnce();
+      expect(fetcher.mock.calls[0]?.[1]).toMatchObject({
+        headers: expect.objectContaining({
+          Authorization: `Bearer ${validCredential}`,
+        }),
+      });
     }
   );
 });

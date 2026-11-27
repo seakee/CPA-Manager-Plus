@@ -13,7 +13,7 @@ import {
   type ArtifactTransport,
 } from './freshArtifact';
 import { readRoutingContext } from './routingContext';
-import { isValidHeaderCredentialValue } from '../utils/headerCredential';
+import { isValidExactHeaderCredentialValue } from '../utils/headerCredential';
 
 const ARTIFACT_STATUS_TIMEOUT_MS = 5_000;
 const ARTIFACT_PROBE_TIMEOUT_MS = 10_000;
@@ -62,7 +62,7 @@ export function createUpgradeArtifactTransport(
       throw { kind: 'aborted', aborted: true, status: 0 };
     }
     const key = credential();
-    if (!key || !isValidHeaderCredentialValue(key)) {
+    if (!key || !isValidExactHeaderCredentialValue(key)) {
       throw { kind: 'authentication', status: 401, code: 'unauthorized' };
     }
     const headers: Record<string, string> = {

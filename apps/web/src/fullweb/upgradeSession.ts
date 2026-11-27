@@ -1,7 +1,7 @@
 import { obfuscatedStorage } from '../services/storage/secureStorage';
 import { useAuthStore } from '../stores/useAuthStore';
 import { STORAGE_KEY_AUTH } from '../utils/constants';
-import { isValidHeaderCredentialValue } from '../utils/headerCredential';
+import { isValidExactHeaderCredentialValue } from '../utils/headerCredential';
 
 export const UPGRADE_AUTH_PATH = '/.well-known/cpamp-bootstrap/upgrade/authenticate';
 export const UPGRADE_AUTH_CONTRACT = 'cpamp.upgrade-auth.v1';
@@ -128,7 +128,7 @@ export async function verifyUpgradeCredential(
   signal: AbortSignal,
   source?: string
 ): Promise<VerifiedUpgradeCredential> {
-  if (!isValidHeaderCredentialValue(credential)) {
+  if (!isValidExactHeaderCredentialValue(credential)) {
     throw new UpgradeAuthenticationError('invalid');
   }
   const headers: Record<string, string> = {
