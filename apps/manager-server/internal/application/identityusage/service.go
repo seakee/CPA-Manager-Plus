@@ -36,6 +36,7 @@ const (
 	PhaseStarting CollectionPhase = "starting"
 	PhaseStopped  CollectionPhase = "stopped"
 	PhaseError    CollectionPhase = "error"
+	PhaseAwaitingRuntime CollectionPhase = "awaiting_runtime"
 )
 
 // CollectionProbe reports the live Collector phase without exposing any CPA
@@ -133,9 +134,10 @@ type SummaryResponse struct {
 
 // Service reads attributable usage for Canonical Keys of the Fresh workspace.
 type Service struct {
-	repo       ports.Repository
-	collection CollectionProbe
-	now        func() int64
+	repo                    ports.Repository
+	collection              CollectionProbe
+	now                     func() int64
+	adoptedPreBindingProven func(context.Context) bool
 }
 
 // New builds the usage read service. A nil probe reports an unknown phase, so
@@ -149,6 +151,24 @@ func (s *Service) SetClock(now func() int64) {
 	if now != nil {
 		s.now = now
 	}
+}
+
+// SetAdoptedPreBindingProven configures an optional installation-level predicate
+// reporting whether "adopted" keys belong to a brand-new Manager-staged
+// destination created at adoption time (zero pre-adoption traffic on the
+// destination gateway). When nil or returning false, adopted keys keep the
+// conservative partial pre-binding rule.
+func (s *Service) SetAdoptedPreBindingProven(fn func(ctx context.Context) bool) {
+	if s != nil {
+		s.adoptedPreBindingProven = fn
+	}
+}
+
+func (s *Service) allowAdoptedPreBinding(ctx context.Context) bool {
+	if s == nil || s.adoptedPreBindingProven == nil {
+		return false
+	}
+	return s.adoptedPreBindingProven(ctx)
 }
 
 // MarkCollectionStart records the first durable moment collection could run.
@@ -167,6 +187,47 @@ func (s *Service) MarkCollectionStartAt(ctx context.Context, startedAtMS int64) 
 	return s.repo.MarkCollectionStarted(ctx, startedAtMS)
 }
 
+// AdvanceCollectionStart moves collection start forward to the current clock
+// after an explicit monitoring-disabled gap and clears the gap marker.
+func (s *Service) AdvanceCollectionStart(ctx context.Context) error {
+	return s.repo.AdvanceCollectionStarted(ctx, s.now())
+}
+
+// AdvanceCollectionStartAt moves collection start forward to startedAtMS after
+// an explicit monitoring-disabled gap and clears the gap marker.
+func (s *Service) AdvanceCollectionStartAt(ctx context.Context, startedAtMS int64) error {
+	if startedAtMS <= 0 {
+		startedAtMS = s.now()
+	}
+	return s.repo.AdvanceCollectionStarted(ctx, startedAtMS)
+}
+
+// MonitoringDisabledGap reports whether monitoring was explicitly disabled
+// since the last proven collection start.
+func (s *Service) MonitoringDisabledGap(ctx context.Context) (bool, error) {
+	return s.repo.MonitoringDisabledGap(ctx)
+}
+
+// RecordMonitoringDisabledGap records an explicit monitoring-disabled gap.
+func (s *Service) RecordMonitoringDisabledGap(ctx context.Context) error {
+	return s.repo.RecordMonitoringDisabledGap(ctx, s.now())
+}
+
+// RecordUnreplayedGap durably records an unreplayed transport disconnect or
+// queue outage exceeding safe retention.
+func (s *Service) RecordUnreplayedGap(ctx context.Context) error {
+	return s.repo.RecordUnreplayedGap(ctx, s.now())
+}
+
+// RecordObservedCollectionStart commits a proven Collector observation instant
+// atomically in storage, preserving eligibility/replay semantics.
+func (s *Service) RecordObservedCollectionStart(ctx context.Context, obs ports.ObservedCollectionStart) error {
+	if obs.ObservedAtMS <= 0 {
+		obs.ObservedAtMS = s.now()
+	}
+	return s.repo.RecordObservedCollectionStart(ctx, obs)
+}
+
 type evidence struct {
 	phase        CollectionPhase
 	collectingAt int64
@@ -182,26 +243,28 @@ type evidence struct {
 	// requestedFromMS is the window the caller asked for; windowFromMS is the
 	// earliest instant Manager can actually prove. A window that starts before
 	// the latter is a lower bound, never a complete observation.
-	requestedFromMS int64
-	windowFromMS    int64
-	windowToMS      int64
+	requestedFromMS   int64
+	windowFromMS      int64
+	windowToMS        int64
+	adoptedPreBinding bool
 }
 
 func isNativeOrigin(origin string) bool {
 	return origin == "workspace" || origin == "installer"
 }
 
-func isNativePreBindingProven(binding ports.Binding, bindingErr error, collectingAt, requestedFromMS, windowToMS int64) bool {
-	// Native Manager-minted keys ("workspace" and "installer") did not exist as
-	// externally callable credentials before binding.FirstSeenAtMS, so when
-	// collection was already proven at or before FirstSeenAtMS and strictly
-	// precedes windowToMS, the pre-binding interval inside [requestedFromMS,
-	// windowToMS) is provably zero client calls.
+func isPreBindingProven(binding ports.Binding, bindingErr error, collectingAt, requestedFromMS, windowToMS int64, allowAdopted bool) bool {
+	// Manager-minted keys ("workspace" and "installer"), as well as adopted
+	// keys explicitly proven to belong to a committed Fresh AdoptExisting
+	// destination, could not serve public /v1/* traffic before attribution.
+	// Pre-binding intervals up to FirstSeenAtMS are provably zero gateway calls
+	// once collection is proven by FirstSeenAtMS.
+	originAllowed := isNativeOrigin(binding.Origin) || (allowAdopted && binding.Origin == "adopted")
 	return bindingErr == nil &&
 		collectingAt > 0 &&
 		collectingAt < windowToMS &&
 		windowToMS > requestedFromMS &&
-		isNativeOrigin(binding.Origin) &&
+		originAllowed &&
 		binding.IdentityCreatedAtMS > 0 &&
 		binding.FirstSeenAtMS <= binding.IdentityCreatedAtMS &&
 		collectingAt <= binding.FirstSeenAtMS
@@ -210,10 +273,12 @@ func isNativePreBindingProven(binding ports.Binding, bindingErr error, collectin
 // evaluate returns the coverage of one key's window. Reasons are stable codes;
 // the UI owns their localization.
 func evaluate(in evidence) (ports.State, string) {
-	nativePreBindingProven := isNativePreBindingProven(
-		in.binding, in.bindingErr, in.collectingAt, in.requestedFromMS, in.windowToMS,
+	preBindingProven := isPreBindingProven(
+		in.binding, in.bindingErr, in.collectingAt, in.requestedFromMS, in.windowToMS, in.adoptedPreBinding,
 	)
 	switch {
+	case in.phase == PhaseAwaitingRuntime:
+		return ports.StateUnknown, "collection_starting"
 	case in.collectingAt <= 0:
 		return ports.StateUnknown, "collection_unproven"
 	case errors.Is(in.bindingErr, ports.ErrBindingConflict):
@@ -241,13 +306,13 @@ func evaluate(in evidence) (ports.State, string) {
 		}
 		return ports.StateUnknown, "projection_catching_up"
 	case in.windowFromMS >= in.windowToMS:
-		if nativePreBindingProven {
+		if preBindingProven && isNativeOrigin(in.binding.Origin) {
 			return ports.StateComplete, "observed"
 		}
 		// Nothing inside the requested range was ever observed. Publishing a
 		// zero here would claim a proven quiet window that does not exist.
 		return ports.StateUnknown, "window_unobserved"
-	case in.windowFromMS > in.requestedFromMS && !nativePreBindingProven:
+	case in.windowFromMS > in.requestedFromMS && !preBindingProven:
 		// Collection started inside the requested window, or a non-native key
 		// was bound after the requested window opened, so the numbers are a
 		// lower bound for it.
@@ -291,6 +356,7 @@ func (s *Service) Detail(ctx context.Context, id identity.APIKeyID, fromMS, toMS
 	if in.bindingErr != nil && !errors.Is(in.bindingErr, ports.ErrBindingNotFound) && !errors.Is(in.bindingErr, ports.ErrBindingConflict) {
 		return DetailResponse{}, in.bindingErr
 	}
+	in.adoptedPreBinding = in.bindingErr == nil && in.binding.Origin == "adopted" && s.allowAdoptedPreBinding(ctx)
 	// Manager can only prove a window from the later of the proven collection
 	// start and the key's own attribution start.
 	if in.collectingAt > in.windowFromMS {
@@ -428,6 +494,18 @@ func (s *Service) SummaryWindow(ctx context.Context, ids []identity.APIKeyID, fr
 	windowFromByID := make(map[identity.APIKeyID]int64, len(ids))
 	ranges := make([]ports.KeyRange, 0, len(ids))
 	var earliestWindowFromMS int64
+	adoptedPreBindingChecked := false
+	adoptedPreBinding := false
+	allowAdoptedFor := func(binding ports.Binding) bool {
+		if binding.Origin != "adopted" {
+			return false
+		}
+		if !adoptedPreBindingChecked {
+			adoptedPreBindingChecked = true
+			adoptedPreBinding = s.allowAdoptedPreBinding(ctx)
+		}
+		return adoptedPreBinding
+	}
 	for _, id := range ids {
 		binding, err := s.repo.Binding(ctx, id)
 		if err != nil && !errors.Is(err, ports.ErrBindingNotFound) && !errors.Is(err, ports.ErrBindingConflict) {
@@ -450,7 +528,7 @@ func (s *Service) SummaryWindow(ctx context.Context, ids []identity.APIKeyID, fr
 				earliestWindowFromMS = windowFromMS
 			}
 			slotsFromMS := windowFromMS
-			if isNativePreBindingProven(binding, nil, collectingAt, fromMS, toMS) {
+			if isPreBindingProven(binding, nil, collectingAt, fromMS, toMS, allowAdoptedFor(binding)) {
 				slotsFromMS = fromMS
 			}
 			ranges = append(ranges, ports.KeyRange{APIKeyID: id, FromMS: windowFromMS, SlotsFromMS: slotsFromMS})
@@ -531,9 +609,10 @@ func (s *Service) SummaryWindow(ctx context.Context, ids []identity.APIKeyID, fr
 			incompleteDays:  daysWithin(incompleteDays, windowFromMS, toMS),
 			projection:      projection,
 			projectionOK:    projectionOK,
-			requestedFromMS: fromMS,
-			windowFromMS:    windowFromMS,
-			windowToMS:      toMS,
+			requestedFromMS:   fromMS,
+			windowFromMS:      windowFromMS,
+			windowToMS:        toMS,
+			adoptedPreBinding: bindingErrs[id] == nil && allowAdoptedFor(bindings[id]),
 		}
 		state, reason := evaluate(in)
 		item.Coverage = CoverageState{State: string(state), Reason: reason}
@@ -626,6 +705,8 @@ func aggregateCoverage(global CoverageState, items []SummaryItem) CoverageState 
 // Key list; it never describes one key's attribution.
 func globalCoverage(phase CollectionPhase, collectingAtMS int64, projection ports.ProjectionState, projectionOK bool) CoverageState {
 	switch {
+	case phase == PhaseAwaitingRuntime:
+		return CoverageState{State: string(ports.StateUnknown), Reason: "collection_starting"}
 	case collectingAtMS <= 0:
 		return CoverageState{State: string(ports.StateUnknown), Reason: "collection_unproven"}
 	case phase == PhaseStopped:

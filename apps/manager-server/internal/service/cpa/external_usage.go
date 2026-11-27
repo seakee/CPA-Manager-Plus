@@ -42,11 +42,15 @@ func FetchExternalUsageStatistics(ctx context.Context, baseURL string, key strin
 	default:
 		return false, fmt.Errorf("%w (HTTP %d)", ErrProofUnavailable, code)
 	}
-	var raw map[string]any
-	if json.Unmarshal(body, &raw) != nil {
+	raw, err := decodeJSONObject(body)
+	if err != nil {
 		return false, ErrProofUnavailable
 	}
-	return readBoolField(raw, "usage-statistics-enabled", "usageStatisticsEnabled"), nil
+	enabled, _, err := inspectBoolCandidates([]map[string]any{raw}, "usage-statistics-enabled", "usageStatisticsEnabled")
+	if err != nil {
+		return false, ErrProofUnavailable
+	}
+	return enabled, nil
 }
 
 // SetExternalUsageStatistics enables or disables usage recording on the user's

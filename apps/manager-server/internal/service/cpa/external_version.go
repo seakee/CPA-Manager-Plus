@@ -3,6 +3,7 @@ package cpa
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -72,73 +73,97 @@ func ClassifyExternalVersion(version string) ExternalVersionReport {
 // would reach. A probe on a different transport could report a version this
 // Manager never writes to.
 func ObserveExternalVersion(ctx context.Context, baseURL string, managementKey string) (ExternalVersionReport, error) {
+	report, _, err := ObserveExternalUsageAuthority(ctx, baseURL, managementKey)
+	return report, err
+}
+
+// ObserveExternalUsageAuthority reads both the advertised CPA version and
+// usage retention configuration in a single authenticated /v0/management/config
+// round-trip. Unparseable or <= 0 retention returns UsageConfig.RetentionVerified=false.
+func ObserveExternalUsageAuthority(ctx context.Context, baseURL string, managementKey string) (ExternalVersionReport, UsageConfig, error) {
 	endpoint, err := NormalizeV8BaseURL(baseURL)
 	if err != nil {
-		return ExternalVersionReport{}, ErrProofUnavailable
+		return ExternalVersionReport{}, UsageConfig{}, ErrProofUnavailable
 	}
 	tr := NewTransportForEndpoint(endpoint)
 	if gate := ExternalSavedCredentialGateFromContext(ctx); gate != nil {
-		var report ExternalVersionReport
+		var (
+			report   ExternalVersionReport
+			usageCfg UsageConfig
+		)
 		err := gate(ctx, func(requestCtx context.Context, target ExternalSavedCredentialTarget) error {
 			if verifyErr := tr.verifyExternalTarget(target); verifyErr != nil {
 				return verifyErr
 			}
 			var probeErr error
-			report, probeErr = tr.ObserveVersion(requestCtx, target.ManagementKey)
+			report, usageCfg, probeErr = tr.ObserveVersionAndUsage(requestCtx, target.ManagementKey)
 			return probeErr
 		})
-		return report, err
+		return report, usageCfg, err
 	}
-	return tr.ObserveVersion(ctx, managementKey)
+	return tr.ObserveVersionAndUsage(ctx, managementKey)
 }
 
 // ObserveVersion is the version probe of one resolved External target, on the
 // transport that target is written through.
 func (t *Transport) ObserveVersion(ctx context.Context, managementKey string) (ExternalVersionReport, error) {
-	version, err := t.observeVersion(ctx, managementKey)
-	if err != nil {
-		return ExternalVersionReport{}, err
-	}
-	return ClassifyExternalVersion(version), nil
+	report, _, err := t.ObserveVersionAndUsage(ctx, managementKey)
+	return report, err
 }
 
-// observeVersion performs the one authenticated read the probe is made of and
-// returns the advertised version, which may be empty.
-func (t *Transport) observeVersion(ctx context.Context, managementKey string) (string, error) {
+// ObserveVersionAndUsage performs the single /v0/management/config read and
+// extracts both the CPA version classification and verified usage retention.
+func (t *Transport) ObserveVersionAndUsage(ctx context.Context, managementKey string) (ExternalVersionReport, UsageConfig, error) {
+	version, usageCfg, err := t.observeVersionAndUsage(ctx, managementKey)
+	if err != nil {
+		return ExternalVersionReport{}, UsageConfig{}, err
+	}
+	return ClassifyExternalVersion(version), usageCfg, nil
+}
+
+func (t *Transport) observeVersionAndUsage(ctx context.Context, managementKey string) (string, UsageConfig, error) {
 	if t == nil || t.client == nil || !validManagementKey(managementKey) {
-		return "", ErrProofUnavailable
+		return "", UsageConfig{}, ErrProofUnavailable
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, t.endpoint+"/v0/management/config", nil)
 	if err != nil {
-		return "", ErrProofUnavailable
+		return "", UsageConfig{}, ErrProofUnavailable
 	}
 	request.Header.Set("Authorization", "Bearer "+managementKey)
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Cache-Control", "no-store")
 	response, err := t.httpClient(ctx).Do(request)
 	if err != nil {
-		return "", ErrProofUnavailable
+		return "", UsageConfig{}, ErrProofUnavailable
 	}
 	ObserveExternalResponseStatus(ctx, response.StatusCode)
 	defer response.Body.Close()
 	switch {
 	case response.StatusCode >= 200 && response.StatusCode < 300:
 	case response.StatusCode == http.StatusUnauthorized:
-		return "", ErrManagementRejected
+		return "", UsageConfig{}, ErrManagementRejected
 	case response.StatusCode == http.StatusForbidden:
 		// CPA answers 403, not 401, when it refuses this client rather than the
 		// credential: a banned address, or remote management disabled for it. It
 		// is the same blocker for the caller, kept apart only because a ban
 		// expires.
-		return "", ErrManagementClientForbidden
+		return "", UsageConfig{}, ErrManagementClientForbidden
 	default:
-		return "", ErrProofUnavailable
+		return "", UsageConfig{}, ErrProofUnavailable
 	}
 	version := strings.TrimSpace(response.Header.Get("X-CPA-Version"))
 	if version == "" {
 		version = strings.TrimSpace(response.Header.Get("X-Server-Version"))
 	}
-	return version, nil
+	limited, readErr := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
+	if readErr != nil || len(limited) > maxResponseBytes {
+		return version, UsageConfig{RetentionVerified: false}, nil
+	}
+	parsed, parseErr := parseManagementConfigPayload(limited)
+	if parseErr != nil {
+		return version, UsageConfig{RetentionVerified: false}, nil
+	}
+	return version, parsed.UsageConfig, nil
 }
 
 // majorVersion reads the leading major number of a CPA version tag. CPA versions

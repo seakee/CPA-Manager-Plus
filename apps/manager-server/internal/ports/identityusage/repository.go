@@ -30,6 +30,10 @@ var (
 	// ErrBindingConflict means the key's source hash is actively bound to a
 	// different Canonical Key. Manager reports that instead of guessing.
 	ErrBindingConflict = errors.New("canonical key source hash is bound to another identity")
+
+	// ErrStaleObservation means a Collector observation raced with a newer
+	// monitoring disable or stopped/superseded Collector run and was rejected.
+	ErrStaleObservation = errors.New("stale collector observation")
 )
 
 // Binding is the durable attribution window of one Canonical Key. Hashing
@@ -170,4 +174,43 @@ type Repository interface {
 	// MarkCollectionStarted records that instant. The earliest value wins, so a
 	// restart never narrows a proven window.
 	MarkCollectionStarted(ctx context.Context, nowMS int64) error
+
+	// AdvanceCollectionStarted moves the durable collection start instant forward
+	// after an explicit monitoring-disabled gap and atomically clears the gap
+	// marker. Unlike MarkCollectionStarted, this updates an earlier timestamp
+	// when nowMS is strictly newer.
+	AdvanceCollectionStarted(ctx context.Context, nowMS int64) error
+
+	// MonitoringDisabledGap reports whether request monitoring was explicitly
+	// disabled since the last proven collection start.
+	MonitoringDisabledGap(ctx context.Context) (bool, error)
+
+	// RecordMonitoringDisabledGap durably records that monitoring was disabled
+	// so a subsequent start advances collection start forward instead of
+	// keeping an earlier start instant.
+	RecordMonitoringDisabledGap(ctx context.Context, nowMS int64) error
+
+	// RecordUnreplayedGap durably records that a transport without backlog
+	// replay dropped or exceeded its retention window.
+	RecordUnreplayedGap(ctx context.Context, nowMS int64) error
+
+	// RecordObservedCollectionStart records a proven Collector observation
+	// instant inside an atomic SQLite transaction fenced on disable sequence,
+	// run activity, retained-queue continuity, and completion eligibility.
+	RecordObservedCollectionStart(ctx context.Context, obs ObservedCollectionStart) error
+}
+
+// ObservedCollectionStart describes one real Collector observation or
+// retained-queue heartbeat for atomic persistence.
+type ObservedCollectionStart struct {
+	ObservedAtMS       int64
+	RetainedQueue      bool
+	Transport          string
+	SourceID           string
+	RetentionBudgetMS  int64
+	ObservedDisableSeq int64
+	HasDisableSeq      bool
+	InitialRunObserve  bool
+	ForceGapAdvance    bool
+	StillActive        func() bool
 }

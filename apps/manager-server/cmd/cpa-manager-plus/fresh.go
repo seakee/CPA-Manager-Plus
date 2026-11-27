@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -233,6 +234,7 @@ type freshApplication struct {
 	// Usage chain: staged keys own source bindings, Collector events feed the
 	// canonical identity projection, and the workspace reads attributed usage.
 	managedSource   freshkeyapply.ManagedSource
+	usageDB         *sql.DB
 	usageProjection *identityprojection.Worker
 	usage           *usageapp.Service
 	// usageStartMu serializes post-completion startup attempts and guards the
@@ -240,6 +242,9 @@ type freshApplication struct {
 	// failed start is retried by a completion replay or a later trigger.
 	usageStartMu                     sync.Mutex
 	beforeUsageReconcileLock         func()
+	beforeUsageStartLock             func()
+	beforeCompletionUsageStart       func()
+	beforeUsageMarkerCommit          func()
 	beforeCollectorAuthRejectionLock func(runID uint64)
 	afterCollectorAuthRejection      func(runID uint64)
 	afterExternalCollectorStart      func()
@@ -248,7 +253,15 @@ type freshApplication struct {
 	usageCollectorStarted            bool
 	usageAwaitCancel                 context.CancelFunc
 	usageAwaitID                     uint64
-	// usageStartReason is the stable code of the last refused Collector start.
+	usageAwaitArmed                  atomic.Bool
+	usageStartupPending              atomic.Bool
+	lastStartedDisableSeq            int64
+	obsMu                            sync.Mutex
+	warmStartPending                 bool
+	pendingWarmObs                   *collector.ObservationEvent
+	lastObserved                     collector.ObservationEvent
+	runObsWaiters                    map[uint64]*runObservationWaiter
+	runRetentions                    map[uint64]*runRetentionWaiter
 	// It is empty once a start succeeded, so the workspace can tell an unstarted
 	// window from one that was never attempted.
 	usageStartReason    atomic.Value
@@ -323,6 +336,7 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 		protector:       opened.Protector,
 		runtimeSettings: settings, runtimeJournal: newFreshRuntimeJournal(opened.DB),
 		rejection:   newExternalRejection(opened.DB),
+		usageDB:     opened.DB,
 		closeCtx:    closeCtx,
 		closeCancel: closeCancel,
 	}
@@ -405,7 +419,9 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	// application records the blocker and drops the started latch so the
 	// workspace stops claiming coverage.
 	legacyCollector.SetAuthRejectionRunHandler(a.reportCollectorAuthRejection)
-	// The Collector and usage imports feed the canonical identity projection and
+	legacyCollector.SetPreObserveSeqFunc(a.readUsageDisableSeq)
+	legacyCollector.SetObservationCallbacks(a.handleCollectorObserved, a.handleCollectorUnreplayedDisconnect)
+	legacyCollector.SetFirstPollErrorHandler(a.handleCollectorFirstPollError)
 	// derived usage rollups so archive verification and retention have complete coverage.
 	initialProjection := identityprojection.NewWorker(legacyStore.IdentityProjections)
 	a.usageProjection = initialProjection
@@ -469,7 +485,9 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 			}
 		}),
 	))
-	a.usage = usageapp.New(identityusage.New(opened.DB), a.collectionPhase)
+	usageSvc := usageapp.New(identityusage.New(opened.DB), a.collectionPhase)
+	usageSvc.SetAdoptedPreBindingProven(a.isAdoptedPreBindingProven)
+	a.usage = usageSvc
 	a.keyRepo = keyrepo.New(opened.DB)
 	a.keys = freshkeys.New(a.keyRepo, opened.Protector, freshkeys.WithSourceRuntime(a.installedRuntimeIdentity))
 	if err := a.keys.DiscardOrphanedRotate(context.Background(), "", ""); err != nil {
@@ -576,7 +594,7 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 				return false
 			}
 			a.collectorWorker.Start(ctx)
-			return a.collectionPhase() != usageapp.PhaseStopped
+			return a.rawCollectionPhase() != usageapp.PhaseStopped
 		}
 		if os.Getenv("CPAMP_PRIVATE_H1") == "1" && os.Getenv("CPAMP_PRIVATE_CONFIG_AUTHORITY") == "1" && os.Getenv("CPAMP_PRIVATE_KEY_OPERATIONS") == "1" {
 			h := cpa.NewH1Coordinator(opened.DB)
@@ -1326,6 +1344,10 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 				return
 			}
 		}
+		var warmState warmStartUsageState
+		if op.Strategy.Strategy == bootstrap.NewManaged {
+			warmState = a.warmStartUsageCollectorBeforeCompletion(r.Context(), op)
+		}
 		next, err := a.store.Update(r.Context(), op.Identity, op.Revision, func(record *freshstore.Record) error {
 			if freshAuth {
 				if err := a.authority.ValidateContinuation(*record, continuation); err != nil {
@@ -1341,6 +1363,7 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 			return nil
 		})
 		if err != nil {
+			a.rollbackWarmStartUsageCollector(r.Context(), warmState)
 			w.WriteHeader(http.StatusConflict)
 			return
 		}
@@ -1348,11 +1371,14 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 			log.Printf("Fresh managed runtime desired state unavailable: %v", err)
 		}
 		a.pluginCapability.reprove(r.Context())
+		if hook := a.beforeCompletionUsageStart; hook != nil {
+			hook()
+		}
 		// Completion is the moment the install-derived CPA authority exists, so
 		// the same idempotent startup path as a resumed install runs now: it
 		// backfills keys staged before completion and starts collection,
 		// projection and identity reconciliation exactly once.
-		a.startUsageCollectionAtCompletion(next.Operation)
+		a.finishCompletionUsageCollection(r.Context(), next.Operation, warmState)
 		writeFreshJSON(w, next.Operation)
 	default:
 		http.NotFound(w, r)

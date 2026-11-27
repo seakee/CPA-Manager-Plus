@@ -43,6 +43,10 @@ type fakeRepo struct {
 	seriesToMS         int64
 	seriesBucketMS     int64
 	markedAt           int64
+	advancedAt         int64
+	disabledGap        bool
+	gapRecordedAt int64
+	unreplayedGap bool
 }
 
 func (f *fakeRepo) Binding(_ context.Context, id identity.APIKeyID) (ports.Binding, error) {
@@ -114,6 +118,47 @@ func (f *fakeRepo) CollectionStartedAtMS(context.Context) (int64, error) {
 
 func (f *fakeRepo) MarkCollectionStarted(_ context.Context, nowMS int64) error {
 	f.collectingAt, f.markedAt = nowMS, nowMS
+	return nil
+}
+
+func (f *fakeRepo) AdvanceCollectionStarted(_ context.Context, nowMS int64) error {
+	if f.collectingAt <= 0 || nowMS > f.collectingAt {
+		f.collectingAt = nowMS
+	}
+	f.advancedAt = nowMS
+	f.disabledGap = false
+	return nil
+}
+
+func (f *fakeRepo) MonitoringDisabledGap(context.Context) (bool, error) {
+	return f.disabledGap, nil
+}
+
+func (f *fakeRepo) RecordMonitoringDisabledGap(_ context.Context, nowMS int64) error {
+	f.disabledGap = true
+	f.gapRecordedAt = nowMS
+	return nil
+}
+
+func (f *fakeRepo) RecordUnreplayedGap(_ context.Context, nowMS int64) error {
+	f.unreplayedGap = true
+	f.gapRecordedAt = nowMS
+	return nil
+}
+
+func (f *fakeRepo) RecordObservedCollectionStart(_ context.Context, obs ports.ObservedCollectionStart) error {
+	if f.disabledGap || f.unreplayedGap || obs.ForceGapAdvance {
+		if f.collectingAt <= 0 || obs.ObservedAtMS > f.collectingAt {
+			f.collectingAt = obs.ObservedAtMS
+		}
+		f.disabledGap = false
+		f.unreplayedGap = false
+		return nil
+	}
+	if f.collectingAt > 0 {
+		return nil
+	}
+	f.collectingAt = obs.ObservedAtMS
 	return nil
 }
 
@@ -1520,5 +1565,316 @@ func TestSummaryWindowExplicitLastUsedParityAndAlignedNativeRecentSlots(t *testi
 	adoptedSlots := sum7d.Items[3].RecentSlots
 	if len(adoptedSlots) != ports.RecentStatusSlotCount || adoptedSlots[0].StartMS != oneHourAgo || adoptedSlots[19].EndMS != testNowMS {
 		t.Fatalf("adopted RecentSlots = %+v, want 20 slots over [%d, %d)", adoptedSlots, oneHourAgo, testNowMS)
+	}
+}
+
+func TestAdoptedPreBindingProvenOnlyWhenOptedIn(t *testing.T) {
+	const (
+		adoptedKeyID = identity.APIKeyID("88888888888888888888888888888888")
+		secondKeyID  = identity.APIKeyID("99999999999999999999999999999999")
+	)
+	createdAt := testNowMS - 120_000
+	repo := &fakeRepo{
+		collectingAt: createdAt,
+		projection:   ports.ProjectionState{Status: "ready"},
+		bindings: map[identity.APIKeyID]ports.Binding{
+			adoptedKeyID: {
+				APIKeyID:            adoptedKeyID,
+				FirstSeenAtMS:       createdAt,
+				Origin:              "adopted",
+				IdentityCreatedAtMS: createdAt,
+			},
+			secondKeyID: {
+				APIKeyID:            secondKeyID,
+				FirstSeenAtMS:       createdAt + 2,
+				Origin:              "adopted",
+				IdentityCreatedAtMS: createdAt + 2,
+			},
+		},
+		windows: map[identity.APIKeyID]ports.Window{},
+	}
+	ctx := context.Background()
+
+	// 1. Default service (External / Upgrade / nil predicate) keeps adopted keys partial.
+	defaultSvc := newTestService(repo, PhaseRunning)
+	defaultSum, err := defaultSvc.Summary(ctx, []identity.APIKeyID{adoptedKeyID})
+	if err != nil {
+		t.Fatalf("Summary(default): %v", err)
+	}
+	if defaultSum.Coverage.State != "partial" || defaultSum.Coverage.Reason != "window_partial" ||
+		defaultSum.Items[0].Coverage.State != "partial" {
+		t.Fatalf("default adopted summary = %+v, want partial/window_partial", defaultSum)
+	}
+
+	// 2. Opt-in predicate returning false also keeps partial/window_partial.
+	falseSvc := newTestService(repo, PhaseRunning)
+	falseSvc.SetAdoptedPreBindingProven(func(context.Context) bool { return false })
+	falseDet, err := falseSvc.Detail(ctx, adoptedKeyID, 0, 0)
+	if err != nil {
+		t.Fatalf("Detail(false predicate): %v", err)
+	}
+	if falseDet.Coverage.State != "partial" || falseDet.Coverage.Reason != "window_partial" {
+		t.Fatalf("false-predicate adopted detail = %+v, want partial/window_partial", falseDet.Coverage)
+	}
+
+	// 3. Opt-in predicate returning true (Fresh AdoptExisting committed) proves complete
+	//    0-call coverage across both Summary and Detail while keeping Detail.FromMS
+	//    honestly clamped to windowFromMS (createdAt).
+	provenSvc := newTestService(repo, PhaseRunning)
+	provenSvc.SetAdoptedPreBindingProven(func(context.Context) bool { return true })
+	sum, err := provenSvc.Summary(ctx, []identity.APIKeyID{adoptedKeyID, secondKeyID})
+	if err != nil {
+		t.Fatalf("Summary(proven): %v", err)
+	}
+	if sum.Coverage.State != "complete" || sum.Coverage.Reason != "observed" {
+		t.Fatalf("proven adopted summary coverage = %+v, want complete/observed", sum.Coverage)
+	}
+	for i, item := range sum.Items {
+		if item.Coverage.State != "complete" || item.Coverage.Reason != "observed" || item.Calls != 0 || item.LastUsedAtMS != nil {
+			t.Fatalf("proven adopted item[%d] = %+v, want complete/observed 0 calls", i, item)
+		}
+		if item.EstimatedCostUSD != nil && *item.EstimatedCostUSD != 0 {
+			t.Fatalf("proven adopted item[%d].EstimatedCostUSD = %v, want nil or 0", i, *item.EstimatedCostUSD)
+		}
+	}
+	det, err := provenSvc.Detail(ctx, adoptedKeyID, 0, 0)
+	if err != nil {
+		t.Fatalf("Detail(proven): %v", err)
+	}
+	if det.Coverage.State != "complete" || det.Coverage.Reason != "observed" {
+		t.Fatalf("proven adopted detail coverage = %+v, want complete/observed", det.Coverage)
+	}
+	if det.FromMS != createdAt || det.ToMS != testNowMS {
+		t.Fatalf("proven adopted detail window = [%d, %d), want clamped [%d, %d)", det.FromMS, det.ToMS, createdAt, testNowMS)
+	}
+	if det.Totals == nil || det.Totals.Calls != 0 || (det.Totals.EstimatedCostUSD != nil && *det.Totals.EstimatedCostUSD != 0) {
+		t.Fatalf("proven adopted detail totals = %+v, want Calls=0 Cost=0/nil", det.Totals)
+	}
+
+	// 4. Even when opted in, collectingAt > FirstSeenAtMS (e.g. monitoring disabled at
+	//    completion and enabled later) MUST stay partial/window_partial, and Stopped
+	//    collection MUST report unavailable/collection_stopped.
+	lateRepo := &fakeRepo{
+		collectingAt: createdAt + 60_000,
+		projection:   ports.ProjectionState{Status: "ready"},
+		bindings:     repo.bindings,
+		windows:      map[identity.APIKeyID]ports.Window{},
+	}
+	lateSvc := newTestService(lateRepo, PhaseRunning)
+	lateSvc.SetAdoptedPreBindingProven(func(context.Context) bool { return true })
+	lateSum, err := lateSvc.Summary(ctx, []identity.APIKeyID{adoptedKeyID})
+	if err != nil {
+		t.Fatalf("Summary(late collector): %v", err)
+	}
+	if lateSum.Coverage.State != "partial" || lateSum.Coverage.Reason != "window_partial" {
+		t.Fatalf("late adopted summary = %+v, want partial/window_partial", lateSum.Coverage)
+	}
+	stoppedSvc := newTestService(repo, PhaseStopped)
+	stoppedSvc.SetAdoptedPreBindingProven(func(context.Context) bool { return true })
+	stoppedDet, err := stoppedSvc.Detail(ctx, adoptedKeyID, 0, 0)
+	if err != nil {
+		t.Fatalf("Detail(stopped): %v", err)
+	}
+	if stoppedDet.Coverage.State != "unavailable" || stoppedDet.Coverage.Reason != "collection_stopped" || stoppedDet.Totals != nil {
+		t.Fatalf("stopped adopted detail = %+v, want unavailable/collection_stopped nil totals", stoppedDet)
+	}
+}
+
+func TestPhaseAwaitingRuntimeSurfacesRetryableCollectionStarting(t *testing.T) {
+	ctx := t.Context()
+	repo := &fakeRepo{
+		bindings: map[identity.APIKeyID]ports.Binding{
+			testKeyID: {
+				APIKeyID:            testKeyID,
+				FirstSeenAtMS:       1,
+				Origin:              "adopted",
+				IdentityCreatedAtMS: 1,
+			},
+		},
+		collectingAt: 0,
+		projection:   ports.ProjectionState{Status: "ready"},
+		windows:      map[identity.APIKeyID]ports.Window{},
+	}
+	svc := newTestService(repo, PhaseAwaitingRuntime)
+	sum, err := svc.Summary(ctx, []identity.APIKeyID{testKeyID})
+	if err != nil {
+		t.Fatalf("Summary(PhaseAwaitingRuntime): %v", err)
+	}
+	if sum.Coverage.State != "unknown" || sum.Coverage.Reason != "collection_starting" {
+		t.Fatalf("Summary(PhaseAwaitingRuntime) = %+v, want unknown/collection_starting", sum.Coverage)
+	}
+	det, err := svc.Detail(ctx, testKeyID, 0, 0)
+	if err != nil {
+		t.Fatalf("Detail(PhaseAwaitingRuntime): %v", err)
+	}
+	if det.Coverage.State != "unknown" || det.Coverage.Reason != "collection_starting" || det.Totals != nil {
+		t.Fatalf("Detail(PhaseAwaitingRuntime) = %+v, want unknown/collection_starting nil totals", det.Coverage)
+	}
+
+	// Non-awaiting starting/stopped/error phases with collectingAt == 0 still report collection_unproven.
+	for _, phase := range []CollectionPhase{PhaseStarting, PhaseStopped, PhaseError} {
+		other := newTestService(repo, phase)
+		otherSum, err := other.Summary(ctx, []identity.APIKeyID{testKeyID})
+		if err != nil {
+			t.Fatalf("Summary(%s): %v", phase, err)
+		}
+		if otherSum.Coverage.State != "unknown" || otherSum.Coverage.Reason != "collection_unproven" {
+			t.Fatalf("Summary(%s) = %+v, want unknown/collection_unproven", phase, otherSum.Coverage)
+		}
+		otherDet, err := other.Detail(ctx, testKeyID, 0, 0)
+		if err != nil {
+			t.Fatalf("Detail(%s): %v", phase, err)
+		}
+		if otherDet.Coverage.State != "unknown" || otherDet.Coverage.Reason != "collection_unproven" {
+			t.Fatalf("Detail(%s) = %+v, want unknown/collection_unproven", phase, otherDet.Coverage)
+		}
+	}
+}
+
+func TestAdvanceCollectionStartDelegatesAndClearsGap(t *testing.T) {
+	ctx := t.Context()
+	repo := &fakeRepo{collectingAt: 1000, disabledGap: true}
+	svc := newTestService(repo, PhaseRunning)
+	svc.SetClock(func() int64 { return 1500 })
+
+	if err := svc.RecordMonitoringDisabledGap(ctx); err != nil {
+		t.Fatalf("RecordMonitoringDisabledGap: %v", err)
+	}
+	gap, err := svc.MonitoringDisabledGap(ctx)
+	if err != nil || !gap {
+		t.Fatalf("MonitoringDisabledGap = (%v, %v), want (true, nil)", gap, err)
+	}
+	if err := svc.AdvanceCollectionStartAt(ctx, 2000); err != nil {
+		t.Fatalf("AdvanceCollectionStartAt: %v", err)
+	}
+	if repo.collectingAt != 2000 || repo.advancedAt != 2000 || repo.disabledGap {
+		t.Fatalf("after AdvanceCollectionStartAt: collectingAt=%d advancedAt=%d disabledGap=%v", repo.collectingAt, repo.advancedAt, repo.disabledGap)
+	}
+}
+
+func TestWhollyPreBindingExplicitDetailRangeWithholdsAdoptedZeroClaim(t *testing.T) {
+	ctx := t.Context()
+	nativeID := identity.APIKeyID("11111111111111111111111111111111")
+	adoptedID := identity.APIKeyID("22222222222222222222222222222222")
+	repo := &fakeRepo{
+		bindings: map[identity.APIKeyID]ports.Binding{
+			nativeID: {
+				APIKeyID:            nativeID,
+				FirstSeenAtMS:       5000,
+				Origin:              "workspace",
+				IdentityCreatedAtMS: 5000,
+			},
+			adoptedID: {
+				APIKeyID:            adoptedID,
+				FirstSeenAtMS:       5000,
+				Origin:              "adopted",
+				IdentityCreatedAtMS: 5000,
+			},
+		},
+		collectingAt: 1000,
+		projection:   ports.ProjectionState{Status: "ready"},
+		windows:      map[identity.APIKeyID]ports.Window{},
+	}
+	svc := newTestService(repo, PhaseRunning)
+	svc.SetClock(func() int64 { return 10000 })
+	svc.SetAdoptedPreBindingProven(func(context.Context) bool { return true })
+
+	// Wholly pre-binding explicit query [1000, 4000) ends before FirstSeenAtMS=5000:
+	// native key did not exist anywhere -> complete/observed;
+	// adopted key existed on unmigrated source CPA -> unknown/window_unobserved.
+	nativePre, err := svc.Detail(ctx, nativeID, 1000, 4000)
+	if err != nil {
+		t.Fatalf("native pre Detail: %v", err)
+	}
+	if nativePre.Coverage.State != "complete" || nativePre.Coverage.Reason != "observed" {
+		t.Fatalf("native pre Detail = %+v, want complete/observed", nativePre.Coverage)
+	}
+	adoptedPre, err := svc.Detail(ctx, adoptedID, 1000, 4000)
+	if err != nil {
+		t.Fatalf("adopted pre Detail: %v", err)
+	}
+	if adoptedPre.Coverage.State != "unknown" || adoptedPre.Coverage.Reason != "window_unobserved" || adoptedPre.Totals != nil {
+		t.Fatalf("adopted pre Detail = %+v, want unknown/window_unobserved nil totals", adoptedPre.Coverage)
+	}
+
+	// Overlapping window [1000, 8000) spans post-adoption lifetime [5000, 8000):
+	// adopted key reports complete/observed with FromMS clamped to 5000.
+	adoptedPost, err := svc.Detail(ctx, adoptedID, 1000, 8000)
+	if err != nil {
+		t.Fatalf("adopted overlapping Detail: %v", err)
+	}
+	if adoptedPost.Coverage.State != "complete" || adoptedPost.Coverage.Reason != "observed" || adoptedPost.FromMS != 5000 {
+		t.Fatalf("adopted overlapping Detail = %+v (from=%d), want complete/observed from=5000", adoptedPost.Coverage, adoptedPost.FromMS)
+	}
+}
+
+func TestPreAdmissionGatewayBoundaryRequiresStrictFirstSeenAtMS(t *testing.T) {
+	ctx := t.Context()
+	adoptedID := identity.APIKeyID("22222222222222222222222222222222")
+	nativeID := identity.APIKeyID("11111111111111111111111111111111")
+
+	const (
+		keyCreated = int64(1_000)
+		postKeyAt  = int64(1_500)
+		nowMS      = int64(2_000)
+	)
+	baseRepo := func(collectingAt int64) *fakeRepo {
+		return &fakeRepo{
+			bindings: map[identity.APIKeyID]ports.Binding{
+				adoptedID: {
+					APIKeyID:            adoptedID,
+					FirstSeenAtMS:       keyCreated,
+					Origin:              "adopted",
+					IdentityCreatedAtMS: keyCreated,
+				},
+				nativeID: {
+					APIKeyID:            nativeID,
+					FirstSeenAtMS:       postKeyAt,
+					Origin:              "workspace",
+					IdentityCreatedAtMS: postKeyAt,
+				},
+			},
+			collectingAt: collectingAt,
+			projection:   ports.ProjectionState{Status: "ready", LatestEventID: 1, LastProcessedEventID: 1},
+			windows:      map[identity.APIKeyID]ports.Window{},
+		}
+	}
+
+	// 1. Pre-binding collectingAt <= FirstSeenAtMS (e.g. subscribe before PrepareAdoption or HTTP aligned to anchor) -> complete/observed.
+	svc := newTestService(baseRepo(keyCreated), PhaseRunning)
+	svc.SetClock(func() int64 { return nowMS })
+	svc.SetAdoptedPreBindingProven(func(context.Context) bool { return true })
+	sum, err := svc.SummaryWindow(ctx, []identity.APIKeyID{adoptedID, nativeID}, 500, nowMS)
+	if err != nil {
+		t.Fatalf("SummaryWindow(collectingAt <= FirstSeenAtMS): %v", err)
+	}
+	if sum.Coverage.State != "complete" || sum.Coverage.Reason != "observed" {
+		t.Fatalf("SummaryWindow(collectingAt <= FirstSeenAtMS) = %+v, want complete/observed", sum.Coverage)
+	}
+	det, err := svc.Detail(ctx, adoptedID, 500, nowMS)
+	if err != nil {
+		t.Fatalf("Detail(collectingAt <= FirstSeenAtMS): %v", err)
+	}
+	if det.Coverage.State != "complete" || det.Coverage.Reason != "observed" {
+		t.Fatalf("Detail(collectingAt <= FirstSeenAtMS) = %+v, want complete/observed", det.Coverage)
+	}
+
+	// 2. Any collectingAt strictly > FirstSeenAtMS (even 1ms after keyCreated) MUST remain partial/window_partial.
+	svcLate := newTestService(baseRepo(keyCreated+1), PhaseRunning)
+	svcLate.SetClock(func() int64 { return nowMS })
+	svcLate.SetAdoptedPreBindingProven(func(context.Context) bool { return true })
+	lateSum, err := svcLate.SummaryWindow(ctx, []identity.APIKeyID{adoptedID}, 500, nowMS)
+	if err != nil {
+		t.Fatalf("SummaryWindow(late): %v", err)
+	}
+	if lateSum.Coverage.State != "partial" || lateSum.Coverage.Reason != "window_partial" {
+		t.Fatalf("SummaryWindow(late) = %+v, want partial/window_partial", lateSum.Coverage)
+	}
+	lateDet, err := svcLate.Detail(ctx, adoptedID, 500, nowMS)
+	if err != nil {
+		t.Fatalf("Detail(late): %v", err)
+	}
+	if lateDet.Coverage.State != "partial" || lateDet.Coverage.Reason != "window_partial" {
+		t.Fatalf("Detail(late) = %+v, want partial/window_partial", lateDet.Coverage)
 	}
 }

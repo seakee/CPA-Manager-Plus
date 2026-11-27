@@ -1019,24 +1019,23 @@ func (a *freshApplication) serveLegacyResource(
 	hasEnabledPatch := false
 	if r.Method == http.MethodPatch && clone.Body != nil {
 		rawBody, readErr := io.ReadAll(io.LimitReader(clone.Body, 4096+1))
-		if readErr != nil || len(rawBody) > 4096 {
+		if readErr != nil || int64(len(rawBody)) > 4096 {
 			w.Header().Set("Connection", "close")
 			_ = http.NewResponseController(w).SetReadDeadline(time.Unix(1, 0))
 			_ = clone.Body.Close()
+			if readErr == nil {
+				clone.Body = io.NopCloser(io.MultiReader(bytes.NewReader(rawBody), clone.Body))
+			}
 		} else {
 			_ = clone.Body.Close()
-		}
-		if readErr == nil {
 			clone.Body = io.NopCloser(bytes.NewReader(rawBody))
-			if len(rawBody) <= 4096 {
-				var bodyMap map[string]json.RawMessage
-				if json.Unmarshal(rawBody, &bodyMap) == nil {
-					for key := range bodyMap {
-						if strings.EqualFold(key, "collector") {
-							hasCollectorPatch = true
-						} else if strings.EqualFold(key, "enabled") {
-							hasEnabledPatch = true
-						}
+			var bodyMap map[string]json.RawMessage
+			if json.Unmarshal(rawBody, &bodyMap) == nil {
+				for key := range bodyMap {
+					if strings.EqualFold(key, "collector") {
+						hasCollectorPatch = true
+					} else if strings.EqualFold(key, "enabled") {
+						hasEnabledPatch = true
 					}
 				}
 			}

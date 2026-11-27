@@ -72,3 +72,53 @@ func TestClientPopKeepsAuthErrorsDistinct(t *testing.T) {
 		t.Fatalf("auth error must not be classified as unsupported")
 	}
 }
+
+func TestClientPopClassifiesPrePopVsUncertainRemovalErrors(t *testing.T) {
+	// Closed local port -> TCP dial failure (pre-pop, not uncertain).
+	closedSrv := httptest.NewServer(http.NewServeMux())
+	closedURL := closedSrv.URL
+	closedSrv.Close()
+	_, dialErr := New(closedURL, "management-key").Pop(context.Background(), 10)
+	if dialErr == nil || IsUncertainPop(dialErr) {
+		t.Fatalf("dial error = %v (uncertain=%v), want non-uncertain dial error", dialErr, IsUncertainPop(dialErr))
+	}
+
+	// Truncated 200 JSON body -> uncertain removal.
+	truncSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`[{"id":1`))
+	}))
+	defer truncSrv.Close()
+	_, truncErr := New(truncSrv.URL, "management-key").Pop(context.Background(), 10)
+	if !IsUncertainPop(truncErr) {
+		t.Fatalf("truncated body err = %v, want IsUncertainPop=true", truncErr)
+	}
+
+	// Dropped connection after receiving request -> uncertain removal.
+	dropSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("missing hijacker")
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = conn.Close()
+	}))
+	defer dropSrv.Close()
+	_, dropErr := New(dropSrv.URL, "management-key").Pop(context.Background(), 10)
+	if !IsUncertainPop(dropErr) {
+		t.Fatalf("dropped reply err = %v, want IsUncertainPop=true", dropErr)
+	}
+
+	// 500 response -> uncertain removal.
+	err500Srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "oops", http.StatusInternalServerError)
+	}))
+	defer err500Srv.Close()
+	_, err500 := New(err500Srv.URL, "management-key").Pop(context.Background(), 10)
+	if !IsUncertainPop(err500) {
+		t.Fatalf("500 err = %v, want IsUncertainPop=true", err500)
+	}
+}
