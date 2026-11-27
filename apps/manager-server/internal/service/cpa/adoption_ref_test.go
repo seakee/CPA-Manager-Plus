@@ -407,7 +407,31 @@ plugins: {}
 			wantComplete: true,
 		},
 		{
-			name: "pre-existing top and middle comments plus example legacy comments ignored",
+			name: "colliding literal dotted keys matching known nested schema paths are flagged as candidates",
+			yaml: `config-version: 8
+server:
+    host: 127.0.0.1
+    port: 8317
+routing:
+    strategy: round-robin
+
+# server.kv-store.path: /tmp/colliding-sibling
+# routing.strategy: round-robin
+# remote-management.allow-remote: false
+# oauth.providers.codex.live-media-relay.allow-private-remote-ips: true
+# codex.live-media-relay.allow-private-remote-ips: true
+`,
+			want: []string{
+				"codex.live-media-relay.allow-private-remote-ips",
+				"oauth.providers.codex.live-media-relay.allow-private-remote-ips",
+				"remote-management.allow-remote",
+				"routing.strategy",
+				"server.kv-store.path",
+			},
+			wantComplete: true,
+		},
+		{
+			name: "pre-existing top and middle comments plus single-segment legacy template comments ignored",
 			yaml: `# custom_top_commented: true
 # Note: operator header
 config-version: 8
@@ -424,13 +448,10 @@ oauth:
 #   host: ""
 #   port: 8317
 # debug: false
-# remote-management.allow-remote: false
 # proxy-url: http://127.0.0.1:8080
 # note: check this before restart
 # TODO: clean up later
 # Note: trailing operator note
-# oauth.providers.codex.live-media-relay.allow-private-remote-ips: true
-# codex.live-media-relay.allow-private-remote-ips: true
 `,
 			want:         nil,
 			wantComplete: true,

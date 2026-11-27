@@ -1074,8 +1074,10 @@ func (e *Executor) migrateUnknownConfig(ctx context.Context, summary *freshstore
 	}, unknownConfigItemName, bootstrap.AdoptionRefConfigUnknown)
 	switch {
 	case unknownScan.ArchiveScanIncomplete:
+		item.Reason = "archive_scan_incomplete"
 		item.Instruction = "Source configuration YAML could not be completely scanned for archived settings; review the source config.yaml and reconfigure any unsupported settings in the destination CPA."
 	case len(unknownScan.ArchiveCandidates) > 0 && len(unknownScan.JSONPaths) == 0:
+		item.Reason = "archived_or_commented_settings"
 		item.Instruction = "Source configuration YAML contains archived or commented-out settings that may have been omitted; review the source config.yaml and reconfigure any needed settings in the destination CPA."
 	}
 	return e.record(ctx, summary, item, checkpoint)

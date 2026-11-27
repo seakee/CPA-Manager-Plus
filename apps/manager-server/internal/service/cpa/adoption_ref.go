@@ -792,25 +792,17 @@ func isPossibleArchivedV8Section(section string) bool {
 	if !archivedSectionPathPattern.MatchString(section) {
 		return false
 	}
-	if section == "oauth.providers.codex.live-media-relay.allow-private-remote-ips" ||
-		section == "codex.live-media-relay.allow-private-remote-ips" {
-		return false
-	}
 	if proseArchiveCommentTags[section] {
 		return false
+	}
+	if strings.Contains(section, ".") {
+		return true
 	}
 	index := knownV8ConfigSchema()
 	if section == "config-version" || index.leaves[section] || index.wholes[section] || index.parents[section] {
 		return false
 	}
-	firstSeg := section
-	if dot := strings.IndexByte(section, '.'); dot >= 0 {
-		firstSeg = section[:dot]
-	}
-	if !index.leaves[firstSeg] && !index.wholes[firstSeg] && !index.parents[firstSeg] {
-		return !legacyCPAV7TopLevelKeys[firstSeg]
-	}
-	return true
+	return !legacyCPAV7TopLevelKeys[section]
 }
 
 // UnknownV8ConfigPaths returns the sorted dotted paths of definite active

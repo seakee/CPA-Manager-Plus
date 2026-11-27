@@ -181,6 +181,8 @@ var allowedAdoptionReasons = map[string]bool{
 	"not_authorized":                true,
 	"reauthenticate_after_adoption": true,
 	"reconfigure_after_adoption":    true,
+	"archive_scan_incomplete":        true,
+	"archived_or_commented_settings": true,
 	"download_failed":               true,
 	"not_uploadable":                true,
 	"runtime_only_credential":       true,

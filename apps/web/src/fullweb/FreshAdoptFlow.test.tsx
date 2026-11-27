@@ -2675,3 +2675,76 @@ it.each(['en', 'zh-CN', 'zh-TW', 'ru'])(
     ).toEqual(['routing.strategy', 'api-keys.gemini', 'replace', 'default']);
   }
 );
+
+it.each(['en', 'zh-CN', 'zh-TW', 'ru'])(
+  'renders source-review reason and guidance for family:unknown-config instead of payload-rule wording (%s)',
+  async (language) => {
+    await act(async () => setFullWebLanguage(language));
+    const unknownConfigSummary: AdoptionSummary = {
+      runId: runA,
+      items: [
+        {
+          id: itemID('u-reconfig'),
+          item: 'family:unknown-config',
+          kind: 'config_family',
+          outcome: 'manual',
+          reason: 'reconfigure_after_adoption',
+          retryable: false,
+          left: 0,
+        },
+        {
+          id: itemID('u-archived'),
+          item: 'family:unknown-config',
+          kind: 'config_family',
+          outcome: 'manual',
+          reason: 'archived_or_commented_settings',
+          retryable: false,
+          left: 0,
+        },
+        {
+          id: itemID('u-incomplete'),
+          item: 'family:unknown-config',
+          kind: 'config_family',
+          outcome: 'manual',
+          reason: 'archive_scan_incomplete',
+          retryable: false,
+          left: 0,
+        },
+        {
+          id: itemID('rules-default'),
+          item: 'rules:default',
+          kind: 'config_family',
+          outcome: 'manual',
+          reason: 'reconfigure_after_adoption',
+          retryable: false,
+          left: 0,
+        },
+      ],
+      planned: 4,
+      finished: true,
+      running: false,
+      retryable: 0,
+      counts: { migrated: 0, manual: 4, failed: 0, absent_at_source: 0 },
+    };
+    await adoptServer({ summaries: [unknownConfigSummary] });
+    await click('adopt-read-inventory');
+    await input('adopt-confirm-inventory', true);
+    await click('adopt-confirm-migrate');
+    await settle();
+
+    const payloadRuleGuidance = adoptText('guidanceConfigFamily');
+    for (const [id, reason] of [
+      ['u-reconfig', 'reconfigure_after_adoption'],
+      ['u-archived', 'archived_or_commented_settings'],
+      ['u-incomplete', 'archive_scan_incomplete'],
+    ] as const) {
+      const rowText = nodeText(byID(`adopt-item-${itemID(id)}`));
+      expect(rowText).toContain(adoptReasonText(reason));
+      expect(rowText).toContain(
+        adoptGuidanceText('config_family', reason, 0, 'family:unknown-config')
+      );
+      expect(rowText).not.toContain(payloadRuleGuidance);
+    }
+    expect(nodeText(byID(`adopt-item-${itemID('rules-default')}`))).toContain(payloadRuleGuidance);
+  }
+);

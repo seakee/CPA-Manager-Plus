@@ -125,6 +125,12 @@ const en = {
     'Set this gateway setting on the destination CPA’s gateway configuration page.',
   guidanceConfigFamily:
     'Replace this payload rule list on the destination CPA’s gateway configuration page.',
+  guidanceUnknownConfig:
+    'Review the source config.yaml for unrecognized settings outside the migrated scope and reconfigure any needed settings on the destination CPA.',
+  guidanceUnknownArchiveIncomplete:
+    'The source config.yaml could not be completely scanned for archived settings; review the source config.yaml and reconfigure any needed settings on the destination CPA.',
+  guidanceUnknownArchiveCandidates:
+    'The source config.yaml contains archived or commented-out entries that may have been omitted; review the source config.yaml and reconfigure any needed settings on the destination CPA.',
   guidanceProviderSection:
     'Copy this provider section into the destination CPA’s configuration, including its provider keys.',
   guidanceFallback: 'Review this item on the destination CPA.',
@@ -225,6 +231,12 @@ const zh: typeof en = {
     '有 {count} 个凭证文件放不进迁移记录，留在了源端。请手动复制到目标 CPA 的认证目录。',
   guidanceConfigLeaf: '请在目标 CPA 的网关配置页面设置该配置项。',
   guidanceConfigFamily: '请在目标 CPA 的网关配置页面替换该载荷规则列表。',
+  guidanceUnknownConfig:
+    '请检查源端 config.yaml 中迁移范围之外的未识别配置，并在目标 CPA 中按需重新配置。',
+  guidanceUnknownArchiveIncomplete:
+    '未能完整扫描源端 config.yaml 中的已归档配置；请检查源端 config.yaml，并在目标 CPA 中按需重新配置。',
+  guidanceUnknownArchiveCandidates:
+    '源端 config.yaml 含有可能被省略的已归档或注释配置；请检查源端 config.yaml，并在目标 CPA 中按需重新配置。',
   guidanceProviderSection: '请把该提供商配置段（含其提供商密钥）复制到目标 CPA 的配置中。',
   guidanceFallback: '请在目标 CPA 上检查该项。',
   pluginConflict: '本次操作记录的插件选项不同。请刷新页面并按已记录的选项继续。',
@@ -322,6 +334,12 @@ const tw: typeof en = {
     '有 {count} 個憑證檔案放不進遷移記錄，留在來源端。請手動複製到目標 CPA 的認證目錄。',
   guidanceConfigLeaf: '請在目標 CPA 的閘道設定頁面設定該項目。',
   guidanceConfigFamily: '請在目標 CPA 的閘道設定頁面取代該載荷規則清單。',
+  guidanceUnknownConfig:
+    '請檢查來源端 config.yaml 中遷移範圍之外的未識別設定，並在目標 CPA 中依需要重新設定。',
+  guidanceUnknownArchiveIncomplete:
+    '未能完整掃描來源端 config.yaml 中的已封存設定；請檢查來源端 config.yaml，並在目標 CPA 中依需要重新設定。',
+  guidanceUnknownArchiveCandidates:
+    '來源端 config.yaml 含有可能被省略的已封存或註解設定；請檢查來源端 config.yaml，並在目標 CPA 中依需要重新設定。',
   guidanceProviderSection: '請把該供應商設定區段（含其供應商金鑰）複製到目標 CPA 的設定中。',
   guidanceFallback: '請在目標 CPA 上檢查該項目。',
   pluginConflict: '本次操作記錄的外掛選項不同。請重新整理頁面並依已記錄的選項繼續。',
@@ -439,6 +457,12 @@ const ru: typeof en = {
   guidanceConfigLeaf: 'Задайте эту настройку шлюза на странице конфигурации шлюза целевого CPA.',
   guidanceConfigFamily:
     'Замените этот список правил нагрузки на странице конфигурации шлюза целевого CPA.',
+  guidanceUnknownConfig:
+    'Проверьте config.yaml источника на наличие нераспознанных настроек вне области переноса и при необходимости задайте их на целевом CPA.',
+  guidanceUnknownArchiveIncomplete:
+    'Не удалось полностью просканировать config.yaml источника на наличие архивных настроек; проверьте config.yaml источника и при необходимости задайте нужные настройки на целевом CPA.',
+  guidanceUnknownArchiveCandidates:
+    'Файл config.yaml источника содержит архивные или закомментированные записи, которые могли быть пропущены; проверьте config.yaml источника и при необходимости задайте нужные настройки на целевом CPA.',
   guidanceProviderSection:
     'Скопируйте этот раздел провайдера, включая его ключи провайдера, в конфигурацию целевого CPA.',
   guidanceFallback: 'Проверьте этот элемент на целевом CPA.',
@@ -535,6 +559,10 @@ const enReasons: Record<string, string> = {
   adoption_inventory_too_large: 'The source holds more items than one run can record.',
   reauthenticate_after_adoption: 'Re-authenticate this provider on the destination.',
   reconfigure_after_adoption: 'Reconfigure this resource on the destination.',
+  archive_scan_incomplete:
+    'The source config.yaml could not be scanned completely for archived settings.',
+  archived_or_commented_settings:
+    'The source config.yaml contains archived or commented-out settings that may have been omitted.',
 };
 const zhReasons: Record<string, string> = {
   runtime_only_credential: '该凭证只存在于源进程中，没有对应文件。请在目标重新认证。',
@@ -555,6 +583,8 @@ const zhReasons: Record<string, string> = {
   adoption_inventory_too_large: '源条目超过单次运行可记录的上限。',
   reauthenticate_after_adoption: '请在目标重新认证该提供商。',
   reconfigure_after_adoption: '请在目标重新配置该资源。',
+  archive_scan_incomplete: '无法完整扫描源端 config.yaml 中的已归档配置。',
+  archived_or_commented_settings: '源端 config.yaml 含有已归档或被注释掉的配置，可能未被自动迁移。',
 };
 const twReasons: Record<string, string> = {
   runtime_only_credential: '該憑證只存在於來源程序，沒有對應檔案。請在目標重新認證。',
@@ -575,6 +605,8 @@ const twReasons: Record<string, string> = {
   adoption_inventory_too_large: '來源項目超過單次執行可記錄的上限。',
   reauthenticate_after_adoption: '請在目標重新認證該供應商。',
   reconfigure_after_adoption: '請在目標重新設定該資源。',
+  archive_scan_incomplete: '無法完整掃描來源端 config.yaml 中的已封存設定。',
+  archived_or_commented_settings: '來源端 config.yaml 含有已封存或被註解掉的設定，可能未被自動遷移。',
 };
 const ruReasons: Record<string, string> = {
   runtime_only_credential:
@@ -596,6 +628,10 @@ const ruReasons: Record<string, string> = {
   adoption_inventory_too_large: 'В источнике больше элементов, чем может записать один запуск.',
   reauthenticate_after_adoption: 'Повторно авторизуйте этого провайдера на целевом CPA.',
   reconfigure_after_adoption: 'Настройте этот ресурс на целевом CPA.',
+  archive_scan_incomplete:
+    'Не удалось полностью просканировать config.yaml источника на наличие архивных настроек.',
+  archived_or_commented_settings:
+    'Файл config.yaml источника содержит архивные или закомментированные настройки, которые могли быть пропущены.',
 };
 
 // Strategy blockers. `adoption_source_read_unavailable` also covers a v7 or
@@ -837,12 +873,25 @@ const reasonGuidanceKeys: Record<string, keyof typeof en> = {
   adoption_inventory_too_large: 'guidanceCredentialInventoryExcess',
 };
 
+const unknownReasonGuidanceKeys: Record<string, keyof typeof en> = {
+  archive_scan_incomplete: 'guidanceUnknownArchiveIncomplete',
+  archived_or_commented_settings: 'guidanceUnknownArchiveCandidates',
+};
+
 /** adoptGuidanceText is the operator's next step for one recorded item. */
-export const adoptGuidanceText = (kind: string, reason = '', count = 0): string => {
+export const adoptGuidanceText = (
+  kind: string,
+  reason = '',
+  count = 0,
+  item = ''
+): string => {
+  if (item === 'family:unknown-config') {
+    const unknownKey = unknownReasonGuidanceKeys[reason] ?? 'guidanceUnknownConfig';
+    return adoptText(unknownKey, { count });
+  }
   const key = (kind === 'credential' && reasonGuidanceKeys[reason]) || guidanceKeys[kind];
   return key ? adoptText(key, { count }) : copy[locale()].guidanceFallback;
 };
-
 /** adoptBlockerText explains one strategy refusal. */
 export const adoptBlockerText = (code: string | undefined): string =>
   (code && blockers[locale()][code]) || copy[locale()].failure;

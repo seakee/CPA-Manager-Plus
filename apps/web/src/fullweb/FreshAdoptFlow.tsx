@@ -1292,7 +1292,12 @@ export function FreshAdoptFlow({
                                         <details className="adopt-item-details">
                                           <summary>{adoptText('details')}</summary>
                                           <p data-testid={`adopt-guidance-${item.kind}`}>
-                                            {adoptGuidanceText(item.kind, item.reason, item.left)}
+                                            {adoptGuidanceText(
+                                              item.kind,
+                                              item.reason,
+                                              item.left,
+                                              item.item
+                                            )}
                                           </p>
                                         </details>
                                       )}

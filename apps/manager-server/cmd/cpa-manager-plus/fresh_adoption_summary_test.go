@@ -806,16 +806,22 @@ func TestAdoptionSummaryReasonsAreBoundedToOwnCodes(t *testing.T) {
 }
 
 func TestAdoptionSummaryPreservesUnknownConfigCanonicalItemAndReason(t *testing.T) {
-	item := freshstore.AdoptionItem{
-		Item:    "family:unknown-config",
-		Kind:    freshstore.AdoptionKindConfigFamily,
-		Outcome: freshstore.AdoptionManual,
-		Reason:  "reconfigure_after_adoption",
-	}
-	if got := publicAdoptionItemText(item, 0, 0); got != "family:unknown-config" {
-		t.Fatalf("publicAdoptionItemText(unknown-config) = %q, want %q", got, "family:unknown-config")
-	}
-	if got := publicAdoptionReason(item.Reason); got != "reconfigure_after_adoption" {
-		t.Fatalf("publicAdoptionReason = %q, want reconfigure_after_adoption", got)
+	for _, reason := range []string{
+		"reconfigure_after_adoption",
+		"archived_or_commented_settings",
+		"archive_scan_incomplete",
+	} {
+		item := freshstore.AdoptionItem{
+			Item:    "family:unknown-config",
+			Kind:    freshstore.AdoptionKindConfigFamily,
+			Outcome: freshstore.AdoptionManual,
+			Reason:  reason,
+		}
+		if got := publicAdoptionItemText(item, 0, 0); got != "family:unknown-config" {
+			t.Fatalf("publicAdoptionItemText(unknown-config) = %q, want %q", got, "family:unknown-config")
+		}
+		if got := publicAdoptionReason(item.Reason); got != reason {
+			t.Fatalf("publicAdoptionReason(%q) = %q, want %q", item.Reason, got, reason)
+		}
 	}
 }

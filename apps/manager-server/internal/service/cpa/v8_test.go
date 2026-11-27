@@ -274,7 +274,7 @@ upstream:
 		}
 		cases := []yamlOutcome{
 			{
-				name:   "clean allow-private-remote-ips alias",
+				name:   "clean normalized relay alias with single-segment legacy comment",
 				status: http.StatusOK,
 				body: `# operator comment
 config-version: 8
@@ -284,11 +284,23 @@ oauth:
     auth-dir: /private/auth
     providers:
         codex:
-            live-media-relay: {}
-
-# oauth.providers.codex.live-media-relay.allow-private-remote-ips: true
+            live-media-relay:
+                disable-private-remote-ips: false
+# debug: false
+# Note: operator trailing note
 `,
 				wantUnknown: false,
+			},
+			{
+				name:   "colliding dotted archive path triggers unknown",
+				status: http.StatusOK,
+				body: `config-version: 8
+server:
+    port: 8317
+
+# server.kv-store.path: /tmp/colliding-sibling
+`,
+				wantUnknown: true,
 			},
 			{
 				name:        "404 not found fails closed",

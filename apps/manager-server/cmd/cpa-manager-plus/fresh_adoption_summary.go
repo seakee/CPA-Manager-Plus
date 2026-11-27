@@ -157,6 +157,8 @@ var adoptionPublicReasons = map[string]bool{
 	"not_authorized":                true,
 	"reauthenticate_after_adoption": true,
 	"reconfigure_after_adoption":    true,
+	"archive_scan_incomplete":        true,
+	"archived_or_commented_settings": true,
 	// Credential outcomes.
 	"download_failed":              true,
 	"not_uploadable":               true,
