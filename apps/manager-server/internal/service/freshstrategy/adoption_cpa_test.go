@@ -185,17 +185,44 @@ func TestAdoptionExactCPAV8WithSupervisor(t *testing.T) {
 				// the adoption executor has something real to copy out of it.
 				sourceConfig := map[string]any{
 					"config-version": 8,
-					"server":         map[string]any{"host": "127.0.0.1", "port": json.Number(sourcePort)},
+					"server": map[string]any{
+						"host":         "127.0.0.1",
+						"port":         json.Number(sourcePort),
+						"github-token": "test-github-token",
+					},
 					"oauth": map[string]any{
 						"auth-dir":              filepath.Join(sourceRoot, "auth"),
 						"model-alias":           map[string]any{"claude": []any{map[string]any{"name": "claude-3", "alias": "claude-alias"}}},
 						"excluded-models":       map[string]any{"gemini": []any{"gemini-hidden"}},
 						"settings":              map[string]any{"claude": []any{map[string]any{"name": "claude-3", "max-context-length": json.Number("200000")}}},
 						"request-scoped-errors": map[string]any{"claude": []any{map[string]any{"status": json.Number("429"), "action": "stop"}}},
+						"providers": map[string]any{
+							"codex": map[string]any{
+								"live-media-relay": map[string]any{
+									"ice-servers": []any{
+										map[string]any{
+											"urls":       []any{"turns:relay.internal:5349"},
+											"username":   "test-turn-user",
+											"credential": "test-turn-cred",
+										},
+									},
+								},
+							},
+						},
 					},
 					"management": map[string]any{"secret-key": sourceKey, "disable-control-panel": true, "disable-auto-update-panel": true},
 					"access":     map[string]any{"api-keys": clientKeys},
-					"plugins":    map[string]any{"enabled": false},
+					"plugins": map[string]any{
+						"enabled":       false,
+						"store-sources": []any{"https://plugins.internal/index.json"},
+						"configs":       map[string]any{"demo-plugin": map[string]any{"timeout": json.Number("10")}},
+					},
+					"observability": map[string]any{
+						"logs": map[string]any{"debug": true, "request-log": true},
+					},
+					"credentials": map[string]any{
+						"concurrency": map[string]any{"default": json.Number("8"), "wait-timeout": "15s", "overflow-status": json.Number("429")},
+					},
 					"routing": map[string]any{
 						"strategy":           "round-robin",
 						"force-model-prefix": true,
@@ -478,6 +505,9 @@ func TestAdoptionExactCPAV8WithSupervisor(t *testing.T) {
 			kindCounts := witnessMigrationKinds(t, class, sourceURL, sourceKey, "http://"+targetAddr, snapshot.Destination.ManagementKey, len(clientKeys))
 			if before != directoryDigest(t, sourceRoot) {
 				t.Fatal("the migration executor modified the source")
+			}
+			if snap, snapErr := cpa.ProveAdoptedDestination(t.Context(), "http://"+targetAddr, snapshot.Destination.ManagementKey, targetRoot); snapErr != nil || len(snap) == 0 {
+				t.Fatalf("the adopted destination failed posture proof after full config migration: %v", snapErr)
 			}
 			// Emit the class-specific resource chain while both the source and the
 			// exact v8 destination are still live and verified. It is separate
@@ -778,9 +808,27 @@ func witnessMigrationKinds(t *testing.T, class bootstrap.AdoptSourceClass, sourc
 		if presence != cpa.ConfigPresent {
 			continue
 		}
+		if section == "credentials.concurrency" {
+			cleaned := stripWitnessMapKeys(want, "lifecycle-config-revision", "observation-barrier-revision")
+			if len(cleaned) == 0 {
+				continue
+			}
+			want = cleaned
+		}
 		got, seen, err := destination.ReadConfigValue(t.Context(), section)
-		if err == nil && seen == cpa.ConfigPresent && reflect.DeepEqual(got, want) {
-			verifiedProvider++
+		if err != nil || seen != cpa.ConfigPresent {
+			continue
+		}
+		if section == "credentials.concurrency" {
+			got = stripWitnessMapKeys(got, "lifecycle-config-revision", "observation-barrier-revision")
+		}
+		if reflect.DeepEqual(got, want) {
+			switch cpa.AdoptionItemRef(section) {
+			case bootstrap.AdoptionRefConfigRouting:
+				verifiedRouting++
+			case bootstrap.AdoptionRefProviderStateAPIKeys:
+				verifiedProvider++
+			}
 		}
 	}
 	if verifiedRouting != counts["cpa-config-routing"] || verifiedProvider != counts["provider-state-api-keys"] {
@@ -789,6 +837,21 @@ func witnessMigrationKinds(t *testing.T, class bootstrap.AdoptSourceClass, sourc
 	}
 	t.Logf("adoption executor witness: %v", counts)
 	return counts
+}
+
+func stripWitnessMapKeys(value any, drop ...string) map[string]any {
+	mapping, ok := value.(map[string]any)
+	if !ok || mapping == nil {
+		return nil
+	}
+	out := make(map[string]any, len(mapping))
+	for k, v := range mapping {
+		out[k] = v
+	}
+	for _, key := range drop {
+		delete(out, key)
+	}
+	return out
 }
 
 // writeAdoptionResourceEvidence emits the class-specific client-key resource

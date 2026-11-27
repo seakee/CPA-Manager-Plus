@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
@@ -11,11 +12,10 @@ import (
 )
 
 // managerOwnedPrefixes are the destination configuration subtrees this Manager
-// owns: the destination's own management credential, its own listener, its own
-// plugin root, its own auth directory and its own client key list. An item below
-// one of them is never copied, because copying it would hand the source's
-// identity to the destination or overwrite what the verified destination
-// installation already wrote.
+// owns: management credentials, listener/discovery/TLS/KV paths, plugin runtime
+// controls, observability host settings, auth directory, and client key list.
+// Copying one of them would hand the source's identity to the destination or
+// overwrite what the verified destination installation already wrote.
 //
 // Both the canonical v8 spelling and the historical YAML spelling appear, since
 // a caller may name either and neither may slip through:
@@ -28,29 +28,19 @@ import (
 var managerOwnedPrefixes = []string{
 	"management.",
 	"remote-management.",
-	"server.host",
-	"server.port",
-	"server.server-id",
-	"plugins.",
 	"disable-control-panel",
-	"oauth.auth-dir",
+	"oauth.auth-dir.",
 	// A list has no children, but a path spelled below it still names the same
 	// owned client key list, so the subtree form is the conservative one.
 	"access.api-keys.",
 }
 
 // managerOwnedExact are the Manager-owned paths that are not a prefix of
-// anything else, plus the whole parent sections those paths live in. The parent
-// sections are named whole on purpose: `management`, `plugins`, `oauth`, `access`
-// and `server` are each owned somewhere inside them, so a section named as a
-// whole is not a copyable unit — a whole-section write would carry the
-// destination's own identity, listener, plugin root, auth directory or client key
-// list with it. Today's tables never name them, which makes this the safety net
-// that surfaces a widened table rather than a normal path.
+// anything else, plus whole parent sections whose subtrees contain host-owned
+// configuration. Named business children under `server.*`, `plugins.*`,
+// `observability.*`, and `oauth.*` are permitted only through explicit allowlists
+// in ManagerOwned so unknown keys under shared roots still fail closed.
 var managerOwnedExact = map[string]bool{
-	"server.host":           true,
-	"server.port":           true,
-	"server.server-id":      true,
 	"disable-control-panel": true,
 	"oauth.auth-dir":        true,
 	"access.api-keys":       true,
@@ -59,6 +49,7 @@ var managerOwnedExact = map[string]bool{
 	"plugins":               true,
 	"oauth":                 true,
 	"access":                true,
+	"observability":         true,
 }
 
 // ManagerOwned reports whether one dotted CPA path belongs to the Manager on the
@@ -83,41 +74,38 @@ func ManagerOwned(path string) bool {
 			return true
 		}
 	}
+	switch {
+	case strings.HasPrefix(path, "server."):
+		_, ok := cpa.LookupConfigLeaf(path)
+		return !ok
+	case strings.HasPrefix(path, "plugins."):
+		return !slices.Contains([]string{
+			"plugins.store-sources",
+			"plugins.store-auth",
+			"plugins.configs",
+		}, path)
+	case strings.HasPrefix(path, "observability."):
+		return path != "observability.logs.debug" && path != "observability.logs.request-log"
+	case strings.HasPrefix(path, "oauth."):
+		if _, ok := cpa.LookupConfigLeaf(path); ok {
+			return false
+		}
+		if slices.Contains(cpa.ProviderAdoptionSections(), path) || slices.Contains(cpa.StructuredConfigAdoptionSections(), path) {
+			return false
+		}
+		return true
+	}
 	return false
 }
 
-// providerSections are the 13 provider ownership groups of the approved scope.
-// Eight are the v8 `api-keys.*` families the gateway configuration page already
-// treats as one whole provider group, four are the `oauth.*` model-facing maps
-// and one is the model catalogue.
-//
-// Verified against CPA v8.0.55 (tag e6e5708e):
-//
-//	internal/config/config_v8.go:67-72   api-keys.gemini, api-keys.interactions,
-//	                                     api-keys.vertex, api-keys.codex,
-//	                                     api-keys.claude, api-keys.xai,
-//	                                     api-keys.meta, api-keys.openai-compatibility
-//	internal/config/config_v8.go:90-91   oauth.model-alias, oauth.excluded-models,
-//	                                     oauth.settings, oauth.request-scoped-errors
-//
-// The scope also names a `models` section. v8.0.55 accepts a root `models` key
-// (`v8AllowedRoots`, internal/config/config_v8.go:636-637, added since
-// v8.0.13), but it is a catalog-source selector
-// (internal/config/model_catalogs.go), not provider data, and the v8 document
-// projection this package reads (GET /v8/management/config) never renders it.
-// `internal/config/config_types.go:650-651` (payload rule lists), `:738-739`
-// (claude provider) and `:869-870` (codex provider) declare `models` only as a
-// member of those structures. So `models` is NOT a whole section that can be
-// copied, and it is absent from the table below rather than guessed. Its
-// effective content arrives with the `api-keys.*` groups, which carry each
-// group's own `models` list.
-// The list itself lives in the pinned resolver (`cpa.ProviderAdoptionSections`),
-// next to the reference each section is gated under, so a section cannot be
-// copyable without a classification.
-//
-// ProviderSections returns the whole-section copy list in page order.
-func ProviderSections() []string { return cpa.ProviderAdoptionSections() }
-
+// ProviderSections returns every whole-PUT configuration section in migration
+// order: the 12 provider API-key/OAuth map sections followed by the 6 structured
+// CPA v8 configuration sections (`oauth.providers.codex.live-media-relay.ice-servers`,
+// `credentials.concurrency`, `credentials.in-flight`, `plugins.store-sources`,
+// `plugins.store-auth`, `plugins.configs`).
+func ProviderSections() []string {
+	return slices.Concat(cpa.ProviderAdoptionSections(), cpa.StructuredConfigAdoptionSections())
+}
 // configLeafPrefix resolves the single PATCH prefix of one gateway leaf: the
 // leaf's own page group. A leaf outside the page table has no prefix.
 func configLeafPrefix(path string) (string, error) {

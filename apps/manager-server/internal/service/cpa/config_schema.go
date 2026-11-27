@@ -101,7 +101,7 @@ type ConfigGroup struct {
 //	internal/config/config_types.go:126-155   upstream claude header defaults, xai
 //	internal/config/config.go:234             client codex compatibility
 //	internal/config/config_types.go:60-100    upstream codex compatibility
-var gatewayLeaves = []ConfigLeaf{
+var gatewayCoreLeaves = []ConfigLeaf{
 	{Path: "routing.strategy", Type: ConfigLeafString, Kind: ConfigKindSelect, Group: "routing"},
 	{Path: "routing.session-affinity", Type: ConfigLeafBool, Kind: ConfigKindBool, Group: "routing"},
 	{Path: "routing.session-affinity-ttl", Type: ConfigLeafString, Kind: ConfigKindDuration, Group: "routing"},
@@ -221,8 +221,24 @@ var gatewayExtraLeaves = []ConfigLeaf{
 	{Path: "oauth.providers.devin.sensitive-words-replace", Type: ConfigLeafKVMap, Kind: ConfigKindKVMap, Group: "devin"},
 	{Path: "oauth.providers.devin.sensitive-patterns-replace", Type: ConfigLeafPatternList, Kind: ConfigKindPatternList, Group: "devin"},
 }
+var gatewayNonPageLeaves = []ConfigLeaf{
+	{Path: "models.catalog", Type: ConfigLeafString, Kind: ConfigKindURL, Group: "models"},
+	{Path: "models.codex-catalog", Type: ConfigLeafString, Kind: ConfigKindURL, Group: "models"},
+	{Path: "models.devin-catalog", Type: ConfigLeafString, Kind: ConfigKindURL, Group: "models"},
 
-var gatewayPageLeaves = append(append([]ConfigLeaf(nil), gatewayLeaves...), gatewayExtraLeaves...)
+	{Path: "server.trusted-proxies", Type: ConfigLeafStringList, Kind: ConfigKindStringList, Group: "server"},
+	{Path: "server.github-token", Type: ConfigLeafString, Kind: ConfigKindText, Group: "server"},
+	{Path: "server.kv-store.disabled", Type: ConfigLeafBool, Kind: ConfigKindBool, Group: "server"},
+
+	{Path: "oauth.providers.claude.oauth-include-create-api-key", Type: ConfigLeafBool, Kind: ConfigKindBool, Group: "claude_oauth", Inherit: boolValue(true)},
+
+	{Path: "observability.logs.debug", Type: ConfigLeafBool, Kind: ConfigKindBool, Group: "observability_logs"},
+	{Path: "observability.logs.request-log", Type: ConfigLeafBool, Kind: ConfigKindBool, Group: "observability_logs"},
+}
+
+var gatewayPageLeaves = append(append([]ConfigLeaf(nil), gatewayCoreLeaves...), gatewayExtraLeaves...)
+
+var gatewayLeaves = append(append([]ConfigLeaf(nil), gatewayPageLeaves...), gatewayNonPageLeaves...)
 
 var imageModeValues = map[string]bool{"true": true, "false": true, "chat": true, "passthrough": true}
 
@@ -239,6 +255,7 @@ var gatewayRuleFamilies = []ConfigRuleFamily{
 	{Family: "default-raw", Path: "requests.payload.default-raw", Raw: true},
 	{Family: "override", Path: "requests.payload.override"},
 	{Family: "override-raw", Path: "requests.payload.override-raw", Raw: true},
+	{Family: "replace", Path: "requests.payload.replace", Replace: true},
 	{Family: "filter", Path: "requests.payload.filter", Filter: true},
 }
 
@@ -256,7 +273,17 @@ const ConfigRulesGroupID = "rules"
 var gatewayGroups = []ConfigGroup{
 	{ID: "routing", Prefix: "routing", Leaves: []string{
 		"routing.strategy", "routing.session-affinity", "routing.session-affinity-ttl",
-		"routing.session-affinity-subagents", "routing.force-model-prefix",
+		"routing.session-affinity-subagents", "routing.session-affinity-rebind-on",
+		"routing.force-model-prefix",
+	}},
+	{ID: "quota", Prefix: "quota-exceeded", Leaves: []string{
+		"quota-exceeded.switch-project", "quota-exceeded.switch-preview-model",
+	}},
+	{ID: "models", Prefix: "models", Leaves: []string{
+		"models.catalog", "models.codex-catalog", "models.devin-catalog",
+	}},
+	{ID: "oauth", Prefix: "oauth", Leaves: []string{
+		"oauth.auth-auto-refresh-workers",
 	}},
 	{ID: "retry", Prefix: "routing.retry", Leaves: []string{
 		"routing.retry.request-retry", "routing.retry.max-retry-credentials", "routing.retry.max-retry-interval",
@@ -266,34 +293,98 @@ var gatewayGroups = []ConfigGroup{
 		"routing.cooldown.transient-error-cooldown-seconds",
 	}},
 	{ID: "request", Prefix: "requests", Leaves: []string{
-		"requests.proxy-url", "requests.passthrough-headers", "requests.nonstream-keepalive-interval",
+		"requests.proxy-url", "requests.tls-handshake-timeout-seconds",
+		"requests.passthrough-headers", "requests.nonstream-keepalive-interval",
 	}},
 	{ID: "streaming", Prefix: "requests.streaming", Leaves: []string{
 		"requests.streaming.keepalive-seconds", "requests.streaming.bootstrap-retries",
+		"requests.streaming.send-keepalive-before-ft",
+	}},
+	{ID: "server", Prefix: "server", Leaves: []string{
+		"server.max-request-body-bytes", "server.shutdown-timeout", "server.commercial-mode",
+		"server.trusted-proxies", "server.github-token", "server.kv-store.disabled",
+	}},
+	{ID: "compression", Prefix: "server.response-compression", Leaves: []string{
+		"server.response-compression.enabled", "server.response-compression.min-bytes",
+	}},
+	{ID: "aistudio", Prefix: "oauth.providers.aistudio", Leaves: []string{
+		"oauth.providers.aistudio.ws-auth",
+	}},
+	{ID: "claude_oauth", Prefix: "oauth.providers.claude", Leaves: []string{
+		"oauth.providers.claude.oauth-include-create-api-key",
 	}},
 	{ID: "media", Prefix: "multimedia", Leaves: []string{
 		"multimedia.disable-image-generation", "multimedia.gpt-image-2-base-model",
 		"multimedia.video-result-auth-cache-ttl",
 	}},
+	{ID: "live_relay", Prefix: "oauth.providers.codex.live-media-relay", Leaves: []string{
+		"oauth.providers.codex.live-media-relay.enabled",
+		"oauth.providers.codex.live-media-relay.max-sessions",
+		"oauth.providers.codex.live-media-relay.disable-private-remote-ips",
+		"oauth.providers.codex.live-media-relay.public-ip",
+		"oauth.providers.codex.live-media-relay.udp-port-min",
+		"oauth.providers.codex.live-media-relay.udp-port-max",
+	}},
 	{ID: "client", Prefix: "client.codex", Leaves: []string{
 		"client.codex.enable-apply-patch", "client.codex.optimize-multi-agent-v2",
+		"client.codex.web-search-result-cache.enabled",
+		"client.codex.web-search-result-cache.ttl",
+		"client.codex.web-search-result-cache.limit",
+	}},
+	{ID: "client_claude", Prefix: "client.claude", Leaves: []string{
+		"client.claude.show-codex-commentary",
 	}},
 	{ID: "codex", Prefix: "upstream.codex", Leaves: []string{
 		"upstream.codex.response-steering", "upstream.codex.disable-codex-cloaking",
 		"upstream.codex.stream-bootstrap-buffering", "upstream.codex.stream-bootstrap-timeout",
 		"upstream.codex.orphan-delegation-compatibility", "upstream.codex.model-level-cooling",
+		"upstream.codex.upstream-request-compression",
+		"upstream.codex.upstream-request-compression-min-bytes",
+		"upstream.codex.websocket-compression",
+	}},
+	{ID: "codex_oauth", Prefix: "oauth.providers.codex", Leaves: []string{
+		"oauth.providers.codex.signin-with-chatgpt-identifier",
+		"oauth.providers.codex.header-defaults.user-agent",
+		"oauth.providers.codex.header-defaults.beta-features",
 	}},
 	{ID: "claude", Prefix: "upstream.claude", Leaves: []string{
 		"upstream.claude.model-level-cooling", "upstream.claude.disable-claude-cloak-mode",
 		"upstream.claude.disable-cloaking-model-list",
+		"upstream.claude.tool-search", "upstream.claude.server-side-fallback",
+		"upstream.claude.session-date-pin-days",
 	}},
 	{ID: "headers", Prefix: "upstream.claude.header-defaults", Leaves: []string{
 		"upstream.claude.header-defaults.user-agent", "upstream.claude.header-defaults.package-version",
 		"upstream.claude.header-defaults.runtime-version", "upstream.claude.header-defaults.os",
 		"upstream.claude.header-defaults.arch", "upstream.claude.header-defaults.timeout",
 		"upstream.claude.header-defaults.timezone", "upstream.claude.header-defaults.stabilize-device-profile",
+		"upstream.claude.header-defaults.inject-diagnostics",
+		"upstream.claude.header-defaults.client-request-id",
+		"upstream.claude.header-defaults.native-entrypoints",
+		"upstream.claude.header-defaults.anthropic-beta-strip",
+		"upstream.claude.header-defaults.anthropic-beta-append",
+	}},
+	{ID: "antigravity", Prefix: "oauth.providers.antigravity", Leaves: []string{
+		"oauth.providers.antigravity.antigravity-credits",
+		"oauth.providers.antigravity.signature-cache-enabled",
+		"oauth.providers.antigravity.signature-bypass-strict",
+		"oauth.providers.antigravity.tos-pause-window",
+		"oauth.providers.antigravity.connection-pool.enabled",
+		"oauth.providers.antigravity.connection-pool.idle-conn-timeout",
+		"oauth.providers.antigravity.connection-pool.max-idle-conns-per-host",
+		"oauth.providers.antigravity.sensitive-words",
+		"oauth.providers.antigravity.sensitive-words-replace",
+		"oauth.providers.antigravity.sensitive-patterns-replace",
+	}},
+	{ID: "devin", Prefix: "oauth.providers.devin", Leaves: []string{
+		"oauth.providers.devin.sensitive-words",
+		"oauth.providers.devin.sensitive-words-replace",
+		"oauth.providers.devin.sensitive-patterns-replace",
 	}},
 	{ID: "xai", Prefix: "upstream.xai", Leaves: []string{"upstream.xai.inject-x-search"}},
+	{ID: "observability_logs", Prefix: "observability.logs", Leaves: []string{
+		"observability.logs.debug", "observability.logs.request-log",
+	}},
 }
 
 var gatewayPageGroups = []ConfigGroup{
@@ -593,10 +684,26 @@ func ConfigGroupPrefix(id string) (string, error) {
 	return group.Prefix, nil
 }
 
+func lookupConfigOrPageLeaf(path string) (ConfigLeaf, bool) {
+	if leaf, ok := gatewayLeafIndex[path]; ok {
+		return leaf, true
+	}
+	leaf, ok := gatewayPageLeafIndex[path]
+	return leaf, ok
+}
+
+func lookupConfigOrPageFamily(family string) (ConfigRuleFamily, bool) {
+	if entry, ok := gatewayFamilyIndex[family]; ok {
+		return entry, true
+	}
+	entry, ok := gatewayPageFamilyIndex[family]
+	return entry, ok
+}
+
 // ConfigLeafEndpoint is the management endpoint of one leaf. CPA answers 404 for
 // a missing key, 400 for an unknown path and 422 for a value it refuses.
 func ConfigLeafEndpoint(path string) (string, error) {
-	if _, ok := gatewayPageLeafIndex[path]; !ok {
+	if _, ok := lookupConfigOrPageLeaf(path); !ok {
 		return "", ErrInvalidConfigPath
 	}
 	return configPathEndpoint(path), nil
@@ -604,7 +711,7 @@ func ConfigLeafEndpoint(path string) (string, error) {
 
 // ConfigValueEndpoint is the management endpoint of a whole payload rule family.
 func ConfigValueEndpoint(family string) (string, error) {
-	entry, ok := gatewayPageFamilyIndex[family]
+	entry, ok := lookupConfigOrPageFamily(family)
 	if !ok {
 		return "", ErrInvalidConfigPath
 	}
@@ -623,7 +730,7 @@ func ConfigPathResource(path string) string {
 // ValidateConfigLeafValue accepts only the leaf's JSON shape. Bounds belong to
 // CPA; CPAMP never restates them.
 func ValidateConfigLeafValue(path string, value any) error {
-	leaf, ok := gatewayPageLeafIndex[path]
+	leaf, ok := lookupConfigOrPageLeaf(path)
 	if !ok {
 		return ErrInvalidConfigPath
 	}
@@ -698,7 +805,7 @@ var ErrPrivateConfigOutOfRange = errors.New("private config value out of range")
 // ConfigLeafInheritable returns the value CPA resolves for a leaf whose key is
 // absent, and whether absence is a third state at all (see ConfigLeaf.Inherit).
 func ConfigLeafInheritable(path string) (bool, bool) {
-	leaf, ok := gatewayPageLeafIndex[path]
+	leaf, ok := lookupConfigOrPageLeaf(path)
 	if !ok || leaf.Inherit == nil {
 		return false, false
 	}
@@ -724,7 +831,7 @@ func LookupGatewayPageLeaf(path string) (ConfigLeaf, bool) {
 // on the runtime gateway page. Keys inside a KVMap leaf are arbitrary user strings
 // rather than structural YAML path segments, so writes replace the whole mapping.
 func IsConfigKVMapLeaf(path string) bool {
-	leaf, ok := gatewayPageLeafIndex[strings.ToLower(path)]
+	leaf, ok := lookupConfigOrPageLeaf(strings.ToLower(path))
 	return ok && leaf.Type == ConfigLeafKVMap
 }
 
@@ -810,7 +917,7 @@ func NormalizeConfigValue(value any) any {
 // composite values and trailing data are rejected; presence is reported
 // separately.
 func ParseConfigLeafValue(path string, raw json.RawMessage) (any, error) {
-	leaf, ok := gatewayPageLeafIndex[path]
+	leaf, ok := lookupConfigOrPageLeaf(path)
 	if !ok {
 		return nil, ErrInvalidConfigPath
 	}

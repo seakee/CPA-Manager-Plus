@@ -159,43 +159,62 @@ var adoptionProviderSectionRefs = func() map[string]bootstrap.ResourceRef {
 	return refs
 }()
 
-// adoptionUncopiedSourceKeys are keys of the accepted CPA v8.0.13 configuration
-// document that sit under a named reader root and that no copyable item carries:
-// not a gateway leaf, not a rule family, not a provider section. They are in the
-// universe as representatives so that their root's set states them as
-// configuration nothing copies, instead of the reader reporting a root whose
-// every key is either copied or forgotten.
-//
-// A root with a whole-root fallback does not need such a list: its fallback
-// already tells the operator to redo the whole block (`server`, `management`,
-// `plugins`, `observability`, `access`, `providers`). The keys below are under
-// `oauth`, which carries copyable provider sections, so without them the record
-// would report `oauth` as fully accounted for while these two keys vanished.
-//
-// Verified against CPA v8.0.13 (tag d7914af):
-//
-//	internal/config/config_v8.go:84    auth-auto-refresh-workers→oauth.auth-auto-refresh-workers
-//	internal/config/config.go:84       AuthAutoRefreshWorkers `yaml:"auth-auto-refresh-workers"`
-//	internal/config/config_v8.go:86    ws-auth→oauth.providers.aistudio.ws-auth
-//	internal/config/config_v8.go:93-101 codex→oauth.providers.codex,
-//	                                   antigravity→oauth.providers.antigravity,
-//	                                   devin→oauth.providers.devin
-//
-// `oauth.providers` is one key for the whole provider runtime block: its canonical
-// children (codex header defaults and live media relay, antigravity, devin,
-// aistudio) are not gateway leaves, not rule families and not copyable sections,
-// so nothing copies them. The `oauth.providers.*` spellings that do have a
-// canonical home are the aliases `internal/config/config_v8.go:28-46` projects
-// to `client.codex.*` and `upstream.*`, and those are copied there, under the
-// gateway table's own leaves.
-//
-// `oauth.auth-dir` is deliberately absent: it is the directory the credentials are
-// discovered in, so `credential:<name>` — `cpa-auth-files` — is what carries it.
-var adoptionUncopiedSourceKeys = []string{
-	"oauth.auth-auto-refresh-workers",
-	"oauth.providers",
+// adoptionStructuredConfigSections lists structured whole-PUT CPA v8 business
+// configuration sections outside api-keys/oauth maps. Each section is gated
+// under AdoptionRefConfigRouting (`cpa-config-routing`).
+var adoptionStructuredConfigSections = []string{
+	"oauth.providers.codex.live-media-relay.ice-servers",
+	"credentials.concurrency",
+	"credentials.in-flight",
+	"plugins.store-sources",
+	"plugins.store-auth",
+	"plugins.configs",
 }
 
+// StructuredConfigAdoptionSections returns the structured whole-PUT CPA v8
+// business configuration sections in stable order.
+func StructuredConfigAdoptionSections() []string {
+	return slices.Clone(adoptionStructuredConfigSections)
+}
+
+var adoptionStructuredSectionRefs = func() map[string]bootstrap.ResourceRef {
+	refs := make(map[string]bootstrap.ResourceRef, len(adoptionStructuredConfigSections))
+	for _, section := range adoptionStructuredConfigSections {
+		refs[section] = bootstrap.AdoptionRefConfigRouting
+	}
+	return refs
+}()
+
+// adoptionHostManagedSourceKeys maps host-exclusive configuration paths that
+// share a named root (`server`, `plugins`, `observability`) with migrated
+// business keys back to their platform-managed ResourceRef. They are never copied;
+// keeping them in the universe ensures Discovery emits the root's platform
+// reference alongside `cpa-config-routing`.
+var adoptionHostManagedSourceKeys = map[string]bootstrap.ResourceRef{
+	"server.server-id":                         bootstrap.AdoptionRefConfigServer,
+	"server.host":                              bootstrap.AdoptionRefConfigServer,
+	"server.port":                              bootstrap.AdoptionRefConfigServer,
+	"server.tls":                               bootstrap.AdoptionRefConfigServer,
+	"server.discovery":                         bootstrap.AdoptionRefConfigServer,
+	"server.kv-store.path":                     bootstrap.AdoptionRefConfigServer,
+	"plugins.enabled":                          bootstrap.AdoptionRefConfigPlugins,
+	"plugins.dir":                              bootstrap.AdoptionRefConfigPlugins,
+	"plugins.auth-revision":                    bootstrap.AdoptionRefConfigPlugins,
+	"observability.usage":                      bootstrap.AdoptionRefConfigObservability,
+	"observability.pprof":                      bootstrap.AdoptionRefConfigObservability,
+	"observability.logs.logging-to-file":       bootstrap.AdoptionRefConfigObservability,
+	"observability.logs.logs-max-total-size-mb": bootstrap.AdoptionRefConfigObservability,
+	"observability.logs.error-logs-max-files":  bootstrap.AdoptionRefConfigObservability,
+}
+
+var adoptionHostManagedSourceKeyList = func() []string {
+	keys := make([]string, 0, len(adoptionHostManagedSourceKeys))
+	for key := range adoptionHostManagedSourceKeys {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
+}()
 // adoptionFamilyPaths is the set of payload rule family paths. A family is a
 // configuration path like any other (`requests.payload.default`), so the same
 // path membership test classifies it.
@@ -227,6 +246,9 @@ func AdoptionItemRef(item string) bootstrap.ResourceRef {
 	if ref, ok := adoptionProviderSectionRefs[item]; ok {
 		return ref
 	}
+	if ref, ok := adoptionStructuredSectionRefs[item]; ok {
+		return ref
+	}
 	if _, ok := LookupConfigLeaf(item); ok {
 		return bootstrap.AdoptionRefConfigRouting
 	}
@@ -238,23 +260,27 @@ func AdoptionItemRef(item string) bootstrap.ResourceRef {
 		// path, so both spellings classify.
 		return bootstrap.AdoptionRefConfigRouting
 	}
+	if ref, ok := adoptionHostManagedSourceKeys[item]; ok {
+		return ref
+	}
 	return bootstrap.AdoptionRefConfigUnknown
 }
 
 // AdoptionItemUniverse returns every item the adoption can enumerate: each
-// gateway leaf, each payload rule family path, each copyable provider section,
-// and one representative of each item class that has no enumerable path
-// (credentials and keys the reader did not name).
+// gateway leaf, each payload rule family path, each copyable provider and
+// structured section, host-managed keys under shared roots, and one
+// representative of each item class that has no enumerable path.
 //
 // The executor walks the same three tables and records items of the same two
 // classes; the invariant tests and the pin walk this, so a widened table is
 // covered without a second inventory.
 func AdoptionItemUniverse() []string {
-	items := make([]string, 0, len(ConfigLeafPaths())+len(ConfigRuleFamilyPaths())+len(adoptionProviderSections)+len(adoptionUncopiedSourceKeys)+2)
+	items := make([]string, 0, len(ConfigLeafPaths())+len(ConfigRuleFamilyPaths())+len(adoptionProviderSections)+len(adoptionStructuredConfigSections)+len(adoptionHostManagedSourceKeyList)+2)
 	items = append(items, ConfigLeafPaths()...)
 	items = append(items, ConfigRuleFamilyPaths()...)
 	items = append(items, adoptionProviderSections...)
-	items = append(items, adoptionUncopiedSourceKeys...)
+	items = append(items, adoptionStructuredConfigSections...)
+	items = append(items, adoptionHostManagedSourceKeyList...)
 	items = append(items, CredentialItemClass, OffTableConfigItemClass)
 	return items
 }

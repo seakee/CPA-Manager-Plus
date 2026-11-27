@@ -12,7 +12,15 @@ import (
 	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"gopkg.in/yaml.v3"
 )
+
+const iceServersSectionPath = "oauth.providers.codex.live-media-relay.ice-servers"
+
+// turnCredentialsRedactedSentinel replaces a non-empty ice-servers list when
+// GET /v8/management/config.yaml is unavailable or omits the unredacted
+// entries, preventing redacted JSON from overwriting or masking TURN secrets.
+type turnCredentialsRedactedSentinel struct{}
 
 // maxCredentialBytes bounds one credential file. An auth file carries tokens,
 // never media, so 1 MiB is far above any real file and still a hard ceiling.
@@ -67,6 +75,10 @@ var ErrEndpointInvalid = fmt.Errorf("freshadopt: invalid CPA endpoint")
 // do issues exactly one request and never retries. A transport error is reported
 // as unknown: the caller's only remedy is a read-back.
 func (w *wire) do(ctx context.Context, method, path string, payload []byte, limit int64) (int, []byte, error) {
+	return w.doAccept(ctx, method, path, "application/json", payload, limit)
+}
+
+func (w *wire) doAccept(ctx context.Context, method, path, accept string, payload []byte, limit int64) (int, []byte, error) {
 	var body io.Reader
 	if payload != nil {
 		body = bytes.NewReader(payload)
@@ -76,7 +88,9 @@ func (w *wire) do(ctx context.Context, method, path string, payload []byte, limi
 		return 0, nil, cpa.ErrProofUnavailable
 	}
 	req.Header.Set("Authorization", "Bearer "+w.key)
-	req.Header.Set("Accept", "application/json")
+	if accept != "" {
+		req.Header.Set("Accept", accept)
+	}
 	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("Cache-Control", "no-store")
 	if payload != nil {
@@ -176,7 +190,33 @@ func (s *SourceWire) ReadConfigDocument(ctx context.Context) (map[string]any, er
 	if code != http.StatusOK {
 		return nil, fmt.Errorf("freshadopt: source config refused with %d", code)
 	}
-	return cpa.DecodeConfigDocument(body)
+	doc, err := cpa.DecodeConfigDocument(body)
+	if err != nil {
+		return nil, err
+	}
+	if iceVal, presence := cpa.LookupConfigValue(doc, iceServersSectionPath); presence == cpa.ConfigPresent {
+		if iceSlice, ok := iceVal.([]any); ok && len(iceSlice) > 0 {
+			s.hydrateIceServersFromYAML(ctx, doc)
+		}
+	}
+	return doc, nil
+}
+
+func (s *SourceWire) hydrateIceServersFromYAML(ctx context.Context, doc map[string]any) {
+	code, body, err := s.w.doAccept(ctx, http.MethodGet, "/v8/management/config.yaml", "application/yaml, text/yaml", nil, maxConfigBytes)
+	if err == nil && code == http.StatusOK {
+		if yamlDoc, decErr := decodeFirstYAMLDocument(body); decErr == nil && yamlDoc != nil {
+			if rawIce, presence := cpa.LookupConfigValue(yamlDoc, iceServersSectionPath); presence == cpa.ConfigPresent {
+				if normalized, normErr := normalizeJSONRoundTrip(rawIce); normErr == nil {
+					if iceSlice, ok := normalized.([]any); ok && len(iceSlice) > 0 {
+						setDocumentPath(doc, iceServersSectionPath, iceSlice)
+						return
+					}
+				}
+			}
+		}
+	}
+	setDocumentPath(doc, iceServersSectionPath, turnCredentialsRedactedSentinel{})
 }
 
 // DestinationWire is the write and read-back client of the destination.
@@ -340,6 +380,9 @@ func (d *DestinationWire) PutConfigValue(ctx context.Context, path string, paylo
 // ReadConfigValue reads one dotted path back from the destination. A 404 is the
 // absent state: CPA serves not_found for a key that is not set.
 func (d *DestinationWire) ReadConfigValue(ctx context.Context, path string) (any, cpa.ConfigPresence, error) {
+	if path == iceServersSectionPath {
+		return d.readIceServersFromYAML(ctx)
+	}
 	code, body, err := d.w.do(ctx, http.MethodGet, configEndpoint(path), nil, maxConfigBytes)
 	if err != nil {
 		return nil, "", err
@@ -361,6 +404,112 @@ func (d *DestinationWire) ReadConfigValue(ctx context.Context, path string) (any
 	default:
 		return nil, "", cpa.ErrProofUnavailable
 	}
+}
+
+func (d *DestinationWire) readIceServersFromYAML(ctx context.Context) (any, cpa.ConfigPresence, error) {
+	code, body, err := d.w.doAccept(ctx, http.MethodGet, "/v8/management/config.yaml", "application/yaml, text/yaml", nil, maxConfigBytes)
+	if err != nil {
+		return nil, "", err
+	}
+	if code != http.StatusOK {
+		// Never fall back to JSON GET for ice-servers: JSON GET redacts TURN secrets.
+		return nil, "", cpa.ErrProofUnavailable
+	}
+	yamlDoc, err := decodeFirstYAMLDocument(body)
+	if err != nil {
+		return nil, "", cpa.ErrSourceConflict
+	}
+	if yamlDoc == nil {
+		return nil, cpa.ConfigMissing, nil
+	}
+	raw, presence := cpa.LookupConfigValue(yamlDoc, iceServersSectionPath)
+	if presence != cpa.ConfigPresent {
+		return nil, presence, nil
+	}
+	normalized, err := normalizeJSONRoundTrip(raw)
+	if err != nil {
+		return nil, "", cpa.ErrSourceConflict
+	}
+	if normalized == nil {
+		return nil, cpa.ConfigNull, nil
+	}
+	return normalized, cpa.ConfigPresent, nil
+}
+
+func decodeFirstYAMLDocument(body []byte) (map[string]any, error) {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil, nil
+	}
+	var raw any
+	err := yaml.NewDecoder(bytes.NewReader(body)).Decode(&raw)
+	if errors.Is(err, io.EOF) || raw == nil {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	converted := yamlValueToJSONCompatible(raw)
+	doc, ok := converted.(map[string]any)
+	if !ok {
+		return nil, cpa.ErrSourceConflict
+	}
+	return doc, nil
+}
+
+func yamlValueToJSONCompatible(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, item := range typed {
+			out[key] = yamlValueToJSONCompatible(item)
+		}
+		return out
+	case map[any]any:
+		out := make(map[string]any, len(typed))
+		for key, item := range typed {
+			out[fmt.Sprint(key)] = yamlValueToJSONCompatible(item)
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for i, item := range typed {
+			out[i] = yamlValueToJSONCompatible(item)
+		}
+		return out
+	default:
+		return typed
+	}
+}
+
+func normalizeJSONRoundTrip(value any) (any, error) {
+	encoded, err := json.Marshal(yamlValueToJSONCompatible(value))
+	if err != nil {
+		return nil, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+	var out any
+	if err := decoder.Decode(&out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func setDocumentPath(doc map[string]any, path string, value any) {
+	if doc == nil {
+		return
+	}
+	parts := strings.Split(path, ".")
+	cur := doc
+	for _, part := range parts[:len(parts)-1] {
+		next, ok := cur[part].(map[string]any)
+		if !ok {
+			next = make(map[string]any)
+			cur[part] = next
+		}
+		cur = next
+	}
+	cur[parts[len(parts)-1]] = value
 }
 
 func configEndpoint(path string) string {

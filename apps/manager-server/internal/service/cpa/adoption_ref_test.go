@@ -95,27 +95,28 @@ func hasUniverseItem(root string) bool {
 // visible to the record — otherwise discovery reports the root as fully
 // accounted for while that key vanished from the adoption.
 var sourceSectionKeys = map[string][]string{
-	"server":        {"commercial-mode", "discovery", "host", "port", "tls"},
+	"server":        {"commercial-mode", "discovery", "github-token", "host", "kv-store", "max-request-body-bytes", "port", "response-compression", "server-id", "shutdown-timeout", "tls", "trusted-proxies"},
 	"management":    {"allow-remote", "base-url", "disable-auto-update-panel", "disable-control-panel", "panel-github-repository", "secret-key"},
 	"access":        {"api-keys"},
 	"oauth":         {"auth-auto-refresh-workers", "auth-dir", "excluded-models", "model-alias", "providers", "request-scoped-errors", "settings"},
 	"api-keys":      {"claude", "codex", "gemini", "interactions", "meta", "openai-compatibility", "vertex", "xai"},
-	"routing":       {"cooldown", "force-model-prefix", "retry", "session-affinity", "session-affinity-subagents", "session-affinity-ttl", "strategy"},
-	"client":        {"codex"},
-	"plugins":       {"auth-revision", "dir", "enabled"},
+	"routing":       {"cooldown", "force-model-prefix", "retry", "session-affinity", "session-affinity-rebind-on", "session-affinity-subagents", "session-affinity-ttl", "strategy"},
+	"client":        {"claude", "codex"},
+	"plugins":       {"auth-revision", "configs", "dir", "enabled", "store-auth", "store-sources"},
 	"observability": {"logs", "pprof", "usage"},
 }
 
 // gatewaySectionKeys are the source sections the v8 reader does not name, so its
-// report puts them under the unknown root. Their keys are gateway configuration:
-// each is either a leaf or a rule family of the gateway table, or it is uncopied
-// configuration the record has to state.
+// report puts them under the unknown root. Their keys are gateway/business
+// configuration: each is carried by a leaf, rule family, or structured section.
 var gatewaySectionKeys = map[string][]string{
-	"requests":   {"proxy-url", "passthrough-headers", "nonstream-keepalive-interval", "streaming", "payload"},
-	"multimedia": {"disable-image-generation", "gpt-image-2-base-model", "video-result-auth-cache-ttl"},
-	"upstream":   {"codex", "claude", "xai"},
+	"requests":      {"proxy-url", "tls-handshake-timeout-seconds", "passthrough-headers", "nonstream-keepalive-interval", "streaming", "payload"},
+	"multimedia":    {"disable-image-generation", "gpt-image-2-base-model", "video-result-auth-cache-ttl"},
+	"upstream":      {"codex", "claude", "xai"},
+	"models":        {"catalog", "codex-catalog", "devin-catalog"},
+	"quota-exceeded": {"switch-project", "switch-preview-model"},
+	"credentials":   {"concurrency", "in-flight"},
 }
-
 // sourceKeyCarriers names the item that carries a source key whose own path is
 // not an item: the source's auth directory is exactly where the credential files
 // are discovered, so `credential:<name>` is what carries it.
@@ -128,16 +129,14 @@ var sourceKeyCarriers = map[string]string{
 // or listed as an uncopied key, and every uncopied key it lists is really a
 // source key of that root, so the table cannot drift into fiction.
 func TestEverySourceKeyIsCoveredByItsRoot(t *testing.T) {
-	uncopied := map[string]bool{}
-	for _, key := range adoptionUncopiedSourceKeys {
-		uncopied[key] = true
+	hostManaged := map[string]bool{}
+	for key := range adoptionHostManagedSourceKeys {
+		hostManaged[key] = true
 	}
 	coveredBy := func(root, path string) bool {
 		carrier := sourceKeyCarriers[path]
 		for _, item := range AdoptionItemUniverse() {
-			if AdoptionRootOf(item) != root || uncopied[item] {
-				// A key that is in the universe only because it is declared uncopied
-				// does not carry itself: that would make the declaration the answer.
+			if AdoptionRootOf(item) != root {
 				continue
 			}
 			if item == carrier || item == path || strings.HasPrefix(item, path+".") {
@@ -154,37 +153,33 @@ func TestEverySourceKeyIsCoveredByItsRoot(t *testing.T) {
 		for _, child := range children {
 			path := root + "." + child
 			covered := coveredBy(root, path)
-			if !covered && !uncopied[path] && !wholeRoot {
-				t.Fatalf("source key %s is carried by no item and is not reported as uncopied", path)
+			if !covered && !hostManaged[path] && !wholeRoot {
+				t.Fatalf("source key %s is carried by no item and is not reported as host-managed", path)
 			}
-			if uncopied[path] && covered {
-				t.Fatalf("source key %s is reported as uncopied but an item carries it", path)
-			}
-			if uncopied[path] && wholeRoot {
+			if hostManaged[path] && wholeRoot {
 				t.Fatalf("source key %s is redundant: its root %q already falls back whole", path, root)
 			}
 		}
 	}
 	// The sections the reader does not name reach discovery under the unknown
-	// root, and each of their keys is gateway configuration the record must state.
+	// root, and each of their keys is configuration the record must state.
 	for section, children := range gatewaySectionKeys {
 		if root := AdoptionRootOf(section); root != unknownSection {
 			t.Fatalf("source section %q discovered as %q, not the unknown root", section, root)
 		}
 		for _, child := range children {
 			path := section + "." + child
-			covered := coveredBy(unknownSection, path)
-			if !covered && !uncopied[path] {
-				t.Fatalf("gateway configuration %s is carried by no item and is not reported as uncopied", path)
+			if !coveredBy(unknownSection, path) {
+				t.Fatalf("gateway configuration %s is carried by no item", path)
 			}
 		}
 	}
-	// The declared uncopied keys are real source keys of a named root: a typo or a
-	// key that moved would silently cover nothing.
-	for key := range uncopied {
-		root, child, nested := strings.Cut(key, ".")
-		if !nested || !slices.Contains(sourceSectionKeys[root], child) {
-			t.Fatalf("declared uncopied key %q is not a source key of a named root", key)
+	// The declared host-managed keys are real source keys of a named root.
+	for key := range hostManaged {
+		root, rest, nested := strings.Cut(key, ".")
+		topChild, _, _ := strings.Cut(rest, ".")
+		if !nested || !slices.Contains(sourceSectionKeys[root], topChild) {
+			t.Fatalf("declared host-managed key %q is not a source key of a named root", key)
 		}
 	}
 	// A carried key names an item that really exists.
@@ -205,24 +200,16 @@ func TestAdoptionRootSetsFollowTheItems(t *testing.T) {
 	// a reference in a root's set that no item produces would tell the operator to
 	// redo work the executor never does.
 	want := map[string][]bootstrap.ResourceRef{
-		// `requests`, `multimedia` and `upstream` are not named sections: the
-		// reader reports that gateway configuration under its catch-all, which is
-		// why it carries both the routing decision and the unknown one.
 		"unknown_cpa_native_resource": {bootstrap.AdoptionRefConfigRouting, bootstrap.AdoptionRefConfigUnknown},
-		// `client` is exactly two gateway leaves. It has no provider section in
-		// the copy plan, so it contributes routing configuration and no provider
-		// verdict: `provider-state-client` covers configuration no item carries.
-		"client": {bootstrap.AdoptionRefConfigRouting},
-		// `oauth` carries the auth directory (and so the credential files), its
-		// copyable provider maps, and the source keys nothing copies — its refresh
-		// worker count and its provider runtime block.
-		"oauth":     {bootstrap.AdoptionRefCPAAuthFiles, bootstrap.AdoptionRefConfigUnknown, bootstrap.AdoptionRefProviderStateAPIKeys},
-		"api-keys":  {bootstrap.AdoptionRefProviderStateAPIKeys},
-		"routing":   {bootstrap.AdoptionRefConfigRouting},
-		"providers": {bootstrap.AdoptionRefProviderStateProviders},
-		"server":    {bootstrap.AdoptionRefConfigServer},
-		"plugins":   {bootstrap.AdoptionRefConfigPlugins},
-		"access":    {bootstrap.AdoptionRefClientAPIKeys},
+		"client":                      {bootstrap.AdoptionRefConfigRouting},
+		"oauth":                       {bootstrap.AdoptionRefCPAAuthFiles, bootstrap.AdoptionRefConfigRouting, bootstrap.AdoptionRefProviderStateAPIKeys},
+		"api-keys":                    {bootstrap.AdoptionRefProviderStateAPIKeys},
+		"routing":                     {bootstrap.AdoptionRefConfigRouting},
+		"providers":                   {bootstrap.AdoptionRefProviderStateProviders},
+		"server":                      {bootstrap.AdoptionRefConfigRouting, bootstrap.AdoptionRefConfigServer},
+		"plugins":                     {bootstrap.AdoptionRefConfigPlugins, bootstrap.AdoptionRefConfigRouting},
+		"observability":               {bootstrap.AdoptionRefConfigObservability, bootstrap.AdoptionRefConfigRouting},
+		"access":                      {bootstrap.AdoptionRefClientAPIKeys},
 	}
 	for root, refs := range want {
 		if got := AdoptionRootRefs(root); !slices.Equal(got, refs) {

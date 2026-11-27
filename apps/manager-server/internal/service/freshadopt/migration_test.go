@@ -20,6 +20,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"gopkg.in/yaml.v3"
 )
 
 // fakeCPA is one CPA v8 Management API stand-in. It records every request
@@ -73,9 +74,10 @@ type fakeCPA struct {
 	transformOnUpload      func(name string, raw []byte) []byte
 	transformOnStatusPatch func(name string, current []byte, disabled bool) []byte
 	statusPatchCount       int
+	failConfigYAML         bool
+	configYAMLOverride     string
 	server                 *httptest.Server
 }
-
 func newFakeCPA(t *testing.T, auth string) *fakeCPA {
 	t.Helper()
 	cpa := &fakeCPA{
@@ -121,9 +123,32 @@ func (c *fakeCPA) serve(w http.ResponseWriter, r *http.Request) {
 		c.downloadCredential(w, r)
 	case path == "/v8/management/credentials/status" && r.Method == http.MethodPatch:
 		c.patchStatus(w, r)
+	case path == "/v8/management/config.yaml" && r.Method == http.MethodGet:
+		c.mu.Lock()
+		failYAML := c.failConfigYAML
+		override := c.configYAMLOverride
+		cfgCopy := cloneFakeConfig(c.config)
+		c.mu.Unlock()
+		if failYAML {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"yaml_unavailable"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+		if override != "" {
+			_, _ = w.Write([]byte(override))
+			return
+		}
+		body, err := yaml.Marshal(cfgCopy)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write(body)
 	case path == "/v8/management/config" && r.Method == http.MethodGet:
 		c.mu.Lock()
-		body, err := json.Marshal(c.config)
+		redactedCfg := redactFakeTURNSecrets(cloneFakeConfig(c.config))
+		body, err := json.Marshal(redactedCfg)
 		c.mu.Unlock()
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -292,9 +317,29 @@ func (c *fakeCPA) writeConfig(w http.ResponseWriter, r *http.Request, slashPath 
 	if strings.HasPrefix(dotted, "api-keys.") {
 		value = stripFakeAPIKeyAuthIndexes(value)
 	}
+	value = cloneFakeValue(value)
 	c.mu.Lock()
-	if r.Method == http.MethodPatch {
-		mergeInto(c.config, strings.Split(dotted, "."), value)
+	if dotted == "credentials.concurrency" {
+		incomingMap, _ := value.(map[string]any)
+		existingMap, _ := lookup(c.config, []string{"credentials", "concurrency"}).(map[string]any)
+		for _, revKey := range []string{"lifecycle-config-revision", "observation-barrier-revision"} {
+			var oldRev, newRev any
+			if existingMap != nil {
+				oldRev = existingMap[revKey]
+			}
+			if incomingMap != nil {
+				newRev = incomingMap[revKey]
+			}
+			if !reflect.DeepEqual(oldRev, newRev) {
+				c.mu.Unlock()
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "read_only_field", "field": "credentials/concurrency/" + revKey})
+				return
+			}
+		}
+	}
+	if r.Method == http.MethodPut {
+		replaceAtPath(c.config, strings.Split(dotted, "."), value)
 	} else {
 		mergeInto(c.config, strings.Split(dotted, "."), value)
 	}
@@ -322,6 +367,12 @@ func (c *fakeCPA) projectedValue(dotted string) any {
 		}
 	}
 	value := lookup(c.config, strings.Split(dotted, "."))
+	if value != nil {
+		value = cloneFakeValue(value)
+	}
+	if dotted == iceServersSectionPath && value != nil {
+		value = redactFakeICEServersSlice(value)
+	}
 	if strings.HasPrefix(dotted, "api-keys.") && value != nil {
 		value = injectFakeAPIKeyAuthIndexes(dotted, value)
 	}
@@ -480,6 +531,92 @@ func mergeInto(document map[string]any, parts []string, value any) {
 	cursor[key] = value
 }
 
+func replaceAtPath(document map[string]any, parts []string, value any) {
+	cursor := document
+	for _, part := range parts[:len(parts)-1] {
+		next, ok := cursor[part].(map[string]any)
+		if !ok {
+			next = map[string]any{}
+			cursor[part] = next
+		}
+		cursor = next
+	}
+	cursor[parts[len(parts)-1]] = value
+}
+
+func cloneFakeConfig(cfg map[string]any) map[string]any {
+	if cfg == nil {
+		return nil
+	}
+	out, _ := cloneFakeValue(cfg).(map[string]any)
+	return out
+}
+
+func cloneFakeValue(v any) any {
+	switch typed := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for k, item := range typed {
+			out[k] = cloneFakeValue(item)
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for i, item := range typed {
+			out[i] = cloneFakeValue(item)
+		}
+		return out
+	case json.Number:
+		if n, err := typed.Int64(); err == nil {
+			return int(n)
+		}
+		return typed
+	default:
+		return typed
+	}
+}
+
+func redactFakeTURNSecrets(cfg map[string]any) map[string]any {
+	if cfg == nil {
+		return nil
+	}
+	if oauth, ok := cfg["oauth"].(map[string]any); ok {
+		if providers, ok := oauth["providers"].(map[string]any); ok {
+			if codex, ok := providers["codex"].(map[string]any); ok {
+				if relay, ok := codex["live-media-relay"].(map[string]any); ok {
+					if servers, ok := relay["ice-servers"]; ok {
+						relay["ice-servers"] = redactFakeICEServersSlice(servers)
+					}
+				}
+			}
+		}
+	}
+	return cfg
+}
+
+func redactFakeICEServersSlice(v any) any {
+	slice, ok := v.([]any)
+	if !ok {
+		return v
+	}
+	out := make([]any, len(slice))
+	for i, raw := range slice {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			out[i] = raw
+			continue
+		}
+		clean := make(map[string]any, len(entry))
+		for k, val := range entry {
+			if k == "username" || k == "credential" {
+				continue
+			}
+			clean[k] = val
+		}
+		out[i] = clean
+	}
+	return out
+}
 func lookup(document map[string]any, parts []string) any {
 	var cursor any = document
 	for _, part := range parts {
@@ -1470,7 +1607,7 @@ func TestManyOverlongCredentialNamesSettleAsOneAggregate(t *testing.T) {
 // both kinds are counted by the same aggregate. Charging one kind and not the
 // other used to overflow the item bound.
 func TestMixedOrdinaryAndOverlongInventorySharesOneBudget(t *testing.T) {
-	const ordinary, overlong = 950, 300
+	const ordinary, overlong = 850, 300
 	names := append(ordinaryCredentialNames(ordinary), overlongCredentialNames(overlong)...)
 	source := capacitySource(t, names)
 	destination := destinationFixture(t)
@@ -2090,13 +2227,21 @@ func TestProviderSectionsAreGatedByTheirOwnRoot(t *testing.T) {
 			t.Fatalf("authorized section %s was gated", section)
 		}
 	}
-	// Only the twelve planned sections classify as provider state; a bare root
-	// name, and a section under a root the plan does not name, are configuration
-	// the executor does not copy, so they classify as unknown configuration and
-	// keep their own manual action.
-	for _, section := range ProviderSections() {
+	// The 12 provider sections classify as provider state and the 6 structured
+	// configuration sections classify as routing configuration; a bare root name,
+	// or a section outside the plan, classifies as unknown configuration and
+	// keeps its own manual action.
+	if got, want := len(ProviderSections()), 18; got != want {
+		t.Fatalf("len(ProviderSections()) = %d, want %d", got, want)
+	}
+	for _, section := range cpa.ProviderAdoptionSections() {
 		if ref := ItemRef(providerSection(section)); ref != bootstrap.AdoptionRefProviderStateAPIKeys {
-			t.Fatalf("planned section %s classified as %s", section, ref)
+			t.Fatalf("provider section %s classified as %s", section, ref)
+		}
+	}
+	for _, section := range cpa.StructuredConfigAdoptionSections() {
+		if ref := ItemRef(providerSection(section)); ref != bootstrap.AdoptionRefConfigRouting {
+			t.Fatalf("structured section %s classified as %s", section, ref)
 		}
 	}
 	for _, section := range []string{"client", "providers", "oauth", "api-keys", "made-up", "made-up.child"} {
@@ -2297,9 +2442,22 @@ func TestItemRefClassifiesAgainstTheGatewayTable(t *testing.T) {
 			t.Fatalf("rule family %s classified as %s", family, ref)
 		}
 	}
-	for _, path := range []string{"oauth.auth-dir", "server.host", "observability.logs.debug", "plugins.dir", "not.a.path"} {
+	for _, path := range []string{"oauth.auth-dir", "not.a.path"} {
 		if ref := ItemRef(freshstore.AdoptionItem{Item: configLeafItemName(path), Kind: freshstore.AdoptionKindConfigLeaf}); ref != bootstrap.AdoptionRefConfigUnknown {
 			t.Fatalf("non-gateway leaf %s classified as %s", path, ref)
+		}
+	}
+	for path, want := range map[string]bootstrap.ResourceRef{
+		"server.host":                 bootstrap.AdoptionRefConfigServer,
+		"plugins.dir":                 bootstrap.AdoptionRefConfigPlugins,
+		"observability.logs.debug":    bootstrap.AdoptionRefConfigRouting,
+		"models.catalog":              bootstrap.AdoptionRefConfigRouting,
+		"server.kv-store.disabled":    bootstrap.AdoptionRefConfigRouting,
+		"server.trusted-proxies":      bootstrap.AdoptionRefConfigRouting,
+		"observability.logs.request-log": bootstrap.AdoptionRefConfigRouting,
+	} {
+		if ref := ItemRef(freshstore.AdoptionItem{Item: configLeafItemName(path), Kind: freshstore.AdoptionKindConfigLeaf}); ref != want {
+			t.Fatalf("leaf %s classified as %s, want %s", path, ref, want)
 		}
 	}
 	if ref := ItemRef(freshstore.AdoptionItem{Item: configFamilyItemName("not-a-family"), Kind: freshstore.AdoptionKindConfigFamily}); ref != bootstrap.AdoptionRefConfigUnknown {
@@ -2308,35 +2466,34 @@ func TestItemRefClassifiesAgainstTheGatewayTable(t *testing.T) {
 	if ref := ItemRef(freshstore.AdoptionItem{Item: credentialItemName("claude-a.json"), Kind: freshstore.AdoptionKindCredential}); ref != bootstrap.AdoptionRefCPAAuthFiles {
 		t.Fatalf("credential classified as %s", ref)
 	}
-	// A provider section is gated under its own root, never under another
-	// A section the copy plan does not contain is configuration the executor
-	// never writes, so it classifies as unknown configuration and stays manual.
-	// It never borrows a root's verdict: `providers` is a section whose contents
-	// the plan does not copy, and `client` is gateway leaves only.
 	for section, want := range map[string]bootstrap.ResourceRef{
-		"api-keys.claude":   bootstrap.AdoptionRefProviderStateAPIKeys,
-		"api-keys.vertex":   bootstrap.AdoptionRefProviderStateAPIKeys,
-		"oauth.model-alias": bootstrap.AdoptionRefProviderStateAPIKeys,
-		"oauth.settings":    bootstrap.AdoptionRefProviderStateAPIKeys,
-		"providers":         bootstrap.AdoptionRefConfigUnknown,
-		"client":            bootstrap.AdoptionRefConfigUnknown,
-		"oauth":             bootstrap.AdoptionRefConfigUnknown,
-		"plugins.enabled":   bootstrap.AdoptionRefConfigUnknown,
-		"made-up":           bootstrap.AdoptionRefConfigUnknown,
-		"made-up.child":     bootstrap.AdoptionRefConfigUnknown,
+		"api-keys.claude":        bootstrap.AdoptionRefProviderStateAPIKeys,
+		"api-keys.vertex":        bootstrap.AdoptionRefProviderStateAPIKeys,
+		"oauth.model-alias":      bootstrap.AdoptionRefProviderStateAPIKeys,
+		"oauth.settings":         bootstrap.AdoptionRefProviderStateAPIKeys,
+		"credentials.concurrency": bootstrap.AdoptionRefConfigRouting,
+		"credentials.in-flight":  bootstrap.AdoptionRefConfigRouting,
+		"plugins.store-sources":  bootstrap.AdoptionRefConfigRouting,
+		"plugins.store-auth":     bootstrap.AdoptionRefConfigRouting,
+		"plugins.configs":        bootstrap.AdoptionRefConfigRouting,
+		"oauth.providers.codex.live-media-relay.ice-servers": bootstrap.AdoptionRefConfigRouting,
+		"providers":       bootstrap.AdoptionRefConfigUnknown,
+		"client":          bootstrap.AdoptionRefConfigUnknown,
+		"oauth":           bootstrap.AdoptionRefConfigUnknown,
+		"plugins.enabled": bootstrap.AdoptionRefConfigPlugins,
+		"made-up":         bootstrap.AdoptionRefConfigUnknown,
+		"made-up.child":   bootstrap.AdoptionRefConfigUnknown,
 	} {
-		ref := ItemRef(freshstore.AdoptionItem{Item: providerSectionItemName(section), Kind: freshstore.AdoptionKindProviderSection})
+		ref := ItemRef(providerSection(section))
 		if ref != want {
 			t.Fatalf("provider section %s classified as %s, want %s", section, ref, want)
 		}
 	}
-	// The keys a section is copied under are the ones the executor actually
-	// enumerates: every provider section of the copy plan resolves to a root
-	// reference, and none of them lands on the fallback.
 	for _, section := range ProviderSections() {
-		ref := ItemRef(freshstore.AdoptionItem{Item: providerSectionItemName(section), Kind: freshstore.AdoptionKindProviderSection})
-		if ref != bootstrap.AdoptionRefProviderStateAPIKeys {
-			t.Fatalf("copyable section %s classified as %s", section, ref)
+		ref := ItemRef(providerSection(section))
+		want := cpa.AdoptionItemRef(section)
+		if ref != want || ref == bootstrap.AdoptionRefConfigUnknown {
+			t.Fatalf("copyable section %s classified as %s (want %s)", section, ref, want)
 		}
 	}
 }
@@ -2952,5 +3109,265 @@ func TestCredentialMigrationRefusesSemanticChangesAndFieldLoss(t *testing.T) {
 					tc.name, item.Outcome, item.Reason)
 			}
 		})
+	}
+}
+
+func TestFullCPAConfigBusinessSettingsAndKVMapMigration(t *testing.T) {
+	source := newFakeCPA(t, "src-key")
+	source.seedAuthFile("claude-a.json", "claude", []byte(`{"type":"claude","access_token":"tok-1"}`), false)
+	source.config = map[string]any{
+		"config-version": 8,
+		"server": map[string]any{
+			"server-id":        "src-srv",
+			"host":             "127.0.0.1",
+			"port":             8317,
+			"commercial-mode":  true,
+			"trusted-proxies":  []any{"10.0.0.0/8", "192.168.1.0/24"},
+			"github-token":     "ghp_source_secret_token",
+			"tls":              map[string]any{"enable": true},
+			"discovery":        map[string]any{"enabled": true},
+			"kv-store":         map[string]any{"path": "/src/kv.db", "disabled": true},
+		},
+		"models": map[string]any{
+			"catalog":       "custom-catalog",
+			"codex-catalog": "embedded",
+			"devin-catalog": "remote",
+		},
+		"oauth": map[string]any{
+			"auth-dir": "/src/auth",
+			"providers": map[string]any{
+				"claude": map[string]any{
+					"oauth-include-create-api-key": true,
+				},
+				"antigravity": map[string]any{
+					"sensitive-words-replace": map[string]any{
+						"badword": "goodword",
+					},
+					"sensitive-patterns-replace": []any{
+						map[string]any{"pattern": `foo\d+`, "replacement": "bar"},
+					},
+				},
+			},
+		},
+		"requests": map[string]any{
+			"payload": map[string]any{
+				"replace": []any{
+					map[string]any{
+						"models": []any{map[string]any{"name": "claude-*", "protocol": "claude"}},
+						"params": map[string]any{
+							"target": map[string]any{"paths": []any{"messages[0].content"}},
+							"replace": []any{
+								map[string]any{"pattern": "secret", "replacement": "redacted"},
+							},
+						},
+					},
+				},
+			},
+		},
+		"credentials": map[string]any{
+			"in-flight": map[string]any{
+				"snapshot-interval": "30s",
+				"stale-after":       "2m",
+				"max-part-bytes":    65536,
+				"max-part-count":    4,
+				"max-revision-bytes": 131072,
+			},
+		},
+		"plugins": map[string]any{
+			"enabled":       false,
+			"dir":           "/src/plugins",
+			"auth-revision": 7,
+			"store-sources": []any{map[string]any{"name": "default", "url": "https://plugins.example.com"}},
+			"store-auth":    map[string]any{"default": map[string]any{"token": "store-tok"}},
+			"configs":       map[string]any{"my-plugin": map[string]any{"threshold": 42}},
+		},
+		"observability": map[string]any{
+			"usage": map[string]any{"statistics-enabled": false},
+			"pprof": map[string]any{"enabled": true},
+			"logs": map[string]any{
+				"logging-to-file":           false,
+				"logs-max-total-size-mb":    500,
+				"error-logs-max-files":      20,
+				"debug":                     true,
+				"request-log":               true,
+			},
+		},
+	}
+
+	destination := destinationFixture(t)
+	// Seed stale destination KVMap entry and destination host-exclusive fields
+	// to verify whole-map PUT replacement and strict host preservation.
+	mergeInto(destination.config, []string{"oauth", "providers", "antigravity", "sensitive-words-replace"}, map[string]any{
+		"stalekey": "staleval",
+	})
+	mergeInto(destination.config, []string{"server"}, map[string]any{
+		"server-id": "dst-srv",
+		"host":      "0.0.0.0",
+		"port":      8317,
+		"kv-store":  map[string]any{"path": "/supervisor/kv.db"},
+	})
+	mergeInto(destination.config, []string{"plugins"}, map[string]any{
+		"enabled":       true,
+		"dir":           "/supervisor/plugins",
+		"auth-revision": 1,
+	})
+	mergeInto(destination.config, []string{"observability"}, map[string]any{
+		"usage": map[string]any{"statistics-enabled": true},
+		"logs":  map[string]any{"logging-to-file": true},
+	})
+
+	summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	for _, leaf := range []string{
+		"server.commercial-mode",
+		"server.trusted-proxies",
+		"server.github-token",
+		"server.kv-store.disabled",
+		"models.catalog",
+		"models.codex-catalog",
+		"models.devin-catalog",
+		"oauth.providers.claude.oauth-include-create-api-key",
+		"oauth.providers.antigravity.sensitive-words-replace",
+		"oauth.providers.antigravity.sensitive-patterns-replace",
+		"observability.logs.debug",
+		"observability.logs.request-log",
+	} {
+		if item := itemByName(t, summary, configLeafItemName(leaf)); item.Outcome != freshstore.AdoptionMigrated {
+			t.Fatalf("leaf %s did not migrate: %+v", leaf, item)
+		}
+	}
+	if item := itemByName(t, summary, configFamilyItemName("replace")); item.Outcome != freshstore.AdoptionMigrated {
+		t.Fatalf("replace rule family did not migrate: %+v", item)
+	}
+	for _, section := range []string{"credentials.in-flight", "plugins.store-sources", "plugins.store-auth", "plugins.configs"} {
+		if item := itemByName(t, summary, providerSectionItemName(section)); item.Outcome != freshstore.AdoptionMigrated {
+			t.Fatalf("section %s did not migrate: %+v", section, item)
+		}
+	}
+	// KVMap PUT replaced the stale destination entry instead of merging.
+	kvGot, _ := lookup(destination.config, []string{"oauth", "providers", "antigravity", "sensitive-words-replace"}).(map[string]any)
+	if _, hasStale := kvGot["stalekey"]; hasStale || kvGot["badword"] != "goodword" {
+		t.Fatalf("KVMap leaf was merged instead of replaced: %+v", kvGot)
+	}
+	// Host-exclusive fields stayed untouched on destination.
+	if got := lookup(destination.config, []string{"server", "server-id"}); got != "dst-srv" {
+		t.Fatalf("destination server-id changed: %v", got)
+	}
+	if got := lookup(destination.config, []string{"server", "kv-store", "path"}); got != "/supervisor/kv.db" {
+		t.Fatalf("destination kv-store.path changed: %v", got)
+	}
+	if got := lookup(destination.config, []string{"plugins", "enabled"}); got != true {
+		t.Fatalf("destination plugins.enabled changed: %v", got)
+	}
+	if got := lookup(destination.config, []string{"plugins", "auth-revision"}); got != 1 {
+		t.Fatalf("destination plugins.auth-revision changed: %v", got)
+	}
+	if got := lookup(destination.config, []string{"observability", "logs", "logging-to-file"}); got != true {
+		t.Fatalf("destination logging-to-file changed: %v", got)
+	}
+}
+
+func TestConcurrencySectionPreservesDestinationRevisions(t *testing.T) {
+	source := newFakeCPA(t, "src-key")
+	source.seedAuthFile("claude-a.json", "claude", []byte(`{"type":"claude","access_token":"tok"}`), false)
+	source.config = map[string]any{
+		"config-version": 8,
+		"credentials": map[string]any{
+			"concurrency": map[string]any{
+				"default":                       4,
+				"lifecycle-config-revision":     "src-rev-99",
+				"observation-barrier-revision":  12,
+			},
+		},
+	}
+	destination := destinationFixture(t)
+	mergeInto(destination.config, []string{"credentials", "concurrency"}, map[string]any{
+		"lifecycle-config-revision":    "dst-rev-1",
+		"observation-barrier-revision": 3,
+	})
+
+	summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	item := itemByName(t, summary, providerSectionItemName("credentials.concurrency"))
+	if item.Outcome != freshstore.AdoptionMigrated {
+		t.Fatalf("credentials.concurrency outcome = %+v, want migrated", item)
+	}
+	got, _ := lookup(destination.config, []string{"credentials", "concurrency"}).(map[string]any)
+	if got["lifecycle-config-revision"] != "dst-rev-1" || got["observation-barrier-revision"] != 3 {
+		t.Fatalf("destination revisions overwritten: %+v", got)
+	}
+	if got["default"] != 4 {
+		t.Fatalf("destination concurrency settings missing: %+v", got)
+	}
+	// Replay must be idempotent with zero additional writes to credentials.concurrency.
+	replay := runMigration(t, source, destination, summary)
+	if replayItem := itemByName(t, replay, providerSectionItemName("credentials.concurrency")); replayItem != item {
+		t.Fatalf("replay rewrote concurrency item: %+v vs %+v", replayItem, item)
+	}
+
+	// Source with ONLY revision keys becomes absent_at_source.
+	revOnlySource := newFakeCPA(t, "src-key")
+	revOnlySource.seedAuthFile("claude-a.json", "claude", []byte(`{"type":"claude","access_token":"tok"}`), false)
+	revOnlySource.config = map[string]any{
+		"config-version": 8,
+		"credentials": map[string]any{
+			"concurrency": map[string]any{
+				"lifecycle-config-revision": "src-only",
+			},
+		},
+	}
+	revOnlyDest := destinationFixture(t)
+	revOnlySummary := runMigration(t, revOnlySource, revOnlyDest, freshstore.AdoptionSummary{})
+	if got := itemByName(t, revOnlySummary, providerSectionItemName("credentials.concurrency")); got.Outcome != freshstore.AdoptionAbsentAtSource {
+		t.Fatalf("revision-only concurrency outcome = %+v, want absent_at_source", got)
+	}
+}
+
+func TestICEServersMigratesViaYAMLAndFailsClosedWhenYAMLUnavailable(t *testing.T) {
+	source := newFakeCPA(t, "src-key")
+	source.seedAuthFile("claude-a.json", "claude", []byte(`{"type":"claude","access_token":"tok"}`), false)
+	source.config = map[string]any{
+		"config-version": 8,
+		"oauth": map[string]any{
+			"providers": map[string]any{
+				"codex": map[string]any{
+					"live-media-relay": map[string]any{
+						"enabled": true,
+						"ice-servers": []any{
+							map[string]any{
+								"urls":       []any{"turn:turn.example.com:3478"},
+								"username":   "turn-user",
+								"credential": "turn-secret",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	destination := destinationFixture(t)
+	summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	item := itemByName(t, summary, providerSectionItemName(iceServersSectionPath))
+	if item.Outcome != freshstore.AdoptionMigrated {
+		t.Fatalf("ice-servers outcome = %+v, want migrated", item)
+	}
+	got, _ := lookup(destination.config, strings.Split(iceServersSectionPath, ".")).([]any)
+	if len(got) != 1 {
+		t.Fatalf("destination ice-servers len = %d, want 1", len(got))
+	}
+	first, _ := got[0].(map[string]any)
+	if first["username"] != "turn-user" || first["credential"] != "turn-secret" {
+		t.Fatalf("destination ice-servers missing hydrated TURN credentials: %+v", first)
+	}
+
+	// When source /v8/management/config.yaml fails, ice-servers must NOT migrate
+	// redacted entries and must become manual reconfigure_after_adoption.
+	source.failConfigYAML = true
+	failDest := destinationFixture(t)
+	failSummary := runMigration(t, source, failDest, freshstore.AdoptionSummary{})
+	manual := itemByName(t, failSummary, providerSectionItemName(iceServersSectionPath))
+	if manual.Outcome != freshstore.AdoptionManual || manual.Reason != "reconfigure_after_adoption" {
+		t.Fatalf("redacted ice-servers outcome = %+v, want manual reconfigure_after_adoption", manual)
+	}
+	if got := lookup(failDest.config, strings.Split(iceServersSectionPath, ".")); got != nil {
+		t.Fatalf("redacted ice-servers must not be written to destination: %+v", got)
 	}
 }
