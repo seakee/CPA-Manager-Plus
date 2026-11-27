@@ -17,6 +17,7 @@ Usage: bash bin/upgrade-cpamp-v2.sh --image REPOSITORY:EXPLICIT_V2_TAG [options]
   --cpa-version V        actual observed CPA release if metadata lacks it
   --mode managed|external default: managed when exact CPA mounts are available
   --network NAME         extra existing network for external CPA reachability
+  --inherit-env NAME     pass selected runtime env var from old Manager (repeatable)
   --public-host HOST     browser-reachable host if the published IP is wildcard
   --public-origin ORIGIN canonical http(s)://host[:port] behind a TLS/reverse proxy
   --state-dir PATH       isolated private state directory outside source/CPA mounts
@@ -116,6 +117,85 @@ valid_ipv6() {
   fi
   [ "$nonzero" = 1 ] || return 1
   if [ "$compressed" = 1 ]; then [ "$groups" -le 7 ]; else [ "$groups" -eq 8 ]; fi
+}
+canon_ipv6() {
+  local lowered left right rest part words=() left_words=() right_words=()
+  local oct1 oct2 oct3 oct4 fill i run_start=-1 run_len=0 best_start=-1 best_len=0 out=''
+  lowered="$(printf '%s' "$1" | tr 'A-Z' 'a-z')"
+  valid_ipv6 "$lowered" || return 1
+  if [[ "$lowered" == *::* ]]; then
+    left="${lowered%%::*}"
+    right="${lowered#*::}"
+  else
+    left="$lowered"
+    right=''
+  fi
+  if [ -n "$left" ]; then
+    rest="$left:"
+    while [ -n "$rest" ]; do
+      part="${rest%%:*}"; rest="${rest#*:}"
+      if [ -z "$rest" ] && [[ "$lowered" != *::* ]] && [[ "$part" == *.* ]]; then
+        IFS=. read -r oct1 oct2 oct3 oct4 <<< "$part"
+        left_words+=("$(( (10#$oct1 << 8) | 10#$oct2 ))" "$(( (10#$oct3 << 8) | 10#$oct4 ))")
+      else
+        left_words+=("$((16#$part))")
+      fi
+    done
+  fi
+  if [ -n "$right" ]; then
+    rest="$right:"
+    while [ -n "$rest" ]; do
+      part="${rest%%:*}"; rest="${rest#*:}"
+      if [ -z "$rest" ] && [[ "$part" == *.* ]]; then
+        IFS=. read -r oct1 oct2 oct3 oct4 <<< "$part"
+        right_words+=("$(( (10#$oct1 << 8) | 10#$oct2 ))" "$(( (10#$oct3 << 8) | 10#$oct4 ))")
+      else
+        right_words+=("$((16#$part))")
+      fi
+    done
+  fi
+  if [[ "$lowered" == *::* ]]; then
+    fill=$((8 - ${#left_words[@]} - ${#right_words[@]}))
+    [ "${#left_words[@]}" -eq 0 ] || words+=("${left_words[@]}")
+    for ((i=0; i<fill; i++)); do words+=(0); done
+    [ "${#right_words[@]}" -eq 0 ] || words+=("${right_words[@]}")
+  else
+    words=("${left_words[@]}")
+  fi
+  [ "${#words[@]}" -eq 8 ] || return 1
+  for ((i=0; i<8; i++)); do
+    if [ "${words[i]}" -eq 0 ]; then
+      if [ "$run_len" -eq 0 ]; then run_start=$i; fi
+      run_len=$((run_len + 1))
+      if [ "$run_len" -ge 2 ] && [ "$run_len" -gt "$best_len" ]; then
+        best_start=$run_start
+        best_len=$run_len
+      fi
+    else
+      run_len=0
+    fi
+  done
+  i=0
+  while [ "$i" -lt 8 ]; do
+    if [ "$i" -eq "$best_start" ]; then
+      if [ "$i" -eq 0 ]; then out='::'; else out="${out}::"; fi
+      i=$((i + best_len))
+      continue
+    fi
+    if [ -n "$out" ] && [[ "$out" != *:: ]]; then out="${out}:"; fi
+    out="${out}$(printf '%x' "${words[i]}")"
+    i=$((i + 1))
+  done
+  printf '%s\n' "$out"
+}
+canon_concrete_ip() {
+  local raw="$1"
+  raw="${raw#[}"; raw="${raw%]}"
+  if [[ "$raw" == *:* ]]; then
+    [ "$raw" != '::' ] && canon_ipv6 "$raw"
+  else
+    valid_ipv4 "$raw" && [ "$raw" != 0.0.0.0 ] && printf '%s\n' "$raw"
+  fi
 }
 valid_origin_hostname() {
   local host="$1" rest label last='' count=0 label_re='^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$' digits_re='^[0-9]+$'
@@ -291,6 +371,68 @@ env_nonempty() {
   # Detect presence of a variable without reading or emitting its secret value.
   [ -n "$(inspect "$1" "{{range .Config.Env}}{{if eq (index (split . \"=\") 0) \"$2\"}}{{if ne . \"$2=\"}}{{println \"1\"}}{{end}}{{end}}{{end}}")" ]
 }
+resolved_env_defined=0
+resolved_env_value=''
+env_scalar_value() {
+  # Loss-free read of a single env entry: propagates inspect exit status, requires
+  # the trailing X sentinel before interpreting empty output as absence, and
+  # preserves embedded/trailing newlines without echoing secret values.
+  local label="$1" container_ref="$2" key="$3" raw entry val rc=0
+  raw="$(inspect "$container_ref" "{{range .Config.Env}}{{if eq (index (split . \"=\") 0) \"$key\"}}{{printf \"%s\\n\" .}}{{end}}{{end}}X")" || rc=$?
+  [ "$rc" -eq 0 ] && [[ "$raw" == *X ]] || fail "Cannot inspect environment entry for $label"
+  raw="${raw%X}"
+  if [ -z "$raw" ]; then
+    resolved_env_defined=0
+    resolved_env_value=''
+    return 0
+  fi
+  entry="${raw%$'\n'}"
+  [[ "$entry" != *$'\n'* ]] && [[ "$entry" != *$'\r'* ]] || fail "$label has a multiline or duplicate environment entry"
+  val="${entry#*=}"
+  if [ -n "$val" ]; then
+    [[ "$val" != *$'\t'* ]] && [[ "$val" != *[$'\001'-$'\037'$'\177']* ]] || fail "$label contains control characters"
+  fi
+  resolved_env_defined=1
+  resolved_env_value="$val"
+}
+valid_tz_value() {
+  local v="$1"
+  [ -n "$v" ] && [ "${#v}" -le 128 ] || return 1
+  [[ "$v" =~ ^[A-Za-z0-9._+-]+(/[A-Za-z0-9._+-]+)*$ ]] || return 1
+  [[ "$v" != .* ]] && [[ "$v" != */.* ]] && [[ "$v" != *..* ]]
+}
+valid_inherited_env_name() {
+  local k="$1"
+  [[ "$k" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || fail "Invalid --inherit-env variable name: $k"
+  case "$k" in
+    PATH|HOME|USER|LOGNAME|SHELL|PWD|OLDPWD|TMPDIR|TZ|IFS|ENV|BASH_ENV|PORT|HOST|HOSTNAME|HTTP_ADDR|PANEL_PATH|LISTEN_ADDR|GO*|LD_*|DYLD_*|USAGE_*|CPA_*|CPAMP_*)
+      fail "--inherit-env forbids reserved or internal variable: $k" ;;
+  esac
+}
+resolved_restart_policy=''
+read_restart_policy() {
+  local raw name count rc=0
+  raw="$(inspect "$1" '{{.HostConfig.RestartPolicy.Name}}:{{.HostConfig.RestartPolicy.MaximumRetryCount}}')" || rc=$?
+  [ "$rc" -eq 0 ] || fail 'Cannot inspect container restart policy'
+  name="${raw%%:*}"; count="${raw#*:}"
+  case "$name" in
+    ''|no) resolved_restart_policy=no ;;
+    always) resolved_restart_policy=always ;;
+    unless-stopped) resolved_restart_policy=unless-stopped ;;
+    on-failure)
+      if [ -z "$count" ] || [ "$count" = 0 ]; then
+        resolved_restart_policy=on-failure
+      elif [[ "$count" =~ ^[1-9][0-9]{0,5}$ ]]; then
+        resolved_restart_policy="on-failure:$count"
+      else
+        fail "Unsupported container restart policy retry count: $raw"
+      fi ;;
+    *) fail "Unsupported container restart policy: $name" ;;
+  esac
+}
+valid_restart_policy() {
+  [[ "$1" =~ ^(no|always|unless-stopped|on-failure(:[1-9][0-9]{0,5})?)$ ]]
+}
 mounts() { inspect "$1" '{{range .Mounts}}{{printf "%s\t" .Type}}{{if .Name}}{{.Name}}{{else}}-{{end}}{{printf "\t"}}{{if .Source}}{{.Source}}{{else}}-{{end}}{{printf "\t%s\t%t\n" .Destination .RW}}{{end}}'; }
 tmpfs_destinations() { inspect "$1" '{{range $dst,$opts := .HostConfig.Tmpfs}}{{println $dst}}{{end}}'; }
 manager_port_signature() {
@@ -362,6 +504,17 @@ acquire_state_lock() {
   state_lock_held=1
   printf '%s\n' "$$" > "$state_lock_dir/pid"
   chmod 600 "$state_lock_dir/pid"
+}
+check_unheld_state_lock() {
+  local holder_pid='' candidate_lock="$state_dir/.lock"
+  [ ! -L "$candidate_lock" ] || fail "State lock path must not be a symlink: $candidate_lock"
+  if [ -e "$candidate_lock" ]; then
+    if [ ! -L "$candidate_lock/pid" ]; then
+      holder_pid="$(cat "$candidate_lock/pid" 2>/dev/null || true)"
+    fi
+    [[ "$holder_pid" =~ ^[0-9]+$ ]] || holder_pid=''
+    fail "Another upgrade or rollback operation${holder_pid:+ (PID $holder_pid)} already holds $candidate_lock"
+  fi
 }
 release_state_lock() {
   if [ "$state_lock_held" = 1 ] && [ -n "$state_lock_dir" ]; then
@@ -492,12 +645,21 @@ confirm() {
 
 image=''; manager=''; source_destination=''; source_version=''; cpa=''; cpa_version=''
 mode=''; extra_network=''; public_host=''; public_origin=''; env_public_origin="${CPAMP_PUBLIC_ORIGIN:-}"
+inherited_env_names=''
 state_dir=''; confirmed=0; rollback=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --help|-h) usage; exit 0 ;;
     --confirm) confirmed=1; shift ;;
     --rollback) rollback=1; shift ;;
+    --inherit-env)
+      [ "$#" -ge 2 ] || fail "Missing value for $1"
+      scalar "$1" "$2"
+      valid_inherited_env_name "$2"
+      if [[ ",$inherited_env_names," != *",$2,"* ]]; then
+        inherited_env_names="${inherited_env_names:+$inherited_env_names,}$2"
+      fi
+      shift 2 ;;
     --image|--manager|--source-mount|--source-version|--cpa|--cpa-version|--mode|--network|--public-host|--public-origin|--state-dir)
       [ "$#" -ge 2 ] || fail "Missing value for $1"
       scalar "$1" "$2"
@@ -552,7 +714,7 @@ fi
 # The manifest is a data file, not an env file or a second migration journal.
 # Docker labels bind these deployment resources; upgrade_operations remains the
 # sole authority for data stages, gap decisions and completion.
-keys=(operation manager_id manager_image source_destination source_type source_source target_source_source source_version manager_running cpa_id cpa_image cpa_running cpa_version cpa_config_type cpa_config_source target_cpa_config_source cpa_auth_destination cpa_auth_type cpa_auth_source target_cpa_auth_source mode image_ref image_id image_revision image_version target_name target_id target_volume backup_volume runtime_volume host_ip host_port published_ports networks extra_network public_host public_origin phase)
+keys=(operation manager_id manager_image source_destination source_type source_source target_source_source source_version manager_running manager_restart_policy cpa_id cpa_image cpa_running cpa_restart_policy cpa_version cpa_config_type cpa_config_source target_cpa_config_source cpa_auth_destination cpa_auth_type cpa_auth_source target_cpa_auth_source mode image_ref image_id image_revision image_version target_name target_id target_volume backup_volume runtime_volume host_ip host_ips host_port published_ports networks extra_network public_host public_origin manager_tz inherited_env_names phase)
 write_state() {
   local key tmp="$state_dir/manifest.$$.new"
   [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || fail 'Unexpected manifest staging file; preserve it and investigate'
@@ -564,6 +726,11 @@ write_state() {
           target_source_source|target_cpa_config_source|target_cpa_auth_source) continue ;;
         esac
       fi
+      if [ "$has_restart_policy_keys" = 0 ]; then
+        case "$key" in
+          manager_restart_policy|cpa_restart_policy) continue ;;
+        esac
+      fi
       printf '%s\t%s\n' "$key" "${!key}"
     done
   ) > "$tmp"
@@ -571,13 +738,17 @@ write_state() {
   state_dir_uncommitted=0
 }
 has_target_mount_sources=0
+has_restart_policy_keys=0
 load_state() {
-  local line key value allowed seen='|' target_mount_keys=0
+  local line key value allowed seen='|' target_mount_keys=0 restart_policy_keys=0
   [ -f "$state_dir/manifest" ] && [ ! -L "$state_dir/manifest" ] || fail 'State manifest is not a regular file'
   public_origin=''
   cpa_auth_destination=''
+  manager_restart_policy=''; cpa_restart_policy=''
+  host_ips=''; manager_tz=''; inherited_env_names=''
   target_source_source=''; target_cpa_config_source=''; target_cpa_auth_source=''
   has_target_mount_sources=0
+  has_restart_policy_keys=0
   while IFS= read -r line || [ -n "$line" ]; do
     [[ "$line" == *$'\t'* ]] || fail 'Malformed manifest line'
     key="${line%%$'\t'*}"; value="${line#*$'\t'}"
@@ -592,7 +763,7 @@ load_state() {
   done < "$state_dir/manifest"
   for key in "${keys[@]}"; do
     case "$key" in
-      public_origin|cpa_auth_destination|target_source_source|target_cpa_config_source|target_cpa_auth_source) ;;
+      public_origin|cpa_auth_destination|target_source_source|target_cpa_config_source|target_cpa_auth_source|manager_restart_policy|cpa_restart_policy|host_ips|manager_tz|inherited_env_names) ;;
       *) [[ "$seen" == *"|$key|"* ]] || fail "Missing manifest key $key" ;;
     esac
   done
@@ -603,6 +774,14 @@ load_state() {
     has_target_mount_sources=1
   elif [ "$target_mount_keys" -ne 0 ]; then
     fail 'Incomplete target mount identity keys in manifest'
+  fi
+  for key in manager_restart_policy cpa_restart_policy; do
+    [[ "$seen" != *"|$key|"* ]] || restart_policy_keys=$((restart_policy_keys + 1))
+  done
+  if [ "$restart_policy_keys" -eq 2 ]; then
+    has_restart_policy_keys=1
+  elif [ "$restart_policy_keys" -ne 0 ]; then
+    fail 'Incomplete restart policy keys in manifest'
   fi
   object_name operation "$operation"
   [ "$target_name" = "$operation" ] && [ "$target_volume" = "$operation-data" ] &&
@@ -618,6 +797,14 @@ load_state() {
   [ "$operation" = "cpamp-v2-${manager_id:0:16}" ] || fail 'Operation does not belong to recorded Manager'
   case "$manager_running" in true|false) ;; *) fail 'Invalid recorded Manager running state' ;; esac
   case "$cpa_running" in true|false) ;; *) fail 'Invalid recorded CPA running state' ;; esac
+  if [ "$has_restart_policy_keys" = 1 ]; then
+    valid_restart_policy "$manager_restart_policy" || fail 'Invalid recorded Manager restart policy'
+    if [ -n "$cpa_id" ]; then
+      valid_restart_policy "$cpa_restart_policy" || fail 'Invalid recorded CPA restart policy'
+    else
+      [ -z "$cpa_restart_policy" ] || fail 'Recorded CPA restart policy lacks CPA container identity'
+    fi
+  fi
   mount_value source-mount "$source_destination"
   source_destination="$(clean_container_path source-mount "$source_destination")"
   [ "$source_destination" != / ] || fail 'Invalid recorded source-mount'
@@ -692,6 +879,52 @@ load_state() {
     deployed) [ -n "$target_id" ] || fail 'Deployed manifest lacks target container identity' ;;
   esac
   [ -z "$host_ip" ] || [[ "$host_ip" =~ ^[A-Za-z0-9.:-]+$ ]] || fail 'Invalid recorded published IP'
+  if [[ "$seen" != *"|host_ips|"* ]]; then
+    if [ -z "$host_ip" ]; then
+      host_ips='*'
+    elif [ "$host_ip" = 0.0.0.0 ] || [ "$host_ip" = '::' ]; then
+      host_ips="$host_ip"
+    else
+      local legacy_canon_ip
+      legacy_canon_ip="$(canon_concrete_ip "$host_ip")" || fail 'Invalid recorded published IP'
+      host_ip="$legacy_canon_ip"
+      host_ips="$legacy_canon_ip"
+    fi
+  elif [ "$host_ips" = '*' ]; then
+    [ -z "$host_ip" ] || [ "$host_ip" = 0.0.0.0 ] || fail 'Recorded host_ip disagrees with unspecified wildcard host_ips'
+  elif [ "$host_ips" = 0.0.0.0 ]; then
+    [ "$host_ip" = 0.0.0.0 ] || fail 'Recorded host_ip disagrees with IPv4 wildcard host_ips'
+  elif [ "$host_ips" = '::' ]; then
+    [ "$host_ip" = '::' ] || fail 'Recorded host_ip disagrees with IPv6 wildcard host_ips'
+  elif [ "$host_ips" = '0.0.0.0,::' ]; then
+    [ "$host_ip" = 0.0.0.0 ] || fail 'Recorded host_ip disagrees with dual-stack wildcard host_ips'
+  else
+    local recorded_ip canon_rec_ip seen_recorded_ips=',' first_recorded_ip=''
+    IFS=, read -r -a recorded_ip_list <<< "$host_ips"
+    [ "${#recorded_ip_list[@]}" -gt 0 ] || fail 'Invalid empty recorded host_ips'
+    for recorded_ip in "${recorded_ip_list[@]}"; do
+      [ -n "$recorded_ip" ] || fail 'Invalid empty IP in recorded host_ips'
+      [ "$recorded_ip" != 0.0.0.0 ] && [ "$recorded_ip" != '::' ] && [ "$recorded_ip" != '*' ] ||
+        fail 'Recorded host_ips mixes wildcard and concrete IPs'
+      canon_rec_ip="$(canon_concrete_ip "$recorded_ip")" || fail 'Invalid recorded concrete IP in host_ips'
+      [ "$canon_rec_ip" = "$recorded_ip" ] || fail 'Non-canonical IP in recorded host_ips'
+      [[ "$seen_recorded_ips" != *",$recorded_ip,"* ]] || fail 'Duplicate IP in recorded host_ips'
+      seen_recorded_ips="${seen_recorded_ips}${recorded_ip},"
+      [ -n "$first_recorded_ip" ] || first_recorded_ip="$recorded_ip"
+    done
+    [ "$host_ip" = "$first_recorded_ip" ] || fail 'Recorded host_ip disagrees with primary entry in host_ips'
+  fi
+  [ -z "$manager_tz" ] || valid_tz_value "$manager_tz" || fail 'Invalid recorded Manager TZ'
+  if [ -n "$inherited_env_names" ]; then
+    local env_item seen_env_items=','
+    IFS=, read -r -a env_item_list <<< "$inherited_env_names"
+    for env_item in "${env_item_list[@]}"; do
+      [ -n "$env_item" ] || fail 'Invalid empty entry in recorded inherited_env_names'
+      valid_inherited_env_name "$env_item"
+      [[ "$seen_env_items" != *",$env_item,"* ]] || fail 'Duplicate entry in recorded inherited_env_names'
+      seen_env_items="${seen_env_items}${env_item},"
+    done
+  fi
   [[ "$host_port" =~ ^[0-9]+$ ]] && [ "$host_port" -gt 0 ] && [ "$host_port" -le 65535 ] || fail 'Invalid recorded published port'
   [ -n "$published_ports" ] || fail 'Missing recorded published port bindings'
   if [ -n "$extra_network" ]; then
@@ -817,6 +1050,99 @@ verify_original_stopped_posture() {
     fi
   fi
 }
+verify_original_restart_policies() {
+  local expectation="$1"
+  [ "$has_restart_policy_keys" = 1 ] || return 0
+  read_restart_policy "$manager_id"
+  case "$expectation" in
+    exact_recorded)
+      [ "$resolved_restart_policy" = "$manager_restart_policy" ] || fail 'Original Manager restart policy changed unexpectedly' ;;
+    transition_allowed)
+      if [ "$manager_restart_policy" = always ]; then
+        case "$resolved_restart_policy" in always|no) ;; *) fail 'Original Manager restart policy changed unexpectedly' ;; esac
+      else
+        [ "$resolved_restart_policy" = "$manager_restart_policy" ] || fail 'Original Manager restart policy changed unexpectedly'
+      fi ;;
+    neutralized)
+      if [ "$manager_restart_policy" = always ]; then
+        [ "$resolved_restart_policy" = no ] || fail 'Original Manager restart policy was not cleared from always'
+      else
+        [ "$resolved_restart_policy" = "$manager_restart_policy" ] || fail 'Original Manager restart policy changed unexpectedly'
+      fi ;;
+    *) fail "Internal restart policy verification mode error: $expectation" ;;
+  esac
+  if [ "$mode" = managed ] && [ -n "$cpa_id" ]; then
+    read_restart_policy "$cpa_id"
+    case "$expectation" in
+      exact_recorded)
+        [ "$resolved_restart_policy" = "$cpa_restart_policy" ] || fail 'Original CPA restart policy changed unexpectedly' ;;
+      transition_allowed)
+        if [ "$cpa_restart_policy" = always ]; then
+          case "$resolved_restart_policy" in always|no) ;; *) fail 'Original CPA restart policy changed unexpectedly' ;; esac
+        else
+          [ "$resolved_restart_policy" = "$cpa_restart_policy" ] || fail 'Original CPA restart policy changed unexpectedly'
+        fi ;;
+      neutralized)
+        if [ "$cpa_restart_policy" = always ]; then
+          [ "$resolved_restart_policy" = no ] || fail 'Original CPA restart policy was not cleared from always'
+        else
+          [ "$resolved_restart_policy" = "$cpa_restart_policy" ] || fail 'Original CPA restart policy changed unexpectedly'
+        fi ;;
+    esac
+  fi
+}
+hydrate_legacy_restart_policies_for_resume() {
+  if [ "$has_restart_policy_keys" = 0 ]; then
+    read_restart_policy "$manager_id"
+    manager_restart_policy="$resolved_restart_policy"
+    if [ -n "$cpa_id" ]; then
+      read_restart_policy "$cpa_id"
+      cpa_restart_policy="$resolved_restart_policy"
+    else
+      cpa_restart_policy=''
+    fi
+    has_restart_policy_keys=1
+    write_state
+  fi
+}
+neutralize_always_restart_policies() {
+  hydrate_legacy_restart_policies_for_resume
+  if [ "$manager_restart_policy" = always ]; then
+    read_restart_policy "$manager_id"
+    if [ "$resolved_restart_policy" = always ]; then
+      docker update --restart no "$manager_id" >/dev/null
+    fi
+    read_restart_policy "$manager_id"
+    [ "$resolved_restart_policy" = no ] || fail 'Original Manager restart policy could not be cleared from always'
+  fi
+  if [ "$mode" = managed ] && [ -n "$cpa_id" ] && [ "$cpa_restart_policy" = always ]; then
+    read_restart_policy "$cpa_id"
+    if [ "$resolved_restart_policy" = always ]; then
+      docker update --restart no "$cpa_id" >/dev/null
+    fi
+    read_restart_policy "$cpa_id"
+    [ "$resolved_restart_policy" = no ] || fail 'Original CPA restart policy could not be cleared from always'
+  fi
+}
+restore_always_restart_policies() {
+  [ "$has_restart_policy_keys" = 1 ] || return 0
+  if [ "$mode" = managed ] && [ -n "$cpa_id" ] && [ "$cpa_restart_policy" = always ]; then
+    read_restart_policy "$cpa_id"
+    if [ "$resolved_restart_policy" != always ]; then
+      docker update --restart always "$cpa_id" >/dev/null
+    fi
+    read_restart_policy "$cpa_id"
+    [ "$resolved_restart_policy" = always ] || fail 'Original CPA restart policy could not be restored to always'
+  fi
+  if [ "$manager_restart_policy" = always ]; then
+    read_restart_policy "$manager_id"
+    if [ "$resolved_restart_policy" != always ]; then
+      docker update --restart always "$manager_id" >/dev/null
+    fi
+    read_restart_policy "$manager_id"
+    [ "$resolved_restart_policy" = always ] || fail 'Original Manager restart policy could not be restored to always'
+  fi
+}
 if [ -z "$state_dir" ]; then
   if [ -z "$manager" ]; then
     candidates="$(docker ps -aq --filter label=com.docker.compose.service=cpa-manager-plus)"
@@ -835,7 +1161,7 @@ fi
 req_image="$image"; req_manager="$manager"; req_source_destination="$source_destination"
 req_source_version="$source_version"; req_cpa="$cpa"; req_cpa_version="$cpa_version"
 req_mode="$mode"; req_extra_network="$extra_network"; req_public_host="$public_host"
-req_public_origin="$public_origin"
+req_public_origin="$public_origin"; req_inherited_env_names="$inherited_env_names"
 if [ -n "$state_dir" ]; then
   mount_value state-dir "$state_dir"
   [ ! -L "$state_dir" ] || fail 'State directory must not be a symlink'
@@ -849,7 +1175,11 @@ if [ -n "$state_dir" ] && [ -e "$state_dir/manifest" ]; then
   state_access="$(ls -ldn "$state_dir")"
   read -r permissions links owner rest <<< "$state_access"
   [ "$owner" = "$(id -u)" ] && [[ "$permissions" == drwx------* ]] || fail 'State directory must be owned by this user with mode 0700'
-  acquire_state_lock
+  if [ "$rollback" = 1 ]; then
+    check_unheld_state_lock
+  else
+    acquire_state_lock
+  fi
   load_state; resume=1
   check_state_dir_isolation
   if [ -n "$req_manager" ]; then
@@ -880,6 +1210,7 @@ if [ -n "$state_dir" ] && [ -e "$state_dir/manifest" ]; then
     fi
   fi
   [ -z "$req_public_origin" ] || [ "$req_public_origin" = "$public_origin" ] || fail 'Conflicting --public-origin for existing state directory'
+  [ -z "$req_inherited_env_names" ] || [ "$req_inherited_env_names" = "$inherited_env_names" ] || fail 'Conflicting --inherit-env for existing state directory'
   if [ -n "$req_public_host" ]; then
     if [ "$rollback" = 1 ]; then
       [ "$req_public_host" = "$public_host" ] || fail 'Conflicting --public-host for existing state directory'
@@ -919,6 +1250,23 @@ else
   [ -z "$(label "$manager_id" dev.cpamp.upgrade.operation)" ] || fail 'Selected Manager is already a v2 upgrade deployment'
   manager_running="$(inspect "$manager_id" '{{.State.Running}}')"
   case "$manager_running" in true|false) ;; *) fail 'Invalid Manager running state' ;; esac
+  read_restart_policy "$manager_id"
+  manager_restart_policy="$resolved_restart_policy"
+  has_restart_policy_keys=1
+  env_scalar_value 'Original Manager TZ' "$manager_id" TZ
+  if [ "$resolved_env_defined" = 1 ]; then
+    valid_tz_value "$resolved_env_value" || fail 'Invalid TZ value on original Manager'
+    manager_tz="$resolved_env_value"
+  else
+    manager_tz=''
+  fi
+  if [ -n "$inherited_env_names" ]; then
+    IFS=, read -r -a inherited_check_list <<< "$inherited_env_names"
+    for inherited_name in "${inherited_check_list[@]}"; do
+      env_scalar_value "--inherit-env $inherited_name" "$manager_id" "$inherited_name"
+      [ "$resolved_env_defined" = 1 ] || fail "Original Manager does not define --inherit-env variable: $inherited_name"
+    done
+  fi
   [ -z "$(env_value "$manager_id" CPA_MANAGER_CONFIG)" ] || fail 'Config-file Manager paths (CPA_MANAGER_CONFIG) cannot be verified safely from Docker metadata'
   [ -z "$(env_value "$manager_id" CPA_MANAGER_DATA_KEY_FILE)" ] && ! env_nonempty "$manager_id" CPA_MANAGER_DATA_KEY || fail 'External Manager data-key secret is unsupported; source requires colocated usage.sqlite and data.key'
   manager_mount_lines="$(mounts "$manager_id")"
@@ -979,12 +1327,14 @@ else
     while IFS= read -r candidate; do [ -z "$candidate" ] || { cpa="$candidate"; count=$((count + 1)); }; done <<< "$candidates"
     [ "$count" -le 1 ] || fail 'Select --cpa explicitly: associated Compose CPA is ambiguous'
   fi
-  cpa_id=''; cpa_image=''; cpa_running=false; cpa_config_type=''; cpa_config_source=''
+  cpa_id=''; cpa_image=''; cpa_running=false; cpa_restart_policy=''; cpa_config_type=''; cpa_config_source=''
   cpa_auth_destination=''; cpa_auth_type=''; cpa_auth_source=''
   if [ -n "$cpa" ]; then
     cpa_id="$(inspect "$cpa" '{{.Id}}')"; cpa_image="$(inspect "$cpa_id" '{{.Image}}')"; cpa_running="$(inspect "$cpa_id" '{{.State.Running}}')"
     [[ "$cpa_id" =~ ^[a-f0-9]{64}$ ]] && [[ "$cpa_image" =~ ^sha256:[a-f0-9]{64}$ ]] || fail 'Invalid CPA container identity'
     case "$cpa_running" in true|false) ;; *) fail 'Invalid CPA running state' ;; esac
+    read_restart_policy "$cpa_id"
+    cpa_restart_policy="$resolved_restart_policy"
     [ "$cpa_id" != "$manager_id" ] || fail 'CPA cannot be the Manager container'
     if [ "$mode" != external ]; then
       if resolve_mount "$cpa_id" /CLIProxyAPI/config.yaml; then
@@ -1043,17 +1393,51 @@ else
   fi
   bindings="$(inspect "$manager_id" '{{range $p,$bindings := .NetworkSettings.Ports}}{{if eq $p "18317/tcp"}}{{range $bindings}}{{printf "%s\t%s\n" .HostIp .HostPort}}{{end}}{{end}}{{end}}')"
   if [ -z "$bindings" ]; then
-    bindings="$(inspect "$manager_id" '{{range $p,$bindings := .HostConfig.PortBindings}}{{if eq $p "18317/tcp"}}{{range $bindings}}{{if .HostIp}}{{.HostIp}}{{else}}0.0.0.0{{end}}{{printf "\t%s\n" .HostPort}}{{end}}{{end}}{{end}}')"
+    bindings="$(inspect "$manager_id" '{{range $p,$bindings := .HostConfig.PortBindings}}{{if eq $p "18317/tcp"}}{{range $bindings}}{{printf "%s\t%s\n" .HostIp .HostPort}}{{end}}{{end}}{{end}}')"
   fi
-  host_ip=''; host_port=''
-  while IFS=$'\t' read -r ip port; do
+  host_ip=''; host_ips=''; host_port=''
+  has_wildcard_unspecified=0; has_wildcard_v4=0; has_wildcard_v6=0; has_concrete_ip=0
+  while IFS= read -r binding_line; do
+    [ -n "$binding_line" ] || continue
+    ip="${binding_line%%$'\t'*}"
+    port="${binding_line#*$'\t'}"
     [ -n "$port" ] || continue
-    if [ -z "$host_port" ]; then host_ip="$ip"; host_port="$port"
+    if [ -z "$host_port" ]; then host_port="$port"
     elif [ "$port" != "$host_port" ]; then fail 'Multiple different published Manager ports require an explicit supported deployment'; fi
+    ip="${ip#[}"; ip="${ip%]}"
+    case "$ip" in
+      '') has_wildcard_unspecified=1 ;;
+      0.0.0.0) has_wildcard_v4=1 ;;
+      '::') has_wildcard_v6=1 ;;
+      *)
+        has_concrete_ip=1
+        canon_ip="$(canon_concrete_ip "$ip")" || fail "Invalid published IP binding on Manager: $ip"
+        if [[ ",${host_ips}," != *",$canon_ip,"* ]]; then
+          host_ips="${host_ips:+$host_ips,}$canon_ip"
+        fi ;;
+    esac
   done <<< "$bindings"
   [[ "$host_port" =~ ^[0-9]+$ ]] && [ "$host_port" -gt 0 ] && [ "$host_port" -le 65535 ] || fail 'Old Manager has no concrete published 18317/tcp port'
-  # A dual-stack wildcard is represented by one equivalent wildcard publish.
-  [ "$host_ip" != '::' ] || host_ip=0.0.0.0
+  if [ "$has_concrete_ip" = 1 ] && { [ "$has_wildcard_unspecified" = 1 ] || [ "$has_wildcard_v4" = 1 ] || [ "$has_wildcard_v6" = 1 ]; }; then
+    fail 'Mixed wildcard and concrete IP bindings on 18317/tcp are unsupported'
+  fi
+  if [ "$has_concrete_ip" = 0 ]; then
+    if [ "$has_wildcard_v4" = 1 ] && [ "$has_wildcard_v6" = 1 ]; then
+      host_ip=0.0.0.0
+      host_ips='0.0.0.0,::'
+    elif [ "$has_wildcard_v4" = 1 ]; then
+      host_ip=0.0.0.0
+      host_ips=0.0.0.0
+    elif [ "$has_wildcard_v6" = 1 ]; then
+      host_ip='::'
+      host_ips='::'
+    else
+      host_ip=''
+      host_ips='*'
+    fi
+  else
+    host_ip="${host_ips%%,*}"
+  fi
   published_ports="$(manager_port_signature "$manager_id")"
   [ -n "$published_ports" ] || fail 'Old Manager has no recorded 18317/tcp port configuration'
   ui_origin="$(resolve_ui_origin)"
@@ -1069,17 +1453,17 @@ else
   for vol in "$target_volume" "$backup_volume" "$runtime_volume"; do
     if docker volume inspect "$vol" >/dev/null 2>&1; then volume_identity "$vol"; fi
   done
-  if [[ "$image" =~ ^sha256:[a-f0-9]{64}$ ]]; then
-    say "Inspecting already-local immutable image $image before stopping any source service."
-  else
-    say "Prefetching explicit image $image before stopping any source service."
-    docker pull "$image"
+  image_ref="$image"; image_id=''; image_version=''; image_revision=''
+  if docker image inspect --format '{{.Id}}' "$image" >/dev/null 2>&1 &&
+     { [[ "$image" =~ ^sha256:[a-f0-9]{64}$ ]] || [[ "$image" == *@sha256:* ]]; }; then
+    image_id="$(docker image inspect --format '{{.Id}}' "$image")"
+    image_version="$(image_label "$image_id" org.opencontainers.image.version)"; image_revision="$(image_label "$image_id" org.opencontainers.image.revision)"
+    [[ "$image_id" =~ ^sha256:[a-f0-9]{64}$ ]] || fail 'Image has no immutable content identity'
+    [[ "$image_version" =~ $v2_release_re ]] || fail 'Image must identify a v2 Manager release'
+    [[ "$image_revision" =~ ^[a-f0-9]{40}$ ]] || fail 'Image lacks a full source revision'
+  elif [[ "$image" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+    fail "Pinned local image digest is not locally available: $image"
   fi
-  image_ref="$image"; image_id="$(docker image inspect --format '{{.Id}}' "$image")"
-  image_version="$(image_label "$image_id" org.opencontainers.image.version)"; image_revision="$(image_label "$image_id" org.opencontainers.image.revision)"
-  [[ "$image_id" =~ ^sha256:[a-f0-9]{64}$ ]] || fail 'Image has no immutable content identity'
-  [[ "$image_version" =~ $v2_release_re ]] || fail 'Image must identify a v2 Manager release'
-  [[ "$image_revision" =~ ^[a-f0-9]{40}$ ]] || fail 'Image lacks a full source revision'
   target_source_source="$source_source"
   target_cpa_config_source="$cpa_config_source"
   target_cpa_auth_source="$cpa_auth_source"
@@ -1109,11 +1493,15 @@ fi
 check_source_identity
 say "Original Manager: $manager_id ($manager_image)"
 say "Source: $source_type:$source_source -> /upgrade/source:ro; Manager release: ${source_version:-unknown (engine must qualify source family)}"
-say "Target: $image_id; release $image_version; source revision $image_revision"
+if [ -n "$image_id" ]; then
+  say "Target: $image_id; release $image_version; source revision $image_revision"
+else
+  say "Target: $image_ref (will pull and verify v2 release identity after confirmation, before stopping any source service)"
+fi
 say "Mode: $mode; associated CPA: ${cpa_id:-not identified (external connection must be proven in UI)}; observed release: ${cpa_version:-unknown}"
-say "Will stop only original Manager; CPA is stopped only for managed mode. Old objects/source remain intact."
+say "Will stop only original Manager (clearing --restart always until explicit rollback); CPA is stopped only for managed mode. Source data remains intact."
 say "Separate new volumes: $target_volume, $backup_volume (verified bundle), $runtime_volume"
-say "Published endpoint: ${host_ip:-0.0.0.0}:$host_port; public origin: ${public_origin:-request host (local HTTP)}; networks: $display_networks"
+say "Published endpoint: ${host_ips:-${host_ip:-0.0.0.0}}:$host_port; public origin: ${public_origin:-request host (local HTTP)}; networks: $display_networks"
 say "Private deployment state: $state_dir/manifest (no credentials); no automatic rollback after possible v2 writes."
 
 target_identity() {
@@ -1191,9 +1579,59 @@ target_identity() {
   target_runtime_dir="$(env_value "$ref" CPAMP_RUNTIME_DATA_DIR)"
   [ -z "$target_runtime_dir" ] || [ "$target_runtime_dir" = /runtime ] || fail 'Target CPAMP_RUNTIME_DATA_DIR env was modified'
   [ -z "$(env_value "$ref" CPA_MANAGER_CONFIG)" ] || fail 'Target CPA_MANAGER_CONFIG env was modified'
-  target_ports="$(inspect "$ref" '{{range $p,$bindings := .HostConfig.PortBindings}}{{range $bindings}}{{printf "%s=" $p}}{{if .HostIp}}{{.HostIp}}{{else}}0.0.0.0{{end}}{{printf ":%s;" .HostPort}}{{end}}{{end}}')"
-  target_ports="${target_ports//[/}"; target_ports="${target_ports//]/}"
-  [ "$target_ports" = "18317/tcp=${host_ip:-0.0.0.0}:$host_port;" ] || fail 'Target published port binding differs from recorded endpoint'
+  local target_cpa_upstream
+  target_cpa_upstream="$(env_value "$ref" CPA_UPSTREAM_URL)"
+  [ -z "$target_cpa_upstream" ] || [ "$target_cpa_upstream" = http://127.0.0.1:8317 ] || fail 'Target CPA_UPSTREAM_URL env was modified'
+  [ -z "$(env_value "$ref" HTTP_ADDR)" ] && [ -z "$(env_value "$ref" PANEL_PATH)" ] &&
+    [ -z "$(env_value "$ref" CPA_MANAGEMENT_KEY_FILE)" ] &&
+    ! env_nonempty "$ref" CPA_MANAGEMENT_KEY || fail 'Target runtime listener or CPA override env was modified'
+  env_scalar_value 'Target TZ' "$ref" TZ
+  if [ -n "$manager_tz" ]; then
+    [ "$resolved_env_defined" = 1 ] && [ "$resolved_env_value" = "$manager_tz" ] || fail 'Target TZ env differs from recorded timezone'
+  else
+    [ "$resolved_env_defined" = 0 ] || fail 'Target unexpectedly defines TZ'
+  fi
+  if [ -n "$inherited_env_names" ]; then
+    local inherited_name expected_inherited_val
+    IFS=, read -r -a target_inherited_list <<< "$inherited_env_names"
+    for inherited_name in "${target_inherited_list[@]}"; do
+      env_scalar_value "--inherit-env $inherited_name" "$manager_id" "$inherited_name"
+      [ "$resolved_env_defined" = 1 ] || fail "Original Manager no longer defines inherited env: $inherited_name"
+      expected_inherited_val="$resolved_env_value"
+      env_scalar_value "Target $inherited_name" "$ref" "$inherited_name"
+      [ "$resolved_env_defined" = 1 ] || fail "Target container missing inherited env: $inherited_name"
+      [ "$resolved_env_value" = "$expected_inherited_val" ] || fail "Target inherited env differs from original Manager: $inherited_name"
+    done
+  fi
+  local raw_target_ports tp_line tp_rest tp_proto tp_ip tp_port tp_canon tp_tuple
+  local expected_binding_set=',' seen_actual_set=',' expected_binding_count=0 actual_binding_count=0 expected_ip
+  IFS=, read -r -a expected_ip_list <<< "${host_ips:-*}"
+  for expected_ip in "${expected_ip_list[@]}"; do
+    tp_tuple="18317/tcp=${expected_ip:-*}:$host_port"
+    [[ "$expected_binding_set" != *",$tp_tuple,"* ]] || continue
+    expected_binding_set="${expected_binding_set}${tp_tuple},"
+    expected_binding_count=$((expected_binding_count + 1))
+  done
+  raw_target_ports="$(inspect "$ref" '{{range $p,$bindings := .HostConfig.PortBindings}}{{range $bindings}}{{printf "%s\t%s\t%s\n" $p .HostIp .HostPort}}{{end}}{{end}}')"
+  while IFS= read -r tp_line; do
+    [ -n "$tp_line" ] || continue
+    tp_proto="${tp_line%%$'\t'*}"
+    tp_rest="${tp_line#*$'\t'}"
+    tp_ip="${tp_rest%%$'\t'*}"
+    tp_port="${tp_rest#*$'\t'}"
+    tp_ip="${tp_ip#[}"; tp_ip="${tp_ip%]}"
+    case "$tp_ip" in
+      '') tp_canon='*' ;;
+      0.0.0.0|'::') tp_canon="$tp_ip" ;;
+      *) tp_canon="$(canon_concrete_ip "$tp_ip")" || fail 'Target container has invalid published IP binding' ;;
+    esac
+    tp_tuple="${tp_proto}=${tp_canon}:${tp_port}"
+    [[ "$seen_actual_set" != *",$tp_tuple,"* ]] || fail 'Duplicate target published port binding'
+    [[ "$expected_binding_set" == *",$tp_tuple,"* ]] || fail 'Target published port binding differs from recorded endpoint'
+    seen_actual_set="${seen_actual_set}${tp_tuple},"
+    actual_binding_count=$((actual_binding_count + 1))
+  done <<< "$raw_target_ports"
+  [ "$actual_binding_count" -eq "$expected_binding_count" ] || fail 'Target published port binding differs from recorded endpoint'
   target_id="$actual_id"
 }
 ensure_networks() {
@@ -1214,9 +1652,30 @@ if [ "$rollback" = 1 ]; then
     prepared|rolled-back) verify_original_stopped_posture recorded_only ;;
     *) verify_original_stopped_posture active_upgrade ;;
   esac
+  verify_original_restart_policies transition_allowed
   has_rollback_target=0
   if [ -n "$target_id" ] || docker inspect "$target_name" >/dev/null 2>&1; then
     has_rollback_target=1
+    case "$phase" in
+      reconcile-pending|reconciled|deployed|rolled-back) ;;
+      *) fail 'Target container already exists before offline migration completed; preserve state and inspect' ;;
+    esac
+    if [ "$has_target_mount_sources" = 1 ]; then
+      target_identity
+    fi
+  fi
+  say 'ROLLBACK discards all v2-only writes from the active service view; v2 volumes/backup remain untouched.'
+  confirm 'Type ROLLBACK to stop v2 and restart the unchanged originals:' ROLLBACK
+  acquire_state_lock
+  load_state
+  check_state_dir_isolation
+  check_source_identity
+  case "$phase" in
+    prepared|rolled-back) verify_original_stopped_posture recorded_only ;;
+    *) verify_original_stopped_posture active_upgrade ;;
+  esac
+  verify_original_restart_policies transition_allowed
+  if [ "$has_rollback_target" = 1 ] || [ -n "$target_id" ] || docker inspect "$target_name" >/dev/null 2>&1; then
     case "$phase" in
       reconcile-pending|reconciled|deployed|rolled-back) ;;
       *) fail 'Target container already exists before offline migration completed; preserve state and inspect' ;;
@@ -1228,16 +1687,6 @@ if [ "$rollback" = 1 ]; then
       check_state_dir_isolation
     fi
     target_identity
-  fi
-  say 'ROLLBACK discards all v2-only writes from the active service view; v2 volumes/backup remain untouched.'
-  confirm 'Type ROLLBACK to stop v2 and restart the unchanged originals:' ROLLBACK
-  check_source_identity
-  case "$phase" in
-    prepared|rolled-back) verify_original_stopped_posture recorded_only ;;
-    *) verify_original_stopped_posture active_upgrade ;;
-  esac
-  if [ "$has_rollback_target" = 1 ] || [ -n "$target_id" ] || docker inspect "$target_name" >/dev/null 2>&1; then
-    target_identity
     if [ "$(inspect "$target_id" '{{.State.Running}}')" = true ]; then
       docker stop --time 150 "$target_id" >/dev/null
     fi
@@ -1245,6 +1694,7 @@ if [ "$rollback" = 1 ]; then
   fi
   # Persist the no-resume boundary before an original service can write again.
   phase=rolled-back; write_state
+  restore_always_restart_policies
   if [ "$mode" = managed ] && [ "$cpa_running" = true ] && [ "$(inspect "$cpa_id" '{{.State.Running}}')" != true ]; then
     docker start "$cpa_id" >/dev/null
   fi
@@ -1252,6 +1702,7 @@ if [ "$rollback" = 1 ]; then
     docker start "$manager_id" >/dev/null
   fi
   verify_original_stopped_posture recorded_only
+  verify_original_restart_policies exact_recorded
   say 'Original objects restarted only if previously running. Do not resume migration after original writes; use a new qualified operation.'
   say "Target volume: $target_volume"
   say "Backup volume: $backup_volume"
@@ -1261,6 +1712,15 @@ fi
 [ "$phase" != rolled-back ] || fail 'Original service may have written after rollback; this migration cannot resume'
 if [ "$resume" = 0 ]; then
   confirm 'Type UPGRADE to stop the identified source and prepare the new deployment:' UPGRADE
+  if [[ ! "$image" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+    say "Prefetching explicit image $image before stopping any source service."
+    docker pull "$image"
+  fi
+  image_ref="$image"; image_id="$(docker image inspect --format '{{.Id}}' "$image")"
+  image_version="$(image_label "$image_id" org.opencontainers.image.version)"; image_revision="$(image_label "$image_id" org.opencontainers.image.revision)"
+  [[ "$image_id" =~ ^sha256:[a-f0-9]{64}$ ]] || fail 'Image has no immutable content identity'
+  [[ "$image_version" =~ $v2_release_re ]] || fail 'Image must identify a v2 Manager release'
+  [[ "$image_revision" =~ ^[a-f0-9]{40}$ ]] || fail 'Image lacks a full source revision'
   if [ -n "$extra_network" ]; then
     resolve_extra_network "$extra_network"
     extra_network="$resolved_extra_network"
@@ -1268,6 +1728,7 @@ if [ "$resume" = 0 ]; then
   [ "$(docker image inspect --format '{{.Id}}' "$image_id")" = "$image_id" ] || fail 'Pinned target image is not locally available; restore that exact image'
   check_source_identity
   verify_original_stopped_posture recorded_only
+  verify_original_restart_policies exact_recorded
   mkdir -m 700 "$state_dir" || fail "State directory already exists; pass that exact --state-dir without conflicting discovery flags to resume: $state_dir"
   state_dir_uncommitted=1
   acquire_state_lock
@@ -1301,12 +1762,18 @@ if [ -n "$target_id" ] || docker inspect "$target_name" >/dev/null 2>&1; then
   fi
   ensure_networks
   verify_original_stopped_posture active_upgrade
+  verify_original_restart_policies transition_allowed
+  neutralize_always_restart_policies
+  verify_original_restart_policies neutralized
+  verify_original_stopped_posture active_upgrade
   docker start "$target_id" >/dev/null
 else
   [ "$phase" != deployed ] && [ -z "$target_id" ] || fail 'Recorded target disappeared; preserve v2 volumes and recover the original deployment, do not repeat migration'
   check_source_identity
   if [ "$phase" = prepared ]; then
     verify_original_stopped_posture recorded_only
+    verify_original_restart_policies transition_allowed
+    neutralize_always_restart_policies
     if [ "$manager_running" = true ] && [ "$(inspect "$manager_id" '{{.State.Running}}')" = true ]; then
       docker stop --time 150 "$manager_id" >/dev/null
     fi
@@ -1317,8 +1784,14 @@ else
       fi
       [ "$(inspect "$cpa_id" '{{.State.Running}}')" = false ] || fail 'Original CPA did not stop cleanly'
     fi
+    verify_original_stopped_posture active_upgrade
+    verify_original_restart_policies neutralized
     phase=stopped; write_state
   else
+    verify_original_stopped_posture active_upgrade
+    verify_original_restart_policies transition_allowed
+    neutralize_always_restart_policies
+    verify_original_restart_policies neutralized
     verify_original_stopped_posture active_upgrade
   fi
   assert_distinct_operation_volumes
@@ -1363,12 +1836,29 @@ else
     check_state_dir_isolation
     write_state
   fi
-  publish_ip="$host_ip"
-  [[ "$publish_ip" != *:* ]] || publish_ip="[$publish_ip]"
-  publish_ip="${publish_ip:+${publish_ip}:}"
+  publish_args=()
+  if [ "${host_ips:-*}" = '*' ]; then
+    publish_args=(--publish "$host_port:18317")
+  else
+    IFS=, read -r -a publish_ip_list <<< "$host_ips"
+    for publish_ip in "${publish_ip_list[@]}"; do
+      [[ "$publish_ip" != *:* ]] || publish_ip="[$publish_ip]"
+      publish_args+=(--publish "${publish_ip}:$host_port:18317")
+    done
+  fi
+  extra_env_args=()
+  [ -z "$manager_tz" ] || extra_env_args+=(--env "TZ=$manager_tz")
+  if [ -n "$inherited_env_names" ]; then
+    IFS=, read -r -a create_inherited_list <<< "$inherited_env_names"
+    for inherited_name in "${create_inherited_list[@]}"; do
+      env_scalar_value "--inherit-env $inherited_name" "$manager_id" "$inherited_name"
+      [ "$resolved_env_defined" = 1 ] || fail "Original Manager no longer defines --inherit-env variable: $inherited_name"
+      extra_env_args+=(--env "$inherited_name=$resolved_env_value")
+    done
+  fi
   build_target_mounts
   deployment=(create --name "$target_name" --label "dev.cpamp.upgrade.operation=$operation" --restart unless-stopped --stop-timeout 150
-    --publish "$publish_ip$host_port:18317" "${target_mount_args[@]}"
+    "${publish_args[@]}" "${target_mount_args[@]}"
     --env CPAMP_UPGRADE_WORKER_SOCKET=/run/cpamp-upgrade/worker.sock --env CPAMP_UPGRADE_SOURCE_ROOT=/upgrade/source
     --add-host host.docker.internal:host-gateway)
   if [ "$mode" = managed ]; then
@@ -1377,6 +1867,9 @@ else
   fi
   [ -z "$cpa_version" ] || deployment+=(--env "CPAMP_UPGRADE_CPA_VERSION=$cpa_version")
   [ -z "$public_origin" ] || deployment+=(--env "CPAMP_PUBLIC_ORIGIN=$public_origin")
+  if [ "${#extra_env_args[@]}" -gt 0 ]; then
+    deployment+=("${extra_env_args[@]}")
+  fi
   IFS=, read -r -a attach_networks <<< "$networks"
   deployment+=(--network "${attach_networks[0]}" "$image_id")
   created_id="$(docker "${deployment[@]}")"

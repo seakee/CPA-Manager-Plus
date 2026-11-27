@@ -55,8 +55,18 @@ const allowedEnvValueReads = new Set([
   'CPAMP_UPGRADE_WORKER_SOCKET', 'CPAMP_UPGRADE_SOURCE_ROOT',
   'CPAMP_UPGRADE_CPA_ROOT', 'CPAMP_UPGRADE_CPA_AUTH_ROOT',
   'CPAMP_UPGRADE_CPA_VERSION', 'CPAMP_LEGACY_ROOT', 'CPAMP_RUNTIME_DATA_DIR',
+  'CPA_UPSTREAM_URL', 'HTTP_ADDR', 'PANEL_PATH', 'CPA_MANAGEMENT_KEY_FILE',
+  'TZ',
 ]);
-const allowedEnvPresenceChecks = new Set(['CPA_MANAGER_DATA_KEY', 'CPAMP_LEGACY_ROOT']);
+const forbiddenSecretEnvReads = new Set([
+  'CPA_MANAGEMENT_KEY', 'CPA_MANAGER_ADMIN_KEY', 'CPA_MANAGER_DATA_KEY',
+]);
+const allowedEnvPresenceChecks = new Set(['CPA_MANAGER_DATA_KEY', 'CPAMP_LEGACY_ROOT', 'CPA_MANAGEMENT_KEY']);
+const isAllowedInheritedEnvKey = key => (
+  !forbiddenSecretEnvReads.has(key) &&
+  Array.isArray(s.allowedInheritedEnvKeys) &&
+  s.allowedInheritedEnvKeys.includes(key)
+);
 
 const parsePublish = spec => {
   if (spec.startsWith('[')) {
@@ -86,17 +96,41 @@ const format = (c, t) => {
   if (t === '{{.State.Running}}') return String(c.running);
   if (t === '{{.HostConfig.Privileged}}') return String(Boolean(c.privileged));
   if (t === '{{.HostConfig.NetworkMode}}') return c.networkMode || c.networks[0] || 'bridge';
+  if (t === '{{.HostConfig.RestartPolicy.Name}}:{{.HostConfig.RestartPolicy.MaximumRetryCount}}') {
+    const rp = c.restartPolicy || { name: 'no', maxRetryCount: 0 };
+    return (rp.name || '') + ':' + String(rp.maxRetryCount || 0);
+  }
   if (t.includes('.Config.Labels')) {
     const key = t.match(/index \.Config\.Labels "([^"]+)"/)[1];
     return c.labels[key] || '';
   }
   if (t.includes('.Config.Env')) {
     const key = t.match(/\) "([^"]+)"/)[1];
+    if (t.endsWith('X')) {
+      if (!allowedEnvValueReads.has(key) && !isAllowedInheritedEnvKey(key)) {
+        throw new Error('Unapproved env read: ' + key);
+      }
+      if (s.failEnvInspectFor && s.failEnvInspectFor.containerID === c.id && s.failEnvInspectFor.key === key) {
+        exit(7, '', 'Synthetic env inspect failure\n');
+      }
+      if (Array.isArray(c.rawEnvEntries)) {
+        const matches = c.rawEnvEntries.filter(entry => entry.startsWith(key + '='));
+        return matches.length > 0 ? matches.join('\n') + '\nX' : 'X';
+      }
+      if (Object.prototype.hasOwnProperty.call(c.env, key) && c.env[key] !== undefined) {
+        return key + '=' + c.env[key] + '\nX';
+      }
+      return 'X';
+    }
     if (t.includes('println "1"')) {
-      if (!allowedEnvPresenceChecks.has(key)) throw new Error('Unapproved env presence check: ' + key);
+      if (!allowedEnvPresenceChecks.has(key)) {
+        throw new Error('Unapproved env presence check: ' + key);
+      }
       return c.env[key] !== undefined && c.env[key] !== '' ? '1' : '';
     }
-    if (!allowedEnvValueReads.has(key)) throw new Error('Unapproved env read: ' + key);
+    if (!allowedEnvValueReads.has(key) && !isAllowedInheritedEnvKey(key)) {
+      throw new Error('Unapproved env read: ' + key);
+    }
     return c.env[key] !== undefined && c.env[key] !== '' ? key + '=' + c.env[key] : '';
   }
   if (t.includes('.HostConfig.Tmpfs')) {
@@ -114,6 +148,10 @@ const format = (c, t) => {
   }
   if (t.includes('.NetworkSettings.Ports') || t.includes('.HostConfig.PortBindings')) {
     if (t.includes('.NetworkSettings.Ports') && !c.running) return '';
+    if (t.includes('%s\\t%s\\t%s') || t.includes('%s\t%s\t%s')) {
+      const hostBindings = c.portBindings ?? c.ports;
+      return hostBindings.map(p => (p.proto || '18317/tcp') + '\t' + (p.ip || '') + '\t' + p.port).join('\n');
+    }
     if (t.includes('%s=')) {
       const hostBindings = c.portBindings ?? c.ports;
       return hostBindings.map(p => (p.proto || '18317/tcp') + '=' + (p.ip || '0.0.0.0') + ':' + p.port + ';').join('');
@@ -314,13 +352,46 @@ if (args[0] === 'create') {
   if (container(name)) refuse('Synthetic name exists');
   const ports = values('--publish').map(parsePublish);
   const createdImg = args.at(-1);
+  const shippingImageDefaultEnv = {
+    USAGE_DATA_DIR: '/data',
+    CPA_UPSTREAM_URL: 'http://127.0.0.1:8317',
+    USAGE_COLLECTOR_MODE: 'auto',
+    USAGE_RESP_QUEUE: 'usage',
+    USAGE_RESP_POP_SIDE: 'right',
+    USAGE_BATCH_SIZE: '100',
+    USAGE_POLL_INTERVAL_MS: '500',
+    USAGE_QUERY_LIMIT: '50000',
+    USAGE_CORS_ORIGINS: '*',
+  };
   s.containers.target = {
     id: s.targetID, name, image: createdImg, imageRef: createdImg, running: false, privileged: args.includes('--privileged'),
+    restartPolicy: { name: opt('--restart') || 'no', maxRetryCount: 0 },
     networkMode: opt('--network'), labels, mounts, networks: [opt('--network')],
-    env: Object.fromEntries(values('--env').map(v => { const eq = v.indexOf('='); return [v.slice(0, eq), v.slice(eq + 1)]; })),
+    env: {
+      ...shippingImageDefaultEnv,
+      ...Object.fromEntries(values('--env').map(v => { const eq = v.indexOf('='); return [v.slice(0, eq), v.slice(eq + 1)]; })),
+    },
     ports,
   };
   out(s.targetID);
+}
+if (args[0] === 'update') {
+  recordMutationLock();
+  if (args.length !== 4 || args[1] !== '--restart') throw new Error('Unexpected docker update flags: ' + args.join(' '));
+  const c = container(args[3]);
+  if (!c) refuse('No synthetic container');
+  if (c.labels['dev.cpamp.upgrade.mount-probe']) throw new Error('Mount probe must never be updated');
+  if (s.startOriginalOnUpdate === c.id) {
+    s.startOriginalOnUpdate = '';
+    c.running = true;
+  }
+  const spec = args[2];
+  if (spec.startsWith('on-failure:')) {
+    c.restartPolicy = { name: 'on-failure', maxRetryCount: Number(spec.split(':')[1] || 0) };
+  } else {
+    c.restartPolicy = { name: spec, maxRetryCount: 0 };
+  }
+  out(c.id);
 }
 if (args[0] === 'container' && args[1] === 'rm') {
   if (args.length !== 3) throw new Error('Unexpected container rm flags: ' + args.join(' '));
@@ -336,6 +407,14 @@ if (args[0] === 'stop' || args[0] === 'start') {
   const c = container(args.at(-1));
   if (!c) refuse('No synthetic service');
   if (c.labels['dev.cpamp.upgrade.mount-probe']) throw new Error('Mount probe must never be started or stopped');
+  if (args[0] === 'stop' && s.failStopContainerOnce === c.id) {
+    s.failStopContainerOnce = '';
+    refuse('Synthetic stop interruption');
+  }
+  if (args[0] === 'start' && s.failStartContainerOnce === c.id) {
+    s.failStartContainerOnce = '';
+    refuse('Synthetic start interruption');
+  }
   c.running = args[0] === 'start';
   out(c.id);
 }
@@ -671,7 +750,7 @@ const isProbeCreate = call => call[0] === 'create' && call.some(a => a.startsWit
 const isProbeRm = call => call[0] === 'container' && call[1] === 'rm';
 const targetCreates = state => state.calls.filter(call => call[0] === 'create' && !isProbeCreate(call));
 const commands = state => state.calls.filter(call => {
-  if (['run', 'stop', 'start', 'rm', 'rmi', 'kill'].includes(call[0])) return true;
+  if (['run', 'stop', 'start', 'rm', 'rmi', 'kill', 'update'].includes(call[0])) return true;
   if (call[0] === 'volume') return call[1] !== 'inspect';
   if (call[0] === 'create') return !isProbeCreate(call);
   if (call[0] === 'container') return !isProbeRm(call);
@@ -942,8 +1021,8 @@ test('Confirmation, unique Manager discovery, and config-driven or external-secr
   const unconfirmed = fixture(t);
   assert.notEqual(unconfirmed.invoke([], true).status, 0);
   assert.equal(commands(unconfirmed.get()).length, 0);
+  assert.equal(unconfirmed.get().calls.some(c => c[0] === 'pull' || c[0] === 'create' || c[0] === 'container'), false);
   assert.equal(existsSync(unconfirmed.stateDir), false);
-
   const ambiguous = fixture(t, { ambiguous: true });
   assert.notEqual(ambiguous.invoke(['--confirm'], true).status, 0);
   assert.equal(commands(ambiguous.get()).length, 0);
@@ -1613,10 +1692,17 @@ test('Legacy 33-key manifest on /host_mnt resumed from phase=preflighted preserv
   assert.equal(manifestMap(f.stateDir).phase, 'preflighted');
 
   // Rewrite manifest as a legacy 33-key manifest at phase=preflighted (without target_*_source, public_origin, cpa_auth_destination).
+  const legacyOptionalPrefixes = [
+    'public_origin\t', 'cpa_auth_destination\t',
+    'target_source_source\t', 'target_cpa_config_source\t', 'target_cpa_auth_source\t',
+    'manager_restart_policy\t', 'cpa_restart_policy\t',
+    'host_ips\t', 'manager_tz\t', 'inherited_env_names\t',
+  ];
   const legacyPreflightedLines = readFileSync(join(f.stateDir, 'manifest'), 'utf8')
     .trimEnd()
     .split('\n')
-    .filter(l => !l.startsWith('public_origin\t') && !l.startsWith('cpa_auth_destination\t') && !l.startsWith('target_source_source\t') && !l.startsWith('target_cpa_config_source\t') && !l.startsWith('target_cpa_auth_source\t'));
+    .filter(l => !legacyOptionalPrefixes.some(prefix => l.startsWith(prefix)));
+  assert.equal(legacyPreflightedLines.length, 33);
   writeFileSync(join(f.stateDir, 'manifest'), `${legacyPreflightedLines.join('\n')}\n`, { mode: 0o600 });
 
   // First resume advances from preflighted -> copied-in and fails at reconcile (exit 2); write_state must NOT persist unprobed target_*_source keys.
@@ -1937,4 +2023,360 @@ test('External mode resume and rollback allow an associated CPA recorded as stop
   assert.equal(manifestMap(mid.stateDir).phase, 'rolled-back');
   assert.equal(mid.get().containers.manager.running, true);
   assert.equal(mid.get().containers.cpa.running, true);
+});
+
+test('Managed cutover clears --restart always before stop, detects live policy drift, supports legacy manifests, and restores on rollback', t => {
+  const alwaysManaged = fixture(t);
+  alwaysManaged.change(s => {
+    s.containers.manager.restartPolicy = { name: 'always', maxRetryCount: 0 };
+    s.containers.cpa.restartPolicy = { name: 'always', maxRetryCount: 0 };
+  });
+  succeeded(alwaysManaged.invoke(['--confirm'], true));
+  const deployedManifest = manifestMap(alwaysManaged.stateDir);
+  assert.equal(deployedManifest.manager_restart_policy, 'always');
+  assert.equal(deployedManifest.cpa_restart_policy, 'always');
+  assert.equal(alwaysManaged.get().containers.manager.restartPolicy.name, 'no');
+  assert.equal(alwaysManaged.get().containers.cpa.restartPolicy.name, 'no');
+  // --restart always was cleared before docker stop on original containers.
+  const firstUpdateIdx = alwaysManaged.get().calls.findIndex(c => c[0] === 'update');
+  const firstStopIdx = alwaysManaged.get().calls.findIndex(c => c[0] === 'stop');
+  assert.ok(firstUpdateIdx >= 0 && firstUpdateIdx < firstStopIdx);
+
+  // Unconfirmed rollback on a legacy manifest without target_*_source performs zero mount-probe or lock mutations.
+  const rawBeforeRollbackPrompt = readFileSync(join(alwaysManaged.stateDir, 'manifest'), 'utf8');
+  const strippedTargetMountLines = rawBeforeRollbackPrompt
+    .trimEnd()
+    .split('\n')
+    .filter(l => !l.startsWith('target_source_source\t') && !l.startsWith('target_cpa_config_source\t') && !l.startsWith('target_cpa_auth_source\t'));
+  writeFileSync(join(alwaysManaged.stateDir, 'manifest'), `${strippedTargetMountLines.join('\n')}\n`, { mode: 0o600 });
+  alwaysManaged.change(s => { s.calls = []; s.locksObserved = []; });
+  assert.notEqual(alwaysManaged.invoke(['--rollback']).status, 0);
+  assert.equal(commands(alwaysManaged.get()).length, 0);
+  assert.equal(alwaysManaged.get().calls.some(c => c[0] === 'create' || c[0] === 'container' || c[0] === 'pull'), false);
+  assert.equal(existsSync(join(alwaysManaged.stateDir, '.lock')), false);
+
+  succeeded(alwaysManaged.invoke(['--rollback', '--confirm']));
+  assert.equal(manifestMap(alwaysManaged.stateDir).phase, 'rolled-back');
+  assert.equal(alwaysManaged.get().containers.manager.restartPolicy.name, 'always');
+  assert.equal(alwaysManaged.get().containers.cpa.restartPolicy.name, 'always');
+  assert.equal(alwaysManaged.get().containers.manager.running, true);
+  assert.equal(alwaysManaged.get().containers.cpa.running, true);
+
+  // Crash window 1: interrupted in phase=prepared AFTER docker update --restart no and BEFORE phase=stopped.
+  // Both resume AND rollback must accept live 'no' for recorded 'always' and recover cleanly.
+  const crashPreparedResume = fixture(t);
+  crashPreparedResume.change(s => {
+    s.containers.manager.restartPolicy = { name: 'always', maxRetryCount: 0 };
+    s.containers.cpa.restartPolicy = { name: 'always', maxRetryCount: 0 };
+    s.failStopContainerOnce = managerID;
+  });
+  assert.notEqual(crashPreparedResume.invoke(['--confirm'], true).status, 0);
+  assert.equal(manifestMap(crashPreparedResume.stateDir).phase, 'prepared');
+  assert.equal(crashPreparedResume.get().containers.manager.restartPolicy.name, 'no');
+  assert.equal(crashPreparedResume.get().containers.cpa.restartPolicy.name, 'no');
+  succeeded(crashPreparedResume.invoke());
+  assert.equal(manifestMap(crashPreparedResume.stateDir).phase, 'deployed');
+  assert.equal(crashPreparedResume.get().containers.manager.restartPolicy.name, 'no');
+
+  const crashPreparedRollback = fixture(t);
+  crashPreparedRollback.change(s => {
+    s.containers.manager.restartPolicy = { name: 'always', maxRetryCount: 0 };
+    s.containers.cpa.restartPolicy = { name: 'always', maxRetryCount: 0 };
+    s.failStopContainerOnce = managerID;
+  });
+  assert.notEqual(crashPreparedRollback.invoke(['--confirm'], true).status, 0);
+  assert.equal(manifestMap(crashPreparedRollback.stateDir).phase, 'prepared');
+  assert.equal(crashPreparedRollback.get().containers.manager.restartPolicy.name, 'no');
+  succeeded(crashPreparedRollback.invoke(['--rollback', '--confirm']));
+  assert.equal(manifestMap(crashPreparedRollback.stateDir).phase, 'rolled-back');
+  assert.equal(crashPreparedRollback.get().containers.manager.restartPolicy.name, 'always');
+  assert.equal(crashPreparedRollback.get().containers.cpa.restartPolicy.name, 'always');
+
+  // Crash window 2: rollback writes phase=rolled-back before restore/start; retry after start failure or pre-restore crash succeeds.
+  const crashRollbackRetry = fixture(t);
+  crashRollbackRetry.change(s => {
+    s.containers.manager.restartPolicy = { name: 'always', maxRetryCount: 0 };
+    s.containers.cpa.restartPolicy = { name: 'always', maxRetryCount: 0 };
+  });
+  succeeded(crashRollbackRetry.invoke(['--confirm'], true));
+  crashRollbackRetry.change(s => { s.failStartContainerOnce = managerID; });
+  assert.notEqual(crashRollbackRetry.invoke(['--rollback', '--confirm']).status, 0);
+  assert.equal(manifestMap(crashRollbackRetry.stateDir).phase, 'rolled-back');
+  // Also simulate crash before restore_always_restart_policies finished (live still 'no' at phase=rolled-back).
+  crashRollbackRetry.change(s => {
+    s.containers.manager.restartPolicy = { name: 'no', maxRetryCount: 0 };
+    s.containers.cpa.restartPolicy = { name: 'no', maxRetryCount: 0 };
+    s.containers.cpa.running = false;
+  });
+  succeeded(crashRollbackRetry.invoke(['--rollback', '--confirm']));
+  assert.equal(crashRollbackRetry.get().containers.manager.restartPolicy.name, 'always');
+  assert.equal(crashRollbackRetry.get().containers.cpa.restartPolicy.name, 'always');
+  assert.equal(crashRollbackRetry.get().containers.manager.running, true);
+  assert.equal(crashRollbackRetry.get().containers.cpa.running, true);
+
+  // Legacy 33-key and 38-key manifests: direct rollback omits unhydrated restart keys and remains retryable after start failure.
+  for (const legacyKind of ['33', '38']) {
+    const legRb = fixture(t);
+    succeeded(legRb.invoke(['--confirm'], true));
+    const legLines = readFileSync(join(legRb.stateDir, 'manifest'), 'utf8')
+      .trimEnd()
+      .split('\n')
+      .filter(l => {
+        if (['manager_restart_policy\t', 'cpa_restart_policy\t', 'host_ips\t', 'manager_tz\t', 'inherited_env_names\t'].some(p => l.startsWith(p))) return false;
+        if (legacyKind === '33' && ['public_origin\t', 'cpa_auth_destination\t', 'target_source_source\t', 'target_cpa_config_source\t', 'target_cpa_auth_source\t'].some(p => l.startsWith(p))) return false;
+        return true;
+      });
+    assert.equal(legLines.length, Number(legacyKind));
+    writeFileSync(join(legRb.stateDir, 'manifest'), `${legLines.join('\n')}\n`, { mode: 0o600 });
+    legRb.change(s => { s.failStartContainerOnce = managerID; });
+    assert.notEqual(legRb.invoke(['--rollback', '--confirm']).status, 0);
+    const afterFailedStart = manifestMap(legRb.stateDir);
+    assert.equal(afterFailedStart.phase, 'rolled-back');
+    assert.equal('manager_restart_policy' in afterFailedStart, false);
+    assert.equal('cpa_restart_policy' in afterFailedStart, false);
+    succeeded(legRb.invoke(['--rollback', '--confirm']));
+    assert.equal(legRb.get().containers.manager.running, true);
+  }
+
+  // Legacy manifest resumed when original containers still had --restart always hydrates and clears them safely.
+  const legacyAlways = fixture(t, { exitCodes: { run: 1 } });
+  assert.notEqual(legacyAlways.invoke(['--confirm'], true).status, 0);
+  const stripRestartLines = readFileSync(join(legacyAlways.stateDir, 'manifest'), 'utf8')
+    .trimEnd()
+    .split('\n')
+    .filter(l => !l.startsWith('manager_restart_policy\t') && !l.startsWith('cpa_restart_policy\t'));
+  writeFileSync(join(legacyAlways.stateDir, 'manifest'), `${stripRestartLines.join('\n')}\n`, { mode: 0o600 });
+  legacyAlways.change(s => {
+    s.exitCodes = {};
+    s.containers.manager.restartPolicy = { name: 'always', maxRetryCount: 0 };
+    s.containers.cpa.restartPolicy = { name: 'always', maxRetryCount: 0 };
+  });
+  succeeded(legacyAlways.invoke());
+  assert.equal(manifestMap(legacyAlways.stateDir).manager_restart_policy, 'always');
+  assert.equal(legacyAlways.get().containers.manager.restartPolicy.name, 'no');
+  assert.equal(legacyAlways.get().containers.cpa.restartPolicy.name, 'no');
+
+  // If an original starts during restart-policy neutralization on either resume branch, resume fails closed before starting target or running migration.
+  const startedDuringExistingTargetResume = fixture(t);
+  startedDuringExistingTargetResume.change(s => {
+    s.containers.manager.restartPolicy = { name: 'always', maxRetryCount: 0 };
+  });
+  succeeded(startedDuringExistingTargetResume.invoke(['--confirm'], true));
+  startedDuringExistingTargetResume.change(s => {
+    s.containers.target.running = false;
+    s.containers.manager.restartPolicy = { name: 'always', maxRetryCount: 0 };
+    s.startOriginalOnUpdate = managerID;
+    s.calls = [];
+  });
+  assert.notEqual(startedDuringExistingTargetResume.invoke().status, 0);
+  assert.equal(startedDuringExistingTargetResume.get().containers.target.running, false);
+
+  const startedDuringOfflineResume = fixture(t, { exitCodes: { run: 1 } });
+  startedDuringOfflineResume.change(s => {
+    s.containers.manager.restartPolicy = { name: 'always', maxRetryCount: 0 };
+  });
+  assert.notEqual(startedDuringOfflineResume.invoke(['--confirm'], true).status, 0);
+  startedDuringOfflineResume.change(s => {
+    s.exitCodes = {};
+    s.containers.manager.restartPolicy = { name: 'always', maxRetryCount: 0 };
+    s.startOriginalOnUpdate = managerID;
+    s.calls = [];
+  });
+  assert.notEqual(startedDuringOfflineResume.invoke().status, 0);
+  assert.equal(runs(startedDuringOfflineResume.get()).length, 0);
+
+  // Unexpected live policy mutation (recorded no -> live always, or recorded always -> live unless-stopped) fails closed on resume.
+  const driftedPolicy = fixture(t);
+  succeeded(driftedPolicy.invoke(['--confirm'], true));
+  driftedPolicy.change(s => {
+    s.containers.manager.restartPolicy = { name: 'always', maxRetryCount: 0 };
+    s.calls = [];
+  });
+  assert.notEqual(driftedPolicy.invoke().status, 0);
+  assert.equal(commands(driftedPolicy.get()).length, 0);
+
+  // External mode clears --restart always on Manager only, leaving associated CPA untouched.
+  const alwaysExt = fixture(t);
+  alwaysExt.change(s => {
+    s.containers.manager.restartPolicy = { name: 'always', maxRetryCount: 0 };
+    s.containers.cpa.restartPolicy = { name: 'always', maxRetryCount: 0 };
+  });
+  succeeded(alwaysExt.invoke(['--mode', 'external', '--confirm'], true));
+  assert.equal(alwaysExt.get().containers.manager.restartPolicy.name, 'no');
+  assert.equal(alwaysExt.get().containers.cpa.restartPolicy.name, 'always');
+  assert.equal(alwaysExt.get().calls.some(c => c[0] === 'update' && c.at(-1) === cpaID), false);
+});
+
+test('Multi-IP and wildcard address families, canonical IPv6 deduplication, strict TZ, and credential-safe --inherit-env work end to end', t => {
+  const proxySecret = 'http://proxy-user:proxy-secret-token@proxy.internal:8080';
+  const multi = fixture(t, {
+    managerEnv: {
+      TZ: 'Asia/Shanghai',
+      HTTP_PROXY: proxySecret,
+      HTTPS_PROXY: proxySecret,
+      NO_PROXY: 'localhost,127.0.0.1,.internal',
+      EMPTY_CUSTOM_TAG: '',
+    },
+  });
+  multi.change(s => {
+    s.allowedInheritedEnvKeys = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'EMPTY_CUSTOM_TAG'];
+    s.containers.manager.ports = [
+      { ip: '10.0.0.5', port: '38684', proto: '18317/tcp' },
+      { ip: '2001:0DB8:0:0:0:0:0:0005', port: '38684', proto: '18317/tcp' },
+      { ip: '2001:db8::5', port: '38684', proto: '18317/tcp' },
+    ];
+  });
+  const out = multi.invoke([
+    '--inherit-env', 'HTTP_PROXY',
+    '--inherit-env', 'HTTPS_PROXY',
+    '--inherit-env', 'NO_PROXY',
+    '--inherit-env', 'EMPTY_CUSTOM_TAG',
+    '--confirm',
+  ], true);
+  succeeded(out);
+  assert.equal(out.stdout.includes('proxy-secret-token'), false);
+  assert.equal(out.stderr.includes('proxy-secret-token'), false);
+
+  const rawManifest = readFileSync(join(multi.stateDir, 'manifest'), 'utf8');
+  assert.equal(rawManifest.includes('proxy-secret-token'), false);
+  const m = manifestMap(multi.stateDir);
+  assert.equal(m.host_ip, '10.0.0.5');
+  assert.equal(m.host_ips, '10.0.0.5,2001:db8::5');
+  assert.equal(m.manager_tz, 'Asia/Shanghai');
+  assert.equal(m.inherited_env_names, 'HTTP_PROXY,HTTPS_PROXY,NO_PROXY,EMPTY_CUSTOM_TAG');
+
+  const target = multi.get().containers.target;
+  assert.deepEqual(target.ports, [
+    { ip: '10.0.0.5', port: '38684', proto: '18317/tcp' },
+    { ip: '2001:db8::5', port: '38684', proto: '18317/tcp' },
+  ]);
+  assert.equal(target.env.TZ, 'Asia/Shanghai');
+  assert.equal(target.env.HTTP_PROXY, proxySecret);
+  assert.equal(target.env.HTTPS_PROXY, proxySecret);
+  assert.equal(target.env.NO_PROXY, 'localhost,127.0.0.1,.internal');
+  assert.equal(target.env.EMPTY_CUSTOM_TAG, '');
+  assert.equal(target.env.CPA_UPSTREAM_URL, 'http://127.0.0.1:8317');
+
+  // Reordered equivalent bindings AND non-compressed IPv6 in HostConfig.PortBindings pass target_identity;
+  // missing, extra, or duplicate bindings and tampered CPA_UPSTREAM_URL fail closed.
+  multi.change(s => {
+    s.containers.target.portBindings = [
+      { ip: '2001:db8:0:0:0:0:0:5', port: '38684', proto: '18317/tcp' },
+      { ip: '10.0.0.5', port: '38684', proto: '18317/tcp' },
+    ];
+  });
+  succeeded(multi.invoke());
+  assert.notEqual(multi.invoke(['--inherit-env', 'HTTP_PROXY']).status, 0);
+
+  for (const badPortBindings of [
+    [{ ip: '10.0.0.5', port: '38684', proto: '18317/tcp' }],
+    [
+      { ip: '10.0.0.5', port: '38684', proto: '18317/tcp' },
+      { ip: '2001:db8::5', port: '38684', proto: '18317/tcp' },
+      { ip: '192.168.1.9', port: '38684', proto: '18317/tcp' },
+    ],
+    [
+      { ip: '10.0.0.5', port: '38684', proto: '18317/tcp' },
+      { ip: '10.0.0.5', port: '38684', proto: '18317/tcp' },
+    ],
+  ]) {
+    multi.change(s => { s.containers.target.portBindings = badPortBindings; s.calls = []; });
+    assert.notEqual(multi.invoke().status, 0);
+    assert.equal(commands(multi.get()).length, 0);
+  }
+  multi.change(s => {
+    s.containers.target.portBindings = [
+      { ip: '2001:db8::5', port: '38684', proto: '18317/tcp' },
+      { ip: '10.0.0.5', port: '38684', proto: '18317/tcp' },
+    ];
+    s.containers.target.env.CPA_UPSTREAM_URL = 'http://cli-proxy-api:8317';
+    s.calls = [];
+  });
+  assert.notEqual(multi.invoke().status, 0);
+  assert.equal(commands(multi.get()).length, 0);
+  multi.change(s => { s.containers.target.env.CPA_UPSTREAM_URL = 'http://127.0.0.1:8317'; });
+  succeeded(multi.invoke(['--rollback', '--confirm']));
+  // Dual-stack wildcard (0.0.0.0 + ::) and IPv6-only wildcard (::) preserve exact address families.
+  const dualWildcard = fixture(t);
+  dualWildcard.change(s => {
+    s.containers.manager.ports = [
+      { ip: '0.0.0.0', port: '38684', proto: '18317/tcp' },
+      { ip: '::', port: '38684', proto: '18317/tcp' },
+    ];
+  });
+  succeeded(dualWildcard.invoke(['--confirm'], true));
+  assert.equal(manifestMap(dualWildcard.stateDir).host_ips, '0.0.0.0,::');
+  assert.deepEqual(dualWildcard.get().containers.target.ports, [
+    { ip: '0.0.0.0', port: '38684', proto: '18317/tcp' },
+    { ip: '::', port: '38684', proto: '18317/tcp' },
+  ]);
+  succeeded(dualWildcard.invoke());
+
+  const v6Wildcard = fixture(t);
+  v6Wildcard.change(s => {
+    s.containers.manager.ports = [{ ip: '::', port: '38684', proto: '18317/tcp' }];
+  });
+  succeeded(v6Wildcard.invoke(['--confirm'], true));
+  assert.equal(manifestMap(v6Wildcard.stateDir).host_ip, '::');
+  assert.equal(manifestMap(v6Wildcard.stateDir).host_ips, '::');
+  assert.deepEqual(v6Wildcard.get().containers.target.ports, [
+    { ip: '::', port: '38684', proto: '18317/tcp' },
+  ]);
+
+  // Reserved / Manager / CPA / runtime variables are rejected before pull or stop.
+  for (const forbidden of [
+    'CPA_MANAGEMENT_KEY', 'CPA_MANAGEMENT_KEY_FILE', 'CPA_UPSTREAM_URL',
+    'CPA_MANAGER_ADMIN_KEY', 'HTTP_ADDR', 'PANEL_PATH', 'PORT', 'HOST',
+    'USAGE_DB_PATH', 'CPAMP_PUBLIC_ORIGIN', 'GOFLAGS', 'LD_PRELOAD', 'TZ',
+  ]) {
+    const bad = fixture(t);
+    const res = bad.invoke(['--inherit-env', forbidden, '--confirm'], true);
+    assert.notEqual(res.status, 0, `Expected rejection for --inherit-env ${forbidden}`);
+    assert.equal(commands(bad.get()).length, 0);
+    assert.equal(bad.get().calls.some(c => c[0] === 'pull'), false);
+  }
+
+  // Multiline env value, duplicate env key, and empty TZ= fail closed without echoing secret payloads.
+  const multilineSecret = fixture(t, { managerEnv: { CUSTOM_PROXY: 'line1-secret\nEVIL=1' } });
+  multilineSecret.change(s => { s.allowedInheritedEnvKeys = ['CUSTOM_PROXY']; });
+  const mlOut = multilineSecret.invoke(['--inherit-env', 'CUSTOM_PROXY', '--confirm'], true);
+  assert.notEqual(mlOut.status, 0);
+  assert.equal(mlOut.stdout.includes('line1-secret'), false);
+  assert.equal(mlOut.stderr.includes('line1-secret'), false);
+  assert.equal(commands(multilineSecret.get()).length, 0);
+
+  const emptyTz = fixture(t, { managerEnv: { TZ: '' } });
+  assert.notEqual(emptyTz.invoke(['--confirm'], true).status, 0);
+  assert.equal(commands(emptyTz.get()).length, 0);
+
+  const invalidTz = fixture(t, { managerEnv: { TZ: '../bad-tz-token' } });
+  const tzOut = invalidTz.invoke(['--confirm'], true);
+  assert.notEqual(tzOut.status, 0);
+  assert.equal(tzOut.stderr.includes('bad-tz-token'), false);
+
+  // Failed TZ inspect on original Manager or unset-TZ target container fails closed instead of silently treating TZ as unset.
+  const failedSourceTzInspect = fixture(t, { managerEnv: { TZ: 'Asia/Shanghai' } });
+  failedSourceTzInspect.change(s => { s.failEnvInspectFor = { containerID: managerID, key: 'TZ' }; });
+  assert.notEqual(failedSourceTzInspect.invoke(['--confirm'], true).status, 0);
+  assert.equal(commands(failedSourceTzInspect.get()).length, 0);
+
+  const failedTargetTzInspect = fixture(t);
+  succeeded(failedTargetTzInspect.invoke(['--confirm'], true));
+  failedTargetTzInspect.change(s => {
+    s.failEnvInspectFor = { containerID: targetID, key: 'TZ' };
+    s.calls = [];
+  });
+  assert.notEqual(failedTargetTzInspect.invoke().status, 0);
+  assert.equal(commands(failedTargetTzInspect.get()).length, 0);
+
+  // Mixed wildcard + concrete IP binding fails closed before pull or stop.
+  const mixedIp = fixture(t);
+  mixedIp.change(s => {
+    s.containers.manager.ports = [
+      { ip: '0.0.0.0', port: '38684', proto: '18317/tcp' },
+      { ip: '10.0.0.5', port: '38684', proto: '18317/tcp' },
+    ];
+  });
+  assert.notEqual(mixedIp.invoke(['--confirm'], true).status, 0);
+  assert.equal(commands(mixedIp.get()).length, 0);
 });
