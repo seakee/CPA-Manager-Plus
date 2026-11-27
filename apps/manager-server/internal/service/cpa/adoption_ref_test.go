@@ -431,9 +431,10 @@ routing:
 			wantComplete: true,
 		},
 		{
-			name: "pre-existing top and middle comments plus single-segment legacy template comments ignored",
+			name: "pre-existing top and middle comments plus trailing plain prose without mapping syntax are ignored",
 			yaml: `# custom_top_commented: true
 # Note: operator header
+# debug: false
 config-version: 8
 # plugins.commented_in_middle: true
 server:
@@ -447,13 +448,46 @@ oauth:
 # Legacy compatibility reference (comments only; not part of this v8 template).
 #   host: ""
 #   port: 8317
-# debug: false
-# proxy-url: http://127.0.0.1:8080
-# note: check this before restart
-# TODO: clean up later
-# Note: trailing operator note
+# operator comment without colon
+# just plain prose at end of file
+# : bare null key ignored
 `,
 			want:         nil,
+			wantComplete: true,
+		},
+		{
+			name: "non-identifier, spaced, punctuated, complex, multiline flow, numeric, empty, and v7-named trailing mappings are all captured",
+			yaml: `config-version: 8
+server:
+    port: 8317
+
+# plugins.future flag: true
+# "  spaced key  ": 1
+# "plugins.@weird/key..1": [
+#   a,
+#   b
+# ]
+# ? "plugins.
+# multiline"
+# : true
+# 123: numeric-key
+# "": empty-string-key
+# Note: trailing mapping
+# debug: false
+# codex:
+#     retired_sub: 1
+`,
+			want: []string{
+				"  spaced key  ",
+				"123",
+				"<empty>",
+				"Note",
+				"codex",
+				"debug",
+				"plugins. multiline",
+				"plugins.@weird/key..1",
+				"plugins.future flag",
+			},
 			wantComplete: true,
 		},
 		{

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -419,89 +418,6 @@ const (
 	archivedV8YAMLScanIncompleteKey = "\x00cpamp_archived_yaml_scan_incomplete"
 )
 
-var (
-	archivedSectionPathPattern = regexp.MustCompile(`^[a-z0-9][a-zA-Z0-9_.-]*$`)
-	proseArchiveCommentTags = map[string]bool{
-		"todo":    true,
-		"fixme":   true,
-		"note":    true,
-		"hack":    true,
-		"warning": true,
-		"xxx":     true,
-	}
-	legacyCPAV7TopLevelKeys = map[string]bool{
-		"host":                               true,
-		"port":                               true,
-		"max-request-body-bytes":             true,
-		"trusted-proxies":                    true,
-		"github-token":                       true,
-		"tls":                                true,
-		"shutdown-timeout":                   true,
-		"commercial-mode":                    true,
-		"discovery":                          true,
-		"kv-store":                           true,
-		"response-compression":               true,
-		"server-id":                          true,
-		"remote-management":                  true,
-		"api-keys":                           true,
-		"credential-concurrency":             true,
-		"credential-in-flight":               true,
-		"force-model-prefix":                 true,
-		"request-retry":                      true,
-		"max-retry-credentials":              true,
-		"max-retry-interval":                 true,
-		"disable-cooling":                    true,
-		"save-cooldown-status":               true,
-		"transient-error-cooldown-seconds":   true,
-		"proxy-url":                          true,
-		"tls-handshake-timeout-seconds":      true,
-		"passthrough-headers":                true,
-		"nonstream-keepalive-interval":       true,
-		"streaming":                          true,
-		"payload":                            true,
-		"auth-dir":                           true,
-		"auth-auto-refresh-workers":          true,
-		"oauth-model-alias":                  true,
-		"oauth-excluded-models":              true,
-		"oauth-request-scoped-errors":        true,
-		"oauth-settings":                     true,
-		"ws-auth":                            true,
-		"incognito-browser":                  true,
-		"codex":                              true,
-		"codex-header-defaults":              true,
-		"claude":                             true,
-		"claude-code":                        true,
-		"disable-claude-cloak-mode":          true,
-		"claude-header-defaults":             true,
-		"antigravity":                        true,
-		"antigravity-signature-cache-enabled": true,
-		"antigravity-signature-bypass-strict": true,
-		"quota-exceeded":                     true,
-		"xai":                                true,
-		"devin":                              true,
-		"disable-image-generation":           true,
-		"gpt-image-2-base-model":             true,
-		"video-result-auth-cache-ttl":        true,
-		"debug":                              true,
-		"logging-to-file":                    true,
-		"logs-max-total-size-mb":             true,
-		"request-log":                        true,
-		"error-logs-max-files":               true,
-		"usage-statistics-enabled":           true,
-		"redis-usage-queue-retention-seconds": true,
-		"pprof":                              true,
-		"gemini-api-key":                     true,
-		"interactions-api-key":               true,
-		"vertex-api-key":                     true,
-		"codex-api-key":                      true,
-		"claude-api-key":                     true,
-		"xai-api-key":                        true,
-		"meta-api-key":                       true,
-		"openai-compatibility":               true,
-		"ampcode":                            true,
-	}
-)
-
 // V8UnknownConfigScan separates definite JSON-visible unknown configuration
 // paths from heuristic trailing YAML archive comment candidates and incomplete
 // YAML scan state.
@@ -559,8 +475,8 @@ func normalizeV8ArchiveCandidates(candidates []string) []string {
 	}
 	out := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
-		if trimmed := strings.TrimSpace(candidate); trimmed != "" {
-			out = append(out, trimmed)
+		if candidate != "" {
+			out = append(out, candidate)
 		}
 	}
 	if len(out) == 0 {
@@ -652,7 +568,7 @@ func ScanV8YAMLArchiveCandidates(projectedV8YAML []byte) (candidates []string, c
 		}
 		blockText := strings.Join(cur, "\n")
 		cur = nil
-		if section, ok := decodeArchivedYAMLMappingSection(blockText); ok && isPossibleArchivedV8Section(section) {
+		if section, ok := decodeArchivedYAMLMappingSection(blockText); ok {
 			found = append(found, section)
 		}
 	}
@@ -679,6 +595,12 @@ func ScanV8YAMLArchiveCandidates(projectedV8YAML []byte) (candidates []string, c
 				cur = append(cur, stripArchiveCommentPrefix(line))
 			}
 			continue
+		}
+		if len(cur) > 0 && strings.HasPrefix(cur[0], "? ") && !strings.HasPrefix(line, "# ? ") {
+			if _, complete := decodeArchivedYAMLMappingSection(strings.Join(cur, "\n")); !complete {
+				cur = append(cur, stripArchiveCommentPrefix(line))
+				continue
+			}
 		}
 		flush()
 		if !strings.HasPrefix(line, "# ") {
@@ -735,7 +657,14 @@ func isArchiveCommentContinuationLine(line string) bool {
 	if strings.HasPrefix(line, "#  ") || strings.HasPrefix(line, "# \t") || strings.HasPrefix(line, "#\t") {
 		return true
 	}
-	return line == "# -" || strings.HasPrefix(line, "# - ") || strings.HasPrefix(line, "# -\t")
+	if line == "# -" || strings.HasPrefix(line, "# - ") || strings.HasPrefix(line, "# -\t") {
+		return true
+	}
+	if line == "# :" || strings.HasPrefix(line, "# : ") || strings.HasPrefix(line, "# :\t") {
+		return true
+	}
+	trimmed := strings.TrimSpace(strings.TrimPrefix(line, "#"))
+	return trimmed == "]" || trimmed == "}" || strings.HasPrefix(trimmed, "],") || strings.HasPrefix(trimmed, "},")
 }
 
 func hasArchiveContinuationAhead(lines []string, start int) bool {
@@ -772,37 +701,16 @@ func decodeArchivedYAMLMappingSection(blockText string) (string, bool) {
 		return "", false
 	}
 	keyNode := root.Content[0]
-	if keyNode == nil || keyNode.Kind != yaml.ScalarNode || keyNode.ShortTag() != "!!str" {
+	if keyNode == nil || keyNode.Kind != yaml.ScalarNode {
 		return "", false
 	}
-	section := strings.TrimSpace(keyNode.Value)
-	if section == "" || section != keyNode.Value {
+	if keyNode.ShortTag() == "!!null" && keyNode.Style == 0 {
 		return "", false
 	}
-	return section, true
-}
-
-func isPossibleArchivedV8Section(section string) bool {
-	if section == "" || strings.ContainsAny(section, " \t\r\n") {
-		return false
+	if keyNode.Value == "" {
+		return "<empty>", true
 	}
-	if strings.HasPrefix(section, ".") || strings.HasSuffix(section, ".") || strings.Contains(section, "..") {
-		return false
-	}
-	if !archivedSectionPathPattern.MatchString(section) {
-		return false
-	}
-	if proseArchiveCommentTags[section] {
-		return false
-	}
-	if strings.Contains(section, ".") {
-		return true
-	}
-	index := knownV8ConfigSchema()
-	if section == "config-version" || index.leaves[section] || index.wholes[section] || index.parents[section] {
-		return false
-	}
-	return !legacyCPAV7TopLevelKeys[section]
+	return keyNode.Value, true
 }
 
 // UnknownV8ConfigPaths returns the sorted dotted paths of definite active

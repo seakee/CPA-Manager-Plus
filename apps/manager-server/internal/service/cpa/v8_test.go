@@ -274,9 +274,11 @@ upstream:
 		}
 		cases := []yamlOutcome{
 			{
-				name:   "clean normalized relay alias with single-segment legacy comment",
+				name:   "clean normalized relay alias with pre-active legacy comments and trailing plain prose",
 				status: http.StatusOK,
 				body: `# operator comment
+# debug: false
+# Note: operator header note
 config-version: 8
 server:
     port: 8317
@@ -286,10 +288,20 @@ oauth:
         codex:
             live-media-relay:
                 disable-private-remote-ips: false
-# debug: false
-# Note: operator trailing note
+# operator trailing comment without mapping syntax
 `,
 				wantUnknown: false,
+			},
+			{
+				name:   "non-identifier spaced archived key triggers unknown",
+				status: http.StatusOK,
+				body: `config-version: 8
+server:
+    port: 8317
+
+# plugins.future flag: true
+`,
+				wantUnknown: true,
 			},
 			{
 				name:   "colliding dotted archive path triggers unknown",

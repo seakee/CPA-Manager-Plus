@@ -4405,4 +4405,108 @@ oauth:
 			t.Fatalf("unknown-config item = %+v, want manual archived_or_commented_settings", unknownItem)
 		}
 	})
+
+	t.Run("case G: real CPA strips non-identifier keys with spaces and punctuation and surfaces archived unknown", func(t *testing.T) {
+		const sourceMgmtKey = "real-cpa-non-ident-mgmt"
+		const destMgmtKey = "real-cpa-non-ident-dest"
+		srcURL, client := startRealCPA(t, `config-version: 8
+server:
+  host: 127.0.0.1
+  port: {PORT}
+management:
+  secret-key: `+sourceMgmtKey+`
+  allow-remote: true
+  disable-control-panel: true
+access:
+  api-keys:
+    - "sk-client-1"
+oauth:
+  auth-dir: "{AUTH_DIR}"
+plugins:
+  "future flag": true
+  "@weird/key..1": "x"
+"root with spaces": 42
+`, sourceMgmtKey)
+		dstURL, _ := startRealCPA(t, `config-version: 8
+server:
+  host: 127.0.0.1
+  port: {PORT}
+management:
+  secret-key: `+destMgmtKey+`
+  allow-remote: true
+  disable-control-panel: true
+access:
+  api-keys:
+    - "sk-client-1"
+oauth:
+  auth-dir: "{AUTH_DIR}"
+`, destMgmtKey)
+
+		// (a) Real CPA omits non-identifier keys from JSON and archives them in config.yaml comments.
+		jsonReq, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, srcURL+"/v8/management/config", nil)
+		jsonReq.Header.Set("Authorization", "Bearer "+sourceMgmtKey)
+		jsonResp, err := client.Do(jsonReq)
+		if err != nil {
+			t.Fatalf("GET /v8/management/config: %v", err)
+		}
+		jsonBody, _ := io.ReadAll(jsonResp.Body)
+		_ = jsonResp.Body.Close()
+		if jsonResp.StatusCode != http.StatusOK ||
+			strings.Contains(string(jsonBody), "future flag") ||
+			strings.Contains(string(jsonBody), "@weird/key..1") ||
+			strings.Contains(string(jsonBody), "root with spaces") {
+			t.Fatalf("expected non-identifier keys omitted from JSON (status=%d body=%s)", jsonResp.StatusCode, string(jsonBody))
+		}
+
+		yamlReq, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, srcURL+"/v8/management/config.yaml", nil)
+		yamlReq.Header.Set("Authorization", "Bearer "+sourceMgmtKey)
+		yamlResp, err := client.Do(yamlReq)
+		if err != nil {
+			t.Fatalf("GET /v8/management/config.yaml: %v", err)
+		}
+		yamlBody, _ := io.ReadAll(yamlResp.Body)
+		_ = yamlResp.Body.Close()
+		yamlText := string(yamlBody)
+		if yamlResp.StatusCode != http.StatusOK ||
+			!strings.Contains(yamlText, `# "plugins.future flag":`) ||
+			!strings.Contains(yamlText, `# "plugins.@weird/key..1":`) ||
+			!strings.Contains(yamlText, `# "root with spaces":`) {
+			t.Fatalf("expected non-identifier keys archived in YAML (status=%d body=%s)", yamlResp.StatusCode, yamlText)
+		}
+
+		// (b) ReadV8AdoptionSnapshot includes unknown_cpa_native_resource.
+		snapshot, err := cpa.ReadV8AdoptionSnapshot(t.Context(), srcURL, sourceMgmtKey)
+		if err != nil {
+			t.Fatalf("ReadV8AdoptionSnapshot: %v", err)
+		}
+		if !slices.Contains(snapshot.ResourceSections, "unknown_cpa_native_resource") {
+			t.Fatalf("ResourceSections = %v, want unknown_cpa_native_resource", snapshot.ResourceSections)
+		}
+
+		// (c) CountSourceInventory omits cpa-config-unknown (never returns 0).
+		srcWire, err := NewSource(t.Context(), Endpoint{BaseURL: srcURL, ManagementKey: sourceMgmtKey})
+		if err != nil {
+			t.Fatalf("NewSource: %v", err)
+		}
+		defer srcWire.Close()
+		counts := CountSourceInventory(t.Context(), srcWire)
+		if val, ok := counts[string(bootstrap.AdoptionRefConfigUnknown)]; ok {
+			t.Fatalf("CountSourceInventory[cpa-config-unknown] = (%d, true), want omitted (%v)", val, counts)
+		}
+
+		// (d) Executor records family:unknown-config as manual archived_or_commented_settings.
+		dstWire, err := NewDestination(t.Context(), Endpoint{BaseURL: dstURL, ManagementKey: destMgmtKey})
+		if err != nil {
+			t.Fatalf("NewDestination: %v", err)
+		}
+		defer dstWire.Close()
+		result, err := New(srcWire, dstWire, migratingDecisions()).Run(t.Context(), freshstore.AdoptionSummary{}, nil)
+		if err != nil {
+			t.Fatalf("Executor.Run: %v", err)
+		}
+		unknownItem := itemByName(t, result.Summary, unknownConfigItemName)
+		if unknownItem.Kind != freshstore.AdoptionKindConfigFamily || unknownItem.Outcome != freshstore.AdoptionManual || unknownItem.Reason != "archived_or_commented_settings" {
+			t.Fatalf("unknown-config item = %+v, want manual archived_or_commented_settings", unknownItem)
+		}
+	})
 }
