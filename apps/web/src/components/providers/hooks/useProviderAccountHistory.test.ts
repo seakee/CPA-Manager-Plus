@@ -1,12 +1,37 @@
-import { describe, expect, it } from 'vitest';
-import type { MonitoringAccountHistoryItem } from '@/services/api/usageService';
+import { createElement, StrictMode } from 'react';
+import { act, create, type ReactTestRenderer } from 'react-test-renderer';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  monitoringAnalyticsApi,
+  type MonitoringAccountHistoryItem,
+} from '@/services/api/usageService';
 import { buildProviderRows } from '../ProviderTable/rowData';
 import type { ProviderRecentUsageMap } from '../utils';
 import {
   aggregateProviderHistoryItems,
   buildProviderHistoryStatusBarData,
   buildProviderHistoryTargets,
+  useProviderAccountHistory,
 } from './useProviderAccountHistory';
+
+const authState = vi.hoisted(() => ({
+  connectionStatus: 'connected',
+  managementKey: 'test-mgmt-key',
+}));
+
+vi.mock('@/stores', () => ({
+  useAuthStore: (selector: (s: typeof authState) => unknown) => selector(authState),
+}));
+
+vi.mock('@/hooks/usePanelFeatureAvailability', () => ({
+  usePanelFeatureAvailability: () => ({
+    managerServiceAvailable: true,
+    managerServiceBase: 'http://127.0.0.1:18319',
+    requestMonitoringAvailable: true,
+    checking: false,
+    reason: '',
+  }),
+}));
 
 describe('useProviderAccountHistory helpers', () => {
   it('builds deduplicated targets across single-key, interactions, and multi-key OpenAI providers', () => {
@@ -151,5 +176,186 @@ describe('useProviderAccountHistory helpers', () => {
     expect(bar.blocks.slice(0, 8)).toEqual(Array(8).fill('idle'));
     expect(bar.blocks.slice(8)).toEqual(['success', 'failure']);
     expect(bar.successRate).toBe(50);
+  });
+});
+
+describe('useProviderAccountHistory re-entry cooldown', () => {
+  let renderer: ReactTestRenderer | undefined;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-26T12:00:00Z'));
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    authState.connectionStatus = 'connected';
+    authState.managementKey = 'test-mgmt-key';
+  });
+
+  afterEach(async () => {
+    if (renderer) {
+      await act(async () => renderer?.unmount());
+    }
+    renderer = undefined;
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('skips duplicate account-history fetch when leaving and re-entering within 5s cooldown, and revalidates after 5s', async () => {
+    const getAccountHistorySpy = vi
+      .spyOn(monitoringAnalyticsApi, 'getAccountHistory')
+      .mockResolvedValue({
+        generated_at_ms: Date.now(),
+        checkpoint: { last_event_id: 1, latest_id: 1, pending: false, processed: 0 },
+        items: [
+          {
+            row_key: 'openai:minimax:0',
+            account_key: 'k1',
+            matched: true,
+            sync_status: 'complete',
+            total_requests: 10,
+            success_calls: 10,
+            failure_calls: 0,
+            total_tokens: 43144,
+            total_cost: 0.01,
+            success_rate: 100,
+            first_seen_ms: 1_000,
+            last_seen_ms: 2_000,
+            latest_request: null,
+            recent_requests: [],
+          },
+        ],
+      });
+
+    const openaiList = [
+      {
+        name: 'Minimax',
+        baseUrl: 'https://api.minimaxi.com/v1',
+        apiKeyEntries: [{ apiKey: 'sk-mm-1', authIndex: 'b375c6488dddc736' }],
+      },
+    ];
+
+    function Harness({ enabled }: { enabled: boolean }) {
+      useProviderAccountHistory({
+        enabled,
+        reentryCooldownMs: 5_000,
+        gemini: [],
+        codex: [],
+        claude: [],
+        vertex: [],
+        openai: openaiList,
+      });
+      return null;
+    }
+
+    await act(async () => {
+      renderer = create(createElement(Harness, { enabled: true }));
+    });
+    expect(getAccountHistorySpy).toHaveBeenCalledTimes(1);
+
+    // Leave and return within 2s (< 5s cooldown): must NOT fire another request.
+    vi.advanceTimersByTime(2_000);
+    await act(async () => {
+      renderer!.update(createElement(Harness, { enabled: false }));
+    });
+    await act(async () => {
+      renderer!.update(createElement(Harness, { enabled: true }));
+    });
+    expect(getAccountHistorySpy).toHaveBeenCalledTimes(1);
+
+    // Advance past 5s cooldown, leave and return: MUST revalidate.
+    vi.advanceTimersByTime(4_000);
+    await act(async () => {
+      renderer!.update(createElement(Harness, { enabled: false }));
+    });
+    await act(async () => {
+      renderer!.update(createElement(Harness, { enabled: true }));
+    });
+    expect(getAccountHistorySpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('starts a fresh fetch on StrictMode replay instead of joining an aborted in-flight tracker', async () => {
+    const signals: AbortSignal[] = [];
+    let resolveSecond!: (value: {
+      generated_at_ms: number;
+      checkpoint: { last_event_id: number; latest_id: number; pending: boolean; processed: number };
+      items: MonitoringAccountHistoryItem[];
+    }) => void;
+
+    const getAccountHistorySpy = vi
+      .spyOn(monitoringAnalyticsApi, 'getAccountHistory')
+      .mockImplementation((_base, _key, _body, signal) => {
+        if (signal) signals.push(signal);
+        if (signals.length === 1) {
+          // First mount request stays pending until StrictMode cleanup aborts it.
+          return new Promise(() => {});
+        }
+        return new Promise((resolve) => {
+          resolveSecond = resolve;
+        });
+      });
+
+    const openaiList = [
+      {
+        name: 'Minimax',
+        baseUrl: 'https://api.minimaxi.com/v1',
+        apiKeyEntries: [{ apiKey: 'sk-mm-1', authIndex: 'b375c6488dddc736' }],
+      },
+    ];
+    const targetRowKey = buildProviderHistoryTargets({
+      gemini: [],
+      codex: [],
+      claude: [],
+      vertex: [],
+      openai: openaiList,
+    })[0].target.row_key;
+
+    function Harness() {
+      const { historyByRowKey } = useProviderAccountHistory({
+        enabled: true,
+        reentryCooldownMs: 5_000,
+        gemini: [],
+        codex: [],
+        claude: [],
+        vertex: [],
+        openai: openaiList,
+      });
+      const total = Array.from(historyByRowKey.values())[0]?.totalRequests ?? 0;
+      return createElement('span', { 'data-total': total });
+    }
+
+    await act(async () => {
+      renderer = create(createElement(StrictMode, null, createElement(Harness)));
+    });
+
+    expect(getAccountHistorySpy).toHaveBeenCalledTimes(2);
+    expect(signals[0]?.aborted).toBe(true);
+    expect(signals[1]?.aborted).toBe(false);
+
+    await act(async () => {
+      resolveSecond({
+        generated_at_ms: Date.now(),
+        checkpoint: { last_event_id: 1, latest_id: 1, pending: false, processed: 0 },
+        items: [
+          {
+            row_key: targetRowKey,
+            account_key: 'k1',
+            matched: true,
+            sync_status: 'complete',
+            total_requests: 10,
+            success_calls: 10,
+            failure_calls: 0,
+            total_tokens: 43144,
+            total_cost: 0.01,
+            success_rate: 100,
+            first_seen_ms: 1_000,
+            last_seen_ms: 2_000,
+            latest_request: null,
+            recent_requests: [],
+          },
+        ],
+      });
+      await Promise.resolve();
+    });
+
+    expect(renderer!.root.findByType('span').props['data-total']).toBe(10);
   });
 });

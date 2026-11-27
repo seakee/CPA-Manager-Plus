@@ -30,6 +30,7 @@ var managerOwnedPrefixes = []string{
 	"remote-management.",
 	"server.host",
 	"server.port",
+	"server.server-id",
 	"plugins.",
 	"disable-control-panel",
 	"oauth.auth-dir",
@@ -49,6 +50,7 @@ var managerOwnedPrefixes = []string{
 var managerOwnedExact = map[string]bool{
 	"server.host":           true,
 	"server.port":           true,
+	"server.server-id":      true,
 	"disable-control-panel": true,
 	"oauth.auth-dir":        true,
 	"access.api-keys":       true,

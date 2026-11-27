@@ -1,8 +1,10 @@
 package cpa
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 )
@@ -166,7 +168,10 @@ func (p proofPosture) matchesAdopt(data []byte) bool {
 		if requiredSet[name] {
 			continue
 		}
-		if !adoptRoots[name] || !isJSONObject(raw) {
+		if disallowedLegacyRootKeys[strings.ToLower(name)] || !isJSONObject(raw) {
+			return false
+		}
+		if !adoptRoots[name] && (isUnsafeExtensionKey(name) || !safeExtensionObject(raw)) {
 			return false
 		}
 	}
@@ -206,55 +211,7 @@ func (p proofPosture) matchesAdopt(data []byte) bool {
 //   - Rejected: enabled `tls` or `discovery`, non-empty `kv-store.path`, and
 //     every unknown `server` key.
 func matchesAdoptServer(raw json.RawMessage) (string, bool) {
-	var server map[string]json.RawMessage
-	if json.Unmarshal(raw, &server) != nil || server == nil {
-		return "", false
-	}
-	var boundHost string
-	if json.Unmarshal(server["host"], &boundHost) != nil || !exactJSONInt(server["port"], 8317) {
-		return "", false
-	}
-	for key, val := range server {
-		switch key {
-		case "host", "port":
-		case "discovery":
-			if !matchesDisabledDiscovery(val) {
-				return "", false
-			}
-		case "tls":
-			if !matchesDisabledTLS(val) {
-				return "", false
-			}
-		case "kv-store":
-			if !matchesAdoptKVStore(val) {
-				return "", false
-			}
-		case "commercial-mode":
-			if _, ok := parseExactJSONBool(val); !ok {
-				return "", false
-			}
-		case "max-request-body-bytes":
-			if !exactJSONNonNegativeInt64(val) {
-				return "", false
-			}
-		case "trusted-proxies":
-			if !isStringSlice(val) {
-				return "", false
-			}
-		case "response-compression":
-			if !matchesResponseCompression(val) {
-				return "", false
-			}
-		case "github-token":
-			var token string
-			if json.Unmarshal(val, &token) != nil {
-				return "", false
-			}
-		default:
-			return "", false
-		}
-	}
-	return boundHost, true
+	return matchesSupervisorServer(raw, true)
 }
 
 func matchesAdoptKVStore(raw json.RawMessage) bool {
@@ -292,18 +249,37 @@ func matchesResponseCompression(raw json.RawMessage) bool {
 				return false
 			}
 		case "min-bytes":
-			var n int
-			if json.Unmarshal(val, &n) != nil {
+			if !exactJSONInt64(val) {
 				return false
 			}
 		default:
-			return false
+			if isUnsafeExtensionKey(key) || !safeExtensionValue(val, 0) {
+				return false
+			}
 		}
 	}
 	return true
 }
 
+func exactJSONInt64(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || (trimmed[0] != '-' && (trimmed[0] < '0' || trimmed[0] > '9')) {
+		return false
+	}
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	dec.UseNumber()
+	var num json.Number
+	if dec.Decode(&num) != nil || dec.More() {
+		return false
+	}
+	_, err := num.Int64()
+	return err == nil
+}
+
 func exactJSONNonNegativeInt64(raw json.RawMessage) bool {
+	if !exactJSONInt64(raw) {
+		return false
+	}
 	var v int64
 	return json.Unmarshal(raw, &v) == nil && v >= 0
 }

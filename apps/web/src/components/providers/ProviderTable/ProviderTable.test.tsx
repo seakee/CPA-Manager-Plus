@@ -776,6 +776,7 @@ describe('ProviderCardGrid', () => {
     expect(text).toContain('82.6%');
     expect(text).toContain('最近状态');
     expect(text).toContain('503 · Service Unavailable');
+    expect(card.findByType(ProviderStatusBar).props.statusData.blocks).toHaveLength(20);
 
     const healthBtn = card
       .findAllByType(Button)

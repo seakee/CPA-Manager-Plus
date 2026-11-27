@@ -51,11 +51,13 @@ export function DrawerRecentStatusCard({
   className,
 }: DrawerRecentStatusCardProps) {
   const totalRecent = statusData.totalSuccess + statusData.totalFailure;
+  const hasSuccess = statusData.totalSuccess > 0;
+  const hasFailure = statusData.totalFailure > 0;
 
   return (
     <DrawerSectionCard
-      variant="highlight"
-      icon={<IconActivity size={18} />}
+      variant="default"
+      icon={<IconActivity size={15} />}
       title={title}
       headingLevel={headingLevel}
       metaActions={<DrawerScopePill>{scopeLabel}</DrawerScopePill>}
@@ -71,11 +73,19 @@ export function DrawerRecentStatusCard({
         <>
           <div className={styles.recentStatusLayout}>
             <div className={styles.recentStatusStats}>
-              <div className={`${styles.recentStatusMetric} ${styles.recentStatusMetricSuccess}`}>
+              <div
+                className={`${styles.recentStatusMetric} ${
+                  hasSuccess ? styles.recentStatusMetricSuccess : styles.recentStatusMetricMuted
+                }`}
+              >
                 <span>{successLabel}</span>
                 <strong>{formatCount(statusData.totalSuccess)}</strong>
               </div>
-              <div className={`${styles.recentStatusMetric} ${styles.recentStatusMetricFailure}`}>
+              <div
+                className={`${styles.recentStatusMetric} ${
+                  hasFailure ? styles.recentStatusMetricFailure : styles.recentStatusMetricMuted
+                }`}
+              >
                 <span>{failureLabel}</span>
                 <strong>{formatCount(statusData.totalFailure)}</strong>
               </div>

@@ -616,7 +616,6 @@
   flex-wrap: wrap;
   flex-shrink: 0;
 }
-
 .sectionHint {
   margin: 0;
   color: var(--text-secondary);
@@ -752,7 +751,7 @@
 
 .recentStatusLayout {
   display: grid;
-  grid-template-columns: minmax(180px, 0.72fr) minmax(0, 1.28fr);
+  grid-template-columns: minmax(176px, 0.7fr) minmax(0, 1.3fr);
   gap: 10px;
   min-width: 0;
 
@@ -769,12 +768,13 @@
 }
 
 .recentStatusMetric {
-  display: grid;
-  align-content: center;
-  justify-items: start;
-  gap: 8px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
   min-width: 0;
-  padding: 11px 12px;
+  padding: 10px 12px;
   border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
   border-radius: var(--app-radius-sm);
   background: var(--app-surface-strong);
@@ -783,7 +783,7 @@
     min-width: 0;
     color: var(--text-secondary);
     font-size: 11px;
-    font-weight: 700;
+    font-weight: 600;
     line-height: 1.3;
     overflow-wrap: anywhere;
   }
@@ -792,8 +792,9 @@
     flex: 0 0 auto;
     color: var(--text-primary);
     font-size: 17px;
+    font-weight: 700;
     font-variant-numeric: tabular-nums;
-    line-height: 1;
+    line-height: 1.1;
   }
 }
 
@@ -806,21 +807,27 @@
 }
 
 .recentStatusMetricFailure {
-  border-color: color-mix(in srgb, var(--data-red-base) 24%, var(--border-color));
+  border-color: color-mix(in srgb, var(--data-red-base) 26%, var(--border-color));
 
   strong {
     color: var(--error-color);
   }
 }
 
+.recentStatusMetricMuted {
+  strong {
+    color: var(--text-tertiary);
+  }
+}
+
 .recentStatusTimeline {
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  gap: 9px;
+  justify-content: space-between;
+  gap: 10px;
   min-width: 0;
-  padding: 11px 12px;
-  border: 1px solid color-mix(in srgb, var(--primary-color) 15%, var(--border-color));
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
   border-radius: var(--app-radius-sm);
   background: var(--app-surface-strong);
 }
@@ -835,17 +842,19 @@
   span:first-child {
     min-width: 0;
     overflow: hidden;
-    color: var(--text-primary);
+    color: var(--text-secondary);
     font-size: 11px;
-    font-weight: 700;
+    font-weight: 600;
+    line-height: 1.3;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
   span:last-child {
     flex: 0 0 auto;
-    color: var(--text-secondary);
-    font-size: 10px;
+    color: var(--text-tertiary);
+    font-size: 10.5px;
+    line-height: 1.3;
     white-space: nowrap;
   }
 }
@@ -854,12 +863,39 @@
   min-width: 0;
   width: 100%;
 
-  > div {
+  [data-status-bar='true'] {
     max-width: none;
     width: 100%;
+    margin-top: 0;
+    padding: 0;
+    gap: 10px;
+  }
+
+  [data-status-blocks='true'] {
+    gap: 3px;
+  }
+
+  [data-status-block='true'] {
+    height: 6px;
+    border-radius: var(--app-radius-pill);
+  }
+
+  [data-status-block-wrapper='true']:hover [data-status-block='true'] {
+    transform: scaleY(1.6);
+  }
+
+  [data-status-rate='true'] {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 22px;
+    padding: 0 9px;
+    border-radius: var(--app-radius-pill);
+    font-size: 11.5px;
+    font-weight: 700;
+    line-height: 1;
   }
 }
-
 .drawerEmptyBox {
   padding: 14px 16px;
   border: 1px dashed var(--border-color);

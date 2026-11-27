@@ -1,9 +1,9 @@
-import { useEffect } from 'react';
+import { StrictMode, useEffect } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MonitoringGate } from './MainRoutes';
-
+import { ConfigRequestSupersededError, useConfigStore } from '@/stores';
+import { LogsGate, MonitoringGate } from './MainRoutes';
 const state = vi.hoisted(() => ({
   checking: false,
   available: true,
@@ -127,5 +127,49 @@ describe('MonitoringGate', () => {
       )
     ).toHaveLength(0);
     expect(pathname).toBe('/monitoring');
+  });
+});
+
+describe('LogsGate', () => {
+  it('recovers under StrictMode when the initial config fetch is superseded', async () => {
+    const initialStore = useConfigStore.getState();
+    let callCount = 0;
+    const fetchConfigMock = vi.fn(async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        throw new ConfigRequestSupersededError('superseded during mount');
+      }
+      const loaded = { debug: false, raw: {} };
+      useConfigStore.setState({ config: loaded });
+      return loaded;
+    });
+
+    useConfigStore.setState({
+      config: null,
+      fetchConfig: fetchConfigMock as typeof initialStore.fetchConfig,
+    });
+
+    try {
+      await act(async () => {
+        renderer = create(
+          <StrictMode>
+            <LogsGate>
+              <div data-testid="logs-page" />
+            </LogsGate>
+          </StrictMode>
+        );
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(fetchConfigMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(renderer!.root.findAllByProps({ 'data-testid': 'logs-page' })).toHaveLength(1);
+    } finally {
+      useConfigStore.setState({
+        config: initialStore.config,
+        fetchConfig: initialStore.fetchConfig,
+      });
+    }
   });
 });

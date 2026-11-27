@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1126,4 +1127,85 @@ func TestResolveCodexLegacyAccountKeyJSONLRoundTrip(t *testing.T) {
 			t.Fatal("expected denied in dbB for same evidence timestamp after export/import")
 		}
 	})
+}
+
+func TestResolveAPIKeyAccountKeysBatchUsesAuthIndexIndexes(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "apikey-identity-plan.sqlite"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	ctx := context.Background()
+	if err := sqliterepo.RunDerivedStartupMaintenance(ctx, db); err != nil {
+		t.Fatalf("RunDerivedStartupMaintenance: %v", err)
+	}
+
+	queries := []struct {
+		name      string
+		query     string
+		wantIndex string
+	}{
+		{
+			name: "rollup_batch_uses_auth_index_index",
+			query: `explain query plan
+				with api_key_targets(request_index, auth_index, provider) as (
+					values (0, 'b375c6488dddc736', 'openai-compatibility'), (1, 'B375C6488DDDC736', 'openai-compatibility')
+				)
+				select distinct t.request_index, r.account_key
+				from api_key_targets t
+				join usage_account_model_rollups r
+					on r.auth_index = t.auth_index
+				where lower(trim(coalesce(r.source, ''))) not like '%.json'
+					and r.account_key not like 'usage-account-history:%:codex-%'
+					and ` + normalizedProviderCaseSQL(`coalesce(r.auth_provider_snapshot, '')`) + ` = t.provider`,
+			wantIndex: "idx_usage_account_model_rollups_auth_index",
+		},
+		{
+			name: "raw_tail_batch_uses_auth_index_index",
+			query: `explain query plan
+				with api_key_targets(request_index, auth_index, provider) as (
+					values (0, 'b375c6488dddc736', 'openai-compatibility')
+				)
+				select distinct t.request_index, ` + usageidentity.SQLAccountKeyExpression("e") + `
+				from api_key_targets t
+				join usage_events e
+					on e.auth_index = t.auth_index
+				where e.id > coalesce((select last_event_id from usage_rollup_checkpoints where name = 'account_history'), 0)
+					and coalesce(trim(e.auth_file_snapshot), '') = ''
+					and coalesce(trim(e.auth_account_id_snapshot), '') = ''
+					and lower(trim(coalesce(e.source, ''))) not like '%.json'
+					and ` + normalizedProviderCaseSQL(`coalesce(nullif(trim(e.auth_provider_snapshot), ''), e.provider, '')`) + ` = t.provider`,
+			wantIndex: "idx_usage_events_auth_index",
+		},
+	}
+
+	for _, tc := range queries {
+		t.Run(tc.name, func(t *testing.T) {
+			rows, err := db.QueryContext(ctx, tc.query)
+			if err != nil {
+				t.Fatalf("explain query plan: %v", err)
+			}
+			defer rows.Close()
+			var details []string
+			for rows.Next() {
+				var id, parent, notused int
+				var detail string
+				if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+					t.Fatalf("scan plan: %v", err)
+				}
+				details = append(details, detail)
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatalf("rows err: %v", err)
+			}
+			plan := strings.Join(details, " | ")
+			if !strings.Contains(plan, tc.wantIndex) {
+				t.Fatalf("query plan did not use %s: %s", tc.wantIndex, plan)
+			}
+			if strings.Contains(plan, "SCAN r") || strings.Contains(plan, "SCAN e") {
+				t.Fatalf("query plan performed full table scan: %s", plan)
+			}
+		})
+	}
 }

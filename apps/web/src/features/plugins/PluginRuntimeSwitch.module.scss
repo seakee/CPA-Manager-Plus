@@ -86,7 +86,15 @@
   margin: 0;
   font-size: 12px;
   line-height: 1.5;
-  color: var(--warning-text);
+  color: var(--data-badge-warning-text);
+
+  &[data-tone='success'] {
+    color: var(--data-badge-success-text);
+  }
+
+  &[data-tone='error'] {
+    color: var(--data-badge-danger-text);
+  }
 }
 
 .switchControls {

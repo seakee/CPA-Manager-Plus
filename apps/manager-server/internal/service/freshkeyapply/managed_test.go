@@ -551,3 +551,36 @@ func TestValidManagerOwnedDestinationCheckpoint(t *testing.T) {
 		}
 	}
 }
+
+func TestManagedProofStampBindsRuntimeAndKeySnapshot(t *testing.T) {
+	s, cpa, _, installedID := managedFixture(t)
+	if _, err := s.Apply(t.Context(), installedID, 9); err != nil {
+		t.Fatal(err)
+	}
+
+	admitted, admitStamp := s.DefaultInstallCPAAuthorityProvenStamp(t.Context())
+	if !admitted || !admitStamp.Valid() {
+		t.Fatalf("expected valid admission stamp, got admitted=%t valid=%t", admitted, admitStamp.Valid())
+	}
+
+	_, unverified, listStamp, err := s.ObservedKeyListStamped(t.Context(), 9)
+	if err != nil || unverified || !listStamp.Valid() {
+		t.Fatalf("expected valid list stamp, got unverified=%t valid=%t err=%v", unverified, listStamp.Valid(), err)
+	}
+	if !admitStamp.Matches(listStamp) {
+		t.Fatalf("expected steady-state admission and list stamps to match: %+v vs %+v", admitStamp, listStamp)
+	}
+
+	// Mutating CPA keys or config under the same persistent install generation must
+	// produce a distinct stamp so stale admission cannot satisfy a newer snapshot.
+	cpa.mu.Lock()
+	cpa.keys = append(cpa.keys, "cpamp_sk_"+strings.Repeat("9", 64))
+	cpa.mu.Unlock()
+	_, rotatedUnverified, rotatedStamp, err := s.ObservedKeyListStamped(t.Context(), 9)
+	if err != nil || rotatedUnverified || !rotatedStamp.Valid() {
+		t.Fatalf("expected valid rotated list stamp, got unverified=%t valid=%t err=%v", rotatedUnverified, rotatedStamp.Valid(), err)
+	}
+	if admitStamp.Matches(rotatedStamp) {
+		t.Fatalf("stale admission stamp falsely matched rotated CPA snapshot")
+	}
+}

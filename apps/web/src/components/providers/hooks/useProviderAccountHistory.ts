@@ -9,7 +9,13 @@ import {
 } from '@/services/api/usageService';
 import { useAuthStore } from '@/stores';
 import type { GeminiKeyConfig, OpenAIProviderConfig, ProviderKeyConfig } from '@/types';
-import type { StatusBarData, StatusBlockState } from '@/utils/recentRequests';
+import {
+  mergeRecentRequestBucketGroups,
+  normalizeRecentRequestBuckets,
+  type RecentRequestBucket,
+  type StatusBarData,
+  type StatusBlockState,
+} from '@/utils/recentRequests';
 import type { ProviderKind } from '../ProviderTable/rowData';
 import { getOpenAIProviderKey, getProviderConfigKey } from '../utils';
 
@@ -26,8 +32,10 @@ export interface ProviderHistoryStats {
   totalCost: number | null;
   successRate: number | null;
   lastSeenMs: number | null;
+  generatedAtMs?: number;
   recentRequests: MonitoringAccountLatestRequest[];
   recentStatusData: StatusBarData;
+  recentBuckets?: RecentRequestBucket[];
 }
 
 export type ProviderHistoryByRowKey = Map<string, ProviderHistoryStats>;
@@ -194,6 +202,7 @@ export function aggregateProviderHistoryItems(
     hasCost: boolean;
     lastSeenMs: number | null;
     recentRequests: MonitoringAccountLatestRequest[];
+    recentBucketGroups: RecentRequestBucket[][];
   };
 
   const accByRowKey = new Map<string, MutableAccumulator>();
@@ -213,6 +222,7 @@ export function aggregateProviderHistoryItems(
       hasCost: false,
       lastSeenMs: null,
       recentRequests: [],
+      recentBucketGroups: [],
     };
 
     if (item.matched) {
@@ -238,6 +248,9 @@ export function aggregateProviderHistoryItems(
     } else if (item.latest_request) {
       current.recentRequests.push(item.latest_request);
     }
+    if (Array.isArray(item.recent_buckets) && item.recent_buckets.length > 0) {
+      current.recentBucketGroups.push(normalizeRecentRequestBuckets(item.recent_buckets));
+    }
     accByRowKey.set(providerRowKey, current);
   });
 
@@ -256,8 +269,16 @@ export function aggregateProviderHistoryItems(
     const resolvedSuccessRate =
       resolvedTotal > 0 ? (acc.successCalls / resolvedTotal) * 100 : null;
 
+    const mergedRecentBuckets =
+      acc.recentBucketGroups.length > 0
+        ? mergeRecentRequestBucketGroups(acc.recentBucketGroups)
+        : undefined;
+    const hasBucketCounts = Boolean(
+      mergedRecentBuckets?.some((b) => b.success + b.failed > 0)
+    );
+
     result.set(rowKey, {
-      matched: acc.matched || resolvedTotal > 0 || sortedRecent.length > 0,
+      matched: acc.matched || resolvedTotal > 0 || sortedRecent.length > 0 || hasBucketCounts,
       totalRequests: resolvedTotal,
       successCalls: acc.successCalls,
       failureCalls: acc.failureCalls,
@@ -266,6 +287,7 @@ export function aggregateProviderHistoryItems(
       successRate: resolvedSuccessRate,
       lastSeenMs: acc.lastSeenMs,
       recentRequests: sortedRecent,
+      ...(mergedRecentBuckets ? { recentBuckets: mergedRecentBuckets } : {}),
       recentStatusData: buildProviderHistoryStatusBarData(sortedRecent),
     });
   });
@@ -275,14 +297,15 @@ export function aggregateProviderHistoryItems(
 
 export interface UseProviderAccountHistoryOptions extends ProviderHistoryListsInput {
   enabled?: boolean;
+  reentryCooldownMs?: number;
 }
 
 export function useProviderAccountHistory(options: UseProviderAccountHistoryOptions) {
   const enabled = options.enabled ?? true;
+  const reentryCooldownMs = options.reentryCooldownMs ?? 0;
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
   const managementKey = useAuthStore((state) => state.managementKey);
   const { managerServiceAvailable, managerServiceBase } = usePanelFeatureAvailability();
-
   const targets = useMemo(
     () =>
       buildProviderHistoryTargets({
@@ -320,72 +343,194 @@ export function useProviderAccountHistory(options: UseProviderAccountHistoryOpti
     EMPTY_PROVIDER_HISTORY_MAP
   );
   const abortControllerRef = useRef<AbortController | null>(null);
+  const inFlightPromiseRef = useRef<{
+    signature: string;
+    controller: AbortController;
+    promise: Promise<ProviderHistoryByRowKey>;
+  } | null>(null);
+  const lastLoadedRef = useRef<{
+    signature: string;
+    at: number;
+    data: ProviderHistoryByRowKey;
+  }>({
+    signature: '',
+    at: 0,
+    data: EMPTY_PROVIDER_HISTORY_MAP,
+  });
 
-  const loadAccountHistory = useCallback(async () => {
+  const loadAccountHistory = useCallback(
+    async (loadOptions?: { maxAgeMs?: number }) => {
+      if (!enabled) {
+        return lastLoadedRef.current.data;
+      }
+      if (
+        connectionStatus !== 'connected' ||
+        !managerServiceAvailable ||
+        !managerServiceBase ||
+        !managementKey ||
+        targets.length === 0
+      ) {
+        lastLoadedRef.current = {
+          signature: '',
+          at: 0,
+          data: EMPTY_PROVIDER_HISTORY_MAP,
+        };
+        setHistoryByRowKey((current) =>
+          current.size === 0 ? current : EMPTY_PROVIDER_HISTORY_MAP
+        );
+        return EMPTY_PROVIDER_HISTORY_MAP;
+      }
+
+      const fullSignature = `${managerServiceBase}|${managementKey}|${targetsSignature}`;
+      const maxAgeMs = loadOptions?.maxAgeMs ?? 0;
+      if (
+        maxAgeMs > 0 &&
+        lastLoadedRef.current.signature === fullSignature &&
+        lastLoadedRef.current.at > 0 &&
+        Date.now() - lastLoadedRef.current.at < maxAgeMs
+      ) {
+        setHistoryByRowKey((current) =>
+          current === lastLoadedRef.current.data ? current : lastLoadedRef.current.data
+        );
+        return lastLoadedRef.current.data;
+      }
+      if (
+        maxAgeMs > 0 &&
+        inFlightPromiseRef.current?.signature === fullSignature &&
+        !inFlightPromiseRef.current.controller.signal.aborted
+      ) {
+        return inFlightPromiseRef.current.promise;
+      }
+
+      abortControllerRef.current?.abort();
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+
+      const requestPromise = (async (): Promise<ProviderHistoryByRowKey> => {
+        try {
+          const batches: ProviderHistoryTargetEntry[][] = [];
+          for (let i = 0; i < targets.length; i += ACCOUNT_HISTORY_BATCH_SIZE) {
+            batches.push(targets.slice(i, i + ACCOUNT_HISTORY_BATCH_SIZE));
+          }
+
+          const collectedItems: MonitoringAccountHistoryItem[] = [];
+          let generatedAtMs: number | undefined;
+          for (const batch of batches) {
+            if (controller.signal.aborted) return EMPTY_PROVIDER_HISTORY_MAP;
+            const response = await monitoringAnalyticsApi.getAccountHistory(
+              managerServiceBase,
+              managementKey,
+              {
+                accounts: batch.map((entry) => entry.target),
+              },
+              controller.signal
+            );
+            if (
+              typeof response?.generated_at_ms === 'number' &&
+              Number.isFinite(response.generated_at_ms) &&
+              response.generated_at_ms > 0
+            ) {
+              generatedAtMs =
+                generatedAtMs === undefined
+                  ? response.generated_at_ms
+                  : Math.max(generatedAtMs, response.generated_at_ms);
+            }
+            if (Array.isArray(response?.items)) {
+              collectedItems.push(...response.items);
+            }
+          }
+
+          if (controller.signal.aborted) return EMPTY_PROVIDER_HISTORY_MAP;
+          const aggregated = aggregateProviderHistoryItems(targets, collectedItems);
+          if (generatedAtMs !== undefined) {
+            aggregated.forEach((entry, key) => {
+              aggregated.set(key, { ...entry, generatedAtMs });
+            });
+          }
+          lastLoadedRef.current = {
+            signature: fullSignature,
+            at: Date.now(),
+            data: aggregated,
+          };
+          setHistoryByRowKey(aggregated);
+          return aggregated;
+        } catch {
+          return EMPTY_PROVIDER_HISTORY_MAP;
+        } finally {
+          if (abortControllerRef.current === controller) {
+            abortControllerRef.current = null;
+          }
+          if (inFlightPromiseRef.current?.controller === controller) {
+            inFlightPromiseRef.current = null;
+          }
+        }
+      })();
+
+      inFlightPromiseRef.current = {
+        signature: fullSignature,
+        controller,
+        promise: requestPromise,
+      };
+      return requestPromise;
+    },
+    [
+      connectionStatus,
+      enabled,
+      managementKey,
+      managerServiceAvailable,
+      managerServiceBase,
+      targets,
+      targetsSignature,
+    ]
+  );
+
+  useEffect(() => {
     if (
-      !enabled ||
       connectionStatus !== 'connected' ||
       !managerServiceAvailable ||
       !managerServiceBase ||
       !managementKey ||
       targets.length === 0
     ) {
-      setHistoryByRowKey((current) => (current.size === 0 ? current : EMPTY_PROVIDER_HISTORY_MAP));
-      return EMPTY_PROVIDER_HISTORY_MAP;
+      abortControllerRef.current?.abort();
+      lastLoadedRef.current = {
+        signature: '',
+        at: 0,
+        data: EMPTY_PROVIDER_HISTORY_MAP,
+      };
+      setHistoryByRowKey((current) =>
+        current.size === 0 ? current : EMPTY_PROVIDER_HISTORY_MAP
+      );
+      return;
     }
-
-    abortControllerRef.current?.abort();
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-
-    try {
-      const batches: ProviderHistoryTargetEntry[][] = [];
-      for (let i = 0; i < targets.length; i += ACCOUNT_HISTORY_BATCH_SIZE) {
-        batches.push(targets.slice(i, i + ACCOUNT_HISTORY_BATCH_SIZE));
-      }
-
-      const collectedItems: MonitoringAccountHistoryItem[] = [];
-      for (const batch of batches) {
-        if (controller.signal.aborted) return EMPTY_PROVIDER_HISTORY_MAP;
-        const response = await monitoringAnalyticsApi.getAccountHistory(
-          managerServiceBase,
-          managementKey,
-          {
-            accounts: batch.map((entry) => entry.target),
-          },
-          controller.signal
-        );
-        if (Array.isArray(response?.items)) {
-          collectedItems.push(...response.items);
-        }
-      }
-
-      if (controller.signal.aborted) return EMPTY_PROVIDER_HISTORY_MAP;
-      const aggregated = aggregateProviderHistoryItems(targets, collectedItems);
-      setHistoryByRowKey(aggregated);
-      return aggregated;
-    } catch {
-      return EMPTY_PROVIDER_HISTORY_MAP;
-    } finally {
-      if (abortControllerRef.current === controller) {
-        abortControllerRef.current = null;
-      }
+    if (!enabled) {
+      return;
     }
+    void loadAccountHistory(
+      reentryCooldownMs > 0 ? { maxAgeMs: reentryCooldownMs } : undefined
+    );
   }, [
     connectionStatus,
     enabled,
+    loadAccountHistory,
     managementKey,
     managerServiceAvailable,
     managerServiceBase,
-    targets,
+    reentryCooldownMs,
+    targets.length,
+    targetsSignature,
   ]);
 
   useEffect(() => {
-    void loadAccountHistory();
     return () => {
-      abortControllerRef.current?.abort();
+      const current = abortControllerRef.current;
+      abortControllerRef.current = null;
+      if (current && inFlightPromiseRef.current?.controller === current) {
+        inFlightPromiseRef.current = null;
+      }
+      current?.abort();
     };
-  }, [loadAccountHistory, targetsSignature]);
+  }, []);
 
   useInterval(
     () => {

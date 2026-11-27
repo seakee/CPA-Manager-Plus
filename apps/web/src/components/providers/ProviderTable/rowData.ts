@@ -1,6 +1,10 @@
 import type { GeminiKeyConfig, ModelAlias, OpenAIProviderConfig, ProviderKeyConfig } from '@/types';
 import { maskApiKey } from '@/utils/format';
-import { compressStatusBarData, type StatusBarData } from '@/utils/recentRequests';
+import {
+  compressStatusBarData,
+  statusBarDataFromRecentRequests,
+  type StatusBarData,
+} from '@/utils/recentRequests';
 import {
   getOpenAIKeyCount,
   getOpenAIUsageStatsCoverage,
@@ -106,6 +110,8 @@ interface ProviderRowBase {
   /** 最近窗口内失败数，供健康筛选使用 */
   recentFailure: number;
   statusData: StatusBarData;
+  /** 20 个 10 分钟区间状态条数据（供详情抽屉 200 分钟时间线使用） */
+  recentStatusData?: StatusBarData;
   /** 当前汇总与状态条的数据口径来源 */
   statsSource: ProviderStatsSource;
   /** 来自 Manager SQLite 的持久历史统计与最近请求（仅 Full Web / Manager 模式可用） */
@@ -316,28 +322,34 @@ function buildKeyConfigRow(
   const liveTotal = liveStats.success + liveStats.failure;
   const hasLiveStats = liveTotal > 0;
   const historyTotal = history?.matched ? history.totalRequests : 0;
+  const hasHistoryBucketCounts = Boolean(
+    history?.recentBuckets?.some((b) => b.success + b.failed > 0)
+  );
   const useHistorySource = Boolean(
     history?.matched &&
-      (historyTotal > 0 || history.recentRequests.length > 0) &&
+      (historyTotal > 0 || history.recentRequests.length > 0 || hasHistoryBucketCounts) &&
       (!hasLiveStats || historyTotal >= liveTotal)
   );
   const stats = useHistorySource && history
     ? { success: history.successCalls, failure: history.failureCalls }
     : liveStats;
-  const liveStatusData = compressStatusBarData(
-    getProviderRecentStatusData(usageByProvider, kind, config.apiKey, config.baseUrl),
-    10
+  const rawLiveStatusData = getProviderRecentStatusData(
+    usageByProvider,
+    kind,
+    config.apiKey,
+    config.baseUrl
   );
-  const hasLiveStatusBlocks = liveStatusData.totalSuccess + liveStatusData.totalFailure > 0;
-  const hasHistoryStatusBlocks = Boolean(
-    useHistorySource &&
-      history &&
-      history.recentStatusData.totalSuccess + history.recentStatusData.totalFailure > 0
-  );
-  const statusData =
-    !hasLiveStatusBlocks && hasHistoryStatusBlocks && history
-      ? history.recentStatusData
-      : liveStatusData;
+  const liveStatusData = compressStatusBarData(rawLiveStatusData, 10);
+  const historyRecent20StatusData =
+    useHistorySource && history
+      ? history.recentBuckets && history.recentBuckets.length > 0
+        ? statusBarDataFromRecentRequests(history.recentBuckets)
+        : history.recentStatusData
+      : null;
+  const recentStatusData = historyRecent20StatusData ?? rawLiveStatusData;
+  const statusData = historyRecent20StatusData
+    ? compressStatusBarData(historyRecent20StatusData, 10)
+    : liveStatusData;
   const effectiveRecentSuccess = statusData.totalSuccess;
   const effectiveRecentFailure = statusData.totalFailure;
   const statsSource: ProviderStatsSource = useHistorySource
@@ -381,6 +393,7 @@ function buildKeyConfigRow(
     recentSuccess: effectiveRecentSuccess,
     recentFailure: effectiveRecentFailure,
     statusData,
+    recentStatusData,
     statsSource,
     history,
     ...(latestFailure ? { latestFailure } : {}),
@@ -419,28 +432,29 @@ function buildOpenAIRow(
   const liveTotal = liveStats.success + liveStats.failure;
   const hasLiveStats = liveTotal > 0;
   const historyTotal = history?.matched ? history.totalRequests : 0;
+  const hasHistoryBucketCounts = Boolean(
+    history?.recentBuckets?.some((b) => b.success + b.failed > 0)
+  );
   const useHistorySource = Boolean(
     history?.matched &&
-      (historyTotal > 0 || history.recentRequests.length > 0) &&
+      (historyTotal > 0 || history.recentRequests.length > 0 || hasHistoryBucketCounts) &&
       (!hasLiveStats || historyTotal >= liveTotal)
   );
   const stats = useHistorySource && history
     ? { success: history.successCalls, failure: history.failureCalls }
     : liveStats;
-  const liveStatusData = compressStatusBarData(
-    getOpenAIProviderRecentStatusData(provider, usageByProvider),
-    10
-  );
-  const hasLiveStatusBlocks = liveStatusData.totalSuccess + liveStatusData.totalFailure > 0;
-  const hasHistoryStatusBlocks = Boolean(
-    useHistorySource &&
-      history &&
-      history.recentStatusData.totalSuccess + history.recentStatusData.totalFailure > 0
-  );
-  const statusData =
-    !hasLiveStatusBlocks && hasHistoryStatusBlocks && history
-      ? history.recentStatusData
-      : liveStatusData;
+  const rawLiveStatusData = getOpenAIProviderRecentStatusData(provider, usageByProvider);
+  const liveStatusData = compressStatusBarData(rawLiveStatusData, 10);
+  const historyRecent20StatusData =
+    useHistorySource && history
+      ? history.recentBuckets && history.recentBuckets.length > 0
+        ? statusBarDataFromRecentRequests(history.recentBuckets)
+        : history.recentStatusData
+      : null;
+  const recentStatusData = historyRecent20StatusData ?? rawLiveStatusData;
+  const statusData = historyRecent20StatusData
+    ? compressStatusBarData(historyRecent20StatusData, 10)
+    : liveStatusData;
   const effectiveRecentSuccess = statusData.totalSuccess;
   const effectiveRecentFailure = statusData.totalFailure;
   const statsSource: ProviderStatsSource = useHistorySource
@@ -483,6 +497,7 @@ function buildOpenAIRow(
     recentSuccess: effectiveRecentSuccess,
     recentFailure: effectiveRecentFailure,
     statusData,
+    recentStatusData,
     statsSource,
     history,
     ...(latestFailure ? { latestFailure } : {}),

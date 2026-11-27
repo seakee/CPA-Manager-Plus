@@ -26,6 +26,8 @@ export interface UseMonitoringAnalyticsParams {
   include?: MonitoringAnalyticsInclude;
   eventsPage?: MonitoringAnalyticsEventsPageRequest | null;
   throttleMs?: number;
+  /** Allow reading stored historical analytics when only the collector switch is off. */
+  allowWhenDisabled?: boolean;
 }
 
 export interface MonitoringAnalyticsRefreshOptions {
@@ -89,6 +91,7 @@ export function useMonitoringAnalytics({
   include,
   eventsPage,
   throttleMs = DEFAULT_REFRESH_THROTTLE_MS,
+  allowWhenDisabled = false,
 }: UseMonitoringAnalyticsParams): UseMonitoringAnalyticsReturn {
   const managementKey = useAuthStore((state) => state.managementKey);
   const apiBase = useAuthStore((state) => state.apiBase);
@@ -159,7 +162,12 @@ export function useMonitoringAnalytics({
   );
   const activeDataScopeKey = dataScopeKey || requestKey;
   const serviceBase = availability.serviceBase;
-  const enabled = availability.available && Boolean(serviceBase) && Boolean(request);
+  const analyticsReadable =
+    availability.available ||
+    (allowWhenDisabled &&
+      availability.managerServiceAvailable &&
+      availability.reason === 'monitoring_disabled');
+  const enabled = analyticsReadable && Boolean(serviceBase) && Boolean(request);
   const connectionScope = JSON.stringify([apiBase, serviceBase, managementKey]);
   const connectionScopeRef = useRef(connectionScope);
   connectionScopeRef.current = connectionScope;

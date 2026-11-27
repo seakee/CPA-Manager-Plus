@@ -132,16 +132,20 @@ export function buildCanonicalNavModel({
     pinnable: false,
   };
 
-  const usageAnalyticsNavItem: NavItem | null = featureAvailability.requestMonitoringAvailable
-    ? {
-        id: CANONICAL_NAV_IDS.usageAnalytics,
-        path: '/usage-analytics',
-        label: t('nav.usage_analytics'),
-        shortLabel: navShortLabel('nav.usage_analytics', t('nav.usage_analytics')),
-        icon: icons.usageAnalytics,
-        pinnable: true,
-      }
-    : null;
+  // Usage Analytics reads historical SQLite data even when the collector is
+  // turned off, so keep it alongside Live Monitor whenever only the switch is off.
+  const usageAnalyticsNavItem: NavItem | null =
+    featureAvailability.requestMonitoringAvailable ||
+    featureAvailability.reason === 'monitoring_disabled'
+      ? {
+          id: CANONICAL_NAV_IDS.usageAnalytics,
+          path: '/usage-analytics',
+          label: t('nav.usage_analytics'),
+          shortLabel: navShortLabel('nav.usage_analytics', t('nav.usage_analytics')),
+          icon: icons.usageAnalytics,
+          pinnable: true,
+        }
+      : null;
 
   // Request monitoring is a switch: while only the collector is off the entry
   // stays in the sidebar and the page explains how to start it. Hiding it here

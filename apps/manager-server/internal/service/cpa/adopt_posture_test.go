@@ -20,14 +20,14 @@ func TestAdoptPostureAcceptsTheAdoptedDestination(t *testing.T) {
 	if !adopt.matches([]byte(adoptDestinationConfig)) {
 		t.Fatal("adopted destination rejected")
 	}
-	// An adoption may also carry source server settings (such as commercial-mode)
-	// that Supervisor never stages on a New Managed listener.
-	adoptedServer := strings.Replace(adoptDestinationConfig, `"port":8317`, `"port":8317,"commercial-mode":true`, 1)
+	// An adoption may also carry protected source server credentials (such as
+	// github-token) that Supervisor never stages on a New Managed listener.
+	adoptedServer := strings.Replace(adoptDestinationConfig, `"port":8317`, `"port":8317,"github-token":"ghp_example"`, 1)
 	if !adopt.matches([]byte(adoptedServer)) {
-		t.Fatal("adopted destination with commercial-mode rejected")
+		t.Fatal("adopted destination with source github-token rejected")
 	}
 	if managedProofPosture.matches([]byte(adoptedServer)) {
-		t.Fatal("managed posture accepted a non-staged server setting")
+		t.Fatal("managed posture accepted a source-only server github-token")
 	}
 	// The plugin switch is the operator's: the plugin page opens for an adopted
 	// installation, so saving either value must leave the posture proven. What
@@ -69,9 +69,13 @@ func TestAdoptPostureAcceptsTheAdoptedDestination(t *testing.T) {
 		"retained safe server settings and disabled discovery/tls/kv-store": strings.Replace(
 			adoptDestinationConfig,
 			`"port":8317`,
-			`"port":8317,"commercial-mode":true,"max-request-body-bytes":10485760,"trusted-proxies":["10.0.0.0/8"],"response-compression":{"enabled":true,"min-bytes":512},"github-token":"ghp_example","discovery":{"service-type":"_ai-gateway._tcp","subtypes":["_chat-completions"]},"tls":{"enable":false},"kv-store":{"disabled":false}`,
+			`"port":8317,"server-id":"65788ebc-f409-4e5c-be25-e02a43497741","shutdown-timeout":30,"commercial-mode":true,"max-request-body-bytes":10485760,"trusted-proxies":["10.0.0.0/8"],"response-compression":{"enabled":true,"min-bytes":-1},"github-token":"ghp_example","discovery":{"service-type":"_ai-gateway._tcp","subtypes":["_chat-completions"]},"tls":{"enable":false},"kv-store":{"disabled":false}`,
 			1,
 		),
+		"forward-compatible cpa 8.x extensions": strings.NewReplacer(
+			`"port":8317`, `"port":8317,"read-header-timeout":"10s"`,
+			`"routing":`, `"telemetry":{"enabled":false},"routing":`,
+		).Replace(adoptDestinationConfig),
 	} {
 		if !adoptProofPosture().matches([]byte(body)) {
 			t.Fatalf("allowed adopted configuration %q rejected", name)
@@ -131,9 +135,13 @@ func TestAdoptPostureAcceptsThePluginGroupTheOperatorSaves(t *testing.T) {
 
 func TestAdoptPostureRefusesWhatTheManagerNeverStaged(t *testing.T) {
 	for name, body := range map[string]string{
-		// A root CPA itself does not read is a document this Manager never proved.
-		"unknown root":       strings.Replace(adoptDestinationConfig, `"routing":`, `"foreign":{},"routing":`, 1),
-		"missing management": strings.Replace(adoptDestinationConfig, `"management":`, `"unused":`, 1),
+		"legacy root":              strings.Replace(adoptDestinationConfig, `"routing":`, `"remote-management":{},"routing":`, 1),
+		"unsafe unknown root name": strings.Replace(adoptDestinationConfig, `"routing":`, `"unix-listener":{},"routing":`, 1),
+		"unknown root path escape": strings.Replace(adoptDestinationConfig, `"routing":`, `"foreign":{"data-dir":"/tmp/escape"},"routing":`, 1),
+		"extension null value":     strings.Replace(adoptDestinationConfig, `"port":8317`, `"port":8317,"custom-note":null`, 1),
+		"extension backslash path": strings.Replace(adoptDestinationConfig, `"port":8317`, `"port":8317,"custom-note":"\\logs"`, 1),
+		"malformed server-id":      strings.Replace(adoptDestinationConfig, `"port":8317`, `"port":8317,"server-id":"bad"`, 1),
+		"missing management":       strings.Replace(adoptDestinationConfig, `"management":`, `"unused":`, 1),
 		"missing usage":      strings.Replace(adoptDestinationConfig, `"observability":`, `"unused":`, 1),
 		"usage off":          strings.Replace(adoptDestinationConfig, `"usage-statistics-enabled":true`, `"usage-statistics-enabled":false`, 1),
 		"plaintext secret":   strings.Replace(adoptDestinationConfig, `"$2a$10$abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXY12"`, `"plaintext-management-key"`, 1),

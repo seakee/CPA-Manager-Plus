@@ -49,6 +49,7 @@ import {
 import { providersApi } from '@/services/api';
 import { getUsageServiceErrorCode } from '@/services/api/usageService';
 import { useAuthStore, useConfigStore, useNotificationStore, useThemeStore } from '@/stores';
+import { isConfigRequestSupersededError } from '@/stores/useConfigStore';
 import type { GeminiKeyConfig, OpenAIProviderConfig, ProviderKeyConfig } from '@/types';
 import {
   PROVIDER_WORKSPACE_PAGE_SIZE_OPTIONS,
@@ -571,6 +572,7 @@ const getPerItemDeleteMethod = (kind: ProviderKind) => {
         : undefined;
   }
 };
+const PROVIDER_REENTRY_REVALIDATE_COOLDOWN_MS = 5_000;
 
 export function AiProvidersPage() {
   const { t } = useTranslation();
@@ -724,9 +726,11 @@ export function AiProvidersPage() {
 
   const { usageByProvider, loadRecentRequests, refreshRecentRequests } = useProviderRecentRequests({
     enabled: isCurrentLayer,
+    initialMaxAgeMs: PROVIDER_REENTRY_REVALIDATE_COOLDOWN_MS,
   });
   const { historyByRowKey, refreshAccountHistory } = useProviderAccountHistory({
     enabled: isCurrentLayer,
+    reentryCooldownMs: PROVIDER_REENTRY_REVALIDATE_COOLDOWN_MS,
     gemini: geminiKeys,
     interactions: interactionsKeys,
     codex: codexConfigs,
@@ -763,7 +767,7 @@ export function AiProvidersPage() {
   const historyByRowKeyRef = useRef(historyByRowKey);
   historyByRowKeyRef.current = historyByRowKey;
   const supersededConfigRef = useRef<typeof config>(null);
-
+  const loadConfigsSeqRef = useRef(0);
   const getCurrentProviderLists = useCallback(
     (): ProviderListsSnapshot => ({
       gemini: [...geminiKeysRef.current],
@@ -777,25 +781,32 @@ export function AiProvidersPage() {
     []
   );
 
-  const applyProviderListsState = useCallback((lists: ProviderListsSnapshot) => {
-    geminiKeysRef.current = lists.gemini;
-    interactionsKeysRef.current = lists.interactions;
-    codexConfigsRef.current = lists.codex;
-    xaiConfigsRef.current = lists.xai;
-    claudeConfigsRef.current = lists.claude;
-    vertexConfigsRef.current = lists.vertex;
-    openaiProvidersRef.current = lists.openai;
-    setGeminiKeys(lists.gemini);
-    setInteractionsKeys(lists.interactions);
-    setCodexConfigs(lists.codex);
-    setXAIConfigs(lists.xai);
-    setClaudeConfigs(lists.claude);
-    setVertexConfigs(lists.vertex);
-    setOpenaiProviders(lists.openai);
-  }, []);
+  const applyProviderListsState = useCallback(
+    (lists: ProviderListsSnapshot, options?: { preserveLoadSeq?: boolean }) => {
+      if (!options?.preserveLoadSeq) {
+        loadConfigsSeqRef.current += 1;
+      }
+      geminiKeysRef.current = lists.gemini;
+      interactionsKeysRef.current = lists.interactions;
+      codexConfigsRef.current = lists.codex;
+      xaiConfigsRef.current = lists.xai;
+      claudeConfigsRef.current = lists.claude;
+      vertexConfigsRef.current = lists.vertex;
+      openaiProvidersRef.current = lists.openai;
+      setGeminiKeys(lists.gemini);
+      setInteractionsKeys(lists.interactions);
+      setCodexConfigs(lists.codex);
+      setXAIConfigs(lists.xai);
+      setClaudeConfigs(lists.claude);
+      setVertexConfigs(lists.vertex);
+      setOpenaiProviders(lists.openai);
+    },
+    []
+  );
 
   const applySingleFamilyState = useCallback(
     (kind: ProviderKind, nextList: ProviderListsSnapshot[ProviderKind]) => {
+      loadConfigsSeqRef.current += 1;
       switch (kind) {
         case 'gemini': {
           const typed = nextList as GeminiKeyConfig[];
@@ -913,12 +924,16 @@ export function AiProvidersPage() {
   const loadConfigs = useCallback(
     async (options?: {
       force?: boolean;
+      maxAgeMs?: number;
       onRowsBuilt?: (nextRows: ProviderRow[]) => void;
       preserveErrorOnFailure?: boolean;
     }): Promise<ProviderRow[] | null> => {
+      const seq = (loadConfigsSeqRef.current += 1);
       const force = Boolean(options?.force);
-      const hasValidCache = !force && isCacheValid();
-      if (!hasValidCache && !force) {
+      const maxAgeMs = options?.maxAgeMs;
+      const hasValidCache = !force && isCacheValid(undefined, maxAgeMs);
+      const hasDisplayableCache = !force && isCacheValid();
+      if (!hasValidCache && !force && !hasDisplayableCache) {
         setLoading(true);
       }
       if (!options?.preserveErrorOnFailure) {
@@ -931,13 +946,21 @@ export function AiProvidersPage() {
             ? providersApi.loadAllProvidersV8Snapshot
             : undefined;
 
-        const [configResult, snapshotResult, vertexResult, openaiResult] = await Promise.allSettled([
-          fetchConfig(undefined, force),
+        const [configResult, snapshotResult] = await Promise.allSettled([
+          force
+            ? fetchConfig(undefined, true)
+            : maxAgeMs !== undefined
+              ? fetchConfig(undefined, false, {
+                  maxAgeMs,
+                  silent: hasDisplayableCache,
+                })
+              : fetchConfig(undefined, false),
           force && snapshotLoader ? snapshotLoader() : Promise.resolve(null),
-          providersApi.getVertexConfigs(),
-          providersApi.getOpenAIProviders(),
         ]);
 
+        if (seq !== loadConfigsSeqRef.current) {
+          return null;
+        }
         if (configResult.status !== 'fulfilled') {
           throw configResult.reason;
         }
@@ -968,6 +991,13 @@ export function AiProvidersPage() {
         } else {
           supersededConfigRef.current = null;
           if (data?.v8Supported !== true) {
+            const [vertexResult, openaiResult] = await Promise.allSettled([
+              providersApi.getVertexConfigs(),
+              providersApi.getOpenAIProviders(),
+            ]);
+            if (seq !== loadConfigsSeqRef.current) {
+              return null;
+            }
             if (vertexResult.status === 'fulfilled') {
               nextVertex = vertexResult.value || [];
               if (!areProviderListsJsonEqual(nextVertex, data?.vertexApiKeys || [])) {
@@ -1009,7 +1039,7 @@ export function AiProvidersPage() {
           vertex: nextVertex,
           openai: nextOpenAI,
         };
-        applyProviderListsState(nextLists);
+        applyProviderListsState(nextLists, { preserveLoadSeq: true });
 
         const nextRows = buildProviderRows({
           ...nextLists,
@@ -1019,13 +1049,18 @@ export function AiProvidersPage() {
         options?.onRowsBuilt?.(nextRows);
         return nextRows;
       } catch (err: unknown) {
-        if (!options?.preserveErrorOnFailure) {
+        if (isConfigRequestSupersededError(err)) {
+          return null;
+        }
+        if (seq === loadConfigsSeqRef.current && !options?.preserveErrorOnFailure) {
           const message = getErrorMessage(err) || t('notification.refresh_failed');
           setError(message);
         }
         return null;
       } finally {
-        setLoading(false);
+        if (seq === loadConfigsSeqRef.current) {
+          setLoading(false);
+        }
       }
     },
     [
@@ -1041,8 +1076,11 @@ export function AiProvidersPage() {
   useEffect(() => {
     if (hasMounted.current) return;
     hasMounted.current = true;
-    void loadConfigs();
-  }, [loadConfigs]);
+    void loadConfigs({
+      maxAgeMs: PROVIDER_REENTRY_REVALIDATE_COOLDOWN_MS,
+      preserveErrorOnFailure: isCacheValid(),
+    });
+  }, [isCacheValid, loadConfigs]);
 
   const leftCurrentLayerRef = useRef(false);
 
@@ -1053,11 +1091,14 @@ export function AiProvidersPage() {
     }
     if (leftCurrentLayerRef.current) {
       leftCurrentLayerRef.current = false;
-      if (!isCacheValid()) {
-        void loadConfigs();
+      if (!isCacheValid(undefined, PROVIDER_REENTRY_REVALIDATE_COOLDOWN_MS)) {
+        void loadConfigs({
+          maxAgeMs: PROVIDER_REENTRY_REVALIDATE_COOLDOWN_MS,
+          preserveErrorOnFailure: isCacheValid(),
+        });
       }
     }
-    void loadRecentRequests().catch(() => {});
+    void loadRecentRequests({ maxAgeMs: PROVIDER_REENTRY_REVALIDATE_COOLDOWN_MS }).catch(() => {});
   }, [isCurrentLayer, isCacheValid, loadConfigs, loadRecentRequests]);
 
   useEffect(() => {

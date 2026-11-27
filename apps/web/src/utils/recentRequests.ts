@@ -18,6 +18,7 @@ export interface StatusBarData {
 
 export interface RecentRequestBucket {
   time?: string;
+  bucketStartMs?: number;
   success: number;
   failed: number;
 }
@@ -42,7 +43,8 @@ export type ApiKeyUsageResponse = Record<
 >;
 
 const RECENT_REQUEST_BLOCK_COUNT = 20;
-const RECENT_REQUEST_BLOCK_DURATION_MS = 10 * 60 * 1000;
+export const RECENT_REQUEST_BUCKET_DURATION_MS = 10 * 60 * 1000;
+const RECENT_REQUEST_BLOCK_DURATION_MS = RECENT_REQUEST_BUCKET_DURATION_MS;
 
 const toFiniteNumber = (value: unknown): number => {
   const numberValue = typeof value === 'number' ? value : Number(value);
@@ -90,8 +92,14 @@ export function normalizeRecentRequestBuckets(input: unknown): RecentRequestBuck
     const record = item && typeof item === 'object' ? (item as Record<string, unknown>) : {};
     const time = typeof record.time === 'string' ? record.time : undefined;
 
+    const rawStartMs = record.bucketStartMs ?? record.bucket_start_ms;
+    const bucketStartMs =
+      typeof rawStartMs === 'number' && Number.isFinite(rawStartMs) && rawStartMs > 0
+        ? rawStartMs
+        : undefined;
     return {
       ...(time ? { time } : {}),
+      ...(bucketStartMs !== undefined ? { bucketStartMs } : {}),
       success: toFiniteNumber(record.success),
       failed: toFiniteNumber(record.failed),
     };
@@ -116,6 +124,60 @@ export function normalizeRecentRequestUsageEntry(input: unknown): RecentRequestU
   };
 }
 
+const snapBucketStartMs = (timestampMs: number): number =>
+  Math.floor(timestampMs / RECENT_REQUEST_BLOCK_DURATION_MS) * RECENT_REQUEST_BLOCK_DURATION_MS;
+
+const parseBucketLabelStartMinute = (label?: string): number | null => {
+  if (!label) return null;
+  const match = /^(\d{2}):(\d{2})-/.exec(label.trim());
+  if (!match) return null;
+  const minute = Number(match[2]);
+  return Number.isInteger(minute) && minute >= 0 && minute < 60 ? minute : null;
+};
+
+/**
+ * Anchors a sequence of contiguous 10-minute buckets onto absolute UTC bucket
+ * start timestamps (`bucketStartMs`). Buckets that already carry `bucketStartMs`
+ * are snapped to 10-minute boundaries; label-only CPA buckets are anchored to
+ * `referenceNowMs` with ±1-bucket boundary-skew alignment when the local clock
+ * minute matches the label's start minute.
+ */
+export function anchorRecentRequestBuckets(
+  buckets: RecentRequestBucket[],
+  referenceNowMs = Date.now()
+): RecentRequestBucket[] {
+  const normalized = normalizeRecentRequestBuckets(buckets);
+  if (normalized.length === 0) return [];
+
+  if (normalized.every((bucket) => bucket.bucketStartMs !== undefined)) {
+    return normalized.map((bucket) => ({
+      ...bucket,
+      bucketStartMs: snapBucketStartMs(bucket.bucketStartMs as number),
+    }));
+  }
+
+  const baseLastStartMs = snapBucketStartMs(referenceNowMs);
+  const lastLabelMinute = parseBucketLabelStartMinute(normalized[normalized.length - 1]?.time);
+  let resolvedLastStartMs = baseLastStartMs;
+  if (lastLabelMinute !== null) {
+    for (const offset of [0, -1, 1]) {
+      const candidateStartMs = baseLastStartMs + offset * RECENT_REQUEST_BLOCK_DURATION_MS;
+      if (new Date(candidateStartMs).getMinutes() === lastLabelMinute) {
+        resolvedLastStartMs = candidateStartMs;
+        break;
+      }
+    }
+  }
+
+  return normalized.map((bucket, index) => ({
+    ...bucket,
+    bucketStartMs:
+      bucket.bucketStartMs !== undefined
+        ? snapBucketStartMs(bucket.bucketStartMs)
+        : resolvedLastStartMs - (normalized.length - 1 - index) * RECENT_REQUEST_BLOCK_DURATION_MS,
+  }));
+}
+
 export function mergeRecentRequestBucketGroups(
   groups: RecentRequestBucket[][]
 ): RecentRequestBucket[] {
@@ -125,6 +187,36 @@ export function mergeRecentRequestBucketGroups(
 
   if (normalizedGroups.length === 0) {
     return [];
+  }
+
+  const allTimestamped = normalizedGroups.every((group) =>
+    group.every((bucket) => bucket.bucketStartMs !== undefined)
+  );
+  if (allTimestamped) {
+    const byStart = new Map<number, RecentRequestBucket>();
+    normalizedGroups.forEach((group) => {
+      group.forEach((bucket) => {
+        const startMs = snapBucketStartMs(bucket.bucketStartMs as number);
+        const existing = byStart.get(startMs);
+        if (existing) {
+          existing.success += bucket.success;
+          existing.failed += bucket.failed;
+          if (!existing.time && bucket.time) {
+            existing.time = bucket.time;
+          }
+          return;
+        }
+        byStart.set(startMs, {
+          ...(bucket.time ? { time: bucket.time } : {}),
+          bucketStartMs: startMs,
+          success: bucket.success,
+          failed: bucket.failed,
+        });
+      });
+    });
+    const sortedStarts = Array.from(byStart.keys()).sort((a, b) => a - b);
+    const tailStarts = sortedStarts.slice(-RECENT_REQUEST_BLOCK_COUNT);
+    return tailStarts.map((startMs) => byStart.get(startMs)!);
   }
 
   const mergedLength = Math.min(
@@ -146,6 +238,9 @@ export function mergeRecentRequestBucketGroups(
       target.failed += bucket.failed;
       if (!target.time && bucket.time) {
         target.time = bucket.time;
+      }
+      if (target.bucketStartMs === undefined && bucket.bucketStartMs !== undefined) {
+        target.bucketStartMs = bucket.bucketStartMs;
       }
     });
   });
@@ -169,7 +264,10 @@ export function statusBarDataFromRecentRequests(buckets: RecentRequestBucket[]):
   const normalizedBuckets = normalizeRecentRequestBuckets(buckets);
   const emptyBucketCount = Math.max(0, RECENT_REQUEST_BLOCK_COUNT - normalizedBuckets.length);
   const blockStats = [
-    ...Array.from({ length: emptyBucketCount }, () => ({ success: 0, failed: 0 })),
+    ...Array.from(
+      { length: emptyBucketCount },
+      (): RecentRequestBucket => ({ success: 0, failed: 0 })
+    ),
     ...normalizedBuckets.slice(-RECENT_REQUEST_BLOCK_COUNT),
   ];
 
@@ -199,7 +297,8 @@ export function statusBarDataFromRecentRequests(buckets: RecentRequestBucket[]):
       blocks.push('mixed');
     }
 
-    const blockStartTime = windowStart + index * RECENT_REQUEST_BLOCK_DURATION_MS;
+    const blockStartTime =
+      bucket.bucketStartMs ?? windowStart + index * RECENT_REQUEST_BLOCK_DURATION_MS;
     blockDetails.push({
       success,
       failure,

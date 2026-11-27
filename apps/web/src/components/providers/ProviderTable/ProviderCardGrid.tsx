@@ -394,8 +394,9 @@ export function ProviderCardGrid({
           latestFailure?.isMostRecent && failureSummaryText
             ? [failureStatusPrefix, failureSummaryText].filter(Boolean).join(' · ')
             : null;
-        const recentWindowSuccess = row.statusData.totalSuccess;
-        const recentWindowFailure = row.statusData.totalFailure;
+        const cardStatusData = row.recentStatusData ?? row.statusData;
+        const recentWindowSuccess = cardStatusData.totalSuccess;
+        const recentWindowFailure = cardStatusData.totalFailure;
         const recentWindowTotal = recentWindowSuccess + recentWindowFailure;
         const recentWindowRate =
           recentWindowTotal > 0 ? Math.round((recentWindowSuccess / recentWindowTotal) * 100) : null;
@@ -730,7 +731,7 @@ export function ProviderCardGrid({
 
               <div className={styles.cardRecentBarRow}>
                 <div className={styles.cardRecentBarWrap}>
-                  <ProviderStatusBar statusData={row.statusData} hideRate />
+                  <ProviderStatusBar statusData={cardStatusData} hideRate />
                 </div>
                 <span
                   className={`${styles.recentTrailPill} ${recentTrailToneClass}`}

@@ -16,17 +16,19 @@ import type { createPublicApiClient } from './publicApi';
 // They still unmount together when the verified administrator session ends.
 function RetainedRoutePanel({
   active,
+  prewarm = false,
   name,
   language,
   children,
 }: {
   active: boolean;
+  prewarm?: boolean;
   name: string;
   language: string;
   children: ReactNode;
 }) {
-  const [visited, setVisited] = useState(active);
-  if (active && !visited) setVisited(true);
+  const [visited, setVisited] = useState(active || prewarm);
+  if ((active || prewarm) && !visited) setVisited(true);
   if (!active && !visited) return null;
   return (
     <div data-testid={`fresh-route-${name}`} hidden={!active} lang={language}>
@@ -43,6 +45,7 @@ export function FreshManagedResources({
   onUnauthorized,
   onPending,
   onDirtyChange,
+  prewarmKeys = false,
 }: {
   basePath: string;
   client: ReturnType<typeof createPublicApiClient>;
@@ -52,6 +55,8 @@ export function FreshManagedResources({
   onUnauthorized: () => void;
   onPending: (pending: boolean) => void;
   onDirtyChange?: (dirty: boolean) => void;
+  /** Pre-mounts the hidden API keys panel on sidebar hover/focus intent. */
+  prewarmKeys?: boolean;
 }) {
   const { i18n } = useTranslation();
   const consoleLanguage = i18n.resolvedLanguage || i18n.language;
@@ -135,7 +140,12 @@ export function FreshManagedResources({
           : bannerNode
         : null}
       {/* 客户端 API 密钥保留面板 */}
-      <RetainedRoutePanel name="keys" active={route === '/api-keys'} language={language}>
+      <RetainedRoutePanel
+        name="keys"
+        active={route === '/api-keys'}
+        prewarm={prewarmKeys}
+        language={language}
+      >
         <FreshManagedKeysPage
           visible={route === '/api-keys'}
           client={client}

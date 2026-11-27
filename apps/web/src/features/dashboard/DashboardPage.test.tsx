@@ -209,7 +209,7 @@ beforeEach(() => {
   mocks.availability.panelHostMode = 'manager_embedded';
   mocks.availability.modelPricesAvailable = true;
   mocks.auth.sessionMode = 'manager_embedded';
-  apiMocks.headerRefreshCallback = null;
+  mocks.config.routingStrategy = 'round-robin';
   apiMocks.loadAllProvidersV8Snapshot = undefined;
   apiMocks.apiKeysList.mockReset().mockResolvedValue(['k1', 'k2']);
   apiMocks.authFilesList.mockReset().mockResolvedValue({ files: [{ name: 'a.json' }] });
@@ -370,5 +370,33 @@ describe('DashboardPage P0 + P1 Plan A', () => {
       'Gemini 2 · Codex 1 · Claude 3 · Meta 2',
     ]);
     expect(textOf(renderer!.root)).toContain('notification.refresh_failed');
+  });
+
+  it('defaults omitted CPA v8 routingStrategy to round-robin and preserves unknown custom strategies', async () => {
+    mocks.config.routingStrategy = '';
+
+    await act(async () => {
+      renderer = create(<DashboardPage />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(textOf(renderer!.root)).toContain('basic_settings.routing_strategy_round_robin');
+
+    await act(async () => {
+      renderer?.unmount();
+    });
+    renderer = null;
+
+    mocks.config.routingStrategy = 'soonest-reset';
+
+    await act(async () => {
+      renderer = create(<DashboardPage />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(textOf(renderer!.root)).toContain('soonest-reset');
+    expect(textOf(renderer!.root)).not.toContain('basic_settings.routing_strategy_round_robin');
   });
 });

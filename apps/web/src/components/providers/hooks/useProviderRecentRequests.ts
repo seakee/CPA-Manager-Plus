@@ -4,6 +4,7 @@ import { apiKeyUsageApi } from '@/services/api';
 import { useAuthStore } from '@/stores';
 import { sha256Hex } from '@/utils/apiKeyHash';
 import {
+  anchorRecentRequestBuckets,
   normalizeRecentRequestUsageEntry,
   type ApiKeyUsageResponse,
   type RecentRequestUsageEntry,
@@ -15,6 +16,7 @@ export type ProviderRecentRequests = Map<string, Map<string, RecentRequestUsageE
 
 export type UseProviderRecentRequestsOptions = {
   enabled?: boolean;
+  initialMaxAgeMs?: number;
 };
 
 const EMPTY_USAGE_BY_PROVIDER: ProviderRecentRequests = new Map();
@@ -53,7 +55,10 @@ const normalizeProviderKey = (value: unknown): string =>
     .trim()
     .toLowerCase();
 
-const normalizeApiKeyUsageResponse = (payload: ApiKeyUsageResponse): ProviderRecentRequests => {
+const normalizeApiKeyUsageResponse = (
+  payload: ApiKeyUsageResponse,
+  fetchedAtMs = Date.now()
+): ProviderRecentRequests => {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     return EMPTY_USAGE_BY_PROVIDER;
   }
@@ -68,7 +73,11 @@ const normalizeApiKeyUsageResponse = (payload: ApiKeyUsageResponse): ProviderRec
 
     const usageByCompositeKey = new Map<string, RecentRequestUsageEntry>();
     Object.entries(entries).forEach(([compositeKey, entry]) => {
-      usageByCompositeKey.set(compositeKey, normalizeRecentRequestUsageEntry(entry));
+      const normalized = normalizeRecentRequestUsageEntry(entry);
+      usageByCompositeKey.set(compositeKey, {
+        ...normalized,
+        recentRequests: anchorRecentRequestBuckets(normalized.recentRequests, fetchedAtMs),
+      });
     });
 
     usageByProvider.set(providerKey, usageByCompositeKey);
@@ -102,6 +111,7 @@ const fetchProviderRecentRequests = async (
 
 export function useProviderRecentRequests(options: UseProviderRecentRequestsOptions = {}) {
   const enabled = options.enabled ?? true;
+  const initialMaxAgeMs = options.initialMaxAgeMs;
   const apiBase = useAuthStore((state) => state.apiBase);
   const managementKey = useAuthStore((state) => state.managementKey);
   const scope = useMemo(
@@ -126,13 +136,13 @@ export function useProviderRecentRequests(options: UseProviderRecentRequestsOpti
   );
 
   const loadRecentRequests = useCallback(
-    async (loadOptions: { force?: boolean } = {}) => {
+    async (loadOptions: { force?: boolean; maxAgeMs?: number } = {}) => {
       if (!enabled) {
         return EMPTY_USAGE_BY_PROVIDER;
       }
 
-      const hasFreshCache =
-        cache.cachedAt > 0 && Date.now() - cache.cachedAt < PROVIDER_RECENT_REQUESTS_STALE_TIME_MS;
+      const staleTimeMs = loadOptions.maxAgeMs ?? PROVIDER_RECENT_REQUESTS_STALE_TIME_MS;
+      const hasFreshCache = cache.cachedAt > 0 && Date.now() - cache.cachedAt < staleTimeMs;
 
       if (!loadOptions.force && hasFreshCache) {
         setUsageForCurrentScope(cache.cachedUsageByProvider);
@@ -166,8 +176,10 @@ export function useProviderRecentRequests(options: UseProviderRecentRequestsOpti
       setUsageForCurrentScope(EMPTY_USAGE_BY_PROVIDER);
       return;
     }
-    void loadRecentRequests().catch(() => {});
-  }, [enabled, loadRecentRequests, setUsageForCurrentScope]);
+    void loadRecentRequests(
+      initialMaxAgeMs !== undefined ? { maxAgeMs: initialMaxAgeMs } : undefined
+    ).catch(() => {});
+  }, [enabled, initialMaxAgeMs, loadRecentRequests, setUsageForCurrentScope]);
 
   useInterval(
     () => {

@@ -280,11 +280,17 @@ func degradableExternalAuthorityError(err error) bool {
 // durable key operation journal. It reconciles an unsettled latest operation
 // read-only first, never mutating CPA and never performing O(N) /v1/models
 // sweeps once a snapshot version is proven.
-func (s *Service) ObservedKeyList(ctx context.Context, generation uint64) (observed []freshkeys.Key, unverified bool, err error) {
+func (s *Service) ObservedKeyList(ctx context.Context, generation uint64) ([]freshkeys.Key, bool, error) {
+	observed, unverified, _, err := s.ObservedKeyListStamped(ctx, generation)
+	return observed, unverified, err
+}
+
+func (s *Service) ObservedKeyListStamped(ctx context.Context, generation uint64) (observed []freshkeys.Key, unverified bool, stamp ManagedProofStamp, err error) {
 	defer func() {
 		if ctx.Err() != nil {
 			observed = markUnverifiedKeys(observed, "key_operation_unknown")
 			unverified = true
+			stamp = ManagedProofStamp{}
 			if err == nil || errors.Is(err, cpa.ErrProofUnavailable) || degradableExternalAuthorityError(err) {
 				err = ctx.Err()
 			}
@@ -292,11 +298,11 @@ func (s *Service) ObservedKeyList(ctx context.Context, generation uint64) (obser
 	}()
 	s = s.active()
 	if s == nil || s.keys == nil {
-		return nil, true, ErrUnavailable
+		return nil, true, ManagedProofStamp{}, ErrUnavailable
 	}
 	if s.profile == ProfileExternal && generation != 0 {
 		if _, err := s.externalTarget(ctx, generation); err != nil && !degradableExternalAuthorityError(err) {
-			return nil, true, err
+			return nil, true, ManagedProofStamp{}, err
 		}
 	}
 	// A missing journal is supported, but a failed journal read is not evidence
@@ -307,7 +313,7 @@ func (s *Service) ObservedKeyList(ctx context.Context, generation uint64) (obser
 		var err error
 		latest, err = s.repo.LatestOperation(ctx)
 		if err != nil {
-			return nil, true, err
+			return nil, true, ManagedProofStamp{}, err
 		}
 		if latest != nil && !latest.IsTerminal() {
 			s.mu.Lock()
@@ -321,28 +327,29 @@ func (s *Service) ObservedKeyList(ctx context.Context, generation uint64) (obser
 			}
 			s.mu.Unlock()
 			if reconcileErr != nil && !readOnlyReconciliationUnavailable(reconcileErr) {
-				return nil, true, reconcileErr
+				return nil, true, ManagedProofStamp{}, reconcileErr
 			}
 			reconciliationErr = reconcileErr
 			latest, err = s.repo.LatestOperation(ctx)
 			if err != nil {
-				return nil, true, err
+				return nil, true, ManagedProofStamp{}, err
 			}
 		}
 	}
 	keys, _, secretByID, err := s.keys.ActiveSecretMap(ctx)
 	if err != nil {
-		return nil, true, err
+		return nil, true, ManagedProofStamp{}, err
 	}
 	if reconciliationErr != nil {
-		return markUnverifiedKeys(keys, externalErrorCode(reconciliationErr)), true, nil
+		return markUnverifiedKeys(keys, externalErrorCode(reconciliationErr)), true, ManagedProofStamp{}, nil
 	}
 
 	if s.profile == ProfileExternal {
-		return s.observedExternalKeyList(ctx, keys, secretByID, latest, generation)
+		obs, unv, err := s.observedExternalKeyList(ctx, keys, secretByID, latest, generation)
+		return obs, unv, ManagedProofStamp{}, err
 	}
 	if s.profile != ProfileManaged {
-		return keys, false, nil
+		return keys, false, ManagedProofStamp{}, nil
 	}
 	return s.observedManagedKeyList(ctx, keys, secretByID, latest, generation)
 }
@@ -353,32 +360,32 @@ func (s *Service) observedManagedKeyList(
 	secretByID map[string]string,
 	latest *repo.Operation,
 	generation uint64,
-) ([]freshkeys.Key, bool, error) {
+) ([]freshkeys.Key, bool, ManagedProofStamp, error) {
 	p, err := s.permit(ctx)
 	if err != nil {
 		if !unavailableObservationAuthority(err) {
-			return nil, true, err
+			return nil, true, ManagedProofStamp{}, err
 		}
-		return markUnverifiedKeys(keys, ""), true, nil
+		return markUnverifiedKeys(keys, ""), true, ManagedProofStamp{}, nil
 	}
 	if generation != 0 && p.Generation != formatUint(generation) {
-		return markUnverifiedKeys(keys, "key_operation_generation_mismatch"), true, nil
+		return markUnverifiedKeys(keys, "key_operation_generation_mismatch"), true, ManagedProofStamp{}, nil
 	}
 	if err := s.requireInstallJournal(ctx, p); err != nil {
 		if errors.Is(err, ErrGeneration) || errors.Is(err, ErrUnavailable) {
-			return markUnverifiedKeys(keys, ""), true, nil
+			return markUnverifiedKeys(keys, ""), true, ManagedProofStamp{}, nil
 		}
-		return nil, true, err
+		return nil, true, ManagedProofStamp{}, err
 	}
 	target, err := s.target(ctx, p)
 	if err != nil {
-		return markUnverifiedKeys(keys, ""), true, nil
+		return markUnverifiedKeys(keys, ""), true, ManagedProofStamp{}, nil
 	}
 	p.runtimeGeneration = uint64(target.Generation)
 	p.runtimeArtifact = string(target.ActiveGatewayArtifact.ArtifactID)
 	w, ok := s.wire.(keyWire)
 	if !ok {
-		return markUnverifiedKeys(keys, ""), true, nil
+		return markUnverifiedKeys(keys, ""), true, ManagedProofStamp{}, nil
 	}
 	snap, err := w.KeySnapshot(ctx, p.ManagementKey)
 	if err != nil {
@@ -386,7 +393,7 @@ func (s *Service) observedManagedKeyList(
 		if errors.Is(err, cpa.ErrSourceConflict) {
 			code = "key_operation_source_conflict"
 		}
-		return markUnverifiedKeys(keys, code), true, nil
+		return markUnverifiedKeys(keys, code), true, ManagedProofStamp{}, nil
 	}
 
 	version := authProofVersion{
@@ -425,12 +432,14 @@ func (s *Service) observedManagedKeyList(
 	}
 
 	unverifiedFlag := false
+	observationFenced := false
 	if len(unverified) > 0 {
 		authOK, authErr := w.SampleKeySet(ctx, unverified, nil)
 		if authErr == nil && authOK {
 			if err := s.managedObservationHeld(ctx, p, w, snap); err != nil {
-				return markUnverifiedKeys(keys, externalErrorCode(err)), true, err
+				return markUnverifiedKeys(keys, externalErrorCode(err)), true, ManagedProofStamp{}, err
 			}
+			observationFenced = true
 			s.authCache.recordProven(version, snap.Keys, unverified)
 			for _, secret := range unverified {
 				proven[freshkeys.SecretDigest(secret)] = true
@@ -440,18 +449,30 @@ func (s *Service) observedManagedKeyList(
 		}
 	}
 
+	if hasSupersededKey(keys) {
+		observationFenced = false
+	}
 	retired, retirementUnknown, err := s.observeRetirements(ctx, keys, snap.Keys, snapshotKeys, version,
-		func(accepted, rejected []string) (bool, error) { return w.SampleKeySet(ctx, accepted, rejected) },
-		func() error { return s.managedObservationHeld(ctx, p, w, snap) })
+		func(accepted, rejected []string) (bool, error) {
+			observationFenced = false
+			return w.SampleKeySet(ctx, accepted, rejected)
+		},
+		func() error {
+			if err := s.managedObservationHeld(ctx, p, w, snap); err != nil {
+				return err
+			}
+			observationFenced = true
+			return nil
+		})
 	if err != nil {
-		return markUnverifiedKeys(keys, externalErrorCode(err)), true, err
+		return markUnverifiedKeys(keys, externalErrorCode(err)), true, ManagedProofStamp{}, err
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, true, err
+		return nil, true, ManagedProofStamp{}, err
 	}
-	if len(proven) > 0 || len(retired) > 0 {
+	if !observationFenced && (len(proven) > 0 || len(retired) > 0) {
 		if err := s.managedObservationHeld(ctx, p, w, snap); err != nil {
-			return markUnverifiedKeys(keys, externalErrorCode(err)), true, err
+			return markUnverifiedKeys(keys, externalErrorCode(err)), true, ManagedProofStamp{}, err
 		}
 	}
 	out := make([]freshkeys.Key, 0, len(keys))
@@ -459,7 +480,8 @@ func (s *Service) observedManagedKeyList(
 		secret := secretByID[string(k.ID)]
 		out = append(out, projectKeyFromSnapshot(k, secret, i < len(retired) && retired[i], snapshotKeys[secret], proven, latest))
 	}
-	return out, unverifiedFlag || retirementUnknown, nil
+	listUnverified := unverifiedFlag || retirementUnknown
+	return out, listUnverified, ManagedProofStamp{valid: !listUnverified, version: version}, nil
 }
 
 func (s *Service) observedExternalKeyList(
@@ -525,6 +547,7 @@ func (s *Service) observedExternalKeyList(
 	}
 
 	unverifiedFlag := false
+	observationFenced := false
 	if len(unverified) > 0 {
 		if sampler, ok := w.(externalAuthWire); ok {
 			authOK, authErr := sampler.ExternalSampleKeySet(ctx, unverified, nil)
@@ -532,6 +555,7 @@ func (s *Service) observedExternalKeyList(
 				if err := s.externalObservationHeld(ctx, install, w, snap); err != nil {
 					return markUnverifiedKeys(keys, externalErrorCode(err)), true, err
 				}
+				observationFenced = true
 				s.authCache.recordProven(version, snap.Keys, unverified)
 				for _, secret := range unverified {
 					proven[freshkeys.SecretDigest(secret)] = true
@@ -544,21 +568,31 @@ func (s *Service) observedExternalKeyList(
 		}
 	}
 
+	if hasSupersededKey(keys) {
+		observationFenced = false
+	}
 	var sample func([]string, []string) (bool, error)
 	if sampler, ok := w.(externalAuthWire); ok {
 		sample = func(accepted, rejected []string) (bool, error) {
+			observationFenced = false
 			return sampler.ExternalSampleKeySet(ctx, accepted, rejected)
 		}
 	}
 	retired, retirementUnknown, err := s.observeRetirements(ctx, keys, snap.Keys, snapshotKeys, version, sample,
-		func() error { return s.externalObservationHeld(ctx, install, w, snap) })
+		func() error {
+			if err := s.externalObservationHeld(ctx, install, w, snap); err != nil {
+				return err
+			}
+			observationFenced = true
+			return nil
+		})
 	if err != nil {
 		return markUnverifiedKeys(keys, externalErrorCode(err)), true, err
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, true, err
 	}
-	if len(proven) > 0 || len(retired) > 0 {
+	if !observationFenced && (len(proven) > 0 || len(retired) > 0) {
 		if err := s.externalObservationHeld(ctx, install, w, snap); err != nil {
 			return markUnverifiedKeys(keys, externalErrorCode(err)), true, err
 		}
@@ -569,6 +603,15 @@ func (s *Service) observedExternalKeyList(
 		out = append(out, projectKeyFromSnapshot(k, secret, i < len(retired) && retired[i], snapshotKeys[secret], proven, latest))
 	}
 	return out, unverifiedFlag || retirementUnknown, nil
+}
+
+func hasSupersededKey(keys []freshkeys.Key) bool {
+	for _, k := range keys {
+		if k.Lifecycle == identity.LifecycleSuperseded {
+			return true
+		}
+	}
+	return false
 }
 
 // ObserveKey reconciles any unsettled operation for key read-only and returns

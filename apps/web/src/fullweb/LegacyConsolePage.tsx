@@ -75,8 +75,8 @@ export function LegacyConsolePage({
   const [freshPending, setFreshPending] = useState(false);
   const [freshDirty, setFreshDirty] = useState(false);
   const [systemDirty, setSystemDirty] = useState(false);
+  const [prewarmKeys, setPrewarmKeys] = useState(false);
   const onUnauthorizedRef = useRef(onUnauthorized);
-
   useEffect(() => {
     onUnauthorizedRef.current = onUnauthorized;
   }, [onUnauthorized]);
@@ -157,6 +157,11 @@ export function LegacyConsolePage({
             enablePinnedNav
             logoutDisabled={freshPending}
             hasUnsavedChanges={freshDirty || systemDirty}
+            onNavItemIntent={(path) => {
+              if (path === '/api-keys') {
+                setPrewarmKeys(true);
+              }
+            }}
             contentFooter={
               <FreshManagedResources
                 basePath={context.basePath}
@@ -166,6 +171,7 @@ export function LegacyConsolePage({
                 onUnauthorized={onUnauthorized}
                 onPending={setFreshPending}
                 onDirtyChange={setFreshDirty}
+                prewarmKeys={prewarmKeys}
               />
             }
             renderRoute={(pathname) => {

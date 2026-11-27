@@ -126,6 +126,25 @@ func TestManagedPostureAllowsOperatorEditsWhileEnforcingSecurityInvariants(t *te
 			name: "cpa SaveConfigPreserveComments rewrite with disabled server discovery and defaults",
 			body: `{"config-version":8,"plugins":{"dir":"/data/runtime/supervisor/plugins","enabled":false},"access":{"api-keys":[]},"server":{"host":"127.0.0.1","port":8317,"discovery":{"service-type":"_ai-gateway._tcp","subtypes":["_chat-completions","_responses","_messages","_generate-content","_interactions"]}},"management":{"allow-remote":false,"secret-key":"$2a$10$SO5RdGiOYIGOuA3sHAWDouh0VHJ7Lx6FqoP3XHRyNGLGlMEodr2ga","disable-control-panel":true,"disable-auto-update-panel":true},"oauth":{"auth-dir":"/data/runtime/supervisor/destination/auth","providers":{"aistudio":{"ws-auth":true}}},"observability":{"logs":{"logging-to-file":false},"usage":{"usage-statistics-enabled":true,"redis-usage-queue-retention-seconds":60}},"credentials":{"concurrency":{"max-limit":1000000},"in-flight":{"snapshot-interval":"2s"}},"routing":{"cooldown":{"disable-cooling":false},"retry":{"request-retry":0}},"api-keys":{"openai-compatibility":[{"name":"mock-fixa1","base-url":"http://host.docker.internal:38339/v1","models":[{"name":"gpt-4.1-mini"}],"keys":[{"api-key":"sk-mock-fixa1"}]}]}}`,
 		},
+		{
+			name: "cpa 8.1.5 server-id shutdown-timeout and source-editor server settings",
+			body: strings.Replace(
+				managedDestinationConfig,
+				`"port":8317`,
+				`"port":8317,"server-id":"65788ebc-f409-4e5c-be25-e02a43497741","shutdown-timeout":30,"commercial-mode":true,"max-request-body-bytes":10485760,"trusted-proxies":["10.0.0.0/8"],"response-compression":{"enabled":true,"min-bytes":-1},"kv-store":{"disabled":false}`,
+				1,
+			),
+		},
+		{
+			name: "forward-compatible cpa 8.x minor-release non-sensitive extensions",
+			body: strings.NewReplacer(
+				`"port":8317`, `"port":8317,"server-id":"65788ebc-f409-4e5c-be25-e02a43497741","read-header-timeout":"10s"`,
+				`"auth-dir":"/runtime/supervisor/destination/auth"`, `"auth-dir":"/runtime/supervisor/destination/auth","token-refresh-skew":"5m"`,
+				`"logging-to-file":false`, `"logging-to-file":false,"logs-max-age-days":7`,
+				`"usage-statistics-enabled":true`, `"usage-statistics-enabled":true,"usage-flush-interval-ms":500`,
+				`"access":{"api-keys":[]}`, `"access":{"api-keys":[]},"telemetry":{"enabled":false,"interval":"30s"}`,
+			).Replace(managedDestinationConfig),
+		},
 	}
 	for _, tc := range allowedTests {
 		t.Run("allow/"+tc.name, func(t *testing.T) {
@@ -271,8 +290,8 @@ func TestManagedPostureAllowsOperatorEditsWhileEnforcingSecurityInvariants(t *te
 			body: strings.Replace(managedDestinationConfig, `"logging-to-file":false`, `"logging-to-file":true,"log-dir":"/tmp/logs"`, 1),
 		},
 		{
-			name: "observability unexpected usage key",
-			body: strings.Replace(managedDestinationConfig, `"usage-statistics-enabled":true`, `"usage-statistics-enabled":true,"custom-usage-key":1`, 1),
+			name: "observability unsafe usage export path",
+			body: strings.Replace(managedDestinationConfig, `"usage-statistics-enabled":true`, `"usage-statistics-enabled":true,"usage-export-path":"/tmp/usage.jsonl"`, 1),
 		},
 		{
 			name: "usage statistics disabled",
@@ -295,8 +314,44 @@ func TestManagedPostureAllowsOperatorEditsWhileEnforcingSecurityInvariants(t *te
 			body: strings.Replace(managedDestinationConfig, `"access":{"api-keys":[]}`, `"access":{"api-keys":[]},"api-keys":["sk-legacy"]`, 1),
 		},
 		{
-			name: "unknown top-level root",
-			body: strings.Replace(managedDestinationConfig, `"access":{"api-keys":[]}`, `"access":{"api-keys":[]},"foreign":{}`, 1),
+			name: "legacy pre-v8 top-level root",
+			body: strings.Replace(managedDestinationConfig, `"access":{"api-keys":[]}`, `"access":{"api-keys":[]},"remote-management":{"allow-remote":true}`, 1),
+		},
+		{
+			name: "unknown top-level root carrying host path escape",
+			body: strings.Replace(managedDestinationConfig, `"access":{"api-keys":[]}`, `"access":{"api-keys":[]},"foreign":{"data-dir":"/tmp/escape"}`, 1),
+		},
+		{
+			name: "unknown top-level root with unsafe listener/socket name",
+			body: strings.Replace(managedDestinationConfig, `"access":{"api-keys":[]}`, `"access":{"api-keys":[]},"custom-socket":{"enabled":false}`, 1),
+		},
+		{
+			name: "extension leaf carrying null or windows drive/backslash path",
+			body: strings.Replace(managedDestinationConfig, `"port":8317`, `"port":8317,"custom-note":null`, 1),
+		},
+		{
+			name: "extension leaf carrying windows drive-relative path",
+			body: strings.Replace(managedDestinationConfig, `"port":8317`, `"port":8317,"custom-note":"C:logs"`, 1),
+		},
+		{
+			name: "response-compression non-integer min-bytes",
+			body: strings.Replace(managedDestinationConfig, `"port":8317`, `"port":8317,"response-compression":{"min-bytes":1.5}`, 1),
+		},
+		{
+			name: "server unix-socket escape",
+			body: strings.Replace(managedDestinationConfig, `"port":8317`, `"port":8317,"unix-socket":"/tmp/cpa.sock"`, 1),
+		},
+		{
+			name: "server github-token not allowed on new_managed",
+			body: strings.Replace(managedDestinationConfig, `"port":8317`, `"port":8317,"github-token":"ghp_example"`, 1),
+		},
+		{
+			name: "server-id zero uuid",
+			body: strings.Replace(managedDestinationConfig, `"port":8317`, `"port":8317,"server-id":"00000000-0000-0000-0000-000000000000"`, 1),
+		},
+		{
+			name: "server-id malformed",
+			body: strings.Replace(managedDestinationConfig, `"port":8317`, `"port":8317,"server-id":"not-a-uuid"`, 1),
 		},
 		{
 			name: "unsupported config-version",

@@ -16,6 +16,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeys"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshrouting"
 )
 
 const freshKeysGatewayAdmissionTimeout = 1500 * time.Millisecond
@@ -82,10 +83,18 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 	case strings.HasSuffix(resource, "/initial-install") && strings.Count(resource, "/") == 2:
 		a.initialClientKey(w, r, op, strings.TrimSuffix(strings.TrimPrefix(resource, "api-keys/"), "/initial-install"))
 	case resource == "api-keys" && r.Method == http.MethodGet:
+		type gatewayAdmissionSample struct {
+			admitted bool
+			stamp    freshkeyapply.ManagedProofStamp
+		}
 		var (
-			keys       []freshkeys.Key
-			unverified bool
-			listErr    error
+			keys        []freshkeys.Key
+			unverified  bool
+			listStamp   freshkeyapply.ManagedProofStamp
+			listErr     error
+			admitDone   chan gatewayAdmissionSample
+			admitCtx    context.Context
+			admitCancel context.CancelFunc
 		)
 		switch {
 		case authority != nil && authority.Profile() == freshkeyapply.ProfileExternal &&
@@ -122,8 +131,21 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 			}
 		case authority != nil && authority.Profile() == freshkeyapply.ProfileManaged &&
 			authority.Targets(op, freshkeyapply.SurfaceKeyOperation):
-			keys, unverified, listErr = authority.ObservedKeyList(r.Context(), op.Strategy.TargetGeneration)
+			targetGen := op.Strategy.TargetGeneration
+			if op.Routing.Committed && freshkeyapply.ManagerOwnedStrategy(op.Strategy) {
+				admitCtx, admitCancel = context.WithTimeout(r.Context(), freshKeysGatewayAdmissionTimeout)
+				defer admitCancel()
+				admitDone = make(chan gatewayAdmissionSample, 1)
+				go func() {
+					admitted, stamp := authority.DefaultInstallCPAAuthorityProvenStamp(admitCtx)
+					admitDone <- gatewayAdmissionSample{admitted: admitted, stamp: stamp}
+				}()
+			}
+			keys, unverified, listStamp, listErr = authority.ObservedKeyListStamped(r.Context(), targetGen)
 			if listErr != nil {
+				if admitCancel != nil {
+					admitCancel()
+				}
 				w.WriteHeader(http.StatusServiceUnavailable)
 				return
 			}
@@ -136,10 +158,59 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 		}
 		gatewayPending := true
 		switch {
+		case admitDone != nil:
+			var admitSample gatewayAdmissionSample
+			select {
+			case admitSample = <-admitDone:
+			case <-admitCtx.Done():
+			}
+			admitCancel()
+			checkCtx, checkCancel := context.WithTimeout(r.Context(), freshKeysGatewayAdmissionTimeout)
+			afterOp, afterErr := a.current(checkCtx)
+			checkCancel()
+			beforeState := freshrouting.StateFor(op)
+			afterState := freshrouting.StateFor(afterOp)
+			sameGeneration := afterErr == nil &&
+				afterOp.Validate() == nil &&
+				afterOp.Routing.Committed &&
+				afterOp.Strategy.TargetGeneration == op.Strategy.TargetGeneration &&
+				afterState.Generation == beforeState.Generation &&
+				afterState.InstallationID == beforeState.InstallationID
+			if !unverified && sameGeneration && listStamp.Valid() {
+				if admitSample.admitted && admitSample.stamp.Matches(listStamp) {
+					gatewayPending = false
+				} else if r.Context().Err() == nil {
+					// Runtime or CPA snapshot rotated between the two parallel reads:
+					// re-probe once under a strict admission deadline and require exact stamp equality.
+					reCtx, reCancel := context.WithTimeout(r.Context(), freshKeysGatewayAdmissionTimeout)
+					reDone := make(chan gatewayAdmissionSample, 1)
+					go func() {
+						reAdmitted, reStamp := authority.DefaultInstallCPAAuthorityProvenStamp(reCtx)
+						reDone <- gatewayAdmissionSample{admitted: reAdmitted, stamp: reStamp}
+					}()
+					var reSample gatewayAdmissionSample
+					select {
+					case reSample = <-reDone:
+					case <-reCtx.Done():
+					}
+					reCancel()
+					gatewayPending = !(reSample.admitted && reSample.stamp.Matches(listStamp))
+				}
+			}
 		case op.Routing.Committed && freshkeyapply.ManagerOwnedStrategy(op.Strategy):
-			admitCtx, cancel := context.WithTimeout(r.Context(), freshKeysGatewayAdmissionTimeout)
-			gatewayPending = !a.gatewayAdmissionProven(admitCtx)
-			cancel()
+			probeCtx, probeCancel := context.WithTimeout(r.Context(), freshKeysGatewayAdmissionTimeout)
+			probeDone := make(chan gatewayAdmissionSample, 1)
+			go func() {
+				admitted, admitStamp := a.gatewayAdmissionProvenStamp(probeCtx)
+				probeDone <- gatewayAdmissionSample{admitted: admitted, stamp: admitStamp}
+			}()
+			var probeSample gatewayAdmissionSample
+			select {
+			case probeSample = <-probeDone:
+			case <-probeCtx.Done():
+			}
+			probeCancel()
+			gatewayPending = !probeSample.admitted || unverified || (listStamp.Valid() && !probeSample.stamp.Matches(listStamp))
 		case op.ProductComplete && op.Routing.Committed &&
 			authority != nil && authority.Profile() == freshkeyapply.ProfileExternal &&
 			authority.Targets(op, freshkeyapply.SurfaceKeyOperation):

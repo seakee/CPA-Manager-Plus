@@ -834,6 +834,80 @@ button.key-quick-btn-more[aria-expanded='true'] {
 .key-empty small {
   font-size: 11px;
 }
+@keyframes key-skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 0.95;
+  }
+}
+.key-loading-skeleton {
+  min-width: 0;
+}
+.key-skeleton-bar,
+.key-skeleton-pill {
+  display: block;
+  background: var(--app-surface-muted);
+  animation: key-skeleton-pulse 1.4s ease-in-out infinite;
+}
+.key-skeleton-bar {
+  height: 12px;
+  border-radius: var(--app-radius-xs);
+}
+.key-skeleton-pill {
+  width: 64px;
+  height: 22px;
+  border-radius: var(--app-radius-pill);
+}
+.key-skeleton-name {
+  width: 140px;
+  height: 14px;
+}
+.key-skeleton-preview {
+  width: 180px;
+  margin-top: 8px;
+}
+.key-skeleton-models {
+  width: 72px;
+}
+.key-skeleton-usage {
+  width: 96px;
+}
+.key-skeleton-time {
+  width: 84px;
+}
+.key-skeleton-action {
+  width: 68px;
+  margin-left: auto;
+}
+.key-skeleton-table tbody tr {
+  pointer-events: none;
+}
+.key-skeleton-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  pointer-events: none;
+}
+.key-skeleton-card-head,
+.key-skeleton-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+:root[data-visual-effects='reduced'] .key-skeleton-bar,
+:root[data-visual-effects='reduced'] .key-skeleton-pill {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .key-skeleton-bar,
+  .key-skeleton-pill {
+    animation: none;
+  }
+}
 .key-gateway-note,
 .key-notice {
   display: flex;

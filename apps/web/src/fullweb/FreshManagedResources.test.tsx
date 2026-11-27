@@ -363,4 +363,79 @@ describe('Fresh resources within the original Console', () => {
       transport.mock.calls.filter(([url]) => String(url).endsWith('/gateway/config'))
     ).toHaveLength(1);
   });
+
+  it('prewarms the hidden API keys panel on intent and reveals loaded keys without duplicate fetch', async () => {
+    const transport = vi.fn<typeof fetch>((url) => {
+      const target = String(url);
+      if (target.endsWith('/api-keys')) {
+        return Promise.resolve(
+          Response.json({
+            keys: [
+              {
+                id: 'a'.repeat(32),
+                requestId: 'b'.repeat(32),
+                maskedPreview: 'cpamp_sk_…aaaa',
+                createdAtMs: Date.now() - 10_000,
+                managerState: 'persisted',
+                lifecycle: 'active',
+                runtimeState: 'effective_observed',
+                name: 'Prewarmed Key',
+                nameRevision: 2,
+                origin: 'workspace',
+              },
+            ],
+            gatewayPending: false,
+            revocationAvailable: true,
+          })
+        );
+      }
+      if (target.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: Date.now() - 86_400_000,
+            toMs: Date.now(),
+            coverage: { state: 'complete', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.resolve(Response.json({ protocols: [], ready: true }));
+    });
+    const client = createPublicApiClient(() => context, transport);
+    const renderTree = (prewarmKeys: boolean) => (
+      <MemoryRouter initialEntries={['/console']}>
+        <Navigation />
+        <FreshManagedResources
+          basePath={context.basePath}
+          client={client}
+          credential="test-admin"
+          onUnauthorized={vi.fn()}
+          onPending={pending}
+          prewarmKeys={prewarmKeys}
+        />
+      </MemoryRouter>
+    );
+
+    await act(async () => {
+      renderer = create(renderTree(false));
+    });
+    expect(transport).not.toHaveBeenCalled();
+
+    // Hover/focus intent mounts the hidden keys panel and warms GET /api-keys.
+    await act(async () => {
+      renderer.update(renderTree(true));
+    });
+    expect(panel('keys').props.hidden).toBe(true);
+    expect(
+      transport.mock.calls.filter(([url]) => String(url).endsWith('/api-keys'))
+    ).toHaveLength(1);
+
+    // Clicking /console/api-keys immediately reveals the already-loaded list without a 2nd GET.
+    await navigate('/console/api-keys');
+    expect(panel('keys').props.hidden).toBe(false);
+    expect(
+      transport.mock.calls.filter(([url]) => String(url).endsWith('/api-keys'))
+    ).toHaveLength(1);
+    expect(JSON.stringify(renderer.toJSON())).toContain('Prewarmed Key');
+  });
 });

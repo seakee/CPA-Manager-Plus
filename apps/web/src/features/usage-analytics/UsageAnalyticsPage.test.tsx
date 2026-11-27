@@ -18,9 +18,16 @@ const { mocks } = vi.hoisted(() => ({
     copyToClipboard: vi.fn(async () => true),
     translationCalls: [] as Array<[string, Record<string, unknown> | undefined]>,
     usageState: null as unknown,
+    monitoringSwitch: {
+      enabled: false,
+      loaded: true,
+      saving: false,
+      failed: false,
+      writable: true,
+      setEnabled: vi.fn(async () => {}),
+    },
   },
 }));
-
 vi.mock('react-router-dom', () => ({
   useNavigate: () => mocks.navigate,
 }));
@@ -44,6 +51,9 @@ vi.mock('./useUsageAnalytics', () => ({
   useUsageAnalytics: () => mocks.usageState,
 }));
 
+vi.mock('@/hooks/useRequestMonitoringSwitch', () => ({
+  useRequestMonitoringSwitch: () => mocks.monitoringSwitch,
+}));
 vi.mock('@/utils/clipboard', () => ({
   copyToClipboard: mocks.copyToClipboard,
 }));
@@ -1518,5 +1528,28 @@ describe('UsageAnalyticsPage', () => {
         .findAllByType(Button)
         .some((button) => getText(button).includes('common.refresh'))
     ).toBe(true);
+  });
+
+  it('shows a non-blocking monitoring-paused banner alongside historical data and allows re-enabling', () => {
+    mocks.monitoringSwitch.setEnabled.mockClear();
+    mocks.usageState = createUsageState({
+      enabled: true,
+      unavailableReason: 'monitoring_disabled',
+    });
+
+    const renderer = renderPage();
+    const notice = renderer.root.findByProps({
+      'data-testid': 'usage-analytics-monitoring-paused-notice',
+    });
+    expect(getText(notice)).toContain('usage_analytics.monitoring_paused_title');
+    expect(getText(notice)).toContain('usage_analytics.monitoring_paused_body');
+    // Historical summary data stays visible underneath the notice.
+    expect(getText(renderer.root)).toContain('usage_analytics.metric_request_count');
+
+    const enableButton = renderer.root.findByProps({
+      'data-testid': 'usage-analytics-enable-request-monitoring',
+    });
+    clickHostButton(enableButton);
+    expect(mocks.monitoringSwitch.setEnabled).toHaveBeenCalledWith(true);
   });
 });

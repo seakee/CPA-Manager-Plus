@@ -4839,4 +4839,351 @@ describe('Fresh client key persistence UI', () => {
       renderer.root.findAllByProps({ 'data-testid': `key-models-popover-${cardKey.id}` })
     ).toHaveLength(0);
   });
+
+  it('auto-refreshes when becoming visible again after 5s cooldown and skips within cooldown or when modal is open', async () => {
+    const nowSpy = vi.spyOn(Date, 'now');
+    try {
+      nowSpy.mockReturnValue(4_000_000);
+      const keyOne = {
+        ...key,
+        id: '1'.repeat(32),
+        requestId: '2'.repeat(32),
+        maskedPreview: 'cpamp_sk_…1111',
+        createdAtMs: 4_000_000 - 10_000,
+        runtimeState: 'effective_observed' as const,
+        name: 'Initial Key',
+      };
+      const keyTwo = {
+        ...key,
+        id: '3'.repeat(32),
+        requestId: '4'.repeat(32),
+        maskedPreview: 'cpamp_sk_…2222',
+        createdAtMs: 4_000_000 + 5_000,
+        runtimeState: 'effective_observed' as const,
+        name: 'Background Created Key',
+      };
+
+      let currentKeys = [keyOne];
+      let listCalls = 0;
+      const fetchMock = vi.fn<typeof fetch>((input) => {
+        const url = String(input);
+        if (url.endsWith('/api-keys')) {
+          listCalls += 1;
+          return Promise.resolve(
+            Response.json({
+              keys: currentKeys,
+              gatewayPending: false,
+              revocationAvailable: true,
+            })
+          );
+        }
+        if (url.endsWith('/api-keys/usage-summary')) {
+          return Promise.resolve(
+            Response.json({
+              fromMs: 4_000_000 - 86_400_000,
+              toMs: Date.now(),
+              coverage: { state: 'complete', reason: 'observed' },
+              items: [],
+            })
+          );
+        }
+        return Promise.resolve(Response.json({ protocols: [], ready: true }));
+      });
+
+      const client = createPublicApiClient(() => context, fetchMock);
+      const renderWithVisible = (visible: boolean) => (
+        <FreshApiKeys
+          client={client}
+          credential="admin-test-only"
+          onUnauthorized={unauthorized}
+          onCreationPending={vi.fn()}
+          visible={visible}
+        />
+      );
+
+      await act(async () => {
+        renderer = create(renderWithVisible(true));
+      });
+      expect(listCalls).toBe(1);
+      expect(JSON.stringify(renderer.toJSON())).toContain('Initial Key');
+
+      // Hide and return within 5s cooldown: must not re-fetch.
+      currentKeys = [keyOne, keyTwo];
+      nowSpy.mockReturnValue(4_003_000);
+      await act(async () => {
+        renderer.update(renderWithVisible(false));
+      });
+      await act(async () => {
+        renderer.update(renderWithVisible(true));
+      });
+      expect(listCalls).toBe(1);
+
+      // Hide and return after 5s cooldown: auto-refreshes and surfaces newly added key.
+      nowSpy.mockReturnValue(4_006_000);
+      await act(async () => {
+        renderer.update(renderWithVisible(false));
+      });
+      await act(async () => {
+        renderer.update(renderWithVisible(true));
+      });
+      expect(listCalls).toBe(2);
+      expect(JSON.stringify(renderer.toJSON())).toContain('Background Created Key');
+
+      // Open create modal, leave and return after 5s: must skip auto-refresh to avoid disturbing user form.
+      await openCreate();
+      nowSpy.mockReturnValue(4_012_000);
+      await act(async () => {
+        renderer.update(renderWithVisible(false));
+      });
+      await act(async () => {
+        renderer.update(renderWithVisible(true));
+      });
+      expect(listCalls).toBe(2);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('shows structured loading skeleton without flashing gateway-pending warning before keys arrive', async () => {
+    let resolveKeys!: (response: Response) => void;
+    const pendingKeys = new Promise<Response>((resolve) => {
+      resolveKeys = resolve;
+    });
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys')) {
+        return pendingKeys;
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: Date.now() - 86_400_000,
+            toMs: Date.now(),
+            coverage: { state: 'complete', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.resolve(Response.json({ protocols: [], ready: true }));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+
+    await act(async () => {
+      renderer = create(
+        <FreshApiKeys
+          client={client}
+          credential="admin-test-only"
+          onUnauthorized={unauthorized}
+          onCreationPending={vi.fn()}
+          visible={true}
+        />
+      );
+    });
+
+    expect(renderer.root.findByProps({ 'data-testid': 'keys-loading-skeleton' })).toBeDefined();
+    expect(renderer.root.findAllByProps({ className: 'key-gateway-note' })).toHaveLength(0);
+
+    await act(async () => {
+      resolveKeys(
+        Response.json({
+          keys: [
+            {
+              ...key,
+              id: '5'.repeat(32),
+              requestId: '6'.repeat(32),
+              maskedPreview: 'cpamp_sk_…5555',
+              runtimeState: 'effective_observed',
+              name: 'Loaded Key',
+            },
+          ],
+          gatewayPending: false,
+          revocationAvailable: true,
+        })
+      );
+    });
+
+    expect(renderer.root.findAllByProps({ 'data-testid': 'keys-loading-skeleton' })).toHaveLength(
+      0
+    );
+    expect(renderer.root.findAllByProps({ className: 'key-gateway-note' })).toHaveLength(0);
+    expect(JSON.stringify(renderer.toJSON())).toContain('Loaded Key');
+  });
+
+  it('does not trigger global logout on hidden prewarm 401 and retries cleanly on first foreground entry', async () => {
+    let keyCalls = 0;
+    let accessCalls = 0;
+    const onUnauthorizedSpy = vi.fn();
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys')) {
+        keyCalls += 1;
+        if (keyCalls === 1) {
+          return Promise.resolve(new Response('{"error":"unauthorized"}', { status: 401 }));
+        }
+        return Promise.resolve(
+          Response.json({
+            keys: [],
+            gatewayPending: false,
+            revocationAvailable: true,
+          })
+        );
+      }
+      if (url.endsWith('/api-keys/access-info')) {
+        accessCalls += 1;
+        if (accessCalls === 1) {
+          return Promise.resolve(new Response('{"error":"unauthorized"}', { status: 401 }));
+        }
+        return Promise.resolve(
+          Response.json({
+            mode: 'new_managed',
+            managementBasePath: '/console',
+            inferenceBasePath: '/infer',
+            protocols: [],
+            ready: true,
+          })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        return Promise.resolve(
+          Response.json({
+            fromMs: Date.now() - 86_400_000,
+            toMs: Date.now(),
+            coverage: { state: 'complete', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.resolve(Response.json({ protocols: [], ready: true }));
+    });
+    const client = createPublicApiClient(() => context, fetchMock);
+    const renderWithVisible = (visible: boolean) => (
+      <FreshApiKeys
+        client={client}
+        credential="admin-test-only"
+        onUnauthorized={onUnauthorizedSpy}
+        onCreationPending={vi.fn()}
+        visible={visible}
+      />
+    );
+
+    // Hidden prewarm receives 401: must NOT log the user out from their active page.
+    await act(async () => {
+      renderer = create(renderWithVisible(false));
+    });
+    expect(keyCalls).toBe(1);
+    expect(accessCalls).toBe(1);
+    expect(onUnauthorizedSpy).not.toHaveBeenCalled();
+
+    // Entering foreground retries BOTH /api-keys and /api-keys/access-info cleanly.
+    await act(async () => {
+      renderer.update(renderWithVisible(true));
+    });
+    expect(keyCalls).toBe(2);
+    expect(accessCalls).toBe(2);
+    expect(onUnauthorizedSpy).not.toHaveBeenCalled();
+  });
+
+  it('retries foreground read after rebind even when an earlier hidden read failed, and preserves usage summary on transient re-entry failure', async () => {
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(5_000_000);
+    try {
+      let apiKeyCalls = 0;
+      let usageCalls = 0;
+      let resolvePostRebindHidden!: (res: Response) => void;
+      const onUnauthorizedSpy = vi.fn();
+      const fetchMock = vi.fn<typeof fetch>((input) => {
+        const url = String(input);
+        if (url.endsWith('/api-keys')) {
+          apiKeyCalls += 1;
+          if (apiKeyCalls === 1) {
+            return Promise.resolve(new Response('{"error":"unauthorized"}', { status: 401 }));
+          }
+          if (apiKeyCalls === 3) {
+            return new Promise<Response>((res) => {
+              resolvePostRebindHidden = res;
+            });
+          }
+          return Promise.resolve(
+            Response.json({
+              keys: [
+                {
+                  ...key,
+                  id: '7'.repeat(32),
+                  requestId: '8'.repeat(32),
+                  maskedPreview: 'cpamp_sk_…7777',
+                  runtimeState: 'effective_observed',
+                  name: 'Rebound Key',
+                },
+              ],
+              gatewayPending: false,
+              revocationAvailable: true,
+            })
+          );
+        }
+        if (url.includes('/api-keys/usage-summary')) {
+          usageCalls += 1;
+          if (usageCalls >= 3) {
+            return Promise.resolve(new Response('{"error":"temporary"}', { status: 503 }));
+          }
+          return Promise.resolve(
+            Response.json({
+              fromMs: 4_900_000,
+              toMs: 5_000_000,
+              coverage: { state: 'complete', reason: 'observed' },
+              items: [{ keyId: '7'.repeat(32), requestCount: 42, totalTokens: 1024 }],
+            })
+          );
+        }
+        return Promise.resolve(Response.json({ protocols: [], ready: true }));
+      });
+      const client = createPublicApiClient(() => context, fetchMock);
+      const renderKeys = (visible: boolean, reloadToken = 0) => (
+        <FreshApiKeys
+          client={client}
+          credential="admin-test-only"
+          onUnauthorized={onUnauthorizedSpy}
+          onCreationPending={vi.fn()}
+          visible={visible}
+          reloadToken={reloadToken}
+        />
+      );
+
+      // 1) Initial hidden prewarm fails -> entering foreground retries (#2) and succeeds.
+      await act(async () => {
+        renderer = create(renderKeys(false, 0));
+      });
+      await act(async () => {
+        renderer.update(renderKeys(true, 0));
+      });
+      expect(apiKeyCalls).toBe(2);
+
+      // 2) Leave page (visible=false) and rebind (reloadToken=1) -> starts hidden read (#3).
+      await act(async () => {
+        renderer.update(renderKeys(false, 1));
+      });
+      expect(apiKeyCalls).toBe(3);
+
+      // User enters page while #3 is still in flight, then #3 fails -> must auto-retry (#4) in foreground!
+      await act(async () => {
+        renderer.update(renderKeys(true, 1));
+      });
+      await act(async () => {
+        resolvePostRebindHidden(new Response('{"error":"transient"}', { status: 503 }));
+      });
+      expect(apiKeyCalls).toBe(4);
+      expect(JSON.stringify(renderer.toJSON())).toContain('42');
+
+      // 3) Hide and re-enter after >5s cooldown: keys refresh (#5) succeeds while usage-summary transiently 503s -> existing '42' summary stays visible.
+      await act(async () => {
+        renderer.update(renderKeys(false, 1));
+      });
+      nowSpy.mockReturnValue(5_007_000);
+      await act(async () => {
+        renderer.update(renderKeys(true, 1));
+      });
+      expect(apiKeyCalls).toBe(5);
+      expect(JSON.stringify(renderer.toJSON())).toContain('42');
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
 });

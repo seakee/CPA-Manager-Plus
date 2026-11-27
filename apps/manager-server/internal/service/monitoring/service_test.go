@@ -2706,6 +2706,129 @@ func TestAccountHistorySupportsAPIKeyAuthIndexTotalsAndRecentRequests(t *testing
 	}
 }
 
+func TestAccountHistoryResolvesMaskedSourceAPIKeyAndOpenAICompatibleBuckets(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	nowMS := time.Now().UnixMilli()
+	currentBucketStart := (nowMS / (10 * 60 * 1000)) * (10 * 60 * 1000)
+	prevBucketStart := currentBucketStart - 10*60*1000
+
+	mkOpenAICompat := func(id string, ts int64, failed bool) usage.Event {
+		ev := monitoringEvent(id, ts, "MiniMax-M3.1-Flash", "b375c6488dddc736", "m:sk-c...Zz9o", failed, 1000, 200, 0, 0, 1200, nil)
+		ev.AuthType = "apikey"
+		ev.Provider = "openai-compatible-minimax"
+		ev.AuthProviderSnapshot = ""
+		ev.AuthFileSnapshot = ""
+		ev.Source = "m:sk-c...Zz9o"
+		ev.AccountSnapshot = ""
+		ev.AuthLabelSnapshot = ""
+		ev.AuthAccountIDSnapshot = ""
+		return ev
+	}
+
+	evOld := mkOpenAICompat("mm-old", nowMS-4*60*60*1000, false)
+	evPrev := mkOpenAICompat("mm-prev", prevBucketStart+60_000, false)
+	evCur1 := mkOpenAICompat("mm-cur-1", currentBucketStart+5_000, false)
+	evCur2 := mkOpenAICompat("mm-cur-2", currentBucketStart+25_000, false)
+
+	evInteractions := monitoringEvent("gi-1", currentBucketStart+10_000, "gemini-2.5-flash", "aa11bb22cc33dd44", "m:AIza...9999", false, 500, 100, 0, 0, 600, nil)
+	evInteractions.AuthType = "apikey"
+	evInteractions.Provider = "gemini-interactions"
+	evInteractions.AuthProviderSnapshot = ""
+	evInteractions.Source = "m:AIza...9999"
+	evInteractions.AuthFileSnapshot = ""
+	evInteractions.AccountSnapshot = ""
+	evInteractions.AuthLabelSnapshot = ""
+
+	if _, err := db.InsertEvents(ctx, []usage.Event{evOld, evPrev, evCur1, evCur2, evInteractions}); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	resp, err := New(db).AccountHistory(ctx, AccountHistoryRequest{
+		CatchUp: true,
+		Accounts: []AccountHistoryTarget{
+			{
+				RowKey:               "openai:minimax",
+				AuthIndex:            "b375c6488dddc736",
+				AuthProviderSnapshot: "openai-compatibility",
+			},
+			{
+				RowKey:               "interactions:gi",
+				AuthIndex:            "aa11bb22cc33dd44",
+				AuthProviderSnapshot: "gemini-interactions",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("AccountHistory failed: %v", err)
+	}
+	if len(resp.Items) != 2 {
+		t.Fatalf("expected 2 items, got %#v", resp.Items)
+	}
+	mm := resp.Items[0]
+	if !mm.Matched || mm.TotalRequests != 4 || mm.SuccessCalls != 4 || mm.FailureCalls != 0 || mm.TotalTokens != 4800 {
+		t.Fatalf("unexpected minimax history item = %#v", mm)
+	}
+	if len(mm.RecentRequests) != 4 {
+		t.Fatalf("expected 4 recent requests for minimax, got %#v", mm.RecentRequests)
+	}
+	if len(mm.RecentBuckets) != 20 {
+		t.Fatalf("expected 20 recent buckets, got %d", len(mm.RecentBuckets))
+	}
+	var bucketSuccessTotal int64
+	for _, b := range mm.RecentBuckets {
+		bucketSuccessTotal += b.Success
+	}
+	if bucketSuccessTotal != 3 {
+		t.Fatalf("expected 3 requests inside 200-minute buckets (excluding 4h-old event), got %d: %#v", bucketSuccessTotal, mm.RecentBuckets)
+	}
+
+	gi := resp.Items[1]
+	if !gi.Matched || gi.TotalRequests != 1 || gi.SuccessCalls != 1 || len(gi.RecentRequests) != 1 {
+		t.Fatalf("unexpected interactions history item = %#v", gi)
+	}
+	if len(gi.RecentBuckets) != 20 {
+		t.Fatalf("expected 20 recent buckets for matched interactions target, got %d", len(gi.RecentBuckets))
+	}
+
+	// Matched provider with only >200-minute old history must still emit 20 zero-filled recent_buckets.
+	evOldOnly := monitoringEvent("old-only-1", nowMS-5*60*60*1000, "claude-sonnet-4", "oldonly00112233", "m:sk-ant...1111", false, 500, 100, 0, 0, 600, nil)
+	evOldOnly.AuthType = "apikey"
+	evOldOnly.Provider = "claude"
+	evOldOnly.AuthProviderSnapshot = ""
+	evOldOnly.Source = "m:sk-ant...1111"
+	evOldOnly.AuthFileSnapshot = ""
+	evOldOnly.AccountSnapshot = ""
+	evOldOnly.AuthLabelSnapshot = ""
+	if _, err := db.InsertEvents(ctx, []usage.Event{evOldOnly}); err != nil {
+		t.Fatalf("insert old-only event: %v", err)
+	}
+	oldResp, err := New(db).AccountHistory(ctx, AccountHistoryRequest{
+		CatchUp: true,
+		Accounts: []AccountHistoryTarget{
+			{
+				RowKey:               "claude:old",
+				AuthIndex:            "oldonly00112233",
+				AuthProviderSnapshot: "claude",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("AccountHistory old-only failed: %v", err)
+	}
+	if len(oldResp.Items) != 1 || !oldResp.Items[0].Matched || oldResp.Items[0].TotalRequests != 1 {
+		t.Fatalf("unexpected old-only item: %#v", oldResp.Items)
+	}
+	if len(oldResp.Items[0].RecentBuckets) != 20 {
+		t.Fatalf("expected 20 zero-filled recent_buckets for matched old-only account, got %d", len(oldResp.Items[0].RecentBuckets))
+	}
+	for _, b := range oldResp.Items[0].RecentBuckets {
+		if b.Success != 0 || b.Failed != 0 {
+			t.Fatalf("expected zero counts in recent_buckets for >200m-old account, got %#v", b)
+		}
+	}
+}
+
 func TestAccountWindowUsageReturnsWindowScopedTotalsAndComputedCost(t *testing.T) {
 	db := newMonitoringTestStore(t)
 	ctx := context.Background()

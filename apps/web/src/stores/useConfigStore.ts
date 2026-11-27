@@ -16,6 +16,31 @@ interface ConfigCache {
   timestamp: number;
 }
 
+export interface ConfigFetchOptions {
+  maxAgeMs?: number;
+  silent?: boolean;
+}
+
+export class ConfigRequestSupersededError extends Error {
+  readonly code = 'CONFIG_REQUEST_SUPERSEDED' as const;
+
+  constructor(message = 'Config request was superseded') {
+    super(message);
+    this.name = 'ConfigRequestSupersededError';
+  }
+}
+
+export function isConfigRequestSupersededError(
+  error: unknown
+): error is ConfigRequestSupersededError {
+  return (
+    error instanceof ConfigRequestSupersededError ||
+    (typeof error === 'object' &&
+      error !== null &&
+      (error as { code?: unknown }).code === 'CONFIG_REQUEST_SUPERSEDED')
+  );
+}
+
 interface ConfigState {
   config: Config | null;
   cache: Map<string, ConfigCache>;
@@ -24,12 +49,16 @@ interface ConfigState {
 
   // 操作
   fetchConfig: {
-    (section?: undefined, forceRefresh?: boolean): Promise<Config>;
-    (section: RawConfigSection, forceRefresh?: boolean): Promise<unknown>;
+    (section?: undefined, forceRefresh?: boolean, options?: ConfigFetchOptions): Promise<Config>;
+    (
+      section: RawConfigSection,
+      forceRefresh?: boolean,
+      options?: ConfigFetchOptions
+    ): Promise<unknown>;
   };
   updateConfigValue: (section: RawConfigSection, value: unknown) => void;
   clearCache: (section?: RawConfigSection) => void;
-  isCacheValid: (section?: RawConfigSection) => boolean;
+  isCacheValid: (section?: RawConfigSection, maxAgeMs?: number) => boolean;
 }
 
 const PROVIDER_CONFIG_SECTION_LIST: readonly RawConfigSection[] = [
@@ -54,21 +83,33 @@ const PROVIDER_CONFIG_SECTIONS: Partial<Record<RawConfigSection, true>> = {
   'openai-compatibility': true,
 };
 
+let configResetEpoch = 0;
 let configRequestToken = 0;
-let inFlightConfigRequest: { id: number; promise: Promise<Config> } | null = null;
-
+let lastSettledRequestId = 0;
+let inFlightConfigRequest: {
+  id: number;
+  resetEpoch: number;
+  exposeStatus: boolean;
+  promise: Promise<Config>;
+} | null = null;
 export const useConfigStore = create<ConfigState>((set, get) => ({
   config: null,
   cache: new Map(),
   loading: false,
   error: null,
 
-  fetchConfig: (async (section?: RawConfigSection, forceRefresh: boolean = false) => {
+  fetchConfig: (async (
+    section?: RawConfigSection,
+    forceRefresh: boolean = false,
+    options?: ConfigFetchOptions
+  ) => {
     const { cache, isCacheValid } = get();
+    const maxAgeMs = options?.maxAgeMs;
+    const silent = Boolean(options?.silent) && !forceRefresh;
 
     // 检查缓存
     const cacheKey = section || '__full__';
-    if (!forceRefresh && isCacheValid(section)) {
+    if (!forceRefresh && isCacheValid(section, maxAgeMs)) {
       const cached = cache.get(cacheKey);
       if (cached) {
         return cached.data;
@@ -76,7 +117,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     }
 
     // section 缓存未命中但 full 缓存可用时，直接复用已获取到的配置，避免重复 /config 请求
-    if (!forceRefresh && section && isCacheValid()) {
+    if (!forceRefresh && section && isCacheValid(undefined, maxAgeMs)) {
       const fullCached = cache.get('__full__');
       if (fullCached?.data) {
         return extractConfigSectionValue(fullCached.data as Config, section);
@@ -84,7 +125,15 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     }
 
     // 同一时刻合并多个 /config 请求（如 StrictMode 或多个页面同时触发）；强制刷新会绕过旧请求并在拉取期间保留现有 config 避免页面闪烁
-    if (!forceRefresh && inFlightConfigRequest) {
+    if (
+      !forceRefresh &&
+      inFlightConfigRequest &&
+      inFlightConfigRequest.resetEpoch === configResetEpoch
+    ) {
+      if (!silent && !inFlightConfigRequest.exposeStatus) {
+        inFlightConfigRequest.exposeStatus = true;
+        set({ loading: true, error: null });
+      }
       const data = await inFlightConfigRequest.promise;
       return section ? extractConfigSectionValue(data, section) : data;
     }
@@ -92,69 +141,127 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     if (forceRefresh) {
       inFlightConfigRequest = null;
       set({ cache: new Map(), loading: true, error: null });
-    } else {
+    } else if (!silent) {
       set({ loading: true, error: null });
     }
-
+    const resetEpochAtStart = configResetEpoch;
     const requestId = (configRequestToken += 1);
+    const startedSilent = silent;
     const v8WriteVersionBefore = providersApi?.getV8EtagMutationVersion?.();
-    try {
-      const requestPromise = configApi.getConfig({ syncLatestV8Etag: false });
-      inFlightConfigRequest = { id: requestId, promise: requestPromise };
-      const data = await requestPromise;
-      const now = Date.now();
-
-      // 如果在请求过程中连接已被切换/登出，则忽略旧请求的结果，避免覆盖新会话的状态
+    const tracker = {
+      id: requestId,
+      resetEpoch: resetEpochAtStart,
+      exposeStatus: !silent,
+      promise: null as unknown as Promise<Config>,
+    };
+    const resolveSupersession = (): Promise<Config> | Config | null => {
+      if (resetEpochAtStart !== configResetEpoch) {
+        throw new ConfigRequestSupersededError('Config store reset during fetch');
+      }
       if (requestId !== configRequestToken) {
-        return section ? extractConfigSectionValue(data, section) : data;
-      }
-
-      const v8VersionMatches =
-        v8WriteVersionBefore === undefined ||
-        v8WriteVersionBefore === providersApi?.getV8EtagMutationVersion?.();
-      if (v8VersionMatches && (data.v8Supported !== undefined || data.v8Etag !== undefined)) {
-        providersApi?.setLatestV8ConfigEtag?.(
-          data.v8Supported === false ? undefined : data.v8Etag,
-          { passiveRead: true }
-        );
-      }
-
-      // 更新缓存
-      const newCache = new Map(get().cache);
-      newCache.set('__full__', { data, timestamp: now });
-      CONFIG_SECTION_KEYS.forEach((key) => {
-        const value = extractConfigSectionValue(data, key);
-        if (value !== undefined) {
-          newCache.set(key, { data: value, timestamp: now });
+        if (
+          inFlightConfigRequest &&
+          inFlightConfigRequest.resetEpoch === resetEpochAtStart &&
+          inFlightConfigRequest.id === configRequestToken
+        ) {
+          return inFlightConfigRequest.promise;
         }
-      });
+        const settledConfig = get().config;
+        if (lastSettledRequestId > requestId && settledConfig !== null) {
+          return settledConfig;
+        }
+        throw new ConfigRequestSupersededError('Config request invalidated during fetch');
+      }
+      return null;
+    };
+    const settledPromise = (async (): Promise<Config> => {
+      try {
+        const data = await configApi.getConfig({ syncLatestV8Etag: false });
+        const superseded = resolveSupersession();
+        if (superseded !== null) {
+          return await superseded;
+        }
+        const now = Date.now();
 
-      set({
-        config: data,
-        cache: newCache,
-        loading: false,
-      });
+        const v8VersionMatches =
+          v8WriteVersionBefore === undefined ||
+          v8WriteVersionBefore === providersApi?.getV8EtagMutationVersion?.();
+        if (!v8VersionMatches && startedSilent) {
+          if (tracker.exposeStatus) {
+            return await get().fetchConfig(undefined, true);
+          }
+          throw new ConfigRequestSupersededError('Silent config revalidation superseded by v8 write');
+        }
 
-      return section ? extractConfigSectionValue(data, section) : data;
-    } catch (error: unknown) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : typeof error === 'string'
-            ? error
-            : 'Failed to fetch config';
-      if (requestId === configRequestToken) {
-        set({
-          error: message || 'Failed to fetch config',
-          loading: false,
+        if (v8VersionMatches && (data.v8Supported !== undefined || data.v8Etag !== undefined)) {
+          providersApi?.setLatestV8ConfigEtag?.(
+            data.v8Supported === false ? undefined : data.v8Etag,
+            { passiveRead: true }
+          );
+        }
+        // 更新缓存
+        const newCache = new Map(get().cache);
+        newCache.set('__full__', { data, timestamp: now });
+        CONFIG_SECTION_KEYS.forEach((key) => {
+          const value = extractConfigSectionValue(data, key);
+          if (value !== undefined) {
+            newCache.set(key, { data: value, timestamp: now });
+          }
         });
+
+        const supersededBeforePublish = resolveSupersession();
+        if (supersededBeforePublish !== null) {
+          return await supersededBeforePublish;
+        }
+        lastSettledRequestId = requestId;
+        set({
+          config: data,
+          cache: newCache,
+          loading: false,
+          error: null,
+        });
+
+        return data;
+      } catch (error: unknown) {
+        if (!isConfigRequestSupersededError(error)) {
+          const supersededOnError = resolveSupersession();
+          if (supersededOnError !== null) {
+            return await supersededOnError;
+          }
+        }
+        if (isConfigRequestSupersededError(error)) {
+          if (requestId === configRequestToken && resetEpochAtStart === configResetEpoch) {
+            set({ loading: false });
+          }
+          throw error;
+        }
+        const message =
+          error instanceof Error
+            ? error.message
+            : typeof error === 'string'
+              ? error
+              : 'Failed to fetch config';
+        if (
+          requestId === configRequestToken &&
+          resetEpochAtStart === configResetEpoch &&
+          tracker.exposeStatus
+        ) {
+          set({
+            error: message || 'Failed to fetch config',
+            loading: false,
+          });
+        }
+        throw error;
+      } finally {
+        if (inFlightConfigRequest?.id === requestId) {
+          inFlightConfigRequest = null;
+        }
       }
-      throw error;
-    } finally {
-      if (inFlightConfigRequest?.id === requestId) {
-        inFlightConfigRequest = null;
-      }
-    }
+    })();
+    tracker.promise = settledPromise;
+    inFlightConfigRequest = tracker;
+    const settledData = await settledPromise;
+    return section ? extractConfigSectionValue(settledData, section) : settledData;
   }) as ConfigState['fetchConfig'],
 
   updateConfigValue: (section, value) => {
@@ -273,19 +380,20 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     }
 
     // 清除全部缓存一般代表“切换连接/登出/全量刷新”，需要让 in-flight 的旧请求失效
+    configResetEpoch += 1;
     configRequestToken += 1;
+    lastSettledRequestId = 0;
     inFlightConfigRequest = null;
-
     set({ config: null, cache: newCache, loading: false, error: null });
   },
 
-  isCacheValid: (section) => {
+  isCacheValid: (section, maxAgeMs = CACHE_EXPIRY_MS) => {
     const { cache } = get();
     const cacheKey = section || '__full__';
     const cached = cache.get(cacheKey);
 
     if (!cached) return false;
 
-    return Date.now() - cached.timestamp < CACHE_EXPIRY_MS;
+    return Date.now() - cached.timestamp < maxAgeMs;
   },
 }));

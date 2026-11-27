@@ -443,6 +443,7 @@ export function useUsageAnalytics(language?: string) {
     filters: analyticsFilters,
     include,
     throttleMs: 0,
+    allowWhenDisabled: true,
   });
 
   const filterSelectorsInclude = useMemo(() => buildUsageAnalyticsFilterSelectorsInclude(), []);
@@ -462,6 +463,7 @@ export function useUsageAnalytics(language?: string) {
     searchQuery: debouncedSearchQuery,
     include: filterSelectorsInclude,
     throttleMs: 0,
+    allowWhenDisabled: true,
   });
 
   const heatmapDateInclude = useMemo(
@@ -495,6 +497,7 @@ export function useUsageAnalytics(language?: string) {
     filters: analyticsFilters,
     include: heatmapDateInclude,
     throttleMs: 0,
+    allowWhenDisabled: true,
   });
 
   const analyticsData = analytics.dataStale ? null : analytics.data;
@@ -583,6 +586,7 @@ export function useUsageAnalytics(language?: string) {
     filters: apiKeyTrendFilters,
     include: apiKeyTrendInclude,
     throttleMs: 0,
+    allowWhenDisabled: true,
   });
   const apiKeyTrendData = apiKeyTrendAnalytics.dataStale ? null : apiKeyTrendAnalytics.data;
   const apiKeyTimeline = useMemo(
@@ -731,6 +735,7 @@ export function useUsageAnalytics(language?: string) {
     filters: selectedApiKeyTimelineFilters,
     include: selectedApiKeyTimelineInclude,
     throttleMs: 0,
+    allowWhenDisabled: true,
   });
   const selectedApiKeyTimelineData = selectedApiKeyTimelineAnalytics.dataStale
     ? null
@@ -792,6 +797,7 @@ export function useUsageAnalytics(language?: string) {
     filters: selectedCredentialTimelineFilters,
     include: selectedCredentialTimelineInclude,
     throttleMs: 0,
+    allowWhenDisabled: true,
   });
   const selectedCredentialTimelineData = selectedCredentialTimelineAnalytics.dataStale
     ? null

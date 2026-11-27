@@ -104,6 +104,7 @@ type AccountWindowUsageQuery = usageevent.AccountWindowUsageQuery
 type AccountWindowModelStat = usageevent.AccountWindowModelStat
 type LatestAccountRequestQuery = usageevent.LatestAccountRequestQuery
 type LatestAccountRequest = usageevent.LatestAccountRequest
+type AccountRecentBucketRow = usageevent.AccountRecentBucketRow
 type UsageRollupCheckpoint = usagerollup.Checkpoint
 type UsageRollupCatchUpResult = usagerollup.CatchUpResult
 type AccountHistoryRollupRow = usagerollup.AccountHistoryRow
@@ -910,6 +911,14 @@ func (s *Store) AccountHistoryRollupRows(ctx context.Context, accountKeys []stri
 
 func (s *Store) RecentAccountRequests(ctx context.Context, targets []LatestAccountRequestQuery, limit int) ([]LatestAccountRequest, error) {
 	return s.UsageEvents.RecentAccountRequests(ctx, targets, limit)
+}
+
+func (s *Store) RecentAccountRequestBuckets(
+	ctx context.Context,
+	targets []LatestAccountRequestQuery,
+	fromMS, toMS, bucketMS int64,
+) ([]AccountRecentBucketRow, error) {
+	return s.UsageEvents.RecentAccountRequestBuckets(ctx, targets, fromMS, toMS, bucketMS)
 }
 
 func (s *Store) DashboardHourlyRollupRows(ctx context.Context, fromMS, toMS int64) ([]DashboardHourlyRollupRow, error) {

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
@@ -37,6 +37,8 @@ import {
   IconX,
 } from '@/components/ui/icons';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
+import { useRequestMonitoringSwitch } from '@/hooks/useRequestMonitoringSwitch';
+import { configurationText as workspaceText } from '@/i18n/configurationWorkspace';
 import { useNotificationStore, useThemeStore } from '@/stores';
 import { copyToClipboard } from '@/utils/clipboard';
 import { getDataPalette, hexToRgba } from '@/utils/dataPalette';
@@ -2286,7 +2288,46 @@ function ProviderOverviewPanel({
     </div>
   );
 }
+function MonitoringPausedNotice() {
+  const { t } = useTranslation();
+  const showNotification = useNotificationStore((state) => state.showNotification);
+  const requestMonitoringSwitch = useRequestMonitoringSwitch();
 
+  useEffect(() => {
+    if (!requestMonitoringSwitch.failed) return;
+    showNotification(workspaceText('requestMonitoringFailed'), 'error');
+  }, [requestMonitoringSwitch.failed, showNotification]);
+
+  return (
+    <section
+      className={styles.pausedNoticePanel}
+      role="status"
+      data-testid="usage-analytics-monitoring-paused-notice"
+    >
+      <div className={styles.pausedNoticeLead}>
+        <IconShield size={20} />
+        <div className={styles.pausedNoticeText}>
+          <strong>{t('usage_analytics.monitoring_paused_title')}</strong>
+          <span>{t('usage_analytics.monitoring_paused_body')}</span>
+        </div>
+      </div>
+      {requestMonitoringSwitch.writable ? (
+        <Button
+          type="button"
+          variant="primary"
+          size="sm"
+          data-testid="usage-analytics-enable-request-monitoring"
+          disabled={requestMonitoringSwitch.saving}
+          onClick={() => void requestMonitoringSwitch.setEnabled(true)}
+        >
+          {requestMonitoringSwitch.saving
+            ? workspaceText('requestMonitoringSaving')
+            : workspaceText('requestMonitoringEnable')}
+        </Button>
+      ) : null}
+    </section>
+  );
+}
 
 function UsageAnalyticsPageInner() {
   const { t, i18n } = useTranslation();
@@ -3049,6 +3090,7 @@ function UsageAnalyticsPageInner() {
           </>
         }
       />
+      {usage.unavailableReason === 'monitoring_disabled' ? <MonitoringPausedNotice /> : null}
 
       {usage.error ? (
         <section className={styles.alertPanel}>
