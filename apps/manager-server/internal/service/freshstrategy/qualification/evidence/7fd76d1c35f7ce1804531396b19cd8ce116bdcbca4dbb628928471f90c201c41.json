@@ -1,14 +1,17 @@
 {
   "schemaVersion": 1,
-  "runId": "cpamp-fresh-adoption-resource-legacy-53b0f576f000",
-  "caseRef": "fresh-legacy-client-api-keys-verify",
-  "sourceClass": "legacy_managed",
-  "consumerImplementationSha256": "f54f080a82e37b0ec080d3b593e674a9412d90f726996ce514df7d706508dae3",
+  "runId": "cpamp-fresh-adoption-resource-network-0c3a678d8b9e",
+  "caseRef": "fresh-network-client-api-keys-verify",
+  "sourceClass": "network_existing",
+  "consumerImplementationSha256": "55190f6d5a3edb0d825d55bb69fc2d7874669dea5986b93b0c516785a68d4d2e",
   "readbackVerified": true,
   "effectiveAuthVerified": true,
   "destinationVerified": true,
   "verifiedResources": {
-    "client-api-keys": 133
+    "client-api-keys": 133,
+    "cpa-auth-files": 2,
+    "cpa-config-routing": 23,
+    "provider-state-api-keys": 5
   },
   "targetArtifactId": "sha256:e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7",
   "targetArchiveSha256": "4cd593251db85e50c820f42e6ea5cecdd05f902201d3dbdb025671d4f306a123",
