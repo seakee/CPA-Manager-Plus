@@ -990,3 +990,58 @@ func TestCollectorWorkerStartSerializesWithConcurrentStopAndDisable(t *testing.T
 		}
 	})
 }
+
+func TestParseWorkerManagedDestinationAcceptsRetiredAdoptionArtifactAndRejectsUnqualified(t *testing.T) {
+	protector, err := security.NewProtector([]byte("worker-managed-dest-test-key-32b"))
+	if err != nil {
+		t.Fatalf("NewProtector: %v", err)
+	}
+	sealed, err := protector.ProtectString("valid-v8-mgmt-secret-key")
+	if err != nil {
+		t.Fatalf("ProtectString: %v", err)
+	}
+	sourceIdentity := "external:sha256:" + strings.Repeat("1", 64)
+	serverFingerprint := "external:sha256:" + strings.Repeat("2", 64)
+	opID := upgradeManagedDestinationOperationIDForWorkerTest(sourceIdentity)
+
+	buildDoc := func(artifact model.RuntimeArtifactID) string {
+		raw, err := json.Marshal(map[string]any{
+			"baseUrl":           "http://127.0.0.1:8317",
+			"urlProved":         true,
+			"serverFingerprint": serverFingerprint,
+			"managementKey":     sealed,
+			"intent": map[string]any{
+				"sourceIdentity":            sourceIdentity,
+				"sourceClass":               "legacy_managed",
+				"expectedRuntimeIdentity":   "rt-worker-1",
+				"expectedRuntimeGeneration": 1,
+				"expectedActiveArtifactId":  string(artifact),
+				"apiKeys":                   []string{"sk-client-1"},
+				"pluginsEnabled":            false,
+			},
+			"operationId": opID,
+			"attempt":     1,
+		})
+		if err != nil {
+			t.Fatalf("marshal doc: %v", err)
+		}
+		return string(raw)
+	}
+
+	unqualified := model.RuntimeArtifactID("sha256:" + strings.Repeat("9", 64))
+	if _, _, _, _, ok := parseWorkerManagedDestination(buildDoc(unqualified), protector); ok {
+		t.Fatal("parseWorkerManagedDestination accepted unqualified artifact, want false")
+	}
+
+	retired := model.RuntimeArtifactID("sha256:" + strings.Repeat("a", 64))
+	freshstrategy.WithRetiredUpgradeAdoptionArtifactsForTesting([]model.RuntimeArtifactID{retired}, func() {
+		baseURL, _, secret, _, ok := parseWorkerManagedDestination(buildDoc(retired), protector)
+		if !ok || baseURL != "http://127.0.0.1:8317" || secret != "valid-v8-mgmt-secret-key" {
+			t.Fatalf("parseWorkerManagedDestination(retired) = (%q, %q, %v), want valid destination", baseURL, secret, ok)
+		}
+	})
+}
+
+func upgradeManagedDestinationOperationIDForWorkerTest(sourceIdentity string) string {
+	return workerManagedDestinationOperationID(sourceIdentity, 1)
+}

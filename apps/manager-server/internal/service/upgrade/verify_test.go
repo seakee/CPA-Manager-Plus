@@ -2046,3 +2046,42 @@ func TestVerifyRejectsInvalidReconciliationAndMissingDomainsOnSnapshotBeforeAcqu
 		}
 	})
 }
+
+func TestVerifyAdmitsRetiredAdoptionArtifactOnlyForCompletedManagedStore(t *testing.T) {
+	retiredArtifact := model.RuntimeArtifactID("sha256:" + strings.Repeat("b", 64))
+	freshstrategy.WithRetiredUpgradeAdoptionArtifactsForTesting([]model.RuntimeArtifactID{retiredArtifact}, func() {
+		t.Run("completed Managed store recorded against retired baseline artifact remains valid for Verify replay", func(t *testing.T) {
+			fixture := newManagedVerifyFixture(t)
+			if _, err := Verify(context.Background(), fixture.verifyOptions()); err != nil {
+				t.Fatalf("initial Verify completion: %v", err)
+			}
+			destination := managedDestinationRecord(t)
+			destination.Intent.ExpectedActiveArtifactID = retiredArtifact
+			if err := saveCPAImportDestinationRecord(context.Background(), fixture.databasePath(), fixture.paths.DataKey, destination, verifyManagedSecret); err != nil {
+				t.Fatalf("rewrite completed destination artifact to retired baseline: %v", err)
+			}
+
+			result, err := Verify(context.Background(), fixture.verifyOptions())
+			if err != nil {
+				t.Fatalf("Verify replay on completed store with retired baseline artifact: %v", err)
+			}
+			if result.Stage != model.UpgradeStageComplete {
+				t.Fatalf("completed Verify stage = %q, want %q", result.Stage, model.UpgradeStageComplete)
+			}
+		})
+
+		t.Run("unfinished Managed store recorded against retired baseline artifact fails closed", func(t *testing.T) {
+			fixture := newManagedVerifyFixture(t)
+			destination := managedDestinationRecord(t)
+			destination.Intent.ExpectedActiveArtifactID = retiredArtifact
+			if err := saveCPAImportDestinationRecord(context.Background(), fixture.databasePath(), fixture.paths.DataKey, destination, verifyManagedSecret); err != nil {
+				t.Fatalf("rewrite unfinished destination artifact to retired baseline: %v", err)
+			}
+
+			_, err := Verify(context.Background(), fixture.verifyOptions())
+			if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorVerifyConnectionUnproven {
+				t.Fatalf("Verify on unfinished store with retired baseline artifact = %v (code=%q/%t), want %s", err, code, ok, UpgradeErrorVerifyConnectionUnproven)
+			}
+		})
+	})
+}

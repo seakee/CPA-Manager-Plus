@@ -154,3 +154,32 @@ func TestQualifiedUpgradeAdoptionArtifactIDNamesTheQualifiedArtifact(t *testing.
 		t.Fatalf("a record qualified on another artifact produced %v, want the opaque refusal", err)
 	}
 }
+
+func TestAdmittedCompletedUpgradeAdoptionArtifactIDAcceptsCurrentAndRetiredLineageOnly(t *testing.T) {
+	current, err := QualifiedUpgradeAdoptionArtifactID()
+	if err != nil {
+		t.Fatalf("QualifiedUpgradeAdoptionArtifactID: %v", err)
+	}
+	for _, item := range retiredUpgradeAdoptionArtifacts {
+		if !item.IsValid() {
+			t.Fatalf("invalid retired adoption artifact %q", item)
+		}
+	}
+	if ok, err := AdmittedCompletedUpgradeAdoptionArtifactID(current); err != nil || !ok {
+		t.Fatalf("current qualified artifact admitted = (%v, %v), want (true, nil)", ok, err)
+	}
+	unqualified := model.RuntimeArtifactID("sha256:" + strings.Repeat("ab", 32))
+	if ok, err := AdmittedCompletedUpgradeAdoptionArtifactID(unqualified); err != nil || ok {
+		t.Fatalf("unqualified artifact admitted = (%v, %v), want (false, nil)", ok, err)
+	}
+
+	retired := model.RuntimeArtifactID("sha256:" + strings.Repeat("ef", 32))
+	WithRetiredUpgradeAdoptionArtifactsForTesting([]model.RuntimeArtifactID{retired}, func() {
+		if ok, err := AdmittedCompletedUpgradeAdoptionArtifactID(retired); err != nil || !ok {
+			t.Fatalf("retired qualified artifact admitted = (%v, %v), want (true, nil)", ok, err)
+		}
+		if staged, err := QualifiedUpgradeAdoptionArtifactID(); err != nil || staged != current {
+			t.Fatalf("QualifiedUpgradeAdoptionArtifactID during retired lineage = (%q, %v), want (%q, nil)", staged, err, current)
+		}
+	})
+}

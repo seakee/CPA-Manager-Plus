@@ -667,7 +667,7 @@ func completedVerifyResultForStore(ctx context.Context, db *sql.DB, paths target
 			return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
 				"the recorded operation is complete but the imported destination its verdict rests on cannot be read, so its verdict cannot be reported; restore the v2 store from its backup", err)
 		}
-		if err := requireVerifyTarget(model.UpgradeTargetManaged, binding, target); err != nil {
+		if err := requireCompletedVerifyTarget(model.UpgradeTargetManaged, binding, target); err != nil {
 			return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
 				"the recorded operation is complete but the destination credential its verdict proved is not the one the Manager stores, so its verdict cannot be reported; restore the v2 store from its backup", err)
 		}
@@ -1020,6 +1020,14 @@ func verifyTargetProtector(paths targetPaths) (*security.Protector, error) {
 // management secret. That is connection preservation: the handoff survived, and
 // nothing compared here is a caller's claim.
 func requireVerifyTarget(mode string, binding upgradeoperation.ExternalBinding, target verifyTarget) error {
+	return requireVerifyTargetWithPolicy(mode, binding, target, false)
+}
+
+func requireCompletedVerifyTarget(mode string, binding upgradeoperation.ExternalBinding, target verifyTarget) error {
+	return requireVerifyTargetWithPolicy(mode, binding, target, true)
+}
+
+func requireVerifyTargetWithPolicy(mode string, binding upgradeoperation.ExternalBinding, target verifyTarget, allowRetired bool) error {
 	if !target.found {
 		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
 			"the Manager stores no CPA connection, so the target this installation uses cannot be confirmed; nothing was written", nil)
@@ -1072,7 +1080,7 @@ func requireVerifyTarget(mode string, binding upgradeoperation.ExternalBinding, 
 		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
 			"the CPA import recorded no destination attempt, so the connection it handed over cannot be confirmed; nothing was written", nil)
 	}
-	if err := requireManagedDestinationEvidence(target.attempt); err != nil {
+	if err := requireManagedDestinationEvidenceWithPolicy(target.attempt, allowRetired); err != nil {
 		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
 			"the CPA import's recorded destination does not describe a proved server, so the connection it handed over cannot be confirmed; nothing was written", err)
 	}
@@ -1122,6 +1130,10 @@ func requireVerifyTarget(mode string, binding upgradeoperation.ExternalBinding, 
 // never equal the one the gate derives from the live CPA, so reporting it as
 // evidence would be a comparison that always fails for the wrong reason.
 func requireManagedDestinationEvidence(destination cpaImportDestinationRecord) error {
+	return requireManagedDestinationEvidenceWithPolicy(destination, false)
+}
+
+func requireManagedDestinationEvidenceWithPolicy(destination cpaImportDestinationRecord, allowRetired bool) error {
 	if strings.TrimSpace(destination.BaseURL) == "" {
 		return errors.New("the recorded destination names no address")
 	}
@@ -1152,6 +1164,16 @@ func requireManagedDestinationEvidence(destination cpaImportDestinationRecord) e
 	}
 	if intent.PluginsEnabled == nil {
 		return errors.New("the recorded destination names no plugin choice the stage request published")
+	}
+	if allowRetired {
+		admitted, err := freshstrategy.AdmittedCompletedUpgradeAdoptionArtifactID(intent.ExpectedActiveArtifactID)
+		if err != nil {
+			return fmt.Errorf("this build carries no accepted CPA adoption artifact lineage to compare the recorded destination against: %w", err)
+		}
+		if !admitted {
+			return errors.New("the recorded destination was staged on an artifact outside this build's qualified CPA adoption lineage")
+		}
+		return nil
 	}
 	qualifiedArtifact, err := freshstrategy.QualifiedUpgradeAdoptionArtifactID()
 	if err != nil {

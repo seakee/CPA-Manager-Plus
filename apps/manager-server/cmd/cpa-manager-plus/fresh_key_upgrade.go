@@ -446,8 +446,8 @@ func parseFullUpgradeManagedDestination(raw string, protector *security.Protecto
 			return upgradeDestinationRecord{}, "", freshkeyapply.ErrUnavailable
 		}
 	}
-	qualifiedArtifact, err := freshstrategy.QualifiedUpgradeAdoptionArtifactID()
-	if err != nil || rec.Intent.ExpectedActiveArtifactID != qualifiedArtifact {
+	admittedArtifact, err := freshstrategy.AdmittedCompletedUpgradeAdoptionArtifactID(rec.Intent.ExpectedActiveArtifactID)
+	if err != nil || !admittedArtifact {
 		return upgradeDestinationRecord{}, "", freshkeyapply.ErrUnavailable
 	}
 	envelope := strings.TrimSpace(rec.ManagementKey)

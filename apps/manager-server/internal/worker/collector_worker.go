@@ -577,8 +577,8 @@ func parseWorkerManagedDestination(raw string, protector *security.Protector) (s
 			return "", "", "", "", false
 		}
 	}
-	qualifiedArtifact, err := freshstrategy.QualifiedUpgradeAdoptionArtifactID()
-	if err != nil || rec.Intent.ExpectedActiveArtifactID != qualifiedArtifact {
+	admittedArtifact, err := freshstrategy.AdmittedCompletedUpgradeAdoptionArtifactID(rec.Intent.ExpectedActiveArtifactID)
+	if err != nil || !admittedArtifact {
 		return "", "", "", "", false
 	}
 	envelope := strings.TrimSpace(rec.ManagementKey)
