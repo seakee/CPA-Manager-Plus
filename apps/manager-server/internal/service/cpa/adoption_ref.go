@@ -194,20 +194,20 @@ var adoptionStructuredSectionRefs = func() map[string]bootstrap.ResourceRef {
 // keeping them in the universe ensures Discovery emits the root's platform
 // reference alongside `cpa-config-routing`.
 var adoptionHostManagedSourceKeys = map[string]bootstrap.ResourceRef{
-	"server.server-id":                         bootstrap.AdoptionRefConfigServer,
-	"server.host":                              bootstrap.AdoptionRefConfigServer,
-	"server.port":                              bootstrap.AdoptionRefConfigServer,
-	"server.tls":                               bootstrap.AdoptionRefConfigServer,
-	"server.discovery":                         bootstrap.AdoptionRefConfigServer,
-	"server.kv-store.path":                     bootstrap.AdoptionRefConfigServer,
-	"plugins.enabled":                          bootstrap.AdoptionRefConfigPlugins,
-	"plugins.dir":                              bootstrap.AdoptionRefConfigPlugins,
-	"plugins.auth-revision":                    bootstrap.AdoptionRefConfigPlugins,
-	"observability.usage":                      bootstrap.AdoptionRefConfigObservability,
-	"observability.pprof":                      bootstrap.AdoptionRefConfigObservability,
-	"observability.logs.logging-to-file":       bootstrap.AdoptionRefConfigObservability,
+	"server.server-id":                          bootstrap.AdoptionRefConfigServer,
+	"server.host":                               bootstrap.AdoptionRefConfigServer,
+	"server.port":                               bootstrap.AdoptionRefConfigServer,
+	"server.tls":                                bootstrap.AdoptionRefConfigServer,
+	"server.discovery":                          bootstrap.AdoptionRefConfigServer,
+	"server.kv-store.path":                      bootstrap.AdoptionRefConfigServer,
+	"plugins.enabled":                           bootstrap.AdoptionRefConfigPlugins,
+	"plugins.dir":                               bootstrap.AdoptionRefConfigPlugins,
+	"plugins.auth-revision":                     bootstrap.AdoptionRefConfigPlugins,
+	"observability.usage":                       bootstrap.AdoptionRefConfigObservability,
+	"observability.pprof":                       bootstrap.AdoptionRefConfigObservability,
+	"observability.logs.logging-to-file":        bootstrap.AdoptionRefConfigObservability,
 	"observability.logs.logs-max-total-size-mb": bootstrap.AdoptionRefConfigObservability,
-	"observability.logs.error-logs-max-files":  bootstrap.AdoptionRefConfigObservability,
+	"observability.logs.error-logs-max-files":   bootstrap.AdoptionRefConfigObservability,
 }
 
 var adoptionHostManagedSourceKeyList = func() []string {
@@ -218,6 +218,7 @@ var adoptionHostManagedSourceKeyList = func() []string {
 	slices.Sort(keys)
 	return keys
 }()
+
 // adoptionFamilyPaths is the set of payload rule family paths. A family is a
 // configuration path like any other (`requests.payload.default`), so the same
 // path membership test classifies it.
@@ -562,7 +563,15 @@ func ScanV8YAMLArchiveCandidates(projectedV8YAML []byte) (candidates []string, c
 	trailing := firstDocLines[tailStart:]
 	var found []string
 	var cur []string
+	pendingBlanks := 0
+	startedExplicitKey := false
+	awaitingExplicitColon := false
+	scanIncomplete := false
 	flush := func() {
+		pendingBlanks = 0
+		wasExplicit := startedExplicitKey
+		startedExplicitKey = false
+		awaitingExplicitColon = false
 		if len(cur) == 0 {
 			return
 		}
@@ -570,39 +579,40 @@ func ScanV8YAMLArchiveCandidates(projectedV8YAML []byte) (candidates []string, c
 		cur = nil
 		if section, ok := decodeArchivedYAMLMappingSection(blockText); ok {
 			found = append(found, section)
+		} else if wasExplicit {
+			scanIncomplete = true
 		}
 	}
-	for idx, rawLine := range trailing {
+	for _, rawLine := range trailing {
 		line := strings.TrimRight(rawLine, "\r")
-		if strings.TrimSpace(line) == "" {
+		if strings.TrimSpace(line) == "" || !strings.HasPrefix(line, "#") {
 			flush()
-			continue
-		}
-		if !strings.HasPrefix(line, "#") {
-			flush()
+			if scanIncomplete {
+				return nil, false
+			}
 			continue
 		}
 		if isBlankArchiveCommentLine(line) {
-			if len(cur) > 0 && hasArchiveContinuationAhead(trailing, idx+1) {
-				cur = append(cur, "")
-			} else {
-				flush()
-			}
-			continue
-		}
-		if isArchiveCommentContinuationLine(line) {
 			if len(cur) > 0 {
-				cur = append(cur, stripArchiveCommentPrefix(line))
+				pendingBlanks++
 			}
 			continue
 		}
-		if len(cur) > 0 && strings.HasPrefix(cur[0], "? ") && !strings.HasPrefix(line, "# ? ") {
-			if _, complete := decodeArchivedYAMLMappingSection(strings.Join(cur, "\n")); !complete {
-				cur = append(cur, stripArchiveCommentPrefix(line))
-				continue
+		isExplicitValueLine := line == "# :" || strings.HasPrefix(line, "# : ") || strings.HasPrefix(line, "# :\t")
+		if len(cur) > 0 && (isArchiveCommentContinuationLine(line) || (awaitingExplicitColon && !strings.HasPrefix(line, "# ? "))) {
+			for ; pendingBlanks > 0; pendingBlanks-- {
+				cur = append(cur, "")
 			}
+			cur = append(cur, stripArchiveCommentPrefix(line))
+			if isExplicitValueLine {
+				awaitingExplicitColon = false
+			}
+			continue
 		}
 		flush()
+		if scanIncomplete {
+			return nil, false
+		}
 		if !strings.HasPrefix(line, "# ") {
 			continue
 		}
@@ -611,8 +621,15 @@ func ScanV8YAMLArchiveCandidates(projectedV8YAML []byte) (candidates []string, c
 			continue
 		}
 		cur = []string{bodyLine}
+		if strings.HasPrefix(bodyLine, "? ") {
+			startedExplicitKey = true
+			awaitingExplicitColon = true
+		}
 	}
 	flush()
+	if scanIncomplete {
+		return nil, false
+	}
 	if len(found) == 0 {
 		return nil, true
 	}
@@ -665,20 +682,6 @@ func isArchiveCommentContinuationLine(line string) bool {
 	}
 	trimmed := strings.TrimSpace(strings.TrimPrefix(line, "#"))
 	return trimmed == "]" || trimmed == "}" || strings.HasPrefix(trimmed, "],") || strings.HasPrefix(trimmed, "},")
-}
-
-func hasArchiveContinuationAhead(lines []string, start int) bool {
-	for i := start; i < len(lines); i++ {
-		next := strings.TrimRight(lines[i], "\r")
-		if strings.TrimSpace(next) == "" || !strings.HasPrefix(next, "#") {
-			return false
-		}
-		if isBlankArchiveCommentLine(next) {
-			continue
-		}
-		return isArchiveCommentContinuationLine(next)
-	}
-	return false
 }
 
 func stripArchiveCommentPrefix(line string) string {

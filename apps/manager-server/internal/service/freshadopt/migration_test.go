@@ -92,6 +92,7 @@ type fakeCPA struct {
 	configYAMLOverride     string
 	server                 *httptest.Server
 }
+
 func newFakeCPA(t *testing.T, auth string) *fakeCPA {
 	t.Helper()
 	cpa := &fakeCPA{
@@ -102,8 +103,11 @@ func newFakeCPA(t *testing.T, auth string) *fakeCPA {
 		runtimeOnly:     map[string]bool{},
 		refuseUpload:    map[string]string{},
 		config:          map[string]any{},
-		writeFailures:     map[string]int{},
-		customWriteErrors: map[string]struct{ status int; code string }{},
+		writeFailures:   map[string]int{},
+		customWriteErrors: map[string]struct {
+			status int
+			code   string
+		}{},
 	}
 	cpa.server = httptest.NewServer(http.HandlerFunc(cpa.serve))
 	t.Cleanup(cpa.server.Close)
@@ -2486,12 +2490,12 @@ func TestItemRefClassifiesAgainstTheGatewayTable(t *testing.T) {
 		}
 	}
 	for path, want := range map[string]bootstrap.ResourceRef{
-		"server.host":                 bootstrap.AdoptionRefConfigServer,
-		"plugins.dir":                 bootstrap.AdoptionRefConfigPlugins,
-		"observability.logs.debug":    bootstrap.AdoptionRefConfigRouting,
-		"models.catalog":              bootstrap.AdoptionRefConfigRouting,
-		"server.kv-store.disabled":    bootstrap.AdoptionRefConfigRouting,
-		"server.trusted-proxies":      bootstrap.AdoptionRefConfigRouting,
+		"server.host":                    bootstrap.AdoptionRefConfigServer,
+		"plugins.dir":                    bootstrap.AdoptionRefConfigPlugins,
+		"observability.logs.debug":       bootstrap.AdoptionRefConfigRouting,
+		"models.catalog":                 bootstrap.AdoptionRefConfigRouting,
+		"server.kv-store.disabled":       bootstrap.AdoptionRefConfigRouting,
+		"server.trusted-proxies":         bootstrap.AdoptionRefConfigRouting,
 		"observability.logs.request-log": bootstrap.AdoptionRefConfigRouting,
 	} {
 		if ref := ItemRef(freshstore.AdoptionItem{Item: configLeafItemName(path), Kind: freshstore.AdoptionKindConfigLeaf}); ref != want {
@@ -2505,15 +2509,15 @@ func TestItemRefClassifiesAgainstTheGatewayTable(t *testing.T) {
 		t.Fatalf("credential classified as %s", ref)
 	}
 	for section, want := range map[string]bootstrap.ResourceRef{
-		"api-keys.claude":        bootstrap.AdoptionRefProviderStateAPIKeys,
-		"api-keys.vertex":        bootstrap.AdoptionRefProviderStateAPIKeys,
-		"oauth.model-alias":      bootstrap.AdoptionRefProviderStateAPIKeys,
-		"oauth.settings":         bootstrap.AdoptionRefProviderStateAPIKeys,
+		"api-keys.claude":         bootstrap.AdoptionRefProviderStateAPIKeys,
+		"api-keys.vertex":         bootstrap.AdoptionRefProviderStateAPIKeys,
+		"oauth.model-alias":       bootstrap.AdoptionRefProviderStateAPIKeys,
+		"oauth.settings":          bootstrap.AdoptionRefProviderStateAPIKeys,
 		"credentials.concurrency": bootstrap.AdoptionRefConfigRouting,
-		"credentials.in-flight":  bootstrap.AdoptionRefConfigRouting,
-		"plugins.store-sources":  bootstrap.AdoptionRefConfigRouting,
-		"plugins.store-auth":     bootstrap.AdoptionRefConfigRouting,
-		"plugins.configs":        bootstrap.AdoptionRefConfigRouting,
+		"credentials.in-flight":   bootstrap.AdoptionRefConfigRouting,
+		"plugins.store-sources":   bootstrap.AdoptionRefConfigRouting,
+		"plugins.store-auth":      bootstrap.AdoptionRefConfigRouting,
+		"plugins.configs":         bootstrap.AdoptionRefConfigRouting,
 		"oauth.providers.codex.live-media-relay.ice-servers": bootstrap.AdoptionRefConfigRouting,
 		"providers":       bootstrap.AdoptionRefConfigUnknown,
 		"client":          bootstrap.AdoptionRefConfigUnknown,
@@ -3156,15 +3160,15 @@ func TestFullCPAConfigBusinessSettingsAndKVMapMigration(t *testing.T) {
 	source.config = map[string]any{
 		"config-version": 8,
 		"server": map[string]any{
-			"server-id":        "src-srv",
-			"host":             "127.0.0.1",
-			"port":             8317,
-			"commercial-mode":  true,
-			"trusted-proxies":  []any{"10.0.0.0/8", "192.168.1.0/24"},
-			"github-token":     "ghp_source_secret_token",
-			"tls":              map[string]any{"enable": true},
-			"discovery":        map[string]any{"enabled": true},
-			"kv-store":         map[string]any{"path": "/src/kv.db", "disabled": true},
+			"server-id":       "src-srv",
+			"host":            "127.0.0.1",
+			"port":            8317,
+			"commercial-mode": true,
+			"trusted-proxies": []any{"10.0.0.0/8", "192.168.1.0/24"},
+			"github-token":    "ghp_source_secret_token",
+			"tls":             map[string]any{"enable": true},
+			"discovery":       map[string]any{"enabled": true},
+			"kv-store":        map[string]any{"path": "/src/kv.db", "disabled": true},
 		},
 		"models": map[string]any{
 			"catalog":       "custom-catalog",
@@ -3204,10 +3208,10 @@ func TestFullCPAConfigBusinessSettingsAndKVMapMigration(t *testing.T) {
 		},
 		"credentials": map[string]any{
 			"in-flight": map[string]any{
-				"snapshot-interval": "30s",
-				"stale-after":       "2m",
-				"max-part-bytes":    65536,
-				"max-part-count":    4,
+				"snapshot-interval":  "30s",
+				"stale-after":        "2m",
+				"max-part-bytes":     65536,
+				"max-part-count":     4,
 				"max-revision-bytes": 131072,
 			},
 		},
@@ -3223,11 +3227,11 @@ func TestFullCPAConfigBusinessSettingsAndKVMapMigration(t *testing.T) {
 			"usage": map[string]any{"statistics-enabled": false},
 			"pprof": map[string]any{"enabled": true},
 			"logs": map[string]any{
-				"logging-to-file":           false,
-				"logs-max-total-size-mb":    500,
-				"error-logs-max-files":      20,
-				"debug":                     true,
-				"request-log":               true,
+				"logging-to-file":        false,
+				"logs-max-total-size-mb": 500,
+				"error-logs-max-files":   20,
+				"debug":                  true,
+				"request-log":            true,
 			},
 		},
 	}
@@ -3311,9 +3315,9 @@ func TestConcurrencySectionPreservesDestinationRevisions(t *testing.T) {
 		"config-version": 8,
 		"credentials": map[string]any{
 			"concurrency": map[string]any{
-				"default":                       4,
-				"lifecycle-config-revision":     "src-rev-99",
-				"observation-barrier-revision":  12,
+				"default":                      4,
+				"lifecycle-config-revision":    "src-rev-99",
+				"observation-barrier-revision": 12,
 			},
 		},
 	}
@@ -3848,6 +3852,54 @@ func TestArchivedUnknownScanFailureAndSizeBoundaryFailClosedWithoutFalseZero(t *
 					t.Fatalf("unknown-config instruction = %q, want incomplete-scan wording", unknownItem.Instruction)
 				}
 			})
+		}
+	})
+
+	t.Run("unterminated explicit key comment in config.yaml fails closed as archive_scan_incomplete", func(t *testing.T) {
+		source := newFakeCPA(t, "src-key")
+		source.config = map[string]any{
+			"config-version": 8,
+			"server":         map[string]any{"port": 8317},
+			"oauth":          map[string]any{"auth-dir": "/source/auth"},
+			"access":         map[string]any{"api-keys": []any{"sk-client-1"}},
+			"plugins":        map[string]any{},
+		}
+		source.configYAMLOverride = `config-version: 8
+server:
+    port: 8317
+oauth:
+    auth-dir: /source/auth
+access:
+    api-keys:
+        - sk-client-1
+plugins: {}
+
+# ? "unterminated
+#   line two
+# plugins.after_broken: true
+`
+		snapshot, err := cpa.ReadV8AdoptionSnapshot(t.Context(), source.server.URL, source.auth)
+		if err != nil {
+			t.Fatalf("ReadV8AdoptionSnapshot: %v", err)
+		}
+		if !slices.Contains(snapshot.ResourceSections, "unknown_cpa_native_resource") {
+			t.Fatalf("ResourceSections = %v, want unknown_cpa_native_resource", snapshot.ResourceSections)
+		}
+
+		srcEndpoint, err := NewSource(t.Context(), source.endpoint())
+		if err != nil {
+			t.Fatalf("NewSource: %v", err)
+		}
+		defer srcEndpoint.Close()
+		counts := CountSourceInventory(t.Context(), srcEndpoint)
+		if val, ok := counts[string(bootstrap.AdoptionRefConfigUnknown)]; ok {
+			t.Fatalf("CountSourceInventory[cpa-config-unknown] = (%d, true), want omitted (%v)", val, counts)
+		}
+
+		summary := runMigration(t, source, destinationFixture(t), freshstore.AdoptionSummary{})
+		unknownItem := itemByName(t, summary, unknownConfigItemName)
+		if unknownItem.Kind != freshstore.AdoptionKindConfigFamily || unknownItem.Outcome != freshstore.AdoptionManual || unknownItem.Reason != "archive_scan_incomplete" {
+			t.Fatalf("unknown-config item = %+v, want manual archive_scan_incomplete", unknownItem)
 		}
 	})
 

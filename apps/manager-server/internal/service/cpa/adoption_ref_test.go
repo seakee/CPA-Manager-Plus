@@ -1,9 +1,11 @@
 package cpa
 
 import (
+	"runtime/debug"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 )
@@ -110,13 +112,14 @@ var sourceSectionKeys = map[string][]string{
 // report puts them under the unknown root. Their keys are gateway/business
 // configuration: each is carried by a leaf, rule family, or structured section.
 var gatewaySectionKeys = map[string][]string{
-	"requests":      {"proxy-url", "tls-handshake-timeout-seconds", "passthrough-headers", "nonstream-keepalive-interval", "streaming", "payload"},
-	"multimedia":    {"disable-image-generation", "gpt-image-2-base-model", "video-result-auth-cache-ttl"},
-	"upstream":      {"codex", "claude", "xai"},
-	"models":        {"catalog", "codex-catalog", "devin-catalog"},
+	"requests":       {"proxy-url", "tls-handshake-timeout-seconds", "passthrough-headers", "nonstream-keepalive-interval", "streaming", "payload"},
+	"multimedia":     {"disable-image-generation", "gpt-image-2-base-model", "video-result-auth-cache-ttl"},
+	"upstream":       {"codex", "claude", "xai"},
+	"models":         {"catalog", "codex-catalog", "devin-catalog"},
 	"quota-exceeded": {"switch-project", "switch-preview-model"},
-	"credentials":   {"concurrency", "in-flight"},
+	"credentials":    {"concurrency", "in-flight"},
 }
+
 // sourceKeyCarriers names the item that carries a source key whose own path is
 // not an item: the source's auth directory is exactly where the credential files
 // are discovered, so `credential:<name>` is what carries it.
@@ -577,6 +580,89 @@ server:
 			}
 		})
 	}
+}
+
+func isRaceDetectorEnabled() bool {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return false
+	}
+	for _, setting := range info.Settings {
+		if setting.Key == "-race" && setting.Value == "true" {
+			return true
+		}
+	}
+	return false
+}
+
+func TestScanV8YAMLArchiveCandidatesBoundedLinearTimeOnLargeCommentTails(t *testing.T) {
+	header := "config-version: 8\nserver:\n    port: 8317\n\n"
+	maxElapsed := 500 * time.Millisecond
+	if isRaceDetectorEnabled() {
+		maxElapsed = 4 * time.Second
+	}
+
+	buildBroken := func(lines int) []byte {
+		var b strings.Builder
+		b.WriteString(header)
+		b.WriteString("# ? \"unterminated\n")
+		for i := 0; i < lines; i++ {
+			b.WriteString("#   continuation 0123456789abcdef01234\n")
+		}
+		b.WriteString("# plugins.after_broken: true\n")
+		return []byte(b.String())
+	}
+
+	t.Run("unterminated explicit complex key over 55k continuation lines (>2 MiB) fails closed in O(N)", func(t *testing.T) {
+		smallPayload := buildBroken(5500)
+		startSmall := time.Now()
+		gotSmall, completeSmall := ScanV8YAMLArchiveCandidates(smallPayload)
+		elapsedSmall := time.Since(startSmall)
+		if completeSmall || gotSmall != nil {
+			t.Fatalf("ScanV8YAMLArchiveCandidates(5.5k) = (%v, %v), want (nil, false)", gotSmall, completeSmall)
+		}
+
+		payload := buildBroken(55000)
+		if len(payload) < 2*1024*1024 {
+			t.Fatalf("expected >=2 MiB input, got %d bytes", len(payload))
+		}
+		start := time.Now()
+		got, complete := ScanV8YAMLArchiveCandidates(payload)
+		elapsed := time.Since(start)
+		if complete || got != nil {
+			t.Fatalf("ScanV8YAMLArchiveCandidates(55k) = (%v, %v), want (nil, false)", got, complete)
+		}
+		if elapsed > maxElapsed {
+			t.Fatalf("ScanV8YAMLArchiveCandidates took %v (>%v) on %d-byte unterminated explicit key", elapsed, maxElapsed, len(payload))
+		}
+		scaleLimit := 25 * elapsedSmall
+		if scaleLimit < 150*time.Millisecond {
+			scaleLimit = 150 * time.Millisecond
+		}
+		if elapsed > scaleLimit {
+			t.Fatalf("ScanV8YAMLArchiveCandidates scaled superlinearly: 5.5k=%v 55k=%v (limit=%v)", elapsedSmall, elapsed, scaleLimit)
+		}
+	})
+
+	t.Run("50k consecutive blank comment lines after archived entry completes in O(N)", func(t *testing.T) {
+		var b strings.Builder
+		b.WriteString(header)
+		b.WriteString("# valid_key: 1\n")
+		for i := 0; i < 50000; i++ {
+			b.WriteString("#   \n")
+		}
+		payload := []byte(b.String())
+
+		start := time.Now()
+		got, complete := ScanV8YAMLArchiveCandidates(payload)
+		elapsed := time.Since(start)
+		if !complete || !slices.Equal(got, []string{"valid_key"}) {
+			t.Fatalf("ScanV8YAMLArchiveCandidates = (%v, %v), want ([valid_key], true)", got, complete)
+		}
+		if elapsed > maxElapsed {
+			t.Fatalf("ScanV8YAMLArchiveCandidates took %v (>%v) on %d-byte blank comment tail", elapsed, maxElapsed, len(payload))
+		}
+	})
 }
 
 func TestAttachV8YAMLArchiveScanSeparatesJSONFromArchiveAndIncompleteState(t *testing.T) {
