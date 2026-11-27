@@ -108,7 +108,7 @@ function formatAdoptItemLabel(raw: string): string {
   if (credMatch) {
     return adoptText('credentialItemTitle', { n: Number(credMatch[1]) });
   }
-  for (const prefix of ['config:', 'section:', 'rules:']) {
+  for (const prefix of ['config:', 'section:', 'rules:', 'family:']) {
     if (raw.startsWith(prefix)) {
       return raw.slice(prefix.length);
     }
@@ -116,16 +116,45 @@ function formatAdoptItemLabel(raw: string): string {
   return raw;
 }
 
-function groupDecisions(list: AdoptionDecision[]) {
-  const groups: Record<'migrate' | 'manual_action' | 'unsupported', AdoptionDecision[]> = {
+const PLATFORM_MANAGED_CONFIG_REFS: Record<string, true> = {
+  'cpa-config-server': true,
+  'cpa-config-management': true,
+  'cpa-config-logging': true,
+  'cpa-config-usage': true,
+  'cpa-config-observability': true,
+  'cpa-config-plugins': true,
+};
+
+function groupDecisions(
+  list: AdoptionDecision[],
+  countsMap?: Readonly<Record<string, number>>
+) {
+  const hasCounts = Boolean(countsMap && Object.keys(countsMap).length > 0);
+  const groups: Record<
+    'migrate' | 'manual_action' | 'platform_managed' | 'unsupported',
+    AdoptionDecision[]
+  > = {
     migrate: [],
     manual_action: [],
+    platform_managed: [],
     unsupported: [],
   };
   for (const decision of list) {
-    if (decision?.Disposition === 'migrate') groups.migrate.push(decision);
-    else if (decision?.Disposition === 'manual_action') groups.manual_action.push(decision);
-    else groups.unsupported.push(decision);
+    if (decision?.Disposition === 'migrate') {
+      groups.migrate.push(decision);
+    } else if (decision?.Disposition === 'manual_action') {
+      const ref = decision.ResourceRef;
+      if (ref === 'cpa-config-unknown' && hasCounts && (countsMap?.[ref] ?? 0) === 0) {
+        continue;
+      }
+      if (PLATFORM_MANAGED_CONFIG_REFS[ref] === true) {
+        groups.platform_managed.push(decision);
+      } else {
+        groups.manual_action.push(decision);
+      }
+    } else {
+      groups.unsupported.push(decision);
+    }
   }
   return groups;
 }
@@ -423,6 +452,9 @@ export function FreshAdoptFlow({
       const durable = await carrier.readOperation();
       if (!alive.current) return;
       onOperation(durable);
+      if (durable.inventoryCounts) {
+        setInventoryCounts(durable.inventoryCounts);
+      }
       const adopt = durable.strategy?.strategy === 'adopt_existing' ? durable.strategy : undefined;
       if (adopt?.stage === 'staged') {
         // The record owns the plugin choice from the moment it staged this
@@ -719,7 +751,8 @@ export function FreshAdoptFlow({
   }
 
   const groups = summary ? groupAdoptionItems(summary) : null;
-  const inventory = groupDecisions(decisions(checkpoint));
+  const countsMap = inventoryCounts ?? operation.inventoryCounts;
+  const inventory = groupDecisions(decisions(checkpoint), countsMap);
   const processed = summary ? summary.items.length : 0;
   const planned = summary ? Math.max(summary.planned, processed) : 0;
   // A run that finished with planned items it never recorded is not a run with
@@ -902,7 +935,6 @@ export function FreshAdoptFlow({
           </div>
         )}
         {stage === 'inventory' && (() => {
-          const countsMap = inventoryCounts ?? operation.inventoryCounts;
           const hasCounts = Boolean(countsMap && Object.keys(countsMap).length > 0);
           const migrateTotal = hasCounts
             ? inventory.migrate.reduce(
@@ -921,10 +953,12 @@ export function FreshAdoptFlow({
                     <FullWebIcon name="sparkle" size={14} />
                   </span>
                   <span>
-                    {adoptText('inventoryCountsBanner', {
-                      migrate: migrateTotal,
-                      manual: inventory.manual_action.length,
-                    })}
+                    {inventory.manual_action.length === 0
+                      ? adoptText('inventoryCountsBannerClean', { migrate: migrateTotal })
+                      : adoptText('inventoryCountsBanner', {
+                          migrate: migrateTotal,
+                          manual: inventory.manual_action.length,
+                        })}
                   </span>
                 </div>
               )}
@@ -936,7 +970,11 @@ export function FreshAdoptFlow({
                     ['unsupported', adoptText('unsupportedGroup')],
                   ] as const
                 ).map(([disposition, label]) => (
-                  <div className="adopt-decision-group adopt-decision-row" key={disposition}>
+                  <div
+                    className="adopt-decision-group adopt-decision-row"
+                    key={disposition}
+                    data-testid={`adopt-decision-row-${disposition}`}
+                  >
                     <dt>{label}</dt>
                     <dd className="adopt-decision-tags">
                       {inventory[disposition].length === 0 ? (
@@ -969,6 +1007,51 @@ export function FreshAdoptFlow({
                   </div>
                 ))}
               </dl>
+              {inventory.platform_managed.length > 0 && (
+                <details className="adopt-platform-managed" data-testid="adopt-platform-managed">
+                  <summary className="adopt-group-summary">
+                    <span className="adopt-group-title-wrap">
+                      <span className="adopt-stage-mark adopt-stage-mark-neutral" aria-hidden="true">
+                        <FullWebIcon name="shield" size={14} />
+                      </span>
+                      <strong className="adopt-group-title">
+                        {adoptText('platformManagedGroup')}
+                      </strong>
+                    </span>
+                    <span className="adopt-group-meta">
+                      <span className="badge badge-neutral adopt-group-count">
+                        {inventory.platform_managed.length}
+                      </span>
+                      <FullWebIcon
+                        name="chevronRight"
+                        size={15}
+                        className="adopt-group-chevron"
+                      />
+                    </span>
+                  </summary>
+                  <div className="adopt-platform-managed-body">
+                    <p className="journey-help">{adoptText('platformManagedHelp')}</p>
+                    <ul className="adopt-platform-managed-list">
+                      {inventory.platform_managed.map((decision) => {
+                        const refCount = countsMap?.[decision.ResourceRef];
+                        return (
+                          <li key={decision.ResourceRef} className="adopt-resource-pill">
+                            <span>{adoptResourceText(decision.ResourceRef)}</span>
+                            {typeof refCount === 'number' && (
+                              <strong
+                                className="adopt-resource-count"
+                                data-testid={`adopt-resource-count-${decision.ResourceRef}`}
+                              >
+                                {refCount}
+                              </strong>
+                            )}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                </details>
+              )}
               <label
                 className="journey-checkline journey-confirm-checkline"
                 htmlFor="adopt-confirm-inventory"
@@ -1061,6 +1144,17 @@ export function FreshAdoptFlow({
                           />
                         )}
                       </div>
+                      {(summary.counts.migrated > 0 || summary.counts.absent_at_source > 0) && (
+                        <p
+                          className="journey-help adopt-progress-subline"
+                          data-testid="adopt-progress-breakdown"
+                        >
+                          {adoptText('progressBreakdown', {
+                            migrated: summary.counts.migrated,
+                            absent: summary.counts.absent_at_source,
+                          })}
+                        </p>
+                      )}
                     </div>
                   );
                 })()}
@@ -1068,7 +1162,12 @@ export function FreshAdoptFlow({
                   <ol className="journey-stages adopt-stage-list" data-testid="adopt-items">
                     {outcomeGroups.map(({ outcome, label, icon }) => {
                       const items = groups[outcome];
-                      const defaultExpanded = outcome === 'manual' || outcome === 'failed';
+                      const defaultExpanded =
+                        outcome === 'manual' ||
+                        outcome === 'failed' ||
+                        (outcome === 'migrated' &&
+                          groups.manual.length === 0 &&
+                          groups.failed.length === 0);
                       const markToneClass =
                         outcome === 'migrated'
                           ? 'adopt-stage-mark-emerald'

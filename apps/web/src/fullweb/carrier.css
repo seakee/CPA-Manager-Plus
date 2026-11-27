@@ -2414,6 +2414,48 @@ input {
   color: var(--text-tertiary);
 }
 
+.adopt-platform-managed {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--app-radius-md);
+  background: var(--bg-subtle);
+}
+
+.adopt-platform-managed > .adopt-group-summary {
+  padding: 11px 16px;
+}
+
+.adopt-platform-managed .adopt-group-title {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.adopt-platform-managed[open] .adopt-group-chevron {
+  transform: rotate(90deg);
+}
+
+.adopt-platform-managed-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 16px 14px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.adopt-platform-managed-body > .journey-help {
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.adopt-platform-managed-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
 .adopt-migration {
   display: flex;
   flex-direction: column;
@@ -2442,6 +2484,12 @@ input {
   font-weight: 500;
   margin: 0;
   color: var(--text-primary);
+}
+
+.adopt-progress-subline {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-secondary);
 }
 
 .adopt-progress-pct {
