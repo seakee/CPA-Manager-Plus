@@ -59,6 +59,22 @@ function extractErrorOperation(err: PublicApiError): KeyOperation | null {
   return res.operation;
 }
 
+const USAGE_STARTUP_RETRY_DELAYS_MS = [800, 1500, 3000, 5000] as const;
+const TRANSIENT_STARTUP_USAGE_REASONS: Record<string, true> = {
+  collection_starting: true,
+  projection_catching_up: true,
+};
+
+function hasTransientStartupUsageSummary(summary: UsageSummary | null): boolean {
+  if (!summary) return false;
+  if (summary.coverage.reason && TRANSIENT_STARTUP_USAGE_REASONS[summary.coverage.reason]) {
+    return true;
+  }
+  return summary.items.some(
+    (item) => !!item.coverage.reason && Boolean(TRANSIENT_STARTUP_USAGE_REASONS[item.coverage.reason])
+  );
+}
+
 function randomRequestId(): string {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) =>
     b.toString(16).padStart(2, '0')
@@ -163,6 +179,8 @@ export function FreshApiKeys({
   reloadToken?: number;
 }) {
   const [keys, setKeys] = useState<Key[] | null>(null);
+  const keysRef = useRef<Key[] | null>(keys);
+  keysRef.current = keys;
   const [gatewayPending, setGatewayPending] = useState(true);
   const [presenceUnverified, setPresenceUnverified] = useState(false);
   const [accessInfo, setAccessInfo] = useState<AccessInfo | null>(null);
@@ -172,6 +190,8 @@ export function FreshApiKeys({
   const [accessReloadToken, setAccessReloadToken] = useState(0);
   const [blocker, setBlocker] = useState<ExternalBlocker | null>(null);
   const [usage, setUsage] = useState<UsageSummary | null>(null);
+  const usageRef = useRef<UsageSummary | null>(usage);
+  usageRef.current = usage;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [pending, setPending] = useState('');
@@ -220,6 +240,11 @@ export function FreshApiKeys({
   usageWindowRef.current = usageWindow;
   const usageReqSeq = useRef(0);
   const latestServerToMsRef = useRef(0);
+  const usageStartupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const usageStartupAttemptRef = useRef(0);
+  const startupRetryWasVisibleRef = useRef(visible);
+  const [usageStartupTick, setUsageStartupTick] = useState(0);
+  const [usageReadsInFlight, setUsageReadsInFlight] = useState(0);
   const [sortBy, setSortBy] = useState<{ key: KeySortKey; direction: SortDirection }>({
     key: 'created',
     direction: 'desc',
@@ -291,6 +316,16 @@ export function FreshApiKeys({
   const secretPendingRef = useRef(false);
   const auth = { kind: 'admin' as const, value: credential };
 
+
+  function clearUsageStartupRetry(resetAttempt = false) {
+    if (usageStartupTimerRef.current !== null) {
+      clearTimeout(usageStartupTimerRef.current);
+      usageStartupTimerRef.current = null;
+    }
+    if (resetAttempt) {
+      usageStartupAttemptRef.current = 0;
+    }
+  }
   useEffect(() => {
     alive.current = true;
     return () => {
@@ -305,6 +340,7 @@ export function FreshApiKeys({
         clearTimeout(rowCopyTimer.current);
         rowCopyTimer.current = null;
       }
+      clearUsageStartupRetry(true);
     };
   }, []);
   // one panel must not release another panel's unresolved write.
@@ -363,6 +399,8 @@ export function FreshApiKeys({
       return;
     }
     pendingRefresh.current = false;
+    clearUsageStartupRetry(true);
+    usageReqSeq.current += 1;
     const epoch = ++readEpoch.current;
     const ownerAtStart = ownerEpoch.current;
     activeReadEpoch.current = epoch;
@@ -371,6 +409,7 @@ export function FreshApiKeys({
     let authenticatedFailure = false;
     let prewarmNeedsForegroundRetry = false;
     syncBusy();
+    setUsageReadsInFlight((n) => n + 1);
     setError('');
     try {
       const result = await client.get<{
@@ -453,7 +492,7 @@ export function FreshApiKeys({
         if (!alive.current || readEpoch.current !== epoch || ownerEpoch.current !== ownerAtStart)
           return;
         if (usageErr instanceof PublicApiError && usageErr.kind === 'authentication') {
-          if (startedWhileHidden || !visibleRef.current) {
+          if (startedWhileHidden || !visibleRef.current || seq !== usageReqSeq.current) {
             lastRefreshCompletedAtRef.current = 0;
             prewarmNeedsForegroundRetry = true;
           } else {
@@ -479,6 +518,9 @@ export function FreshApiKeys({
         }
       }
     } finally {
+      if (ownerEpoch.current === ownerAtStart && alive.current) {
+        setUsageReadsInFlight((n) => Math.max(0, n - 1));
+      }
       if (ownerEpoch.current === ownerAtStart && activeReadEpoch.current === epoch) {
         activeReadEpoch.current = null;
         if (authenticatedFailure) pendingRefresh.current = false;
@@ -498,9 +540,11 @@ export function FreshApiKeys({
   async function refreshUsageSummarySilently(
     ownerAtStart = ownerEpoch.current,
     rebindAtStart = rebindSeq.current,
-    targetWindow = usageWindowRef.current
-  ) {
+    targetWindow = usageWindowRef.current,
+    options?: { preserveOnError?: boolean }
+  ): Promise<'ok' | 'error' | 'stale'> {
     const seq = ++usageReqSeq.current;
+    setUsageReadsInFlight((n) => n + 1);
     try {
       const parsed = parseUsageSummary(
         await client.get<unknown>(
@@ -514,23 +558,23 @@ export function FreshApiKeys({
         rebindSeq.current !== rebindAtStart ||
         seq !== usageReqSeq.current
       ) {
-        return;
+        return 'stale';
       }
-      if (!parsed) {
-        setUsage(null);
-        return;
+      if (!parsed) throw new Error('Invalid usage summary response');
+      if (usageWindowRef.current !== targetWindow) {
+        return 'stale';
       }
-      if (usageWindowRef.current === targetWindow) {
-        latestServerToMsRef.current = Math.max(latestServerToMsRef.current, parsed.toMs);
-        setUsage(parsed);
-      }
+      latestServerToMsRef.current = Math.max(latestServerToMsRef.current, parsed.toMs);
+      setUsage(parsed);
+      return 'ok';
     } catch (usageErr) {
       if (
         !alive.current ||
         ownerEpoch.current !== ownerAtStart ||
-        rebindSeq.current !== rebindAtStart
+        rebindSeq.current !== rebindAtStart ||
+        seq !== usageReqSeq.current
       ) {
-        return;
+        return 'stale';
       }
       if (usageErr instanceof PublicApiError && usageErr.kind === 'authentication') {
         if (visibleRef.current) {
@@ -538,10 +582,15 @@ export function FreshApiKeys({
         } else {
           lastRefreshCompletedAtRef.current = 0;
         }
-        return;
+        return 'stale';
       }
-      if (seq === usageReqSeq.current) {
+      if (!options?.preserveOnError) {
         setUsage(null);
+      }
+      return 'error';
+    } finally {
+      if (ownerEpoch.current === ownerAtStart && alive.current) {
+        setUsageReadsInFlight((n) => Math.max(0, n - 1));
       }
     }
   }
@@ -608,6 +657,8 @@ export function FreshApiKeys({
       usageWindowRef.current = '24h';
       ++usageReqSeq.current;
       latestServerToMsRef.current = 0;
+      setUsageReadsInFlight(0);
+      clearUsageStartupRetry(true);
       reportPending();
     }
     setBlocker(null);
@@ -619,8 +670,28 @@ export function FreshApiKeys({
   useEffect(() => {
     const becameVisible = visible && !wasVisibleRef.current;
     wasVisibleRef.current = visible;
+    if (!visible) {
+      usageReqSeq.current += 1;
+      return;
+    }
     if (!becameVisible) return;
-    if (Date.now() - lastRefreshCompletedAtRef.current < AUTO_REFRESH_COOLDOWN_MS) return;
+    if (Date.now() - lastRefreshCompletedAtRef.current < AUTO_REFRESH_COOLDOWN_MS) {
+      if (
+        !usageRef.current &&
+        keysRef.current !== null &&
+        activeReadEpoch.current === null &&
+        !activeMutation.current &&
+        !selectedRef.current &&
+        !detailPendingRef.current
+      ) {
+        void refreshUsageSummarySilently(
+          ownerEpoch.current,
+          rebindSeq.current,
+          usageWindowRef.current
+        );
+      }
+      return;
+    }
     if (
       activeReadEpoch.current !== null ||
       activeMutation.current ||
@@ -641,6 +712,63 @@ export function FreshApiKeys({
     }
     void refresh(false, { backgroundRevalidate: true });
   }, [visible]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const becameVisible = visible && !startupRetryWasVisibleRef.current;
+    startupRetryWasVisibleRef.current = visible;
+    clearUsageStartupRetry(false);
+    if (becameVisible) {
+      usageStartupAttemptRef.current = 0;
+    }
+    const hasTransientUsage = hasTransientStartupUsageSummary(usage);
+    if (!visible || !hasTransientUsage || usageReadsInFlight > 0) {
+      if (!hasTransientUsage) {
+        usageStartupAttemptRef.current = 0;
+      }
+      return;
+    }
+    const attempt = usageStartupAttemptRef.current;
+    if (attempt >= USAGE_STARTUP_RETRY_DELAYS_MS.length) {
+      return;
+    }
+    const delayMs = USAGE_STARTUP_RETRY_DELAYS_MS[attempt];
+    const ownerAtSchedule = ownerEpoch.current;
+    const rebindAtSchedule = rebindSeq.current;
+    const windowAtSchedule = usageWindowRef.current;
+    usageStartupTimerRef.current = setTimeout(() => {
+      usageStartupTimerRef.current = null;
+      if (
+        !alive.current ||
+        !visibleRef.current ||
+        ownerEpoch.current !== ownerAtSchedule ||
+        rebindSeq.current !== rebindAtSchedule ||
+        usageWindowRef.current !== windowAtSchedule
+      ) {
+        return;
+      }
+      usageStartupAttemptRef.current = attempt + 1;
+      void refreshUsageSummarySilently(
+        ownerAtSchedule,
+        rebindAtSchedule,
+        windowAtSchedule,
+        { preserveOnError: true }
+      ).then((outcome) => {
+        if (
+          outcome === 'error' &&
+          alive.current &&
+          visibleRef.current &&
+          ownerEpoch.current === ownerAtSchedule &&
+          rebindSeq.current === rebindAtSchedule &&
+          usageWindowRef.current === windowAtSchedule
+        ) {
+          setUsageStartupTick((tick) => tick + 1);
+        }
+      });
+    }, delayMs);
+    return () => {
+      clearUsageStartupRetry(false);
+    };
+  }, [usage, usageReadsInFlight, usageStartupTick, visible, credential, reloadToken, usageWindow]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function copyCreatedSecret() {
     if (!secret) return;
@@ -906,6 +1034,7 @@ export function FreshApiKeys({
       setCreatedKeyId('');
       setCreateOpen(false);
       if (shouldRefreshUsage) {
+        clearUsageStartupRetry(true);
         void refreshUsageSummarySilently();
       }
     }
@@ -2700,6 +2829,7 @@ export function FreshApiKeys({
               activeTab={usageWindow}
               onChange={(nextWin) => {
                 if (nextWin === usageWindowRef.current) return;
+                clearUsageStartupRetry(true);
                 usageWindowRef.current = nextWin;
                 setUsageWindow(nextWin);
                 setUsage(null);
@@ -2935,14 +3065,6 @@ export function FreshApiKeys({
             </div>
           </aside>
         )}
-        {!!keys?.some((key) => key.origin === 'adopted') && (
-          <aside className="key-gateway-note" data-testid="adopted-key-note">
-            <FullWebIcon name="shield" />
-            <div>
-              <p>{k('adoptedOriginNote')}</p>
-            </div>
-          </aside>
-        )}
       </div>
       <div
         id="key-workspace-panel-access"
@@ -3143,6 +3265,7 @@ export function FreshApiKeys({
             setRegenerateTargetId('');
             if (regenerateChangedRef.current) {
               regenerateChangedRef.current = false;
+              clearUsageStartupRetry(true);
               void refreshUsageSummarySilently();
             }
           }}

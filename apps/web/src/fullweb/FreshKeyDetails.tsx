@@ -392,6 +392,12 @@ function usageCoverageTone(state: UsageState): DrawerStatusTone {
   }
 }
 
+const USAGE_STARTUP_RETRY_DELAYS_MS = [800, 1500, 3000, 5000] as const;
+
+function isTransientStartupUsageReason(reason: string | undefined): boolean {
+  return reason === 'collection_starting' || reason === 'projection_catching_up';
+}
+
 function detailTime(value: number) {
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return { iso: undefined, label: '—' };
@@ -973,24 +979,42 @@ export function FreshKeyDetails({
   const inFlight = useRef(false);
   const active = useRef(true);
   const ownerEpoch = useRef(0);
+  const readSeq = useRef(0);
   const usageSeq = useRef(0);
   const usage24hSeq = useRef(0);
   const usageRef = useRef<KeyUsage | null>(null);
   const usage24hRef = useRef<KeyUsage | null>(null);
   const latestServerToMsRef = useRef(0);
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
+  const openRef = useRef(open);
+  openRef.current = open;
+  const recordRef = useRef<Key | null>(record);
+  recordRef.current = record;
+  const usageFailedRef = useRef(usageFailed);
+  usageFailedRef.current = usageFailed;
+  const hiddenAuthSuppressedRef = useRef(false);
+  const wasOpenVisibleRef = useRef(open && visible);
+  const usageStartupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const usageStartupAttemptRef = useRef(0);
+  const wasActiveForUsageRetryRef = useRef(open && visible);
+  const [usageStartupTick, setUsageStartupTick] = useState(0);
+  const [usageReadsInFlight, setUsageReadsInFlight] = useState(0);
   const prevInitialWindowRef = useRef(initialWindow);
   const detailDrawerBodyRef = useRef<HTMLDivElement | null>(null);
   const auth = { kind: 'admin' as const, value: credential };
   const onPendingRef = useRef(onPending);
   onPendingRef.current = onPending;
 
-  useEffect(() => {
-    return () => {
-      onPendingRef.current(false);
-      clearTimeout(idCopyTimerRef.current);
-      idCopyTimerRef.current = undefined;
-    };
-  }, []);
+  function clearUsageStartupRetry(resetAttempt = false) {
+    if (usageStartupTimerRef.current !== null) {
+      clearTimeout(usageStartupTimerRef.current);
+      usageStartupTimerRef.current = null;
+    }
+    if (resetAttempt) {
+      usageStartupAttemptRef.current = 0;
+    }
+  }
   const resource = 'api-keys/' + id;
   const activeUsageWindow: UsageWindow =
     usageWindowState.forId === id ? usageWindowState.window : initialWindow;
@@ -998,7 +1022,18 @@ export function FreshKeyDetails({
     state: 'unknown' as UsageState,
     reason: 'usage_read_failed',
   };
+  const activeUsageWindowRef = useRef<UsageWindow>(activeUsageWindow);
+  activeUsageWindowRef.current = activeUsageWindow;
 
+
+  useEffect(() => {
+    return () => {
+      onPendingRef.current(false);
+      clearTimeout(idCopyTimerRef.current);
+      idCopyTimerRef.current = undefined;
+      clearUsageStartupRetry(true);
+    };
+  }, []);
   useEffect(() => {
     prevInitialWindowRef.current = initialWindow;
     active.current = true;
@@ -1009,14 +1044,21 @@ export function FreshKeyDetails({
     setBusy(false);
     setCopying(false);
     setRecord(null);
+    recordRef.current = null;
     setUsage(null);
     setUsage24h(null);
     usageRef.current = null;
     usage24hRef.current = null;
     latestServerToMsRef.current = 0;
+    readSeq.current += 1;
     usageSeq.current += 1;
     usage24hSeq.current += 1;
+    hiddenAuthSuppressedRef.current = false;
+    wasOpenVisibleRef.current = open && visible;
     setUsageFailed(false);
+    usageFailedRef.current = false;
+    setUsageReadsInFlight(0);
+    clearUsageStartupRetry(true);
     setUsageWindowState({ forId: id, window: initialWindow });
     setApplyPending(false);
     setApplyUnknown(false);
@@ -1035,7 +1077,7 @@ export function FreshKeyDetails({
     setDetailTab(initialTab);
     initialActionApplied.current = false;
     const previous = typeof document !== 'undefined' ? document.activeElement : null;
-    if (open) {
+    if (open && visible) {
       void read(ownerAtMount);
       void readUsage(ownerAtMount, initialWindow);
       if (initialWindow !== '24h') {
@@ -1044,6 +1086,7 @@ export function FreshKeyDetails({
     }
     return () => {
       active.current = false;
+      clearUsageStartupRetry(true);
       if (
         typeof HTMLElement !== 'undefined' &&
         previous instanceof HTMLElement &&
@@ -1055,9 +1098,49 @@ export function FreshKeyDetails({
   }, [id, credential, reloadToken, open]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
+    const openVisible = open && visible;
+    const becameOpenVisible = openVisible && !wasOpenVisibleRef.current;
+    wasOpenVisibleRef.current = openVisible;
+    if (!openVisible) {
+      readSeq.current += 1;
+      inFlight.current = false;
+      setBusy(false);
+      usageSeq.current += 1;
+      usage24hSeq.current += 1;
+      return;
+    }
+    if (becameOpenVisible) {
+      const retryHiddenAuth = hiddenAuthSuppressedRef.current;
+      hiddenAuthSuppressedRef.current = false;
+      const ownerAtStart = ownerEpoch.current;
+      if (retryHiddenAuth || !recordRef.current) {
+        void read(ownerAtStart);
+      }
+      if (retryHiddenAuth || !usageRef.current || usageFailedRef.current) {
+        void readUsage(ownerAtStart, activeUsageWindowRef.current);
+      }
+      if (
+        activeUsageWindowRef.current !== '24h' &&
+        (retryHiddenAuth || !usage24hRef.current)
+      ) {
+        void readUsage24h(ownerAtStart);
+      }
+    }
+  }, [open, visible]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
     const prev = prevInitialWindowRef.current;
     prevInitialWindowRef.current = initialWindow;
     if (!open || prev === initialWindow) return;
+    if (!visible) {
+      clearUsageStartupRetry(true);
+      activeUsageWindowRef.current = initialWindow;
+      setUsageWindowState({ forId: id, window: initialWindow });
+      usageRef.current = null;
+      setUsage(null);
+      setUsageFailed(false);
+      return;
+    }
     switchUsageWindow(initialWindow);
   }, [initialWindow, open]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1072,24 +1155,95 @@ export function FreshKeyDetails({
     }
   }, [initialAction, record, applyPending]);
 
+  useEffect(() => {
+    const isActive = open && visible;
+    const becameActive = isActive && !wasActiveForUsageRetryRef.current;
+    wasActiveForUsageRetryRef.current = isActive;
+    clearUsageStartupRetry(false);
+    if (becameActive) {
+      usageStartupAttemptRef.current = 0;
+    }
+    const hasTransientUsage =
+      isTransientStartupUsageReason(usage?.coverage.reason) ||
+      (activeUsageWindow !== '24h' && isTransientStartupUsageReason(usage24h?.coverage.reason));
+    if (!isActive || !hasTransientUsage || usageReadsInFlight > 0) {
+      if (!hasTransientUsage) {
+        usageStartupAttemptRef.current = 0;
+      }
+      return;
+    }
+    const attempt = usageStartupAttemptRef.current;
+    if (attempt >= USAGE_STARTUP_RETRY_DELAYS_MS.length) {
+      return;
+    }
+    const delayMs = USAGE_STARTUP_RETRY_DELAYS_MS[attempt];
+    const ownerAtSchedule = ownerEpoch.current;
+    const windowAtSchedule = activeUsageWindowRef.current;
+    usageStartupTimerRef.current = setTimeout(() => {
+      usageStartupTimerRef.current = null;
+      if (
+        !active.current ||
+        !openRef.current ||
+        !visibleRef.current ||
+        ownerEpoch.current !== ownerAtSchedule ||
+        activeUsageWindowRef.current !== windowAtSchedule
+      ) {
+        return;
+      }
+      usageStartupAttemptRef.current = attempt + 1;
+      const reloadActive = isTransientStartupUsageReason(usageRef.current?.coverage.reason);
+      const reload24h =
+        windowAtSchedule !== '24h' &&
+        isTransientStartupUsageReason(usage24hRef.current?.coverage.reason);
+      void Promise.all([
+        reloadActive
+          ? readUsage(ownerAtSchedule, windowAtSchedule, { preserveOnError: true })
+          : Promise.resolve('ok' as const),
+        reload24h
+          ? readUsage24h(ownerAtSchedule, { preserveOnError: true })
+          : Promise.resolve('ok' as const),
+      ]).then(([activeOutcome, dailyOutcome]) => {
+        if (
+          (activeOutcome === 'error' || dailyOutcome === 'error') &&
+          active.current &&
+          openRef.current &&
+          visibleRef.current &&
+          ownerEpoch.current === ownerAtSchedule &&
+          activeUsageWindowRef.current === windowAtSchedule
+        ) {
+          setUsageStartupTick((tick) => tick + 1);
+        }
+      });
+    }, delayMs);
+    return () => {
+      clearUsageStartupRetry(false);
+    };
+  }, [usage, usage24h, usageReadsInFlight, usageStartupTick, open, visible, id, credential, reloadToken, activeUsageWindow]); // eslint-disable-line react-hooks/exhaustive-deps
+
   function validate(value: Key) {
     if (!validKey(value) || value.id !== id) throw new Error();
     return value;
   }
 
   function failure(err: unknown) {
-    if (err instanceof PublicApiError && err.kind === 'authentication') onUnauthorized();
-    else setMessage(t('keysUnavailable'));
+    if (err instanceof PublicApiError && err.kind === 'authentication') {
+      if (visibleRef.current && openRef.current) {
+        onUnauthorized();
+      } else if (openRef.current) {
+        hiddenAuthSuppressedRef.current = true;
+      }
+    } else setMessage(t('keysUnavailable'));
   }
 
   async function read(ownerAtStart = ownerEpoch.current) {
     if (inFlight.current || applyPendingRef.current) return;
+    const seq = ++readSeq.current;
     inFlight.current = true;
     setBusy(true);
     setMessage('');
     try {
       const value = validate(await client.get<Key>(resource, auth));
-      if (!active.current || ownerEpoch.current !== ownerAtStart) return;
+      if (!active.current || ownerEpoch.current !== ownerAtStart || seq !== readSeq.current) return;
       setRecord(value);
       onSaved(value);
       if (value.runtimeState === 'effective_observed' || value.runtimeState === 'revoked_observed') {
@@ -1102,9 +1256,23 @@ export function FreshKeyDetails({
       }
       onPending(false);
     } catch (err) {
-      if (active.current && ownerEpoch.current === ownerAtStart) failure(err);
+      if (active.current && ownerEpoch.current === ownerAtStart) {
+        if (seq !== readSeq.current) {
+          if (
+            err instanceof PublicApiError &&
+            err.kind === 'authentication' &&
+            openRef.current &&
+            !recordRef.current &&
+            !inFlight.current
+          ) {
+            hiddenAuthSuppressedRef.current = true;
+          }
+          return;
+        }
+        failure(err);
+      }
     } finally {
-      if (ownerEpoch.current === ownerAtStart) {
+      if (ownerEpoch.current === ownerAtStart && seq === readSeq.current) {
         inFlight.current = false;
         if (active.current) setBusy(false);
       }
@@ -1141,8 +1309,10 @@ export function FreshKeyDetails({
       if (active.current && ownerEpoch.current === ownerAtStart) setCopyFeedback('copied');
     } catch (err) {
       if (!active.current || ownerEpoch.current !== ownerAtStart) return;
-      if (err instanceof PublicApiError && err.kind === 'authentication') onUnauthorized();
-      else {
+      if (err instanceof PublicApiError && err.kind === 'authentication') {
+        if (visibleRef.current && openRef.current) onUnauthorized();
+        else if (openRef.current) hiddenAuthSuppressedRef.current = true;
+      } else {
         setCopyFeedback('failed');
         if (err instanceof PublicApiError && err.status === 409) {
           await read(ownerAtStart);
@@ -1179,7 +1349,8 @@ export function FreshKeyDetails({
     } catch (err) {
       if (!active.current || ownerEpoch.current !== ownerAtStart) return 'ignored';
       if (err instanceof PublicApiError && err.kind === 'authentication') {
-        onUnauthorized();
+        if (visibleRef.current && openRef.current) onUnauthorized();
+        else if (openRef.current) hiddenAuthSuppressedRef.current = true;
         return 'ignored';
       }
       if (err instanceof PublicApiError && err.status === 409) {
@@ -1229,8 +1400,9 @@ export function FreshKeyDetails({
 
   async function readUsage(
     ownerAtStart = ownerEpoch.current,
-    window: UsageWindow = activeUsageWindow
-  ) {
+    window: UsageWindow = activeUsageWindow,
+    options?: { preserveOnError?: boolean }
+  ): Promise<'ok' | 'error' | 'stale'> {
     const seq = ++usageSeq.current;
     const seq24h = window === '24h' ? ++usage24hSeq.current : 0;
     let usagePath = `${resource}/usage`;
@@ -1240,72 +1412,106 @@ export function FreshKeyDetails({
       const fromMs = Math.max(1, toMs - spanMs);
       usagePath = `${resource}/usage?from_ms=${fromMs}&to_ms=${toMs}`;
     }
+    setUsageReadsInFlight((n) => n + 1);
     try {
       const parsed = parseKeyUsage(await client.get<unknown>(usagePath, auth), id);
       if (!parsed) throw new Error('Invalid usage response');
       if (!active.current || ownerEpoch.current !== ownerAtStart) {
-        return;
+        return 'stale';
+      }
+      if (seq !== usageSeq.current && !(window === '24h' && seq24h === usage24hSeq.current)) {
+        return 'stale';
       }
       latestServerToMsRef.current = Math.max(latestServerToMsRef.current, parsed.toMs);
       if (window === '24h' && seq24h === usage24hSeq.current) {
         usage24hRef.current = parsed;
         setUsage24h(parsed);
       }
-      if (seq !== usageSeq.current) {
-        return;
+      if (seq !== usageSeq.current || window !== activeUsageWindowRef.current) {
+        return 'stale';
       }
       usageRef.current = parsed;
       setUsage(parsed);
       setUsageFailed(false);
+      return 'ok';
     } catch (err) {
       if (!active.current || ownerEpoch.current !== ownerAtStart) {
-        return;
+        return 'stale';
       }
       if (err instanceof PublicApiError && err.kind === 'authentication') {
         if (seq === usageSeq.current || (window === '24h' && seq24h === usage24hSeq.current)) {
-          onUnauthorized();
+          if (visibleRef.current && openRef.current) {
+            onUnauthorized();
+          } else if (openRef.current) {
+            hiddenAuthSuppressedRef.current = true;
+          }
         }
-        return;
+        return 'stale';
       }
-      if (window === '24h' && seq24h === usage24hSeq.current) {
-        usage24hRef.current = null;
-        setUsage24h(null);
+      const isCurrentActive = seq === usageSeq.current;
+      const isCurrent24h = window === '24h' && seq24h === usage24hSeq.current;
+      if (!options?.preserveOnError) {
+        if (isCurrent24h) {
+          usage24hRef.current = null;
+          setUsage24h(null);
+        }
+        if (isCurrentActive) {
+          usageRef.current = null;
+          setUsage(null);
+          setUsageFailed(true);
+        }
       }
-      if (seq !== usageSeq.current) {
-        return;
+      return isCurrentActive || isCurrent24h ? 'error' : 'stale';
+    } finally {
+      if (ownerEpoch.current === ownerAtStart && active.current) {
+        setUsageReadsInFlight((n) => Math.max(0, n - 1));
       }
-      usageRef.current = null;
-      setUsage(null);
-      setUsageFailed(true);
     }
   }
 
-  async function readUsage24h(ownerAtStart = ownerEpoch.current) {
+  async function readUsage24h(
+    ownerAtStart = ownerEpoch.current,
+    options?: { preserveOnError?: boolean }
+  ): Promise<'ok' | 'error' | 'stale'> {
     const seq = ++usage24hSeq.current;
+    setUsageReadsInFlight((n) => n + 1);
     try {
       const parsed = parseKeyUsage(await client.get<unknown>(`${resource}/usage`, auth), id);
       if (!parsed) throw new Error('Invalid usage response');
       if (!active.current || ownerEpoch.current !== ownerAtStart || seq !== usage24hSeq.current) {
-        return;
+        return 'stale';
       }
       latestServerToMsRef.current = Math.max(latestServerToMsRef.current, parsed.toMs);
       usage24hRef.current = parsed;
       setUsage24h(parsed);
+      return 'ok';
     } catch (err) {
       if (!active.current || ownerEpoch.current !== ownerAtStart || seq !== usage24hSeq.current) {
-        return;
+        return 'stale';
       }
       if (err instanceof PublicApiError && err.kind === 'authentication') {
-        onUnauthorized();
-        return;
+        if (visibleRef.current && openRef.current) {
+          onUnauthorized();
+        } else if (openRef.current) {
+          hiddenAuthSuppressedRef.current = true;
+        }
+        return 'stale';
       }
-      usage24hRef.current = null;
-      setUsage24h(null);
+      if (!options?.preserveOnError) {
+        usage24hRef.current = null;
+        setUsage24h(null);
+      }
+      return 'error';
+    } finally {
+      if (ownerEpoch.current === ownerAtStart && active.current) {
+        setUsageReadsInFlight((n) => Math.max(0, n - 1));
+      }
     }
   }
 
   function switchUsageWindow(nextWindow: UsageWindow) {
     if (nextWindow === activeUsageWindow) return;
+    clearUsageStartupRetry(true);
     setUsageWindowState({ forId: id, window: nextWindow });
     usageRef.current = null;
     setUsage(null);
@@ -2044,6 +2250,7 @@ export function FreshKeyDetails({
                   aria-label={t('keysReadDetails')}
                   disabled={busy || applyPending || applyUnknown}
                   onClick={() => {
+                    clearUsageStartupRetry(true);
                     void read(ownerEpoch.current);
                     void readUsage(ownerEpoch.current, activeUsageWindow);
                     if (activeUsageWindow !== '24h') {
@@ -2381,9 +2588,11 @@ export function FreshKeyDetails({
                         </DrawerDlRow>
                       )}
                     </DrawerDefinitionList>
-                    {record.origin === 'adopted' && (
-                      <p className="key-field-help key-adopted-note">{k('adoptedOriginNote')}</p>
-                    )}
+                    {record.origin === 'adopted' &&
+                      !revokedOrSuperseded &&
+                      !(record.lastRotatedAtMs && record.lastRotatedAtMs > 0) && (
+                        <p className="key-field-help key-adopted-note">{k('adoptedOriginNote')}</p>
+                      )}
                   </DrawerSectionCard>
                   {!revokedOrSuperseded && (
                     <AccessInfoSummary
@@ -2392,6 +2601,7 @@ export function FreshKeyDetails({
                       onUnauthorized={onUnauthorized}
                       info={accessInfo ?? undefined}
                       reloadToken={reloadToken}
+                      visible={open && visible}
                       compact
                       clientOnly
                       drawerEmbed

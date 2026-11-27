@@ -978,6 +978,7 @@ describe('Fresh client key persistence UI', () => {
     expect(readText(adoptedCardNode)).toContain(k('adoptedOriginInline'));
     expect(readText(adoptedCardNode)).toContain(k('neverUsedShort'));
     expect(readText(adoptedCardNode)).toContain(k('timeRotatedShort'));
+    expect(renderer.root.findAllByProps({ 'data-testid': 'adopted-key-note' })).toHaveLength(0);
   });
   it('keeps the key list usable when the usage read fails and avoids duplicate Unavailable pills', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json({
@@ -5185,5 +5186,504 @@ describe('Fresh client key persistence UI', () => {
     } finally {
       nowSpy.mockRestore();
     }
+  });
+
+  it('auto-revalidates transient startup usage states until settled and stops once complete or capped', async () => {
+    vi.useFakeTimers();
+    const adoptedKey = {
+      ...key,
+      id: '9'.repeat(32),
+      requestId: 'a'.repeat(32),
+      origin: 'adopted' as const,
+      maskedPreview: '…9999',
+      name: 'Adopted Startup Key',
+      runtimeState: 'effective_observed' as const,
+    };
+    let summaryCalls = 0;
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys')) {
+        return Promise.resolve(
+          Response.json({
+            keys: [adoptedKey],
+            gatewayPending: false,
+            revocationAvailable: true,
+          })
+        );
+      }
+      if (url.endsWith('/api-keys/usage-summary')) {
+        summaryCalls += 1;
+        if (summaryCalls === 1) {
+          return Promise.resolve(
+            Response.json({
+              fromMs: 1_000,
+              toMs: 2_000,
+              coverage: { state: 'unknown', reason: 'collection_starting' },
+              items: [
+                {
+                  keyId: adoptedKey.id,
+                  calls: 0,
+                  lastUsedAtMs: null,
+                  coverage: { state: 'unknown', reason: 'collection_starting' },
+                },
+              ],
+            })
+          );
+        }
+        if (summaryCalls === 2) {
+          return Promise.resolve(
+            Response.json({
+              fromMs: 1_000,
+              toMs: 3_000,
+              coverage: { state: 'unknown', reason: 'projection_catching_up' },
+              items: [
+                {
+                  keyId: adoptedKey.id,
+                  calls: 0,
+                  lastUsedAtMs: null,
+                  coverage: { state: 'unknown', reason: 'projection_catching_up' },
+                },
+              ],
+            })
+          );
+        }
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1_000,
+            toMs: 4_000,
+            coverage: { state: 'complete', reason: 'observed' },
+            items: [
+              {
+                keyId: adoptedKey.id,
+                calls: 0,
+                success: 0,
+                failure: 0,
+                estimatedCostUsd: 0,
+                lastUsedAtMs: null,
+                coverage: { state: 'complete', reason: 'observed' },
+              },
+            ],
+          })
+        );
+      }
+      return Promise.resolve(Response.json({ protocols: [], ready: true }));
+    });
+
+    await act(async () => {
+      renderer = create(
+        <FreshApiKeys
+          client={createPublicApiClient(() => context, fetchMock)}
+          credential="admin-test-only"
+          onUnauthorized={unauthorized}
+          onCreationPending={vi.fn()}
+        />
+      );
+    });
+
+    expect(summaryCalls).toBe(1);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'adopted-key-note' })).toHaveLength(0);
+    const initialUsageText = readText(
+      renderer.root.findByProps({ 'data-testid': 'key-usage-' + adoptedKey.id })
+    );
+    expect(initialUsageText).toContain(k('usageStateUnknown'));
+    expect(initialUsageText).toContain('—');
+
+    // First retry at 800ms transitions from collection_starting to projection_catching_up.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(800);
+    });
+    expect(summaryCalls).toBe(2);
+    expect(
+      readText(renderer.root.findByProps({ 'data-testid': 'key-usage-' + adoptedKey.id }))
+    ).toContain(k('usageStateUnknown'));
+
+    // Second retry at 1500ms settles to complete/observed with unproven pill removed.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1500);
+    });
+    expect(summaryCalls).toBe(3);
+    const settledUsage = readText(
+      renderer.root.findByProps({ 'data-testid': 'key-usage-' + adoptedKey.id })
+    );
+    expect(settledUsage).not.toContain(k('usageStateUnknown'));
+    expect(settledUsage).not.toContain(k('usageStatePartial'));
+    expect(settledUsage).not.toContain('—');
+    expect(view()).not.toContain(k('usageReasonCollectionStarting'));
+    expect(view()).not.toContain(k('usageReasonProjectionCatchingUp'));
+    // No more retries are scheduled after settling.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+    expect(summaryCalls).toBe(3);
+  });
+
+  it('bounds transient startup usage retries and cancels pending timers on unmount', async () => {
+    vi.useFakeTimers();
+    const adoptedKey = {
+      ...key,
+      id: 'c'.repeat(32),
+      requestId: 'd'.repeat(32),
+      origin: 'adopted' as const,
+      maskedPreview: '…cccc',
+      name: 'Bounded Retry Key',
+      runtimeState: 'effective_observed' as const,
+    };
+    let summaryCalls = 0;
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys')) {
+        return Promise.resolve(
+          Response.json({
+            keys: [adoptedKey],
+            gatewayPending: false,
+            revocationAvailable: true,
+          })
+        );
+      }
+      if (url.includes('/api-keys/usage-summary')) {
+        summaryCalls += 1;
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1_000,
+            toMs: 2_000,
+            coverage: { state: 'unknown', reason: 'collection_starting' },
+            items: [
+              {
+                keyId: adoptedKey.id,
+                calls: 0,
+                lastUsedAtMs: null,
+                coverage: { state: 'unknown', reason: 'collection_starting' },
+              },
+            ],
+          })
+        );
+      }
+      return Promise.resolve(Response.json({ protocols: [], ready: true }));
+    });
+
+    await act(async () => {
+      renderer = create(
+        <FreshApiKeys
+          client={createPublicApiClient(() => context, fetchMock)}
+          credential="admin-test-only"
+          onUnauthorized={unauthorized}
+          onCreationPending={vi.fn()}
+        />
+      );
+    });
+    expect(summaryCalls).toBe(1);
+
+    // Exhaust [800, 1500, 3000, 5000] bounded retry schedule -> max 4 retries (5 total calls).
+    for (const delayMs of [800, 1500, 3000, 5000, 30_000]) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(delayMs);
+      });
+    }
+    expect(summaryCalls).toBe(5);
+
+    // Unmount before a fresh cycle's retry fires cancels any pending timer.
+    await act(async () => {
+      renderer.root.findByProps({ 'data-testid': 'key-list-usage-window-7d' }).props.onClick();
+    });
+    expect(summaryCalls).toBe(6);
+    await act(async () => {
+      renderer.unmount();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+    expect(summaryCalls).toBe(6);
+  });
+
+  it('resets transient startup usage retry budget when becoming visible again and cancels pending timer when hidden', async () => {
+    vi.useFakeTimers();
+    const adoptedKey = {
+      ...key,
+      id: 'e'.repeat(32),
+      requestId: 'f'.repeat(32),
+      origin: 'adopted' as const,
+      maskedPreview: '…eeee',
+      name: 'Visibility Retry Key',
+      runtimeState: 'effective_observed' as const,
+    };
+    let summaryCalls = 0;
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys')) {
+        return Promise.resolve(
+          Response.json({
+            keys: [adoptedKey],
+            gatewayPending: false,
+            revocationAvailable: true,
+          })
+        );
+      }
+      if (url.includes('/api-keys/usage-summary')) {
+        summaryCalls += 1;
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1_000,
+            toMs: 2_000,
+            coverage: { state: 'unknown', reason: 'collection_starting' },
+            items: [
+              {
+                keyId: adoptedKey.id,
+                calls: 0,
+                lastUsedAtMs: null,
+                coverage: { state: 'unknown', reason: 'collection_starting' },
+              },
+            ],
+          })
+        );
+      }
+      return Promise.resolve(Response.json({ protocols: [], ready: true }));
+    });
+
+    const renderPage = (visible: boolean) => (
+      <FreshApiKeys
+        client={createPublicApiClient(() => context, fetchMock)}
+        credential="admin-test-only"
+        visible={visible}
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+      />
+    );
+
+    await act(async () => {
+      renderer = create(renderPage(true));
+    });
+    expect(summaryCalls).toBe(1);
+
+    // Exhaust the 4-retry budget (total 1 + 4 = 5 calls), keeping elapsed < 30s auto-refresh cooldown.
+    for (const delayMs of [800, 1500, 3000, 5000, 6000]) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(delayMs);
+      });
+    }
+    expect(summaryCalls).toBe(5);
+
+    // Returning from hidden to visible within auto-refresh cooldown resets the startup retry budget.
+    await act(async () => {
+      renderer.update(renderPage(false));
+    });
+    await act(async () => {
+      renderer.update(renderPage(true));
+    });
+    const callsOnReopen = summaryCalls;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(800);
+    });
+    expect(summaryCalls).toBe(callsOnReopen + 1);
+
+    // Hiding while the next retry (1500ms) is armed cancels the pending timer.
+    await act(async () => {
+      renderer.update(renderPage(false));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(summaryCalls).toBe(callsOnReopen + 1);
+  });
+
+  it('re-fetches discarded usage summary on visibility return inside cooldown and waits for in-flight refresh before starting startup retry', async () => {
+    vi.useFakeTimers();
+    const adoptedKey = {
+      ...key,
+      id: 'f'.repeat(32),
+      requestId: '0'.repeat(32),
+      origin: 'adopted' as const,
+      maskedPreview: '…ffff',
+      name: 'Cooldown Recovery Key',
+      runtimeState: 'effective_observed' as const,
+    };
+    let resolveFirstSummary!: (res: Response) => void;
+    let resolveSecondRefreshSummary!: (res: Response) => void;
+    let summaryCalls = 0;
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys')) {
+        return Promise.resolve(
+          Response.json({
+            keys: [adoptedKey],
+            gatewayPending: false,
+            revocationAvailable: true,
+          })
+        );
+      }
+      if (url.includes('/api-keys/usage-summary')) {
+        summaryCalls += 1;
+        if (summaryCalls === 1) {
+          return new Promise<Response>((resolve) => {
+            resolveFirstSummary = resolve;
+          });
+        }
+        if (summaryCalls === 3) {
+          return new Promise<Response>((resolve) => {
+            resolveSecondRefreshSummary = resolve;
+          });
+        }
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1_000,
+            toMs: 2_000,
+            coverage: { state: 'unknown', reason: 'collection_starting' },
+            items: [
+              {
+                keyId: adoptedKey.id,
+                calls: 0,
+                lastUsedAtMs: null,
+                coverage: { state: 'unknown', reason: 'collection_starting' },
+              },
+            ],
+          })
+        );
+      }
+      return Promise.resolve(Response.json({ protocols: [], ready: true }));
+    });
+    const renderPage = (visible: boolean) => (
+      <FreshApiKeys
+        client={createPublicApiClient(() => context, fetchMock)}
+        credential="admin-test-only"
+        visible={visible}
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+      />
+    );
+
+    await act(async () => {
+      renderer = create(renderPage(true));
+    });
+    expect(summaryCalls).toBe(1);
+
+    // Hide before first summary resolves (retires seq -> usage stays null), resolve #1 while hidden,
+    // then return within 5s cooldown -> must re-fetch usage-summary (#2).
+    await act(async () => {
+      renderer.update(renderPage(false));
+      resolveFirstSummary(
+        Response.json({
+          fromMs: 1_000,
+          toMs: 2_000,
+          coverage: { state: 'unknown', reason: 'collection_starting' },
+          items: [],
+        })
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    await act(async () => {
+      renderer.update(renderPage(true));
+    });
+    expect(summaryCalls).toBe(2);
+
+    // Hide >5s so visibility return triggers refresh (#3, held pending). While #3 is pending past 800ms,
+    // startup retry must NOT fire or burn a retry slot until #3 finishes.
+    await act(async () => {
+      renderer.update(renderPage(false));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6_000);
+    });
+    await act(async () => {
+      renderer.update(renderPage(true));
+    });
+    expect(summaryCalls).toBe(3);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(summaryCalls).toBe(3);
+
+    await act(async () => {
+      resolveSecondRefreshSummary(
+        Response.json({
+          fromMs: 1_000,
+          toMs: 3_000,
+          coverage: { state: 'unknown', reason: 'collection_starting' },
+          items: [
+            {
+              keyId: adoptedKey.id,
+              calls: 0,
+              lastUsedAtMs: null,
+              coverage: { state: 'unknown', reason: 'collection_starting' },
+            },
+          ],
+        })
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(800);
+    });
+    expect(summaryCalls).toBe(4);
+  });
+
+  it('ignores retired pre-hide usage-summary 401 inside refresh() after rapid visible toggle and retries in foreground', async () => {
+    let resolveFirstSummary!: (res: Response) => void;
+    let summaryCalls = 0;
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys')) {
+        return Promise.resolve(
+          Response.json({
+            keys: [key],
+            gatewayPending: false,
+            revocationAvailable: true,
+          })
+        );
+      }
+      if (url.includes('/api-keys/usage-summary')) {
+        summaryCalls += 1;
+        if (summaryCalls === 1) {
+          return new Promise<Response>((resolve) => {
+            resolveFirstSummary = resolve;
+          });
+        }
+        return Promise.resolve(
+          Response.json({
+            fromMs: 1_000,
+            toMs: 2_000,
+            coverage: { state: 'complete', reason: 'observed' },
+            items: [],
+          })
+        );
+      }
+      return Promise.resolve(Response.json({ protocols: [], ready: true }));
+    });
+
+    const renderPage = (visible: boolean) => (
+      <FreshApiKeys
+        client={createPublicApiClient(() => context, fetchMock)}
+        credential="admin-test-only"
+        visible={visible}
+        onUnauthorized={unauthorized}
+        onCreationPending={vi.fn()}
+      />
+    );
+
+    await act(async () => {
+      renderer = create(renderPage(true));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(summaryCalls).toBe(1);
+
+    // Rapid visible: true -> false -> true retires usageReqSeq for the in-flight summary request.
+    await act(async () => {
+      renderer.update(renderPage(false));
+    });
+    await act(async () => {
+      renderer.update(renderPage(true));
+    });
+
+    // Pre-hide 401 settling after visible returned to true must not call onUnauthorized and should retry foreground refresh.
+    await act(async () => {
+      resolveFirstSummary(new Response(null, { status: 401 }));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(unauthorized).not.toHaveBeenCalled();
+    expect(summaryCalls).toBe(2);
   });
 });
