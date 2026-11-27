@@ -24,6 +24,7 @@ import (
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
@@ -184,6 +185,13 @@ func TestPreflightServesAReport(t *testing.T) {
 		}
 		if report.Fingerprint != "" && !strings.HasSuffix(report.Fingerprint, "…") && len(report.Fingerprint) > 12 {
 			t.Fatalf("fingerprint is not abbreviated: %q", report.Fingerprint)
+		}
+		wantArtifactID, qErr := freshstrategy.QualifiedUpgradeAdoptionArtifactID()
+		if qErr != nil {
+			t.Fatalf("QualifiedUpgradeAdoptionArtifactID() error = %v", qErr)
+		}
+		if report.QualifiedCPAArtifactID != string(wantArtifactID) {
+			t.Fatalf("preflight qualifiedCpaArtifactId = %q, want %q", report.QualifiedCPAArtifactID, wantArtifactID)
 		}
 	}
 }

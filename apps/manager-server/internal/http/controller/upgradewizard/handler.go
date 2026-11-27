@@ -40,6 +40,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradesurface"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
@@ -1124,6 +1125,9 @@ type preflightDocument struct {
 	// ExpectedVersion is the release the copy-in must be told when the
 	// declaration is pending. Empty when the caller declared a version.
 	ExpectedVersion string `json:"expectedVersion,omitempty"`
+	// QualifiedCPAArtifactID names the exact v8 CPA artifact this binary's
+	// compiled adoption record qualifies for a 1.x -> v2 Managed import.
+	QualifiedCPAArtifactID string `json:"qualifiedCpaArtifactId,omitempty"`
 }
 
 // servePreflight reports on the mount the operator supplied, never on the
@@ -1214,6 +1218,10 @@ func (h *Handler) servePreflight(w http.ResponseWriter, r *http.Request, mount m
 		}
 	}
 	h.rememberPreflightParityGaps(hasGaps)
+	qualifiedCPAArtifactID := ""
+	if artifactID, qErr := freshstrategy.QualifiedUpgradeAdoptionArtifactID(); qErr == nil {
+		qualifiedCPAArtifactID = string(artifactID)
+	}
 	writeJSON(w, http.StatusOK, preflightDocument{
 		ContractVersion: Contract,
 		SourceKind:      report.SourceKind,
@@ -1233,6 +1241,7 @@ func (h *Handler) servePreflight(w http.ResponseWriter, r *http.Request, mount m
 		Ready:              report.Ready,
 		PendingDeclaration: pendingDeclaration,
 		ExpectedVersion:    expectedVersion,
+		QualifiedCPAArtifactID: qualifiedCPAArtifactID,
 	})
 }
 

@@ -3609,4 +3609,105 @@ describe('Full Web upgrade wizard', () => {
     expect(allByTestId('upgrade-progress')).toHaveLength(0);
     expect(allByTestId('upgrade-progress-reading')).toHaveLength(0);
   });
+
+  it('surfaces the pinned Managed CPA baseline artifact on preflight and rejects malformed digests', async () => {
+    const digest = 'sha256:' + 'e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7';
+    expect(parseUpgradePreflight(preflightDocument({ qualifiedCpaArtifactId: digest }))?.qualifiedCpaArtifactId).toBe(
+      digest
+    );
+    expect(parseUpgradePreflight(preflightDocument({ qualifiedCpaArtifactId: '' }))).toBeNull();
+    expect(parseUpgradePreflight(preflightDocument({ qualifiedCpaArtifactId: 'sha256:short' }))).toBeNull();
+    expect(parseUpgradePreflight(preflightDocument({ qualifiedCpaArtifactId: 123 }))).toBeNull();
+    const read: UpgradeWizardRead = vi.fn(async (resource) =>
+      resource === 'installation/upgrade/status'
+        ? unrecordedStatus()
+        : preflightDocument({ qualifiedCpaArtifactId: digest })
+    );
+    await mount(read);
+    const baseline = byTestId('upgrade-preflight-cpa-baseline');
+    expect(baseline.props.title).toBe(digest);
+    expect(baseline.children.join('')).toBe('sha256:e48c85c75a19…');
+  });
+
+  it('keeps the Console and Gateway URL copy banner visible on result even when accessInfo is omitted after canonical cutover', async () => {
+    const writeText = vi.fn(async () => undefined);
+    vi.stubGlobal('window', { setTimeout, clearTimeout, location: { origin: 'https://manager.example' } });
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+
+    const canonicalWithoutAccessInfo = markCanonicalUpgradeStatus(
+      statusDocument({
+        stage: 'complete',
+        nextAction: 'complete',
+        targetMode: 'managed',
+        routing: {
+          configured: true,
+          committed: true,
+          existingPrefixesPreserved: false,
+          controlBasePath: '/cpamp-ctl',
+          inferenceBasePath: '/cpamp-inf',
+          sharedEntry: false,
+          externalBaseUrl: '',
+          suggestedControlBasePath: '',
+          suggestedInferenceBasePath: '',
+        },
+      })
+    );
+
+    await act(async () => {
+      renderer = create(
+        <FreshUpgradeFlow
+          read={vi.fn(async () => canonicalWithoutAccessInfo)}
+          language="zh-CN"
+          pollDelays={[10_000]}
+        />
+      );
+    });
+
+    expect(byTestId('upgrade-result-console-banner')).toBeTruthy();
+    expect(allByTestId('upgrade-access-active')).toHaveLength(0);
+    expect(byTestId('upgrade-gateway-waiting')).toBeTruthy();
+    expect(byTestId('access-info-management').children.join('')).toBe('https://manager.example/cpamp-ctl');
+    expect(byTestId('access-info-inference').children.join('')).toBe('https://manager.example/cpamp-inf');
+    expect(byTestId('upgrade-open-console').props.href).toBe('https://manager.example/cpamp-ctl');
+
+    await press('access-info-copy-management');
+    expect(writeText).toHaveBeenCalledWith('https://manager.example/cpamp-ctl');
+    await press('access-info-copy-inference');
+    expect(writeText).toHaveBeenCalledWith('https://manager.example/cpamp-inf');
+
+    const externalWithoutAccessInfoOrUrl = markCanonicalUpgradeStatus(
+      statusDocument({
+        stage: 'complete',
+        nextAction: 'complete',
+        targetMode: 'external',
+        routing: {
+          configured: true,
+          committed: true,
+          existingPrefixesPreserved: false,
+          controlBasePath: '/cpamp-ext',
+          inferenceBasePath: '',
+          sharedEntry: false,
+          externalBaseUrl: '',
+          suggestedControlBasePath: '',
+          suggestedInferenceBasePath: '',
+        },
+      })
+    );
+
+    await act(async () => {
+      renderer!.update(
+        <FreshUpgradeFlow
+          read={vi.fn(async () => externalWithoutAccessInfoOrUrl)}
+          language="zh-CN"
+          pollDelays={[10_000]}
+        />
+      );
+    });
+
+    expect(byTestId('upgrade-result-console-banner')).toBeTruthy();
+    expect(allByTestId('access-info-error')).toHaveLength(0);
+    expect(allByTestId('upgrade-access-active')).toHaveLength(0);
+    expect(byTestId('access-info-management').children.join('')).toBe('https://manager.example/cpamp-ext');
+    expect(byTestId('upgrade-open-console').props.href).toBe('https://manager.example/cpamp-ext');
+  });
 });
