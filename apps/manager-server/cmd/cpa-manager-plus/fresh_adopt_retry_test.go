@@ -52,13 +52,22 @@ func acceptedClientAPIKeysDecision() []bootstrap.AdoptionResourceDecision {
 func adoptV8Source(t *testing.T, reads *int) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/v8/management/config" || r.Header.Get("Authorization") != "Bearer "+adoptTestSourceKey {
+		if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer "+adoptTestSourceKey {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
-		*reads++
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"source-auth"},"access":{"api-keys":["source-client-one","source-client-two"]}}`))
+		switch r.URL.Path {
+		case "/v8/management/config":
+			*reads++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"source-auth"},"access":{"api-keys":["source-client-one","source-client-two"]}}`))
+		case "/v8/management/config.yaml":
+			*reads++
+			w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+			_, _ = w.Write([]byte("config-version: 8\nserver:\n  port: 8317\noauth:\n  auth-dir: source-auth\naccess:\n  api-keys:\n    - source-client-one\n    - source-client-two\n"))
+		default:
+			w.WriteHeader(http.StatusForbidden)
+		}
 	}))
 	t.Cleanup(server.Close)
 	return server

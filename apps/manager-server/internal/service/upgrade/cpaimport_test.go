@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
@@ -34,6 +35,8 @@ import (
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshadopt"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
@@ -115,11 +118,12 @@ type fakeDestinationCPA struct {
 	// failConfigWrite makes the config endpoints answer as a destination that
 	// cannot take a configuration write, so a test with a zero-credential source
 	// can stop a run after the attempt was recorded and before cpa_config is.
-	failConfigWrite   bool
-	emptyModels       bool
-	rejectUntilReady  *fakeImportRuntime
-	prematureRequests int
-	server            *httptest.Server
+	failConfigWrite        bool
+	validateLiveMediaRelay bool
+	emptyModels            bool
+	rejectUntilReady       *fakeImportRuntime
+	prematureRequests      int
+	server                 *httptest.Server
 }
 
 func newFakeDestinationCPA(t *testing.T, management string) *fakeDestinationCPA {
@@ -361,13 +365,23 @@ func (c *fakeDestinationCPA) writeConfig(w http.ResponseWriter, r *http.Request,
 		value = stripDestinationAuthIndexes(value)
 	}
 	c.mu.Lock()
+	candidate := cloneDestinationMap(c.config)
 	if r.Method == http.MethodPatch {
 		// CPA merges a PATCH mapping key by key, so a leaf below a page group
 		// leaves the group's other leaves in place.
-		patchConfig(c.config, strings.Split(dotted, "."), value)
+		patchConfig(candidate, strings.Split(dotted, "."), value)
 	} else {
-		mergeConfig(c.config, strings.Split(dotted, "."), value)
+		mergeConfig(candidate, strings.Split(dotted, "."), value)
 	}
+	if c.validateLiveMediaRelay {
+		if err := validateDestinationLiveMediaRelay(candidate); err != nil {
+			c.mu.Unlock()
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "invalid_config", "message": err.Error()})
+			return
+		}
+	}
+	c.config = candidate
 	c.mu.Unlock()
 	_, _ = w.Write([]byte(`{"status":"ok","config-version":8}`))
 }
@@ -3012,5 +3026,402 @@ func TestImportCPAConnectionConflictRedactsURLUserinfo(t *testing.T) {
 	}
 	if !strings.Contains(msg, "http://other-cpa.example:8317/gateway") {
 		t.Fatalf("connection conflict error did not retain redacted host URL: %q", msg)
+	}
+}
+
+// TestCPASourceAndExecutorReplayMigratesFullRichV7AndV8Configs exercises the
+// complete source -> freshadopt.Executor -> fakeDestinationCPA replay loop for
+// both rich v7 and rich v8 configs, verifying every newly added leaf,
+// payload.replace, oauth.settings, unredacted ice-servers,
+// credentials.{concurrency,in-flight}, models.*, observability.logs.*,
+// server.github-token, and plugins.{store-sources,store-auth,configs}, as well
+// as destination host-key/revision preservation and idempotent replay.
+func TestCPASourceAndExecutorReplayMigratesFullRichV7AndV8Configs(t *testing.T) {
+	allMigrateDecisions := func() []bootstrap.AdoptionResourceDecision {
+		refs := bootstrap.MigratedAdoptionResourceRefs()
+		decisions := make([]bootstrap.AdoptionResourceDecision, 0, len(refs))
+		for _, ref := range refs {
+			rule, ok := bootstrap.FreshAdoptionRule(ref)
+			if !ok {
+				t.Fatalf("migrated ref without rule: %q", ref)
+			}
+			decisions = append(decisions, bootstrap.AdoptionResourceDecision{
+				ResourceRef:       ref,
+				Kind:              rule.Kind,
+				Scope:             rule.Scope,
+				ReadEvidenceRef:   bootstrap.CapabilityEvidenceRef("preflight:" + string(ref) + "-read"),
+				ReplayEvidenceRef: bootstrap.CapabilityEvidenceRef("preflight:" + string(ref) + "-replay"),
+				VerifyEvidenceRef: bootstrap.CapabilityEvidenceRef("preflight:" + string(ref) + "-verify"),
+				Qualification:     bootstrap.CapabilityQualified,
+				Disposition:       bootstrap.Migrate,
+			})
+		}
+		return decisions
+	}
+
+	cases := []struct {
+		name              string
+		rawConfig         string
+		wantGithubToken   string
+		wantIncludeAPIKey bool
+		wantDebug         bool
+		wantTURNUser      string
+		wantTURNSecret    string
+		wantConcDefault   float64
+	}{
+		{
+			name:              "rich v7 flat/legacy layout",
+			rawConfig:         richV7BusinessConfig,
+			wantGithubToken:   "ghp_v7source_token",
+			wantIncludeAPIKey: false,
+			wantDebug:         true,
+			wantTURNUser:      "turn-user",
+			wantTURNSecret:    "turn-secret-unredacted",
+			wantConcDefault:   6,
+		},
+		{
+			name:              "rich v8 canonical layout",
+			rawConfig:         richV8BusinessConfig,
+			wantGithubToken:   "ghp_v8source_token",
+			wantIncludeAPIKey: true,
+			wantDebug:         false,
+			wantTURNUser:      "v8-turn-user",
+			wantTURNSecret:    "v8-turn-secret",
+			wantConcDefault:   8,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			legacyRoot, _ := writeCPAFixture(t, tc.rawConfig, map[string]string{
+				"codex-user.json": `{"type":"codex","access_token":"tok"}`,
+			})
+			source, err := openManagedCPASource(cpaSourceOptions{
+				LegacyRoot: legacyRoot,
+				CPAVersion: "8.0.55",
+			})
+			if err != nil {
+				t.Fatalf("openManagedCPASource: %v", err)
+			}
+			if len(source.manual) != 0 {
+				t.Fatalf("expected 0 source manual items, got %+v", source.manual)
+			}
+
+			destination := newFakeDestinationCPA(t, "dest-management-key-0123456789abcdef")
+			destination.mu.Lock()
+			destination.config["server"] = map[string]any{
+				"server-id": "dest-server-id",
+				"host":      "127.0.0.1",
+				"port":      18317,
+				"kv-store":  map[string]any{"path": "/dest/kv.db"},
+			}
+			destination.config["plugins"] = map[string]any{
+				"enabled":       false,
+				"dir":           "/dest/plugins",
+				"auth-revision": 99,
+			}
+			destination.config["observability"] = map[string]any{
+				"logs": map[string]any{"logging-to-file": false},
+			}
+			destination.config["credentials"] = map[string]any{
+				"concurrency": map[string]any{
+					"lifecycle-config-revision":    "dest-rev-9",
+					"observation-barrier-revision": 88,
+				},
+			}
+			destination.validateLiveMediaRelay = true
+			destination.mu.Unlock()
+			endpoint, err := freshadopt.NewDestination(context.Background(), freshadopt.Endpoint{
+				BaseURL:       destination.url(),
+				ManagementKey: destination.management,
+			})
+			if err != nil {
+				t.Fatalf("freshadopt.NewDestination: %v", err)
+			}
+			defer endpoint.Close()
+
+			decisions := allMigrateDecisions()
+			first, err := freshadopt.New(source, endpoint, decisions).Run(context.Background(), freshstore.AdoptionSummary{}, nil)
+			if err != nil {
+				t.Fatalf("first executor run: %v", err)
+			}
+			if !first.Summary.Finished {
+				t.Fatalf("first executor summary did not finish: %+v", first.Summary)
+			}
+			for _, item := range first.Summary.Items {
+				if item.Outcome == freshstore.AdoptionFailed || item.Outcome == freshstore.AdoptionManual {
+					t.Fatalf("unexpected non-migrated item on first run: %+v", item)
+				}
+			}
+
+			// Replay idempotently with prior Summary.
+			second, err := freshadopt.New(source, endpoint, decisions).Run(context.Background(), first.Summary, nil)
+			if err != nil {
+				t.Fatalf("replay executor run: %v", err)
+			}
+			if !second.Summary.Finished {
+				t.Fatalf("replay executor summary did not finish: %+v", second.Summary)
+			}
+			for _, item := range second.Summary.Items {
+				if item.Outcome == freshstore.AdoptionFailed || item.Outcome == freshstore.AdoptionManual {
+					t.Fatalf("unexpected non-migrated item on replay: %+v", item)
+				}
+			}
+
+			destination.mu.Lock()
+			defer destination.mu.Unlock()
+
+			// Every leaf, rule family, and provider/structured section exists on destination.
+			for _, leaf := range cpa.ConfigLeafPaths() {
+				if _, ok := configValueAt(destination.config, strings.Split(leaf, ".")); !ok {
+					t.Fatalf("destination missing leaf %q", leaf)
+				}
+			}
+			for _, familyID := range cpa.ConfigRuleFamilyIDs() {
+				entry, _ := cpa.LookupConfigRuleFamily(familyID)
+				if _, ok := configValueAt(destination.config, strings.Split(entry.Path, ".")); !ok {
+					t.Fatalf("destination missing rule family %q", entry.Path)
+				}
+			}
+			for _, section := range freshadopt.ProviderSections() {
+				if _, ok := configValueAt(destination.config, strings.Split(section, ".")); !ok {
+					t.Fatalf("destination missing provider/structured section %q", section)
+				}
+			}
+
+			// Spot-check critical values, unredacted ICE credentials, and preserved destination revisions/host keys.
+			if got, _ := configValueAt(destination.config, []string{"server", "github-token"}); got != tc.wantGithubToken {
+				t.Fatalf("destination server.github-token = %#v, want %q", got, tc.wantGithubToken)
+			}
+			if got, _ := configValueAt(destination.config, []string{"oauth", "providers", "claude", "oauth-include-create-api-key"}); got != tc.wantIncludeAPIKey {
+				t.Fatalf("destination claude oauth-include-create-api-key = %#v, want %v", got, tc.wantIncludeAPIKey)
+			}
+			if got, _ := configValueAt(destination.config, []string{"observability", "logs", "debug"}); got != tc.wantDebug {
+				t.Fatalf("destination observability.logs.debug = %#v, want %v", got, tc.wantDebug)
+			}
+			rawICE, _ := configValueAt(destination.config, []string{"oauth", "providers", "codex", "live-media-relay", "ice-servers"})
+			iceEntry := rawICE.([]any)[0].(map[string]any)
+			if iceEntry["username"] != tc.wantTURNUser || iceEntry["credential"] != tc.wantTURNSecret {
+				t.Fatalf("destination ice-servers credentials lost/redacted: %#v", iceEntry)
+			}
+			rawConc, _ := configValueAt(destination.config, []string{"credentials", "concurrency"})
+			concMap := rawConc.(map[string]any)
+			if concMap["lifecycle-config-revision"] != "dest-rev-9" {
+				t.Fatalf("destination concurrency lifecycle-config-revision = %#v, want dest-rev-9 preserved", concMap["lifecycle-config-revision"])
+			}
+			if got, _ := concMap["observation-barrier-revision"].(json.Number).Int64(); got != 88 {
+				t.Fatalf("destination concurrency observation-barrier-revision = %#v, want 88 preserved", concMap["observation-barrier-revision"])
+			}
+			if got, _ := concMap["default"].(json.Number).Float64(); got != tc.wantConcDefault {
+				t.Fatalf("destination concurrency default = %#v, want %v", concMap["default"], tc.wantConcDefault)
+			}
+			if got, _ := configValueAt(destination.config, []string{"server", "server-id"}); got != "dest-server-id" {
+				t.Fatalf("destination server.server-id overwritten: %#v", got)
+			}
+			if got, _ := configValueAt(destination.config, []string{"server", "kv-store", "path"}); got != "/dest/kv.db" {
+				t.Fatalf("destination server.kv-store.path overwritten: %#v", got)
+			}
+			if got, _ := configValueAt(destination.config, []string{"plugins", "auth-revision"}); got != 99 {
+				t.Fatalf("destination plugins.auth-revision overwritten: %#v", got)
+			}
+			if got, _ := configValueAt(destination.config, []string{"observability", "logs", "logging-to-file"}); got != false {
+				t.Fatalf("destination observability.logs.logging-to-file overwritten: %#v", got)
+			}
+		})
+	}
+}
+
+func cloneDestinationValue(v any) any {
+	switch typed := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for k, val := range typed {
+			out[k] = cloneDestinationValue(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for i, val := range typed {
+			out[i] = cloneDestinationValue(val)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+func cloneDestinationMap(m map[string]any) map[string]any {
+	if m == nil {
+		return map[string]any{}
+	}
+	return cloneDestinationValue(m).(map[string]any)
+}
+
+func destinationInt64(raw any) (int64, bool) {
+	switch v := raw.(type) {
+	case int:
+		return int64(v), true
+	case int64:
+		return v, true
+	case float64:
+		return int64(v), true
+	case json.Number:
+		n, err := v.Int64()
+		return n, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func validateDestinationLiveMediaRelay(doc map[string]any) error {
+	raw, ok := configValueAt(doc, []string{"oauth", "providers", "codex", "live-media-relay"})
+	relay, ok := raw.(map[string]any)
+	if !ok || relay == nil {
+		return nil
+	}
+	enabled, _ := relay["enabled"].(bool)
+	if !enabled {
+		return nil
+	}
+	maxSessions := int64(0)
+	if rawMax, exists := relay["max-sessions"]; exists && rawMax != nil {
+		parsed, ok := destinationInt64(rawMax)
+		if !ok || parsed < 0 {
+			return fmt.Errorf("max-sessions must be non-negative numeric")
+		}
+		maxSessions = parsed
+	}
+	effectiveMax := maxSessions
+	if effectiveMax == 0 {
+		effectiveMax = 32
+	}
+	portMin := int64(0)
+	if rawMin, exists := relay["udp-port-min"]; exists && rawMin != nil {
+		parsed, ok := destinationInt64(rawMin)
+		if !ok {
+			return fmt.Errorf("udp-port-min invalid")
+		}
+		portMin = parsed
+	}
+	portMax := int64(0)
+	if rawMax, exists := relay["udp-port-max"]; exists && rawMax != nil {
+		parsed, ok := destinationInt64(rawMax)
+		if !ok {
+			return fmt.Errorf("udp-port-max invalid")
+		}
+		portMax = parsed
+	}
+	if portMin <= 0 || portMax <= 0 || portMin > portMax {
+		return fmt.Errorf("oauth.providers.codex.live-media-relay udp-port-min and udp-port-max must form a valid port range when enabled")
+	}
+	if portMax-portMin+1 < effectiveMax*2 {
+		return fmt.Errorf("oauth.providers.codex.live-media-relay UDP range requires at least %d ports for %d sessions", effectiveMax*2, effectiveMax)
+	}
+	return nil
+}
+
+func TestCPASourceAndExecutorAtomicLiveMediaRelayValidation(t *testing.T) {
+	rawConfig := `config-version: 8
+access:
+  api-keys:
+    - "client-key-1"
+oauth:
+  providers:
+    codex:
+      live-media-relay:
+        enabled: true
+        disable-private-remote-ips: true
+        udp-port-min: 40000
+        udp-port-max: 40100
+`
+	legacyRoot, _ := writeCPAFixture(t, rawConfig, nil)
+	source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "8.0.55"})
+	if err != nil {
+		t.Fatalf("openManagedCPASource: %v", err)
+	}
+	if len(source.manual) != 0 {
+		t.Fatalf("unexpected source manual items: %+v", source.manual)
+	}
+
+	destination := newFakeDestinationCPA(t, "dest-management-key-0123456789abcdef")
+	destination.validateLiveMediaRelay = true
+	endpoint, err := freshadopt.NewDestination(context.Background(), freshadopt.Endpoint{
+		BaseURL:       destination.url(),
+		ManagementKey: destination.management,
+	})
+	if err != nil {
+		t.Fatalf("freshadopt.NewDestination: %v", err)
+	}
+	defer endpoint.Close()
+
+	rule, ok := bootstrap.FreshAdoptionRule(bootstrap.AdoptionRefConfigRouting)
+	if !ok {
+		t.Fatalf("missing FreshAdoptionRule for %s", bootstrap.AdoptionRefConfigRouting)
+	}
+	decisions := []bootstrap.AdoptionResourceDecision{
+		{
+			ResourceRef:       bootstrap.AdoptionRefConfigRouting,
+			Kind:              rule.Kind,
+			Scope:             rule.Scope,
+			ReadEvidenceRef:   "preflight:cpa-config-routing-read",
+			ReplayEvidenceRef: "preflight:cpa-config-routing-replay",
+			VerifyEvidenceRef: "preflight:cpa-config-routing-verify",
+			Qualification:     bootstrap.CapabilityQualified,
+			Disposition:       bootstrap.Migrate,
+		},
+	}
+	first, err := freshadopt.New(source, endpoint, decisions).Run(context.Background(), freshstore.AdoptionSummary{}, nil)
+	if err != nil {
+		t.Fatalf("Executor.Run: %v", err)
+	}
+	if !first.Summary.Finished {
+		t.Fatalf("summary did not finish: %+v", first.Summary)
+	}
+	var relayPatches int
+	for _, req := range destination.requests() {
+		if req == "PATCH /v8/management/config/oauth/providers/codex/live-media-relay" {
+			relayPatches++
+		}
+	}
+	if relayPatches != 1 {
+		t.Fatalf("live-media-relay PATCH count = %d, want 1 atomic PATCH (%v)", relayPatches, destination.requests())
+	}
+	for _, path := range []string{
+		"oauth.providers.codex.live-media-relay.enabled",
+		"oauth.providers.codex.live-media-relay.disable-private-remote-ips",
+		"oauth.providers.codex.live-media-relay.udp-port-min",
+		"oauth.providers.codex.live-media-relay.udp-port-max",
+	} {
+		found := false
+		for _, item := range first.Summary.Items {
+			if item.Item == "config:"+path {
+				found = true
+				if item.Outcome != freshstore.AdoptionMigrated {
+					t.Fatalf("%s outcome = %+v, want migrated", path, item)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("missing summary item for %s", path)
+		}
+	}
+	if got, _ := configValueAt(destination.config, []string{"oauth", "providers", "codex", "live-media-relay", "udp-port-min"}); !reflect.DeepEqual(got, json.Number("40000")) {
+		t.Fatalf("destination udp-port-min = %#v, want 40000", got)
+	}
+	if got, _ := configValueAt(destination.config, []string{"oauth", "providers", "codex", "live-media-relay", "udp-port-max"}); !reflect.DeepEqual(got, json.Number("40100")) {
+		t.Fatalf("destination udp-port-max = %#v, want 40100", got)
+	}
+	beforeReplay := len(destination.requests())
+	second, err := freshadopt.New(source, endpoint, decisions).Run(context.Background(), first.Summary, nil)
+	if err != nil {
+		t.Fatalf("Executor.Run replay: %v", err)
+	}
+	if !second.Summary.Finished {
+		t.Fatalf("replay summary did not finish: %+v", second.Summary)
+	}
+	for _, req := range destination.requests()[beforeReplay:] {
+		if strings.HasPrefix(req, "PATCH ") || strings.HasPrefix(req, "PUT ") {
+			t.Fatalf("replay wrote to destination unexpectedly: %v", destination.requests()[beforeReplay:])
+		}
 	}
 }

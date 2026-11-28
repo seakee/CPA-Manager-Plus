@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -231,8 +232,12 @@ func readV8ConfigWithClient(ctx context.Context, client *http.Client, baseURL, m
 		}
 	}
 	delete(sections, "config-version")
-	if len(sections) > 0 {
-		observation.ResourceSections = append(observation.ResourceSections, "unknown_cpa_native_resource")
+	rawDoc, docErr := DecodeConfigDocument(data)
+	if docErr != nil {
+		return V8ConfigObservation{}, V8InvalidConfig
+	}
+	if len(sections) > 0 || len(UnknownV8ConfigPaths(rawDoc)) > 0 {
+		observation.ResourceSections = append(observation.ResourceSections, unknownSection)
 	}
 	if adoptionKeys != nil {
 		// A well-formed source with no client Key has nothing to adopt and would
@@ -257,9 +262,39 @@ func readV8ConfigWithClient(ctx context.Context, client *http.Client, baseURL, m
 			seen[key] = true
 			keys = append(keys, key)
 		}
+		if !slices.Contains(observation.ResourceSections, unknownSection) {
+			candidates, complete := probeV8YAMLArchive(ctx, client, baseURL, managementKey)
+			if !complete || len(candidates) > 0 {
+				observation.ResourceSections = append(observation.ResourceSections, unknownSection)
+			}
+		}
 		*adoptionKeys = keys
 	}
 	return observation, nil
+}
+
+func probeV8YAMLArchive(ctx context.Context, client *http.Client, baseURL, managementKey string) ([]string, bool) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/v8/management/config.yaml", nil)
+	if err != nil {
+		return nil, false
+	}
+	request.Header.Set("Authorization", "Bearer "+managementKey)
+	request.Header.Set("Accept", "application/yaml, text/yaml")
+	request.Header.Set("Accept-Encoding", "identity, gzip")
+	request.Header.Set("Cache-Control", "no-store")
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, false
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, false
+	}
+	yamlData, ok := readBoundedJSONBody(response)
+	if !ok {
+		return nil, false
+	}
+	return ScanV8YAMLArchiveCandidates(yamlData)
 }
 
 var _ error = V8ReadError("")

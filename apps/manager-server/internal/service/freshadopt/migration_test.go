@@ -8,18 +8,24 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"gopkg.in/yaml.v3"
 )
 
 // fakeCPA is one CPA v8 Management API stand-in. It records every request
@@ -44,7 +50,15 @@ type fakeCPA struct {
 	config map[string]any
 	// writeFailures makes one dotted path fail with the given status.
 	writeFailures map[string]int
-	// readOverrides replaces the value readConfig returns for one dotted path,
+	// customWriteErrors makes one dotted path fail with a custom status + upstream
+	// JSON error string so tests can verify the closed reason allowlist.
+	customWriteErrors map[string]struct {
+		status int
+		code   string
+	}
+	// validateLiveMediaRelay enforces upstream CPA's codex_live.go Validate()
+	// cross-field rule on every PATCH/PUT before committing.
+	validateLiveMediaRelay bool
 	// letting a test simulate a divergent or malformed read-back after PUT.
 	readOverrides map[string]any
 	// uploadStatus > 0 makes the upload answer that status but still store the
@@ -73,6 +87,9 @@ type fakeCPA struct {
 	transformOnUpload      func(name string, raw []byte) []byte
 	transformOnStatusPatch func(name string, current []byte, disabled bool) []byte
 	statusPatchCount       int
+	failConfigYAML         bool
+	hangConfigYAML         bool
+	configYAMLOverride     string
 	server                 *httptest.Server
 }
 
@@ -87,6 +104,10 @@ func newFakeCPA(t *testing.T, auth string) *fakeCPA {
 		refuseUpload:    map[string]string{},
 		config:          map[string]any{},
 		writeFailures:   map[string]int{},
+		customWriteErrors: map[string]struct {
+			status int
+			code   string
+		}{},
 	}
 	cpa.server = httptest.NewServer(http.HandlerFunc(cpa.serve))
 	t.Cleanup(cpa.server.Close)
@@ -121,9 +142,37 @@ func (c *fakeCPA) serve(w http.ResponseWriter, r *http.Request) {
 		c.downloadCredential(w, r)
 	case path == "/v8/management/credentials/status" && r.Method == http.MethodPatch:
 		c.patchStatus(w, r)
+	case path == "/v8/management/config.yaml" && r.Method == http.MethodGet:
+		c.mu.Lock()
+		failYAML := c.failConfigYAML
+		hangYAML := c.hangConfigYAML
+		override := c.configYAMLOverride
+		cfgCopy := cloneFakeConfig(c.config)
+		c.mu.Unlock()
+		if hangYAML {
+			<-r.Context().Done()
+			return
+		}
+		if failYAML {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"yaml_unavailable"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+		if override != "" {
+			_, _ = w.Write([]byte(override))
+			return
+		}
+		body, err := yaml.Marshal(cfgCopy)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write(body)
 	case path == "/v8/management/config" && r.Method == http.MethodGet:
 		c.mu.Lock()
-		body, err := json.Marshal(c.config)
+		redactedCfg := redactFakeTURNSecrets(cloneFakeConfig(c.config))
+		body, err := json.Marshal(redactedCfg)
 		c.mu.Unlock()
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -267,6 +316,14 @@ func (c *fakeCPA) writeConfig(w http.ResponseWriter, r *http.Request, slashPath 
 	// CPA refuses the WHOLE write when one value in it is unacceptable, so a
 	// failing leaf is matched against the leaves the body would actually set.
 	c.mu.Lock()
+	for _, leaf := range append(leafPaths(dotted, body), dotted) {
+		if custom, ok := c.customWriteErrors[leaf]; ok {
+			c.mu.Unlock()
+			w.WriteHeader(custom.status)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": custom.code, "message": "upstream details"})
+			return
+		}
+	}
 	failing := ""
 	for _, leaf := range append(leafPaths(dotted, body), dotted) {
 		if c.writeFailures[leaf] != 0 {
@@ -292,12 +349,42 @@ func (c *fakeCPA) writeConfig(w http.ResponseWriter, r *http.Request, slashPath 
 	if strings.HasPrefix(dotted, "api-keys.") {
 		value = stripFakeAPIKeyAuthIndexes(value)
 	}
+	value = cloneFakeValue(value)
 	c.mu.Lock()
-	if r.Method == http.MethodPatch {
-		mergeInto(c.config, strings.Split(dotted, "."), value)
-	} else {
-		mergeInto(c.config, strings.Split(dotted, "."), value)
+	if dotted == "credentials.concurrency" {
+		incomingMap, _ := value.(map[string]any)
+		existingMap, _ := lookup(c.config, []string{"credentials", "concurrency"}).(map[string]any)
+		for _, revKey := range []string{"lifecycle-config-revision", "observation-barrier-revision"} {
+			var oldRev, newRev any
+			if existingMap != nil {
+				oldRev = existingMap[revKey]
+			}
+			if incomingMap != nil {
+				newRev = incomingMap[revKey]
+			}
+			if !reflect.DeepEqual(oldRev, newRev) {
+				c.mu.Unlock()
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "read_only_field", "field": "credentials/concurrency/" + revKey})
+				return
+			}
+		}
 	}
+	candidate := cloneFakeValue(c.config).(map[string]any)
+	if r.Method == http.MethodPut {
+		replaceAtPath(candidate, strings.Split(dotted, "."), value)
+	} else {
+		mergeInto(candidate, strings.Split(dotted, "."), value)
+	}
+	if c.validateLiveMediaRelay {
+		if err := validateFakeLiveMediaRelay(candidate); err != nil {
+			c.mu.Unlock()
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "invalid_config", "message": err.Error()})
+			return
+		}
+	}
+	c.config = candidate
 	c.mu.Unlock()
 	_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "config-version": 8})
 }
@@ -322,6 +409,12 @@ func (c *fakeCPA) projectedValue(dotted string) any {
 		}
 	}
 	value := lookup(c.config, strings.Split(dotted, "."))
+	if value != nil {
+		value = cloneFakeValue(value)
+	}
+	if dotted == iceServersSectionPath && value != nil {
+		value = redactFakeICEServersSlice(value)
+	}
 	if strings.HasPrefix(dotted, "api-keys.") && value != nil {
 		value = injectFakeAPIKeyAuthIndexes(dotted, value)
 	}
@@ -480,6 +573,92 @@ func mergeInto(document map[string]any, parts []string, value any) {
 	cursor[key] = value
 }
 
+func replaceAtPath(document map[string]any, parts []string, value any) {
+	cursor := document
+	for _, part := range parts[:len(parts)-1] {
+		next, ok := cursor[part].(map[string]any)
+		if !ok {
+			next = map[string]any{}
+			cursor[part] = next
+		}
+		cursor = next
+	}
+	cursor[parts[len(parts)-1]] = value
+}
+
+func cloneFakeConfig(cfg map[string]any) map[string]any {
+	if cfg == nil {
+		return nil
+	}
+	out, _ := cloneFakeValue(cfg).(map[string]any)
+	return out
+}
+
+func cloneFakeValue(v any) any {
+	switch typed := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for k, item := range typed {
+			out[k] = cloneFakeValue(item)
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for i, item := range typed {
+			out[i] = cloneFakeValue(item)
+		}
+		return out
+	case json.Number:
+		if n, err := typed.Int64(); err == nil {
+			return int(n)
+		}
+		return typed
+	default:
+		return typed
+	}
+}
+
+func redactFakeTURNSecrets(cfg map[string]any) map[string]any {
+	if cfg == nil {
+		return nil
+	}
+	if oauth, ok := cfg["oauth"].(map[string]any); ok {
+		if providers, ok := oauth["providers"].(map[string]any); ok {
+			if codex, ok := providers["codex"].(map[string]any); ok {
+				if relay, ok := codex["live-media-relay"].(map[string]any); ok {
+					if servers, ok := relay["ice-servers"]; ok {
+						relay["ice-servers"] = redactFakeICEServersSlice(servers)
+					}
+				}
+			}
+		}
+	}
+	return cfg
+}
+
+func redactFakeICEServersSlice(v any) any {
+	slice, ok := v.([]any)
+	if !ok {
+		return v
+	}
+	out := make([]any, len(slice))
+	for i, raw := range slice {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			out[i] = raw
+			continue
+		}
+		clean := make(map[string]any, len(entry))
+		for k, val := range entry {
+			if k == "username" || k == "credential" {
+				continue
+			}
+			clean[k] = val
+		}
+		out[i] = clean
+	}
+	return out
+}
 func lookup(document map[string]any, parts []string) any {
 	var cursor any = document
 	for _, part := range parts {
@@ -1470,7 +1649,7 @@ func TestManyOverlongCredentialNamesSettleAsOneAggregate(t *testing.T) {
 // both kinds are counted by the same aggregate. Charging one kind and not the
 // other used to overflow the item bound.
 func TestMixedOrdinaryAndOverlongInventorySharesOneBudget(t *testing.T) {
-	const ordinary, overlong = 950, 300
+	const ordinary, overlong = 850, 300
 	names := append(ordinaryCredentialNames(ordinary), overlongCredentialNames(overlong)...)
 	source := capacitySource(t, names)
 	destination := destinationFixture(t)
@@ -2090,13 +2269,21 @@ func TestProviderSectionsAreGatedByTheirOwnRoot(t *testing.T) {
 			t.Fatalf("authorized section %s was gated", section)
 		}
 	}
-	// Only the twelve planned sections classify as provider state; a bare root
-	// name, and a section under a root the plan does not name, are configuration
-	// the executor does not copy, so they classify as unknown configuration and
-	// keep their own manual action.
-	for _, section := range ProviderSections() {
+	// The 12 provider sections classify as provider state and the 6 structured
+	// configuration sections classify as routing configuration; a bare root name,
+	// or a section outside the plan, classifies as unknown configuration and
+	// keeps its own manual action.
+	if got, want := len(ProviderSections()), 18; got != want {
+		t.Fatalf("len(ProviderSections()) = %d, want %d", got, want)
+	}
+	for _, section := range cpa.ProviderAdoptionSections() {
 		if ref := ItemRef(providerSection(section)); ref != bootstrap.AdoptionRefProviderStateAPIKeys {
-			t.Fatalf("planned section %s classified as %s", section, ref)
+			t.Fatalf("provider section %s classified as %s", section, ref)
+		}
+	}
+	for _, section := range cpa.StructuredConfigAdoptionSections() {
+		if ref := ItemRef(providerSection(section)); ref != bootstrap.AdoptionRefConfigRouting {
+			t.Fatalf("structured section %s classified as %s", section, ref)
 		}
 	}
 	for _, section := range []string{"client", "providers", "oauth", "api-keys", "made-up", "made-up.child"} {
@@ -2297,9 +2484,22 @@ func TestItemRefClassifiesAgainstTheGatewayTable(t *testing.T) {
 			t.Fatalf("rule family %s classified as %s", family, ref)
 		}
 	}
-	for _, path := range []string{"oauth.auth-dir", "server.host", "observability.logs.debug", "plugins.dir", "not.a.path"} {
+	for _, path := range []string{"oauth.auth-dir", "not.a.path"} {
 		if ref := ItemRef(freshstore.AdoptionItem{Item: configLeafItemName(path), Kind: freshstore.AdoptionKindConfigLeaf}); ref != bootstrap.AdoptionRefConfigUnknown {
 			t.Fatalf("non-gateway leaf %s classified as %s", path, ref)
+		}
+	}
+	for path, want := range map[string]bootstrap.ResourceRef{
+		"server.host":                    bootstrap.AdoptionRefConfigServer,
+		"plugins.dir":                    bootstrap.AdoptionRefConfigPlugins,
+		"observability.logs.debug":       bootstrap.AdoptionRefConfigRouting,
+		"models.catalog":                 bootstrap.AdoptionRefConfigRouting,
+		"server.kv-store.disabled":       bootstrap.AdoptionRefConfigRouting,
+		"server.trusted-proxies":         bootstrap.AdoptionRefConfigRouting,
+		"observability.logs.request-log": bootstrap.AdoptionRefConfigRouting,
+	} {
+		if ref := ItemRef(freshstore.AdoptionItem{Item: configLeafItemName(path), Kind: freshstore.AdoptionKindConfigLeaf}); ref != want {
+			t.Fatalf("leaf %s classified as %s, want %s", path, ref, want)
 		}
 	}
 	if ref := ItemRef(freshstore.AdoptionItem{Item: configFamilyItemName("not-a-family"), Kind: freshstore.AdoptionKindConfigFamily}); ref != bootstrap.AdoptionRefConfigUnknown {
@@ -2308,35 +2508,34 @@ func TestItemRefClassifiesAgainstTheGatewayTable(t *testing.T) {
 	if ref := ItemRef(freshstore.AdoptionItem{Item: credentialItemName("claude-a.json"), Kind: freshstore.AdoptionKindCredential}); ref != bootstrap.AdoptionRefCPAAuthFiles {
 		t.Fatalf("credential classified as %s", ref)
 	}
-	// A provider section is gated under its own root, never under another
-	// A section the copy plan does not contain is configuration the executor
-	// never writes, so it classifies as unknown configuration and stays manual.
-	// It never borrows a root's verdict: `providers` is a section whose contents
-	// the plan does not copy, and `client` is gateway leaves only.
 	for section, want := range map[string]bootstrap.ResourceRef{
-		"api-keys.claude":   bootstrap.AdoptionRefProviderStateAPIKeys,
-		"api-keys.vertex":   bootstrap.AdoptionRefProviderStateAPIKeys,
-		"oauth.model-alias": bootstrap.AdoptionRefProviderStateAPIKeys,
-		"oauth.settings":    bootstrap.AdoptionRefProviderStateAPIKeys,
-		"providers":         bootstrap.AdoptionRefConfigUnknown,
-		"client":            bootstrap.AdoptionRefConfigUnknown,
-		"oauth":             bootstrap.AdoptionRefConfigUnknown,
-		"plugins.enabled":   bootstrap.AdoptionRefConfigUnknown,
-		"made-up":           bootstrap.AdoptionRefConfigUnknown,
-		"made-up.child":     bootstrap.AdoptionRefConfigUnknown,
+		"api-keys.claude":         bootstrap.AdoptionRefProviderStateAPIKeys,
+		"api-keys.vertex":         bootstrap.AdoptionRefProviderStateAPIKeys,
+		"oauth.model-alias":       bootstrap.AdoptionRefProviderStateAPIKeys,
+		"oauth.settings":          bootstrap.AdoptionRefProviderStateAPIKeys,
+		"credentials.concurrency": bootstrap.AdoptionRefConfigRouting,
+		"credentials.in-flight":   bootstrap.AdoptionRefConfigRouting,
+		"plugins.store-sources":   bootstrap.AdoptionRefConfigRouting,
+		"plugins.store-auth":      bootstrap.AdoptionRefConfigRouting,
+		"plugins.configs":         bootstrap.AdoptionRefConfigRouting,
+		"oauth.providers.codex.live-media-relay.ice-servers": bootstrap.AdoptionRefConfigRouting,
+		"providers":       bootstrap.AdoptionRefConfigUnknown,
+		"client":          bootstrap.AdoptionRefConfigUnknown,
+		"oauth":           bootstrap.AdoptionRefConfigUnknown,
+		"plugins.enabled": bootstrap.AdoptionRefConfigPlugins,
+		"made-up":         bootstrap.AdoptionRefConfigUnknown,
+		"made-up.child":   bootstrap.AdoptionRefConfigUnknown,
 	} {
-		ref := ItemRef(freshstore.AdoptionItem{Item: providerSectionItemName(section), Kind: freshstore.AdoptionKindProviderSection})
+		ref := ItemRef(providerSection(section))
 		if ref != want {
 			t.Fatalf("provider section %s classified as %s, want %s", section, ref, want)
 		}
 	}
-	// The keys a section is copied under are the ones the executor actually
-	// enumerates: every provider section of the copy plan resolves to a root
-	// reference, and none of them lands on the fallback.
 	for _, section := range ProviderSections() {
-		ref := ItemRef(freshstore.AdoptionItem{Item: providerSectionItemName(section), Kind: freshstore.AdoptionKindProviderSection})
-		if ref != bootstrap.AdoptionRefProviderStateAPIKeys {
-			t.Fatalf("copyable section %s classified as %s", section, ref)
+		ref := ItemRef(providerSection(section))
+		want := cpa.AdoptionItemRef(section)
+		if ref != want || ref == bootstrap.AdoptionRefConfigUnknown {
+			t.Fatalf("copyable section %s classified as %s (want %s)", section, ref, want)
 		}
 	}
 }
@@ -2953,4 +3152,1413 @@ func TestCredentialMigrationRefusesSemanticChangesAndFieldLoss(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFullCPAConfigBusinessSettingsAndKVMapMigration(t *testing.T) {
+	source := newFakeCPA(t, "src-key")
+	source.seedAuthFile("claude-a.json", "claude", []byte(`{"type":"claude","access_token":"tok-1"}`), false)
+	source.config = map[string]any{
+		"config-version": 8,
+		"server": map[string]any{
+			"server-id":       "src-srv",
+			"host":            "127.0.0.1",
+			"port":            8317,
+			"commercial-mode": true,
+			"trusted-proxies": []any{"10.0.0.0/8", "192.168.1.0/24"},
+			"github-token":    "ghp_source_secret_token",
+			"tls":             map[string]any{"enable": true},
+			"discovery":       map[string]any{"enabled": true},
+			"kv-store":        map[string]any{"path": "/src/kv.db", "disabled": true},
+		},
+		"models": map[string]any{
+			"catalog":       "custom-catalog",
+			"codex-catalog": "embedded",
+			"devin-catalog": "remote",
+		},
+		"oauth": map[string]any{
+			"auth-dir": "/src/auth",
+			"providers": map[string]any{
+				"claude": map[string]any{
+					"oauth-include-create-api-key": true,
+				},
+				"antigravity": map[string]any{
+					"sensitive-words-replace": map[string]any{
+						"badword": "goodword",
+					},
+					"sensitive-patterns-replace": []any{
+						map[string]any{"pattern": `foo\d+`, "replacement": "bar"},
+					},
+				},
+			},
+		},
+		"requests": map[string]any{
+			"payload": map[string]any{
+				"replace": []any{
+					map[string]any{
+						"models": []any{map[string]any{"name": "claude-*", "protocol": "claude"}},
+						"params": map[string]any{
+							"target": map[string]any{"paths": []any{"messages[0].content"}},
+							"replace": []any{
+								map[string]any{"pattern": "secret", "replacement": "redacted"},
+							},
+						},
+					},
+				},
+			},
+		},
+		"credentials": map[string]any{
+			"in-flight": map[string]any{
+				"snapshot-interval":  "30s",
+				"stale-after":        "2m",
+				"max-part-bytes":     65536,
+				"max-part-count":     4,
+				"max-revision-bytes": 131072,
+			},
+		},
+		"plugins": map[string]any{
+			"enabled":       false,
+			"dir":           "/src/plugins",
+			"auth-revision": 7,
+			"store-sources": []any{map[string]any{"name": "default", "url": "https://plugins.example.com"}},
+			"store-auth":    map[string]any{"default": map[string]any{"token": "store-tok"}},
+			"configs":       map[string]any{"my-plugin": map[string]any{"threshold": 42}},
+		},
+		"observability": map[string]any{
+			"usage": map[string]any{"statistics-enabled": false},
+			"pprof": map[string]any{"enabled": true},
+			"logs": map[string]any{
+				"logging-to-file":        false,
+				"logs-max-total-size-mb": 500,
+				"error-logs-max-files":   20,
+				"debug":                  true,
+				"request-log":            true,
+			},
+		},
+	}
+
+	destination := destinationFixture(t)
+	// Seed stale destination KVMap entry and destination host-exclusive fields
+	// to verify whole-map PUT replacement and strict host preservation.
+	mergeInto(destination.config, []string{"oauth", "providers", "antigravity", "sensitive-words-replace"}, map[string]any{
+		"stalekey": "staleval",
+	})
+	mergeInto(destination.config, []string{"server"}, map[string]any{
+		"server-id": "dst-srv",
+		"host":      "0.0.0.0",
+		"port":      8317,
+		"kv-store":  map[string]any{"path": "/supervisor/kv.db"},
+	})
+	mergeInto(destination.config, []string{"plugins"}, map[string]any{
+		"enabled":       true,
+		"dir":           "/supervisor/plugins",
+		"auth-revision": 1,
+	})
+	mergeInto(destination.config, []string{"observability"}, map[string]any{
+		"usage": map[string]any{"statistics-enabled": true},
+		"logs":  map[string]any{"logging-to-file": true},
+	})
+
+	summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	for _, leaf := range []string{
+		"server.commercial-mode",
+		"server.trusted-proxies",
+		"server.github-token",
+		"server.kv-store.disabled",
+		"models.catalog",
+		"models.codex-catalog",
+		"models.devin-catalog",
+		"oauth.providers.claude.oauth-include-create-api-key",
+		"oauth.providers.antigravity.sensitive-words-replace",
+		"oauth.providers.antigravity.sensitive-patterns-replace",
+		"observability.logs.debug",
+		"observability.logs.request-log",
+	} {
+		if item := itemByName(t, summary, configLeafItemName(leaf)); item.Outcome != freshstore.AdoptionMigrated {
+			t.Fatalf("leaf %s did not migrate: %+v", leaf, item)
+		}
+	}
+	if item := itemByName(t, summary, configFamilyItemName("replace")); item.Outcome != freshstore.AdoptionMigrated {
+		t.Fatalf("replace rule family did not migrate: %+v", item)
+	}
+	for _, section := range []string{"credentials.in-flight", "plugins.store-sources", "plugins.store-auth", "plugins.configs"} {
+		if item := itemByName(t, summary, providerSectionItemName(section)); item.Outcome != freshstore.AdoptionMigrated {
+			t.Fatalf("section %s did not migrate: %+v", section, item)
+		}
+	}
+	// KVMap PUT replaced the stale destination entry instead of merging.
+	kvGot, _ := lookup(destination.config, []string{"oauth", "providers", "antigravity", "sensitive-words-replace"}).(map[string]any)
+	if _, hasStale := kvGot["stalekey"]; hasStale || kvGot["badword"] != "goodword" {
+		t.Fatalf("KVMap leaf was merged instead of replaced: %+v", kvGot)
+	}
+	// Host-exclusive fields stayed untouched on destination.
+	if got := lookup(destination.config, []string{"server", "server-id"}); got != "dst-srv" {
+		t.Fatalf("destination server-id changed: %v", got)
+	}
+	if got := lookup(destination.config, []string{"server", "kv-store", "path"}); got != "/supervisor/kv.db" {
+		t.Fatalf("destination kv-store.path changed: %v", got)
+	}
+	if got := lookup(destination.config, []string{"plugins", "enabled"}); got != true {
+		t.Fatalf("destination plugins.enabled changed: %v", got)
+	}
+	if got := lookup(destination.config, []string{"plugins", "auth-revision"}); got != 1 {
+		t.Fatalf("destination plugins.auth-revision changed: %v", got)
+	}
+	if got := lookup(destination.config, []string{"observability", "logs", "logging-to-file"}); got != true {
+		t.Fatalf("destination logging-to-file changed: %v", got)
+	}
+}
+
+func TestConcurrencySectionPreservesDestinationRevisions(t *testing.T) {
+	source := newFakeCPA(t, "src-key")
+	source.seedAuthFile("claude-a.json", "claude", []byte(`{"type":"claude","access_token":"tok"}`), false)
+	source.config = map[string]any{
+		"config-version": 8,
+		"credentials": map[string]any{
+			"concurrency": map[string]any{
+				"default":                      4,
+				"lifecycle-config-revision":    "src-rev-99",
+				"observation-barrier-revision": 12,
+			},
+		},
+	}
+	destination := destinationFixture(t)
+	mergeInto(destination.config, []string{"credentials", "concurrency"}, map[string]any{
+		"lifecycle-config-revision":    "dst-rev-1",
+		"observation-barrier-revision": 3,
+	})
+
+	summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	item := itemByName(t, summary, providerSectionItemName("credentials.concurrency"))
+	if item.Outcome != freshstore.AdoptionMigrated {
+		t.Fatalf("credentials.concurrency outcome = %+v, want migrated", item)
+	}
+	got, _ := lookup(destination.config, []string{"credentials", "concurrency"}).(map[string]any)
+	if got["lifecycle-config-revision"] != "dst-rev-1" || got["observation-barrier-revision"] != 3 {
+		t.Fatalf("destination revisions overwritten: %+v", got)
+	}
+	if got["default"] != 4 {
+		t.Fatalf("destination concurrency settings missing: %+v", got)
+	}
+	// Replay must be idempotent with zero additional writes to credentials.concurrency.
+	replay := runMigration(t, source, destination, summary)
+	if replayItem := itemByName(t, replay, providerSectionItemName("credentials.concurrency")); replayItem != item {
+		t.Fatalf("replay rewrote concurrency item: %+v vs %+v", replayItem, item)
+	}
+
+	// Source with ONLY revision keys becomes absent_at_source.
+	revOnlySource := newFakeCPA(t, "src-key")
+	revOnlySource.seedAuthFile("claude-a.json", "claude", []byte(`{"type":"claude","access_token":"tok"}`), false)
+	revOnlySource.config = map[string]any{
+		"config-version": 8,
+		"credentials": map[string]any{
+			"concurrency": map[string]any{
+				"lifecycle-config-revision": "src-only",
+			},
+		},
+	}
+	revOnlyDest := destinationFixture(t)
+	revOnlySummary := runMigration(t, revOnlySource, revOnlyDest, freshstore.AdoptionSummary{})
+	if got := itemByName(t, revOnlySummary, providerSectionItemName("credentials.concurrency")); got.Outcome != freshstore.AdoptionAbsentAtSource {
+		t.Fatalf("revision-only concurrency outcome = %+v, want absent_at_source", got)
+	}
+}
+
+func TestICEServersMigratesViaYAMLAndFailsClosedWhenYAMLUnavailable(t *testing.T) {
+	source := newFakeCPA(t, "src-key")
+	source.seedAuthFile("claude-a.json", "claude", []byte(`{"type":"claude","access_token":"tok"}`), false)
+	source.config = map[string]any{
+		"config-version": 8,
+		"oauth": map[string]any{
+			"providers": map[string]any{
+				"codex": map[string]any{
+					"live-media-relay": map[string]any{
+						"enabled": true,
+						"ice-servers": []any{
+							map[string]any{
+								"urls":       []any{"turn:turn.example.com:3478"},
+								"username":   "turn-user",
+								"credential": "turn-secret",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	destination := destinationFixture(t)
+	summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	item := itemByName(t, summary, providerSectionItemName(iceServersSectionPath))
+	if item.Outcome != freshstore.AdoptionMigrated {
+		t.Fatalf("ice-servers outcome = %+v, want migrated", item)
+	}
+	got, _ := lookup(destination.config, strings.Split(iceServersSectionPath, ".")).([]any)
+	if len(got) != 1 {
+		t.Fatalf("destination ice-servers len = %d, want 1", len(got))
+	}
+	first, _ := got[0].(map[string]any)
+	if first["username"] != "turn-user" || first["credential"] != "turn-secret" {
+		t.Fatalf("destination ice-servers missing hydrated TURN credentials: %+v", first)
+	}
+
+	// When source /v8/management/config.yaml fails, ice-servers must NOT migrate
+	// redacted entries and must become manual reconfigure_after_adoption.
+	source.failConfigYAML = true
+	failDest := destinationFixture(t)
+	failSummary := runMigration(t, source, failDest, freshstore.AdoptionSummary{})
+	manual := itemByName(t, failSummary, providerSectionItemName(iceServersSectionPath))
+	if manual.Outcome != freshstore.AdoptionManual || manual.Reason != "reconfigure_after_adoption" {
+		t.Fatalf("redacted ice-servers outcome = %+v, want manual reconfigure_after_adoption", manual)
+	}
+	if got := lookup(failDest.config, strings.Split(iceServersSectionPath, ".")); got != nil {
+		t.Fatalf("redacted ice-servers must not be written to destination: %+v", got)
+	}
+}
+
+func fakeInt64(raw any) (int64, bool) {
+	switch v := raw.(type) {
+	case int:
+		return int64(v), true
+	case int64:
+		return v, true
+	case float64:
+		return int64(v), true
+	case json.Number:
+		n, err := v.Int64()
+		return n, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func validateFakeLiveMediaRelay(doc map[string]any) error {
+	raw := lookup(doc, []string{"oauth", "providers", "codex", "live-media-relay"})
+	relay, ok := raw.(map[string]any)
+	if !ok || relay == nil {
+		return nil
+	}
+	enabled, _ := relay["enabled"].(bool)
+	if !enabled {
+		return nil
+	}
+	maxSessions := int64(0)
+	if rawMax, ok := relay["max-sessions"]; ok && rawMax != nil {
+		parsed, ok := fakeInt64(rawMax)
+		if !ok || parsed < 0 {
+			return fmt.Errorf("max-sessions must be non-negative numeric")
+		}
+		maxSessions = parsed
+	}
+	effectiveMax := maxSessions
+	if effectiveMax == 0 {
+		effectiveMax = 32
+	}
+	portMin := int64(0)
+	if rawMin, ok := relay["udp-port-min"]; ok && rawMin != nil {
+		parsed, ok := fakeInt64(rawMin)
+		if !ok {
+			return fmt.Errorf("udp-port-min invalid")
+		}
+		portMin = parsed
+	}
+	portMax := int64(0)
+	if rawMax, ok := relay["udp-port-max"]; ok && rawMax != nil {
+		parsed, ok := fakeInt64(rawMax)
+		if !ok {
+			return fmt.Errorf("udp-port-max invalid")
+		}
+		portMax = parsed
+	}
+	if portMin <= 0 || portMax <= 0 || portMin > portMax {
+		return fmt.Errorf("oauth.providers.codex.live-media-relay udp-port-min and udp-port-max must form a valid port range when enabled")
+	}
+	if portMax-portMin+1 < effectiveMax*2 {
+		return fmt.Errorf("oauth.providers.codex.live-media-relay UDP range requires at least %d ports for %d sessions", effectiveMax*2, effectiveMax)
+	}
+	return nil
+}
+
+func TestCoupledLiveMediaRelayMigratesAtomicallyUnderStrictValidation(t *testing.T) {
+	t.Run("valid coupled group applies in single atomic PATCH", func(t *testing.T) {
+		source := newFakeCPA(t, "src-key")
+		source.config = map[string]any{
+			"oauth": map[string]any{
+				"providers": map[string]any{
+					"codex": map[string]any{
+						"live-media-relay": map[string]any{
+							"enabled":                    true,
+							"disable-private-remote-ips": true,
+							"udp-port-min":               json.Number("40000"),
+							"udp-port-max":               json.Number("40100"),
+						},
+					},
+				},
+			},
+		}
+		destination := destinationFixture(t)
+		destination.validateLiveMediaRelay = true
+		summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+
+		var patchCount int
+		for _, m := range destination.requestMethods() {
+			if m == "PATCH /v8/management/config/oauth/providers/codex/live-media-relay" {
+				patchCount++
+			}
+		}
+		if patchCount != 1 {
+			t.Fatalf("live-media-relay PATCH count = %d, want 1 atomic PATCH (%v)", patchCount, destination.requestMethods())
+		}
+		for _, path := range []string{
+			"oauth.providers.codex.live-media-relay.enabled",
+			"oauth.providers.codex.live-media-relay.disable-private-remote-ips",
+			"oauth.providers.codex.live-media-relay.udp-port-min",
+			"oauth.providers.codex.live-media-relay.udp-port-max",
+		} {
+			got := itemByName(t, summary, configLeafItemName(path))
+			if got.Outcome != freshstore.AdoptionMigrated {
+				t.Fatalf("%s outcome = %+v, want migrated", path, got)
+			}
+		}
+		for _, absent := range []string{
+			"oauth.providers.codex.live-media-relay.max-sessions",
+			"oauth.providers.codex.live-media-relay.public-ip",
+		} {
+			got := itemByName(t, summary, configLeafItemName(absent))
+			if got.Outcome != freshstore.AdoptionAbsentAtSource {
+				t.Fatalf("%s outcome = %+v, want absent_at_source", absent, got)
+			}
+		}
+
+		// Replay idempotently: zero additional PATCH requests.
+		before := len(destination.requestMethods())
+		replayed := runMigration(t, source, destination, summary)
+		if !replayed.Finished || len(destination.requestMethods()) != before {
+			t.Fatalf("replay mutated destination or did not finish: finished=%v methods=%v", replayed.Finished, destination.requestMethods()[before:])
+		}
+	})
+
+	t.Run("cross-field rejection leaves zero half-applied state and maps manual reason", func(t *testing.T) {
+		source := newFakeCPA(t, "src-key")
+		source.config = map[string]any{
+			"oauth": map[string]any{
+				"providers": map[string]any{
+					"codex": map[string]any{
+						"live-media-relay": map[string]any{
+							"enabled":      true,
+							"udp-port-min": json.Number("40000"),
+							"udp-port-max": json.Number("40010"), // too narrow for default 32 sessions (needs 64)
+						},
+					},
+				},
+			},
+			"routing": map[string]any{
+				"strategy": "round-robin",
+			},
+		}
+		destination := destinationFixture(t)
+		destination.validateLiveMediaRelay = true
+		summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+		for _, path := range []string{
+			"oauth.providers.codex.live-media-relay.enabled",
+			"oauth.providers.codex.live-media-relay.udp-port-min",
+			"oauth.providers.codex.live-media-relay.udp-port-max",
+		} {
+			got := itemByName(t, summary, configLeafItemName(path))
+			if got.Outcome != freshstore.AdoptionManual || got.Reason != "reconfigure_after_adoption" {
+				t.Fatalf("%s outcome = %+v, want manual reconfigure_after_adoption", path, got)
+			}
+		}
+		if got := lookup(destination.config, []string{"oauth", "providers", "codex", "live-media-relay"}); got != nil {
+			t.Fatalf("destination left half-applied live-media-relay state: %#v", got)
+		}
+		if got := itemByName(t, summary, configLeafItemName("routing.strategy")); got.Outcome != freshstore.AdoptionMigrated {
+			t.Fatalf("subsequent leaf routing.strategy = %+v, want migrated", got)
+		}
+	})
+
+	t.Run("local validation failure aborts atomic batch without half-writing siblings", func(t *testing.T) {
+		source := newFakeCPA(t, "src-key")
+		source.config = map[string]any{
+			"oauth": map[string]any{
+				"providers": map[string]any{
+					"codex": map[string]any{
+						"live-media-relay": map[string]any{
+							"enabled":      true,
+							"udp-port-min": "not-an-int",
+							"udp-port-max": json.Number("40100"),
+						},
+					},
+				},
+			},
+		}
+		destination := destinationFixture(t)
+		destination.validateLiveMediaRelay = true
+		summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+		for _, m := range destination.requestMethods() {
+			if m == "PATCH /v8/management/config/oauth/providers/codex/live-media-relay" {
+				t.Fatalf("local validation failure must not issue live-media-relay PATCH (%v)", destination.requestMethods())
+			}
+		}
+		if got := itemByName(t, summary, configLeafItemName("oauth.providers.codex.live-media-relay.udp-port-min")); got.Outcome != freshstore.AdoptionManual || got.Reason != "value_shape_unsupported" {
+			t.Fatalf("invalid leaf = %+v, want manual value_shape_unsupported", got)
+		}
+		for _, sibling := range []string{
+			"oauth.providers.codex.live-media-relay.enabled",
+			"oauth.providers.codex.live-media-relay.udp-port-max",
+		} {
+			got := itemByName(t, summary, configLeafItemName(sibling))
+			if got.Outcome != freshstore.AdoptionManual || got.Reason != "reconfigure_after_adoption" {
+				t.Fatalf("sibling %s = %+v, want manual reconfigure_after_adoption", sibling, got)
+			}
+		}
+	})
+}
+
+func TestNamedRootsOnlyWithNestedUnknownKeyEmitsStep3DecisionInventoryCountAndStep4ManualItem(t *testing.T) {
+	source := newFakeCPA(t, "src-key")
+	source.config = map[string]any{
+		"config-version": 8,
+		"server": map[string]any{
+			"port": 8317,
+		},
+		"oauth": map[string]any{
+			"auth-dir": "/source/auth",
+		},
+		"access": map[string]any{
+			"api-keys": []any{"sk-client-1"},
+		},
+		"plugins": map[string]any{
+			"enabled":      false,
+			"mystery_flag": true,
+		},
+	}
+
+	// (a) ReadV8Config emits unknown_cpa_native_resource, producing cpa-config-unknown decision.
+	obs, err := cpa.ReadV8Config(t.Context(), source.server.URL, source.auth)
+	if err != nil {
+		t.Fatalf("ReadV8Config: %v", err)
+	}
+	if !slices.Contains(obs.ResourceSections, "unknown_cpa_native_resource") {
+		t.Fatalf("ReadV8Config ResourceSections = %v, want unknown_cpa_native_resource", obs.ResourceSections)
+	}
+	refs := cpa.AdoptionRootRefs("unknown_cpa_native_resource")
+	if !slices.Contains(refs, bootstrap.AdoptionRefConfigUnknown) {
+		t.Fatalf("AdoptionRootRefs(unknown_cpa_native_resource) = %v, want cpa-config-unknown", refs)
+	}
+	decision, ok := bootstrap.FreshAdoptionDecision(bootstrap.AdoptionRefConfigUnknown, bootstrap.AdoptionResourceDecision{})
+	if !ok || decision.Disposition != bootstrap.ManualAction || decision.ManualAction != "reconfigure_after_adoption" {
+		t.Fatalf("FreshAdoptionDecision(cpa-config-unknown) = (%+v, %v)", decision, ok)
+	}
+
+	// (b) CountSourceInventory reports cpa-config-unknown: 1.
+	srcEndpoint, err := NewSource(t.Context(), source.endpoint())
+	if err != nil {
+		t.Fatalf("NewSource: %v", err)
+	}
+	defer srcEndpoint.Close()
+	counts := CountSourceInventory(t.Context(), srcEndpoint)
+	if counts[string(bootstrap.AdoptionRefConfigUnknown)] != 1 {
+		t.Fatalf("CountSourceInventory[cpa-config-unknown] = %d, want 1 (%v)", counts[string(bootstrap.AdoptionRefConfigUnknown)], counts)
+	}
+
+	// (c) Executor records durable AdoptionManual reconfigure_after_adoption item.
+	destination := destinationFixture(t)
+	summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	if !summary.Finished || len(summary.Items) != summary.Planned {
+		t.Fatalf("summary did not complete cleanly: finished=%v items=%d planned=%d", summary.Finished, len(summary.Items), summary.Planned)
+	}
+	unknownItem := itemByName(t, summary, unknownConfigItemName)
+	if unknownItem.Kind != freshstore.AdoptionKindConfigFamily || unknownItem.Outcome != freshstore.AdoptionManual || unknownItem.Reason != "reconfigure_after_adoption" {
+		t.Fatalf("unknown-config item = %+v, want manual reconfigure_after_adoption", unknownItem)
+	}
+	if !CanonicalItem(unknownItem) {
+		t.Fatalf("CanonicalItem(%+v) = false, want true", unknownItem)
+	}
+	if ref := ItemRef(unknownItem); ref != bootstrap.AdoptionRefConfigUnknown {
+		t.Fatalf("ItemRef(%+v) = %q, want %q", unknownItem, ref, bootstrap.AdoptionRefConfigUnknown)
+	}
+}
+
+func TestUpstreamCustomErrorStringIsMappedToClosedAllowlistBeforeCheckpointing(t *testing.T) {
+	source := newFakeCPA(t, "src-key")
+	source.config = map[string]any{
+		"routing": map[string]any{
+			"strategy": "round-robin",
+		},
+	}
+	destination := destinationFixture(t)
+	destination.customWriteErrors["routing.strategy"] = struct {
+		status int
+		code   string
+	}{
+		status: http.StatusBadRequest,
+		code:   "custom free-text code",
+	}
+	srcEndpoint, err := NewSource(t.Context(), source.endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srcEndpoint.Close()
+	dstEndpoint, err := NewDestination(t.Context(), destination.endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dstEndpoint.Close()
+
+	var checkpointed freshstore.AdoptionSummary
+	result, err := New(srcEndpoint, dstEndpoint, migratingDecisions()).Run(t.Context(), freshstore.AdoptionSummary{}, func(current freshstore.AdoptionSummary) error {
+		checkpointed = current
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Executor.Run: %v", err)
+	}
+	for _, summary := range []freshstore.AdoptionSummary{result.Summary, checkpointed} {
+		item := itemByName(t, summary, configLeafItemName("routing.strategy"))
+		if item.Outcome != freshstore.AdoptionManual || item.Reason != "reconfigure_after_adoption" {
+			t.Fatalf("persisted item = %+v, want manual with Reason=reconfigure_after_adoption", item)
+		}
+	}
+}
+
+func TestArchivedUnknownConfigInYAMLSurfacesInInventoryCountAndExecutor(t *testing.T) {
+	source := newFakeCPA(t, "src-key")
+	source.config = map[string]any{
+		"config-version": 8,
+		"server":         map[string]any{"port": 8317},
+		"oauth":          map[string]any{"auth-dir": "/source/auth"},
+		"access":         map[string]any{"api-keys": []any{"sk-client-1"}},
+		"upstream": map[string]any{
+			"codex": map[string]any{
+				"disable-codex-cloaking": true,
+			},
+		},
+		"plugins": map[string]any{},
+	}
+	source.configYAMLOverride = `# operator comment
+config-version: 8
+server:
+    port: 8317
+oauth: {auth-dir: "/source/auth", providers: {codex: {}}}
+plugins: {}
+upstream:
+    codex:
+        disable-codex-cloaking: true
+
+# oauth.providers.codex.retired-setting: false
+# plugins.mystery_flag: true
+`
+
+	snapshot, err := cpa.ReadV8AdoptionSnapshot(t.Context(), source.server.URL, source.auth)
+	if err != nil {
+		t.Fatalf("ReadV8AdoptionSnapshot: %v", err)
+	}
+	if !slices.Contains(snapshot.ResourceSections, "unknown_cpa_native_resource") {
+		t.Fatalf("ResourceSections = %v, want unknown_cpa_native_resource", snapshot.ResourceSections)
+	}
+	refs := cpa.AdoptionRootRefs("unknown_cpa_native_resource")
+	if !slices.Contains(refs, bootstrap.AdoptionRefConfigUnknown) {
+		t.Fatalf("AdoptionRootRefs(unknown_cpa_native_resource) = %v, want cpa-config-unknown", refs)
+	}
+
+	srcEndpoint, err := NewSource(t.Context(), source.endpoint())
+	if err != nil {
+		t.Fatalf("NewSource: %v", err)
+	}
+	defer srcEndpoint.Close()
+	counts := CountSourceInventory(t.Context(), srcEndpoint)
+	if val, ok := counts[string(bootstrap.AdoptionRefConfigUnknown)]; ok {
+		t.Fatalf("CountSourceInventory[cpa-config-unknown] = (%d, true), want omitted when archive candidates exist (%v)", val, counts)
+	}
+
+	destination := destinationFixture(t)
+	summary := runMigration(t, source, destination, freshstore.AdoptionSummary{})
+	if !summary.Finished || len(summary.Items) != summary.Planned {
+		t.Fatalf("summary did not complete cleanly: finished=%v items=%d planned=%d", summary.Finished, len(summary.Items), summary.Planned)
+	}
+	if item := itemByName(t, summary, configLeafItemName("upstream.codex.disable-codex-cloaking")); item.Outcome != freshstore.AdoptionMigrated {
+		t.Fatalf("disable-codex-cloaking = %+v, want migrated", item)
+	}
+	unknownItem := itemByName(t, summary, unknownConfigItemName)
+	if unknownItem.Kind != freshstore.AdoptionKindConfigFamily || unknownItem.Outcome != freshstore.AdoptionManual || unknownItem.Reason != "archived_or_commented_settings" {
+		t.Fatalf("unknown-config item = %+v, want manual archived_or_commented_settings", unknownItem)
+	}
+	if !strings.Contains(unknownItem.Instruction, "archived or commented-out settings") {
+		t.Fatalf("unknown-config instruction = %q, want archive candidate wording", unknownItem.Instruction)
+	}
+}
+
+func TestArchivedUnknownScanFailureAndSizeBoundaryFailClosedWithoutFalseZero(t *testing.T) {
+	t.Run("failed or timed out config.yaml omits exact count and records manual incomplete-scan item", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			hang bool
+		}{
+			{name: "http 500"},
+			{name: "timeout", hang: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				source := newFakeCPA(t, "src-key")
+				source.config = map[string]any{
+					"config-version": 8,
+					"server":         map[string]any{"port": 8317},
+					"oauth":          map[string]any{"auth-dir": "/source/auth"},
+					"access":         map[string]any{"api-keys": []any{"sk-client-1"}},
+					"routing":        map[string]any{"strategy": "round-robin"},
+				}
+				source.failConfigYAML = !tc.hang
+				source.hangConfigYAML = tc.hang
+
+				snapshotCtx, cancelSnapshot := context.WithTimeout(t.Context(), 150*time.Millisecond)
+				defer cancelSnapshot()
+				if !tc.hang {
+					snapshotCtx = t.Context()
+				}
+				snapshot, err := cpa.ReadV8AdoptionSnapshot(snapshotCtx, source.server.URL, source.auth)
+				if err != nil {
+					t.Fatalf("ReadV8AdoptionSnapshot: %v", err)
+				}
+				if !slices.Contains(snapshot.ResourceSections, "unknown_cpa_native_resource") {
+					t.Fatalf("ResourceSections = %v, want unknown_cpa_native_resource", snapshot.ResourceSections)
+				}
+
+				srcEndpoint, err := NewSource(t.Context(), source.endpoint())
+				if err != nil {
+					t.Fatalf("NewSource: %v", err)
+				}
+				defer srcEndpoint.Close()
+				if tc.hang {
+					srcEndpoint.w.client.Timeout = 80 * time.Millisecond
+				}
+
+				counts := CountSourceInventory(t.Context(), srcEndpoint)
+				if val, ok := counts[string(bootstrap.AdoptionRefConfigUnknown)]; ok {
+					t.Fatalf("CountSourceInventory[cpa-config-unknown] = (%d, true), want omitted on incomplete scan (%v)", val, counts)
+				}
+
+				dstEndpoint, err := NewDestination(t.Context(), destinationFixture(t).endpoint())
+				if err != nil {
+					t.Fatalf("NewDestination: %v", err)
+				}
+				defer dstEndpoint.Close()
+				result, err := New(srcEndpoint, dstEndpoint, migratingDecisions()).Run(t.Context(), freshstore.AdoptionSummary{}, nil)
+				if err != nil {
+					t.Fatalf("Executor.Run: %v", err)
+				}
+				unknownItem := itemByName(t, result.Summary, unknownConfigItemName)
+				if unknownItem.Outcome != freshstore.AdoptionManual || unknownItem.Reason != "archive_scan_incomplete" {
+					t.Fatalf("unknown-config item = %+v, want manual archive_scan_incomplete", unknownItem)
+				}
+				if !strings.Contains(unknownItem.Instruction, "could not be completely scanned") {
+					t.Fatalf("unknown-config instruction = %q, want incomplete-scan wording", unknownItem.Instruction)
+				}
+			})
+		}
+	})
+
+	t.Run("unterminated explicit key comment in config.yaml fails closed as archive_scan_incomplete", func(t *testing.T) {
+		source := newFakeCPA(t, "src-key")
+		source.config = map[string]any{
+			"config-version": 8,
+			"server":         map[string]any{"port": 8317},
+			"oauth":          map[string]any{"auth-dir": "/source/auth"},
+			"access":         map[string]any{"api-keys": []any{"sk-client-1"}},
+			"plugins":        map[string]any{},
+		}
+		source.configYAMLOverride = `config-version: 8
+server:
+    port: 8317
+oauth:
+    auth-dir: /source/auth
+access:
+    api-keys:
+        - sk-client-1
+plugins: {}
+
+# ? "unterminated
+#   line two
+# plugins.after_broken: true
+`
+		snapshot, err := cpa.ReadV8AdoptionSnapshot(t.Context(), source.server.URL, source.auth)
+		if err != nil {
+			t.Fatalf("ReadV8AdoptionSnapshot: %v", err)
+		}
+		if !slices.Contains(snapshot.ResourceSections, "unknown_cpa_native_resource") {
+			t.Fatalf("ResourceSections = %v, want unknown_cpa_native_resource", snapshot.ResourceSections)
+		}
+
+		srcEndpoint, err := NewSource(t.Context(), source.endpoint())
+		if err != nil {
+			t.Fatalf("NewSource: %v", err)
+		}
+		defer srcEndpoint.Close()
+		counts := CountSourceInventory(t.Context(), srcEndpoint)
+		if val, ok := counts[string(bootstrap.AdoptionRefConfigUnknown)]; ok {
+			t.Fatalf("CountSourceInventory[cpa-config-unknown] = (%d, true), want omitted (%v)", val, counts)
+		}
+
+		summary := runMigration(t, source, destinationFixture(t), freshstore.AdoptionSummary{})
+		unknownItem := itemByName(t, summary, unknownConfigItemName)
+		if unknownItem.Kind != freshstore.AdoptionKindConfigFamily || unknownItem.Outcome != freshstore.AdoptionManual || unknownItem.Reason != "archive_scan_incomplete" {
+			t.Fatalf("unknown-config item = %+v, want manual archive_scan_incomplete", unknownItem)
+		}
+	})
+
+	t.Run("1.2 MiB YAML between 1 MiB snapshot cap and 8 MiB transport cap distinguishes clean zero from archived unknown", func(t *testing.T) {
+		headerPadding := strings.Repeat("# operator header padding line for bounded read boundary verification 0123456789\n", 16000)
+		activeYAML := `config-version: 8
+server:
+    port: 8317
+oauth:
+    auth-dir: /source/auth
+access:
+    api-keys:
+        - sk-client-1
+plugins: {}
+`
+		if len(headerPadding) <= 1<<20 || len(headerPadding)+len(activeYAML) >= 8<<20 {
+			t.Fatalf("unexpected YAML test size: %d", len(headerPadding)+len(activeYAML))
+		}
+
+		for _, withArchived := range []bool{false, true} {
+			name := "clean 1.2 MiB YAML"
+			yamlBody := headerPadding + activeYAML
+			if withArchived {
+				name = "dirty 1.2 MiB YAML"
+				yamlBody += "\n# plugins.retired.option: true\n"
+			}
+			t.Run(name, func(t *testing.T) {
+				source := newFakeCPA(t, "src-key")
+				source.config = map[string]any{
+					"config-version": 8,
+					"server":         map[string]any{"port": 8317},
+					"oauth":          map[string]any{"auth-dir": "/source/auth"},
+					"access":         map[string]any{"api-keys": []any{"sk-client-1"}},
+					"plugins":        map[string]any{},
+				}
+				source.configYAMLOverride = yamlBody
+
+				// Step 1/3 snapshot probe reads up to 1 MiB -> fails closed on >1 MiB YAML.
+				snapshot, err := cpa.ReadV8AdoptionSnapshot(t.Context(), source.server.URL, source.auth)
+				if err != nil {
+					t.Fatalf("ReadV8AdoptionSnapshot: %v", err)
+				}
+				if !slices.Contains(snapshot.ResourceSections, "unknown_cpa_native_resource") {
+					t.Fatalf("ResourceSections = %v, want unknown_cpa_native_resource above 1 MiB cap", snapshot.ResourceSections)
+				}
+
+				// Inventory count & executor read up to 8 MiB -> exact 0 when clean, omitted/manual when archived.
+				srcEndpoint, err := NewSource(t.Context(), source.endpoint())
+				if err != nil {
+					t.Fatalf("NewSource: %v", err)
+				}
+				defer srcEndpoint.Close()
+				counts := CountSourceInventory(t.Context(), srcEndpoint)
+				val, ok := counts[string(bootstrap.AdoptionRefConfigUnknown)]
+				if withArchived {
+					if ok {
+						t.Fatalf("CountSourceInventory[cpa-config-unknown] = (%d, true), want omitted for archived 1.2 MiB YAML", val)
+					}
+				} else if !ok || val != 0 {
+					t.Fatalf("CountSourceInventory[cpa-config-unknown] = (%d, %v), want (0, true) for clean 1.2 MiB YAML", val, ok)
+				}
+
+				summary := runMigration(t, source, destinationFixture(t), freshstore.AdoptionSummary{})
+				item, exists := summary.Item(unknownConfigItemName)
+				if withArchived {
+					if !exists || item.Outcome != freshstore.AdoptionManual || item.Reason != "archived_or_commented_settings" {
+						t.Fatalf("dirty 1.2 MiB unknown-config item = (%+v, %v), want manual archived_or_commented_settings", item, exists)
+					}
+				} else if exists {
+					t.Fatalf("clean 1.2 MiB YAML unexpectedly recorded family:unknown-config: %+v", item)
+				}
+			})
+		}
+	})
+}
+
+func TestRealCPAV8ArchivedUnknownConfigEndToEnd(t *testing.T) {
+	cpaBin := strings.TrimSpace(os.Getenv("CPAMP_TEST_CPA_V8"))
+	if cpaBin == "" {
+		t.Skip("CPAMP_TEST_CPA_V8 is unset")
+	}
+
+	startRealCPA := func(t *testing.T, configTemplate string, mgmtKey string) (string, *http.Client) {
+		t.Helper()
+		dir := t.TempDir()
+		authDir := filepath.Join(dir, "auth")
+		if err := os.MkdirAll(authDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr := l.Addr().String()
+		_, portStr, _ := net.SplitHostPort(addr)
+		_ = l.Close()
+
+		cfgText := strings.NewReplacer("{PORT}", portStr, "{AUTH_DIR}", authDir).Replace(configTemplate)
+		cfgPath := filepath.Join(dir, "config.yaml")
+		if err := os.WriteFile(cfgPath, []byte(cfgText), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(cpaBin, "-config", cfgPath)
+		cmd.Dir = dir
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start CPA binary %s: %v", cpaBin, err)
+		}
+		t.Cleanup(func() {
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+			}
+		})
+
+		baseURL := "http://" + addr
+		client := &http.Client{Timeout: 2 * time.Second}
+		deadline := time.Now().Add(20 * time.Second)
+		for time.Now().Before(deadline) {
+			req, _ := http.NewRequest(http.MethodGet, baseURL+"/v8/management/config", nil)
+			req.Header.Set("Authorization", "Bearer "+mgmtKey)
+			resp, err := client.Do(req)
+			if err == nil {
+				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+				_ = resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					return baseURL, client
+				}
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		t.Fatalf("CPA at %s did not become ready in time", baseURL)
+		return "", nil
+	}
+
+	t.Run("case A: strips flow and block unknown keys on disk and surfaces them in discovery, inventory count, and executor", func(t *testing.T) {
+		const sourceMgmtKey = "real-cpa-source-mgmt"
+		const destMgmtKey = "real-cpa-dest-mgmt"
+		srcURL, _ := startRealCPA(t, `# operator comment
+config-version: 8
+server:
+  host: 127.0.0.1
+  port: {PORT}
+management:
+  secret-key: `+sourceMgmtKey+`
+  allow-remote: true
+  disable-control-panel: true
+access:
+  api-keys:
+    - "sk-client-1"
+oauth: {auth-dir: "{AUTH_DIR}", providers: {codex: {disable-codex-cloaking: true, retired-setting: false}}}
+plugins:
+  mystery_flag: true
+`, sourceMgmtKey)
+
+		dstURL, _ := startRealCPA(t, `config-version: 8
+server:
+  host: 127.0.0.1
+  port: {PORT}
+management:
+  secret-key: `+destMgmtKey+`
+  allow-remote: true
+  disable-control-panel: true
+access:
+  api-keys:
+    - "sk-client-1"
+oauth:
+  auth-dir: "{AUTH_DIR}"
+`, destMgmtKey)
+
+		// 1) ReadV8AdoptionSnapshot includes unknown_cpa_native_resource and Step 3 produces manual_action.
+		snapshot, err := cpa.ReadV8AdoptionSnapshot(t.Context(), srcURL, sourceMgmtKey)
+		if err != nil {
+			t.Fatalf("ReadV8AdoptionSnapshot: %v", err)
+		}
+		if !slices.Contains(snapshot.ResourceSections, "unknown_cpa_native_resource") {
+			t.Fatalf("ResourceSections = %v, want unknown_cpa_native_resource", snapshot.ResourceSections)
+		}
+		refs := cpa.AdoptionRootRefs("unknown_cpa_native_resource")
+		if !slices.Contains(refs, bootstrap.AdoptionRefConfigUnknown) {
+			t.Fatalf("AdoptionRootRefs(unknown_cpa_native_resource) = %v, want cpa-config-unknown", refs)
+		}
+		decision, ok := bootstrap.FreshAdoptionDecision(bootstrap.AdoptionRefConfigUnknown, bootstrap.AdoptionResourceDecision{})
+		if !ok || decision.Disposition != bootstrap.ManualAction || decision.ManualAction != bootstrap.ReconfigureAfterAdoption {
+			t.Fatalf("FreshAdoptionDecision(cpa-config-unknown) = (%+v, %v)", decision, ok)
+		}
+
+		// 2) CountSourceInventory reports cpa-config-unknown == 2.
+		srcWire, err := NewSource(t.Context(), Endpoint{BaseURL: srcURL, ManagementKey: sourceMgmtKey})
+		if err != nil {
+			t.Fatalf("NewSource: %v", err)
+		}
+		defer srcWire.Close()
+		counts := CountSourceInventory(t.Context(), srcWire)
+		if val, ok := counts[string(bootstrap.AdoptionRefConfigUnknown)]; ok {
+			t.Fatalf("CountSourceInventory[cpa-config-unknown] = (%d, true), want omitted when archive candidates exist (%v)", val, counts)
+		}
+
+		// 3) Executor against real CPA v8.0.55 destination migrates disable-codex-cloaking and records family:unknown-config manual.
+		dstWire, err := NewDestination(t.Context(), Endpoint{BaseURL: dstURL, ManagementKey: destMgmtKey})
+		if err != nil {
+			t.Fatalf("NewDestination: %v", err)
+		}
+		defer dstWire.Close()
+		result, err := New(srcWire, dstWire, migratingDecisions()).Run(t.Context(), freshstore.AdoptionSummary{}, nil)
+		if err != nil {
+			t.Fatalf("Executor.Run: %v", err)
+		}
+		if !result.Summary.Finished || len(result.Summary.Items) != result.Summary.Planned {
+			t.Fatalf("summary incomplete: finished=%v items=%d planned=%d", result.Summary.Finished, len(result.Summary.Items), result.Summary.Planned)
+		}
+		if cloaking := itemByName(t, result.Summary, configLeafItemName("upstream.codex.disable-codex-cloaking")); cloaking.Outcome != freshstore.AdoptionMigrated {
+			t.Fatalf("upstream.codex.disable-codex-cloaking = %+v, want migrated", cloaking)
+		}
+		if val, presence, readErr := dstWire.ReadConfigValue(t.Context(), "upstream.codex.disable-codex-cloaking"); readErr != nil || presence != cpa.ConfigPresent || val != true {
+			t.Fatalf("destination readback upstream.codex.disable-codex-cloaking = (%v, %v, %v), want true", val, presence, readErr)
+		}
+		unknownItem := itemByName(t, result.Summary, unknownConfigItemName)
+		if unknownItem.Kind != freshstore.AdoptionKindConfigFamily || unknownItem.Outcome != freshstore.AdoptionManual || unknownItem.Reason != "archived_or_commented_settings" {
+			t.Fatalf("unknown-config item = %+v, want manual archived_or_commented_settings", unknownItem)
+		}
+	})
+
+	t.Run("case B: clean v8 config with operator comment and allow-private-remote-ips alias has zero unknown keys", func(t *testing.T) {
+		const sourceMgmtKey = "real-cpa-clean-source-mgmt"
+		const destMgmtKey = "real-cpa-clean-dest-mgmt"
+		srcURL, _ := startRealCPA(t, `# operator comment
+config-version: 8
+server:
+  host: 127.0.0.1
+  port: {PORT}
+management:
+  secret-key: `+sourceMgmtKey+`
+  allow-remote: true
+  disable-control-panel: true
+access:
+  api-keys:
+    - "sk-client-1"
+oauth:
+  auth-dir: "{AUTH_DIR}"
+codex:
+  live-media-relay:
+    allow-private-remote-ips: true
+`, sourceMgmtKey)
+
+		dstURL, _ := startRealCPA(t, `config-version: 8
+server:
+  host: 127.0.0.1
+  port: {PORT}
+management:
+  secret-key: `+destMgmtKey+`
+  allow-remote: true
+  disable-control-panel: true
+access:
+  api-keys:
+    - "sk-client-1"
+oauth:
+  auth-dir: "{AUTH_DIR}"
+`, destMgmtKey)
+
+		snapshot, err := cpa.ReadV8AdoptionSnapshot(t.Context(), srcURL, sourceMgmtKey)
+		if err != nil {
+			t.Fatalf("ReadV8AdoptionSnapshot: %v", err)
+		}
+		if slices.Contains(snapshot.ResourceSections, "unknown_cpa_native_resource") {
+			t.Fatalf("clean source unexpectedly reported unknown_cpa_native_resource: %v", snapshot.ResourceSections)
+		}
+		for _, section := range snapshot.ResourceSections {
+			if slices.Contains(cpa.AdoptionRootRefs(section), bootstrap.AdoptionRefConfigUnknown) {
+				t.Fatalf("clean source section %q unexpectedly mapped to cpa-config-unknown (%v)", section, snapshot.ResourceSections)
+			}
+		}
+
+		srcWire, err := NewSource(t.Context(), Endpoint{BaseURL: srcURL, ManagementKey: sourceMgmtKey})
+		if err != nil {
+			t.Fatalf("NewSource: %v", err)
+		}
+		defer srcWire.Close()
+		counts := CountSourceInventory(t.Context(), srcWire)
+		if val, ok := counts[string(bootstrap.AdoptionRefConfigUnknown)]; !ok || val != 0 {
+			t.Fatalf("CountSourceInventory[cpa-config-unknown] = (%d, %v), want (0, true) (%v)", val, ok, counts)
+		}
+
+		dstWire, err := NewDestination(t.Context(), Endpoint{BaseURL: dstURL, ManagementKey: destMgmtKey})
+		if err != nil {
+			t.Fatalf("NewDestination: %v", err)
+		}
+		defer dstWire.Close()
+		result, err := New(srcWire, dstWire, migratingDecisions()).Run(t.Context(), freshstore.AdoptionSummary{}, nil)
+		if err != nil {
+			t.Fatalf("Executor.Run: %v", err)
+		}
+		if item, exists := result.Summary.Item(unknownConfigItemName); exists {
+			t.Fatalf("clean source unexpectedly recorded family:unknown-config item: %+v", item)
+		}
+	})
+
+	t.Run("case C: real CPA source with only named roots in JSON still surfaces archived unknown YAML key in ReadV8AdoptionSnapshot", func(t *testing.T) {
+		const sourceMgmtKey = "real-cpa-archived-only-mgmt"
+		srcURL, _ := startRealCPA(t, `# operator comment
+config-version: 8
+server:
+  host: 127.0.0.1
+  port: {PORT}
+management:
+  secret-key: `+sourceMgmtKey+`
+  allow-remote: true
+  disable-control-panel: true
+access:
+  api-keys:
+    - "sk-client-1"
+oauth: {auth-dir: "{AUTH_DIR}", providers: {codex: {retired-setting: false}}}
+plugins:
+  mystery_flag: true
+`, sourceMgmtKey)
+
+		snapshot, err := cpa.ReadV8AdoptionSnapshot(t.Context(), srcURL, sourceMgmtKey)
+		if err != nil {
+			t.Fatalf("ReadV8AdoptionSnapshot: %v", err)
+		}
+		if !slices.Contains(snapshot.ResourceSections, "unknown_cpa_native_resource") {
+			t.Fatalf("ResourceSections = %v, want unknown_cpa_native_resource", snapshot.ResourceSections)
+		}
+		srcWire, err := NewSource(t.Context(), Endpoint{BaseURL: srcURL, ManagementKey: sourceMgmtKey})
+		if err != nil {
+			t.Fatalf("NewSource: %v", err)
+		}
+		defer srcWire.Close()
+		counts := CountSourceInventory(t.Context(), srcWire)
+		if val, ok := counts[string(bootstrap.AdoptionRefConfigUnknown)]; ok {
+			t.Fatalf("CountSourceInventory[cpa-config-unknown] = (%d, true), want omitted when archive candidates exist (%v)", val, counts)
+		}
+	})
+
+	t.Run("case D: real CPA strips literal dotted key under plugins and archives it cleanly", func(t *testing.T) {
+		const sourceMgmtKey = "real-cpa-dotted-plugins-mgmt"
+		const destMgmtKey = "real-cpa-dotted-plugins-dest"
+		srcURL, _ := startRealCPA(t, `config-version: 8
+server:
+  host: 127.0.0.1
+  port: {PORT}
+management:
+  secret-key: `+sourceMgmtKey+`
+  allow-remote: true
+  disable-control-panel: true
+access:
+  api-keys:
+    - "sk-client-1"
+oauth:
+  auth-dir: "{AUTH_DIR}"
+plugins:
+  retired.option: true
+`, sourceMgmtKey)
+		dstURL, _ := startRealCPA(t, `config-version: 8
+server:
+  host: 127.0.0.1
+  port: {PORT}
+management:
+  secret-key: `+destMgmtKey+`
+  allow-remote: true
+  disable-control-panel: true
+access:
+  api-keys:
+    - "sk-client-1"
+oauth:
+  auth-dir: "{AUTH_DIR}"
+`, destMgmtKey)
+
+		snapshot, err := cpa.ReadV8AdoptionSnapshot(t.Context(), srcURL, sourceMgmtKey)
+		if err != nil {
+			t.Fatalf("ReadV8AdoptionSnapshot: %v", err)
+		}
+		if !slices.Contains(snapshot.ResourceSections, "unknown_cpa_native_resource") {
+			t.Fatalf("ResourceSections = %v, want unknown_cpa_native_resource", snapshot.ResourceSections)
+		}
+		srcWire, err := NewSource(t.Context(), Endpoint{BaseURL: srcURL, ManagementKey: sourceMgmtKey})
+		if err != nil {
+			t.Fatalf("NewSource: %v", err)
+		}
+		defer srcWire.Close()
+		counts := CountSourceInventory(t.Context(), srcWire)
+		if val, ok := counts[string(bootstrap.AdoptionRefConfigUnknown)]; ok {
+			t.Fatalf("CountSourceInventory[cpa-config-unknown] = (%d, true), want omitted (%v)", val, counts)
+		}
+
+		dstWire, err := NewDestination(t.Context(), Endpoint{BaseURL: dstURL, ManagementKey: destMgmtKey})
+		if err != nil {
+			t.Fatalf("NewDestination: %v", err)
+		}
+		defer dstWire.Close()
+		result, err := New(srcWire, dstWire, migratingDecisions()).Run(t.Context(), freshstore.AdoptionSummary{}, nil)
+		if err != nil {
+			t.Fatalf("Executor.Run: %v", err)
+		}
+		unknownItem := itemByName(t, result.Summary, unknownConfigItemName)
+		if unknownItem.Kind != freshstore.AdoptionKindConfigFamily || unknownItem.Outcome != freshstore.AdoptionManual || unknownItem.Reason != "archived_or_commented_settings" {
+			t.Fatalf("unknown-config item = %+v, want manual archived_or_commented_settings", unknownItem)
+		}
+	})
+
+	t.Run("case E: real CPA with trailing operator # key: value comment omits exact count and records manual item", func(t *testing.T) {
+		const sourceMgmtKey = "real-cpa-trailing-comment-mgmt"
+		const destMgmtKey = "real-cpa-trailing-comment-dest"
+		srcURL, _ := startRealCPA(t, `config-version: 8
+server:
+  host: 127.0.0.1
+  port: {PORT}
+management:
+  secret-key: `+sourceMgmtKey+`
+  allow-remote: true
+  disable-control-panel: true
+access:
+  api-keys:
+    - "sk-client-1"
+oauth:
+  auth-dir: "{AUTH_DIR}"
+# custom-operator-note: true
+`, sourceMgmtKey)
+		dstURL, _ := startRealCPA(t, `config-version: 8
+server:
+  host: 127.0.0.1
+  port: {PORT}
+management:
+  secret-key: `+destMgmtKey+`
+  allow-remote: true
+  disable-control-panel: true
+access:
+  api-keys:
+    - "sk-client-1"
+oauth:
+  auth-dir: "{AUTH_DIR}"
+`, destMgmtKey)
+
+		snapshot, err := cpa.ReadV8AdoptionSnapshot(t.Context(), srcURL, sourceMgmtKey)
+		if err != nil {
+			t.Fatalf("ReadV8AdoptionSnapshot: %v", err)
+		}
+		if !slices.Contains(snapshot.ResourceSections, "unknown_cpa_native_resource") {
+			t.Fatalf("ResourceSections = %v, want unknown_cpa_native_resource", snapshot.ResourceSections)
+		}
+		srcWire, err := NewSource(t.Context(), Endpoint{BaseURL: srcURL, ManagementKey: sourceMgmtKey})
+		if err != nil {
+			t.Fatalf("NewSource: %v", err)
+		}
+		defer srcWire.Close()
+		counts := CountSourceInventory(t.Context(), srcWire)
+		if val, ok := counts[string(bootstrap.AdoptionRefConfigUnknown)]; ok {
+			t.Fatalf("CountSourceInventory[cpa-config-unknown] = (%d, true), want omitted (%v)", val, counts)
+		}
+
+		dstWire, err := NewDestination(t.Context(), Endpoint{BaseURL: dstURL, ManagementKey: destMgmtKey})
+		if err != nil {
+			t.Fatalf("NewDestination: %v", err)
+		}
+		defer dstWire.Close()
+		result, err := New(srcWire, dstWire, migratingDecisions()).Run(t.Context(), freshstore.AdoptionSummary{}, nil)
+		if err != nil {
+			t.Fatalf("Executor.Run: %v", err)
+		}
+		unknownItem := itemByName(t, result.Summary, unknownConfigItemName)
+		if unknownItem.Kind != freshstore.AdoptionKindConfigFamily || unknownItem.Outcome != freshstore.AdoptionManual || unknownItem.Reason != "archived_or_commented_settings" {
+			t.Fatalf("unknown-config item = %+v, want manual archived_or_commented_settings", unknownItem)
+		}
+	})
+
+	t.Run("case F: real CPA strips colliding literal dotted key under server and surfaces archived unknown without false zero", func(t *testing.T) {
+		const sourceMgmtKey = "real-cpa-colliding-dotted-mgmt"
+		const destMgmtKey = "real-cpa-colliding-dotted-dest"
+		srcURL, client := startRealCPA(t, `config-version: 8
+server:
+  host: 127.0.0.1
+  port: {PORT}
+  kv-store.path: /tmp/colliding-sibling
+management:
+  secret-key: `+sourceMgmtKey+`
+  allow-remote: true
+  disable-control-panel: true
+access:
+  api-keys:
+    - "sk-client-1"
+oauth:
+  auth-dir: "{AUTH_DIR}"
+`, sourceMgmtKey)
+		dstURL, _ := startRealCPA(t, `config-version: 8
+server:
+  host: 127.0.0.1
+  port: {PORT}
+management:
+  secret-key: `+destMgmtKey+`
+  allow-remote: true
+  disable-control-panel: true
+access:
+  api-keys:
+    - "sk-client-1"
+oauth:
+  auth-dir: "{AUTH_DIR}"
+`, destMgmtKey)
+
+		// (a) Real CPA omits literal dotted kv-store.path from JSON and archives # server.kv-store.path in YAML.
+		jsonReq, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, srcURL+"/v8/management/config", nil)
+		jsonReq.Header.Set("Authorization", "Bearer "+sourceMgmtKey)
+		jsonResp, err := client.Do(jsonReq)
+		if err != nil {
+			t.Fatalf("GET /v8/management/config: %v", err)
+		}
+		jsonBody, _ := io.ReadAll(jsonResp.Body)
+		_ = jsonResp.Body.Close()
+		if jsonResp.StatusCode != http.StatusOK || strings.Contains(string(jsonBody), "kv-store") || strings.Contains(string(jsonBody), "colliding-sibling") {
+			t.Fatalf("expected colliding kv-store.path omitted from JSON (status=%d body=%s)", jsonResp.StatusCode, string(jsonBody))
+		}
+
+		yamlReq, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, srcURL+"/v8/management/config.yaml", nil)
+		yamlReq.Header.Set("Authorization", "Bearer "+sourceMgmtKey)
+		yamlResp, err := client.Do(yamlReq)
+		if err != nil {
+			t.Fatalf("GET /v8/management/config.yaml: %v", err)
+		}
+		yamlBody, _ := io.ReadAll(yamlResp.Body)
+		_ = yamlResp.Body.Close()
+		if yamlResp.StatusCode != http.StatusOK || !strings.Contains(string(yamlBody), "# server.kv-store.path:") {
+			t.Fatalf("expected # server.kv-store.path archived in YAML (status=%d body=%s)", yamlResp.StatusCode, string(yamlBody))
+		}
+
+		// (b) ReadV8AdoptionSnapshot includes unknown_cpa_native_resource.
+		snapshot, err := cpa.ReadV8AdoptionSnapshot(t.Context(), srcURL, sourceMgmtKey)
+		if err != nil {
+			t.Fatalf("ReadV8AdoptionSnapshot: %v", err)
+		}
+		if !slices.Contains(snapshot.ResourceSections, "unknown_cpa_native_resource") {
+			t.Fatalf("ResourceSections = %v, want unknown_cpa_native_resource", snapshot.ResourceSections)
+		}
+
+		// (c) CountSourceInventory omits cpa-config-unknown (never returns 0).
+		srcWire, err := NewSource(t.Context(), Endpoint{BaseURL: srcURL, ManagementKey: sourceMgmtKey})
+		if err != nil {
+			t.Fatalf("NewSource: %v", err)
+		}
+		defer srcWire.Close()
+		counts := CountSourceInventory(t.Context(), srcWire)
+		if val, ok := counts[string(bootstrap.AdoptionRefConfigUnknown)]; ok {
+			t.Fatalf("CountSourceInventory[cpa-config-unknown] = (%d, true), want omitted (%v)", val, counts)
+		}
+
+		// (d) Executor records family:unknown-config as manual archived_or_commented_settings.
+		dstWire, err := NewDestination(t.Context(), Endpoint{BaseURL: dstURL, ManagementKey: destMgmtKey})
+		if err != nil {
+			t.Fatalf("NewDestination: %v", err)
+		}
+		defer dstWire.Close()
+		result, err := New(srcWire, dstWire, migratingDecisions()).Run(t.Context(), freshstore.AdoptionSummary{}, nil)
+		if err != nil {
+			t.Fatalf("Executor.Run: %v", err)
+		}
+		unknownItem := itemByName(t, result.Summary, unknownConfigItemName)
+		if unknownItem.Kind != freshstore.AdoptionKindConfigFamily || unknownItem.Outcome != freshstore.AdoptionManual || unknownItem.Reason != "archived_or_commented_settings" {
+			t.Fatalf("unknown-config item = %+v, want manual archived_or_commented_settings", unknownItem)
+		}
+	})
+
+	t.Run("case G: real CPA strips non-identifier keys with spaces and punctuation and surfaces archived unknown", func(t *testing.T) {
+		const sourceMgmtKey = "real-cpa-non-ident-mgmt"
+		const destMgmtKey = "real-cpa-non-ident-dest"
+		srcURL, client := startRealCPA(t, `config-version: 8
+server:
+  host: 127.0.0.1
+  port: {PORT}
+management:
+  secret-key: `+sourceMgmtKey+`
+  allow-remote: true
+  disable-control-panel: true
+access:
+  api-keys:
+    - "sk-client-1"
+oauth:
+  auth-dir: "{AUTH_DIR}"
+plugins:
+  "future flag": true
+  "@weird/key..1": "x"
+"root with spaces": 42
+`, sourceMgmtKey)
+		dstURL, _ := startRealCPA(t, `config-version: 8
+server:
+  host: 127.0.0.1
+  port: {PORT}
+management:
+  secret-key: `+destMgmtKey+`
+  allow-remote: true
+  disable-control-panel: true
+access:
+  api-keys:
+    - "sk-client-1"
+oauth:
+  auth-dir: "{AUTH_DIR}"
+`, destMgmtKey)
+
+		// (a) Real CPA omits non-identifier keys from JSON and archives them in config.yaml comments.
+		jsonReq, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, srcURL+"/v8/management/config", nil)
+		jsonReq.Header.Set("Authorization", "Bearer "+sourceMgmtKey)
+		jsonResp, err := client.Do(jsonReq)
+		if err != nil {
+			t.Fatalf("GET /v8/management/config: %v", err)
+		}
+		jsonBody, _ := io.ReadAll(jsonResp.Body)
+		_ = jsonResp.Body.Close()
+		if jsonResp.StatusCode != http.StatusOK ||
+			strings.Contains(string(jsonBody), "future flag") ||
+			strings.Contains(string(jsonBody), "@weird/key..1") ||
+			strings.Contains(string(jsonBody), "root with spaces") {
+			t.Fatalf("expected non-identifier keys omitted from JSON (status=%d body=%s)", jsonResp.StatusCode, string(jsonBody))
+		}
+
+		yamlReq, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, srcURL+"/v8/management/config.yaml", nil)
+		yamlReq.Header.Set("Authorization", "Bearer "+sourceMgmtKey)
+		yamlResp, err := client.Do(yamlReq)
+		if err != nil {
+			t.Fatalf("GET /v8/management/config.yaml: %v", err)
+		}
+		yamlBody, _ := io.ReadAll(yamlResp.Body)
+		_ = yamlResp.Body.Close()
+		yamlText := string(yamlBody)
+		if yamlResp.StatusCode != http.StatusOK ||
+			!strings.Contains(yamlText, `# "plugins.future flag":`) ||
+			!strings.Contains(yamlText, `# "plugins.@weird/key..1":`) ||
+			!strings.Contains(yamlText, `# "root with spaces":`) {
+			t.Fatalf("expected non-identifier keys archived in YAML (status=%d body=%s)", yamlResp.StatusCode, yamlText)
+		}
+
+		// (b) ReadV8AdoptionSnapshot includes unknown_cpa_native_resource.
+		snapshot, err := cpa.ReadV8AdoptionSnapshot(t.Context(), srcURL, sourceMgmtKey)
+		if err != nil {
+			t.Fatalf("ReadV8AdoptionSnapshot: %v", err)
+		}
+		if !slices.Contains(snapshot.ResourceSections, "unknown_cpa_native_resource") {
+			t.Fatalf("ResourceSections = %v, want unknown_cpa_native_resource", snapshot.ResourceSections)
+		}
+
+		// (c) CountSourceInventory omits cpa-config-unknown (never returns 0).
+		srcWire, err := NewSource(t.Context(), Endpoint{BaseURL: srcURL, ManagementKey: sourceMgmtKey})
+		if err != nil {
+			t.Fatalf("NewSource: %v", err)
+		}
+		defer srcWire.Close()
+		counts := CountSourceInventory(t.Context(), srcWire)
+		if val, ok := counts[string(bootstrap.AdoptionRefConfigUnknown)]; ok {
+			t.Fatalf("CountSourceInventory[cpa-config-unknown] = (%d, true), want omitted (%v)", val, counts)
+		}
+
+		// (d) Executor records family:unknown-config as manual archived_or_commented_settings.
+		dstWire, err := NewDestination(t.Context(), Endpoint{BaseURL: dstURL, ManagementKey: destMgmtKey})
+		if err != nil {
+			t.Fatalf("NewDestination: %v", err)
+		}
+		defer dstWire.Close()
+		result, err := New(srcWire, dstWire, migratingDecisions()).Run(t.Context(), freshstore.AdoptionSummary{}, nil)
+		if err != nil {
+			t.Fatalf("Executor.Run: %v", err)
+		}
+		unknownItem := itemByName(t, result.Summary, unknownConfigItemName)
+		if unknownItem.Kind != freshstore.AdoptionKindConfigFamily || unknownItem.Outcome != freshstore.AdoptionManual || unknownItem.Reason != "archived_or_commented_settings" {
+			t.Fatalf("unknown-config item = %+v, want manual archived_or_commented_settings", unknownItem)
+		}
+	})
 }

@@ -7,21 +7,48 @@ import (
 	"testing"
 )
 
-// TestGatewayPathTableCoversAcceptedInventory pins both the adoption-pinned
-// table (39 leaves, 11 groups, 5 families) and the expanded runtime gateway page
-// table (88 leaves, 21 groups, 6 families including payload.replace).
+// TestGatewayPathTableCoversAcceptedInventory pins both the expanded adoption
+// table (97 leaves, 24 groups, 6 families) and the unchanged runtime gateway
+// page table (88 leaves, 21 groups, 6 families including payload.replace).
 func TestGatewayPathTableCoversAcceptedInventory(t *testing.T) {
-	if len(gatewayLeaves) != 39 {
+	if len(gatewayLeaves) != 97 {
 		t.Fatalf("leaf count %d", len(gatewayLeaves))
 	}
 	if len(ConfigLeafPaths()) != len(gatewayLeaves) {
 		t.Fatal("leaf paths drifted")
 	}
-	if len(ConfigGroupIDs()) != 11 || len(ConfigRuleFamilyPaths()) != 5 {
-		t.Fatalf("adoption pinned counts drifted: %d groups, %d families", len(ConfigGroupIDs()), len(ConfigRuleFamilyPaths()))
+	if len(ConfigGroupIDs()) != 24 || len(ConfigRuleFamilyPaths()) != 6 {
+		t.Fatalf("adoption counts drifted: %d groups, %d families", len(ConfigGroupIDs()), len(ConfigRuleFamilyPaths()))
+	}
+	adoptionSeen := map[string]string{}
+	for _, group := range gatewayGroups {
+		for _, path := range group.Leaves {
+			leaf, ok := LookupConfigLeaf(path)
+			if !ok {
+				t.Fatalf("%s: group %s names an unknown adoption leaf", path, group.ID)
+			}
+			if leaf.Group != group.ID {
+				t.Fatalf("%s: leaf group %s, adoption group table %s", path, leaf.Group, group.ID)
+			}
+			if !strings.HasPrefix(path, group.Prefix+".") {
+				t.Fatalf("%s: outside adoption group prefix %s", path, group.Prefix)
+			}
+			if other, dup := adoptionSeen[path]; dup {
+				t.Fatalf("%s: in adoption %s and %s", path, other, group.ID)
+			}
+			adoptionSeen[path] = group.ID
+		}
+	}
+	if len(adoptionSeen) != len(gatewayLeaves) {
+		t.Fatalf("adoption groups cover %d of %d leaves", len(adoptionSeen), len(gatewayLeaves))
 	}
 	if len(gatewayPageLeaves) != 88 || len(GatewayPageLeafPaths()) != 88 {
 		t.Fatalf("page leaf count %d", len(gatewayPageLeaves))
+	}
+	for _, path := range GatewayPageLeafPaths() {
+		if _, ok := LookupConfigLeaf(path); !ok {
+			t.Fatalf("gateway page leaf %q missing from adoption ConfigLeafPaths", path)
+		}
 	}
 	seen := map[string]string{}
 	for _, group := range gatewayPageGroups {
@@ -250,9 +277,8 @@ func TestRuleFamiliesRejectDuplicatePathsAndBadShapes(t *testing.T) {
 }
 
 // TestPluginScopeIsSeparateFromTheGatewayPage pins the plugin runtime switch as
-// its own scope: the accepted gateway page stays at 39 leaves / 11 groups and the
-// plugin group is not a gateway group, so neither route can reach the other's
-// leaves.
+// its own scope: the plugin group is not a gateway group, so neither route can
+// reach the other's leaves.
 func TestPluginScopeIsSeparateFromTheGatewayPage(t *testing.T) {
 	if got := PluginConfigLeafPaths(); len(got) != 1 || got[0] != "plugins.enabled" {
 		t.Fatalf("plugin leaves %v", got)
@@ -328,6 +354,9 @@ func TestIsConfigKVMapLeafAndReplaceRuleEdgeCases(t *testing.T) {
 		"all false with positions":      `[{"models":[{"name":"*"}],"target":{"role":"user","all":false,"positions":[1,2]},"replacements":[{"old.phrase":"new"}]}]`,
 		"all true with empty positions": `[{"models":[{"name":"*"}],"target":{"role":"user","all":true,"positions":[]},"replacements":[{"a":"b"}]}]`,
 		"whitespace-only source key":    `[{"models":[{"name":"*"}],"target":{"role":"user","all":true},"replacements":[{" ":""},{"\t\n":" "}]}]`,
+		"system and developer roles":    `[{"models":[{"name":"*"}],"target":{"role":"system","all":true},"replacements":[{"a":"b"}]},{"models":[{"name":"*"}],"target":{"role":"developer","positions":[1]},"replacements":[{"c":"d"}]}]`,
+		"target paths":                  `[{"models":[{"name":"*"}],"target":{"paths":["input[0].text","instructions"]},"replacements":[{"a":"b"}]}]`,
+		"regex replacement entry":       `[{"models":[{"name":"*"}],"target":{"role":"user","all":true},"replacements":[{"pattern":"foo-[0-9]+","replacement":"bar"}]}]`,
 	}
 	for name, body := range validReplace {
 		if _, err := ParseConfigRules("replace", json.RawMessage(body)); err != nil {
@@ -342,6 +371,10 @@ func TestIsConfigKVMapLeafAndReplaceRuleEdgeCases(t *testing.T) {
 		"all non-bool":                   `[{"models":[{"name":"*"}],"target":{"role":"user","all":"false","positions":[1]},"replacements":[{"a":"b"}]}]`,
 		"fractional position":            `[{"models":[{"name":"*"}],"target":{"role":"user","positions":[1.5]},"replacements":[{"a":"b"}]}]`,
 		"zero position":                  `[{"models":[{"name":"*"}],"target":{"role":"user","positions":[0]},"replacements":[{"a":"b"}]}]`,
+		"paths mixed with role":          `[{"models":[{"name":"*"}],"target":{"paths":["instructions"],"role":"user"},"replacements":[{"a":"b"}]}]`,
+		"empty target paths":             `[{"models":[{"name":"*"}],"target":{"paths":[]},"replacements":[{"a":"b"}]}]`,
+		"blank target path":              `[{"models":[{"name":"*"}],"target":{"paths":[" "]},"replacements":[{"a":"b"}]}]`,
+		"bad regex pair keys":            `[{"models":[{"name":"*"}],"target":{"role":"user","all":true},"replacements":[{"pattern":"x","other":"y"}]}]`,
 	}
 	for name, body := range invalidReplace {
 		if _, err := ParseConfigRules("replace", json.RawMessage(body)); err == nil {

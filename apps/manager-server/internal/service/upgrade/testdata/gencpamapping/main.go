@@ -45,16 +45,16 @@ import (
 )
 
 const (
-	// v8AliasRef is the release the alias table is read at. It is the release
-	// the destination's own gateway table documents (see
-	// internal/service/cpa/config_schema.go), so an alias answer here is the one
-	// the destination's surface was verified against.
-	v8AliasRef = "v8.0.13"
+	// v8AliasRef is the upstream ref the alias table is read at. It tracks
+	// CPA's v8 schema matching internal/service/cpa/config_schema.go.
+	v8AliasRef = "main"
 	// v8AliasFile is the file that declares the alias tables.
 	v8AliasFile = "internal/config/config_v8.go"
 	// configDirectory is the package whose struct yaml tags define the full
 	// configuration paths a release accepts.
 	configDirectory = "internal/config"
+	// registryDirectory holds catalog structs aliased from Config (ModelCatalogs).
+	registryDirectory = "internal/registry"
 )
 
 // fixture is the checked-in oracle.
@@ -75,6 +75,9 @@ type fixture struct {
 	Families []aliasEntry `json:"families"`
 	// Paths are the exact legacy path aliases and the prefix rewrites v8 applies.
 	Paths []aliasEntry `json:"paths"`
+	// NativePaths are the Config struct paths at v8AliasRef that already live
+	// at their canonical v8 path without an alias rewrite.
+	NativePaths []string `json:"nativePaths,omitempty"`
 	// Presence is the release each full configuration path first appears in and,
 	// for a path a later release dropped, the release it disappeared in.
 	Presence map[string]presence `json:"presence"`
@@ -157,6 +160,18 @@ func run(upstream, tagsFile, out string) error {
 	}
 	built.Families = families
 	built.Paths = paths
+	nativeAtV8, err := configPathsAt(git, refs[v8AliasRef])
+	if err != nil {
+		return fmt.Errorf("walk the configuration at %s: %w", v8AliasRef, err)
+	}
+	native := make([]string, 0, len(nativeAtV8))
+	for path := range nativeAtV8 {
+		if _, remapped := resolveUpstreamDestination(families, paths, path); !remapped {
+			native = append(native, path)
+		}
+	}
+	sort.Strings(native)
+	built.NativePaths = native
 	digest := sha256.Sum256([]byte(aliasSource))
 	built.Sources = append(built.Sources, source{
 		Role: "v8-alias-table", Ref: v8AliasRef, Commit: refs[v8AliasRef],
@@ -164,9 +179,8 @@ func run(upstream, tagsFile, out string) error {
 	})
 	built.Sources = append(built.Sources, source{
 		Role: "config-struct-yaml-tags", Ref: v7v8Range(versions),
-		Path: configDirectory + "/*.go (non-test)",
+		Path: configDirectory + "/*.go + " + registryDirectory + "/*.go (non-test)",
 	})
-
 	// Walk every version in order and record the full path set it accepts.
 	seen := map[string]bool{}
 	for _, tag := range versions {
@@ -236,7 +250,10 @@ func resolveTags(git func(...string) (string, error), tagsFile string) (map[stri
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) != 2 || !strings.HasPrefix(fields[0], "v") {
+		if len(fields) != 2 {
+			continue
+		}
+		if !strings.HasPrefix(fields[0], "v") && fields[0] != v8AliasRef {
 			continue
 		}
 		if _, exists := refs[fields[0]]; exists {
@@ -247,6 +264,13 @@ func resolveTags(git func(...string) (string, error), tagsFile string) (map[stri
 			return nil, fmt.Errorf("tag %s names commit %s, which this checkout does not hold", fields[0], fields[1])
 		}
 		refs[fields[0]] = fields[1]
+	}
+	if _, exists := refs[v8AliasRef]; !exists {
+		commit, err := git("rev-parse", v8AliasRef+"^{commit}")
+		if err != nil {
+			return nil, fmt.Errorf("resolve %s: %w", v8AliasRef, err)
+		}
+		refs[v8AliasRef] = strings.TrimSpace(commit)
 	}
 	return refs, nil
 }
@@ -262,6 +286,15 @@ func v7v8Range(versions []string) string {
 // lessVersion orders the scanned tags: v7 before v8, then numerically by the
 // release parts. A pre-release suffix is ignored for ordering.
 func lessVersion(left, right string) bool {
+	if left == right {
+		return false
+	}
+	if !strings.HasPrefix(left, "v") {
+		return false
+	}
+	if !strings.HasPrefix(right, "v") {
+		return true
+	}
 	a := versionParts(left)
 	b := versionParts(right)
 	for index := range 3 {
@@ -271,7 +304,6 @@ func lessVersion(left, right string) bool {
 	}
 	return left < right
 }
-
 func versionParts(tag string) [3]int {
 	trimmed := strings.TrimPrefix(strings.TrimPrefix(tag, "v"), "V")
 	trimmed, _, _ = strings.Cut(trimmed, "-")
@@ -306,12 +338,14 @@ func parseAliasTables(source string) ([]aliasEntry, []aliasEntry, error) {
 			paths = append(paths, aliasEntry{Legacy: pair[0], Current: pair[1], Kind: "leaf"})
 		}
 	}
-	prefixes, err := literalPairs(source, "prefixes := []configPath")
-	if err != nil {
-		return nil, nil, err
-	}
-	for _, pair := range prefixes {
-		paths = append(paths, aliasEntry{Legacy: pair[0], Current: pair[1], Kind: "prefix"})
+	for _, marker := range []string{"prefixes := []configPath", "var v8SharedStructPaths"} {
+		pairs, err := literalPairs(source, marker)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, pair := range pairs {
+			paths = append(paths, aliasEntry{Legacy: pair[0], Current: pair[1], Kind: "prefix"})
+		}
 	}
 	if len(entries) != 8 || len(paths) == 0 {
 		return nil, nil, fmt.Errorf("the alias table read %d families and %d paths, which is not the v8 table", len(entries), len(paths))
@@ -319,6 +353,37 @@ func parseAliasTables(source string) ([]aliasEntry, []aliasEntry, error) {
 	return entries, paths, nil
 }
 
+func resolveUpstreamDestination(families, paths []aliasEntry, legacy string) (string, bool) {
+	for _, alias := range paths {
+		if alias.Kind == "leaf" && alias.Legacy == legacy {
+			return alias.Current, true
+		}
+	}
+	for _, family := range families {
+		if family.Legacy == legacy {
+			return "api-keys." + family.Current, true
+		}
+	}
+	best := ""
+	bestCurrent := ""
+	for _, alias := range paths {
+		if alias.Kind != "prefix" {
+			continue
+		}
+		if alias.Legacy != legacy && !strings.HasPrefix(legacy, alias.Legacy+".") {
+			continue
+		}
+		if len(alias.Legacy) <= len(best) {
+			continue
+		}
+		best = alias.Legacy
+		bestCurrent = alias.Current
+	}
+	if best == "" {
+		return "", false
+	}
+	return bestCurrent + strings.TrimPrefix(legacy, best), true
+}
 // literalPairs extracts the string pairs of one literal slice declaration.
 func literalPairs(source, marker string) ([][2]string, error) {
 	start := strings.Index(source, marker)
@@ -352,34 +417,38 @@ func literalPairs(source, marker string) ([][2]string, error) {
 // reached from `Config` through the package's struct declarations, plus every
 // intermediate struct path so a section-level claim can be checked too.
 func configPathsAt(git func(...string) (string, error), commit string) (map[string]bool, error) {
-	listing, err := git("ls-tree", "-r", "--name-only", commit, configDirectory+"/")
-	if err != nil {
-		return nil, err
-	}
 	files := map[string][]byte{}
-	for _, name := range strings.Split(listing, "\n") {
-		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+	for _, dir := range []string{configDirectory, registryDirectory} {
+		listing, err := git("ls-tree", "-r", "--name-only", commit, dir+"/")
+		if err != nil {
 			continue
 		}
-		body, err := git("show", commit+":"+name)
-		if err != nil {
-			return nil, err
+		for _, name := range strings.Split(listing, "\n") {
+			if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			body, err := git("show", commit+":"+name)
+			if err != nil {
+				return nil, err
+			}
+			files[name] = []byte(body)
 		}
-		files[name] = []byte(body)
 	}
 	return walkConfigPaths(files)
 }
 
-// walkConfigPaths builds the struct graph of one package snapshot and walks it
+// walkConfigPaths builds the struct graph of config + registry snapshots and walks
 // from the root `Config` type.
 func walkConfigPaths(files map[string][]byte) (map[string]bool, error) {
 	structs := map[string]*ast.StructType{}
+	aliases := map[string]string{}
 	set := token.NewFileSet()
 	for name, body := range files {
 		parsed, err := parser.ParseFile(set, name, body, 0)
 		if err != nil {
 			return nil, err
 		}
+		pkg := parsed.Name.Name
 		for _, declaration := range parsed.Decls {
 			generic, ok := declaration.(*ast.GenDecl)
 			if !ok || generic.Tok != token.TYPE {
@@ -390,19 +459,49 @@ func walkConfigPaths(files map[string][]byte) (map[string]bool, error) {
 				if !ok {
 					continue
 				}
+				qual := pkg + "." + typeSpec.Name.Name
 				if structure, ok := typeSpec.Type.(*ast.StructType); ok {
-					structs[typeSpec.Name.Name] = structure
+					structs[qual] = structure
+					if pkg == "config" {
+						structs[typeSpec.Name.Name] = structure
+					}
+				} else if target := qualifiedTypeName(pkg, typeSpec.Type); target != "" {
+					aliases[qual] = target
+					if pkg == "config" {
+						aliases[typeSpec.Name.Name] = target
+					}
 				}
 			}
 		}
 	}
-	root, ok := structs["Config"]
+	resolveStruct := func(pkg string, expr ast.Expr) (*ast.StructType, string) {
+		name := qualifiedTypeName(pkg, expr)
+		for range 8 {
+			if name == "" {
+				return nil, ""
+			}
+			if st, ok := structs[name]; ok {
+				nextPkg, _, _ := strings.Cut(name, ".")
+				if !strings.Contains(name, ".") {
+					nextPkg = pkg
+				}
+				return st, nextPkg
+			}
+			next, ok := aliases[name]
+			if !ok {
+				return nil, ""
+			}
+			name = next
+		}
+		return nil, ""
+	}
+	root, ok := structs["config.Config"]
 	if !ok {
 		return nil, fmt.Errorf("the release declares no Config struct in %s", configDirectory)
 	}
 	out := map[string]bool{}
-	var walk func(structure *ast.StructType, prefix string, depth int)
-	walk = func(structure *ast.StructType, prefix string, depth int) {
+	var walk func(pkg string, structure *ast.StructType, prefix string, depth int)
+	walk = func(pkg string, structure *ast.StructType, prefix string, depth int) {
 		if structure == nil || depth > 12 {
 			return
 		}
@@ -415,10 +514,8 @@ func walkConfigPaths(files map[string][]byte) (map[string]bool, error) {
 				continue
 			}
 			if inline {
-				// An embedded struct contributes its fields at this prefix, which
-				// is what `yaml:",inline"` means to the decoder.
-				if nested, ok := structs[typeName(field.Type)]; ok {
-					walk(nested, prefix, depth+1)
+				if nested, nextPkg := resolveStruct(pkg, field.Type); nested != nil {
+					walk(nextPkg, nested, prefix, depth+1)
 				}
 				continue
 			}
@@ -427,12 +524,12 @@ func walkConfigPaths(files map[string][]byte) (map[string]bool, error) {
 				next = prefix + "." + name
 			}
 			out[next] = true
-			if nested, ok := structs[typeName(field.Type)]; ok {
-				walk(nested, next, depth+1)
+			if nested, nextPkg := resolveStruct(pkg, field.Type); nested != nil {
+				walk(nextPkg, nested, next, depth+1)
 			}
 		}
 	}
-	walk(root, "", 0)
+	walk("config", root, "", 0)
 	return out, nil
 }
 
@@ -465,18 +562,23 @@ func yamlField(field *ast.Field) (name string, inline bool, ok bool) {
 	return "", len(field.Names) == 0, len(field.Names) == 0
 }
 
-// typeName resolves the local type name a field is declared as, including a
-// pointer, slice or map element that carries the struct.
-func typeName(expression ast.Expr) string {
+// qualifiedTypeName resolves the pkg-qualified type name a field is declared as,
+// including a pointer, slice or map element that carries the struct.
+func qualifiedTypeName(pkg string, expression ast.Expr) string {
 	switch typed := expression.(type) {
 	case *ast.Ident:
-		return typed.Name
+		return pkg + "." + typed.Name
+	case *ast.SelectorExpr:
+		if id, ok := typed.X.(*ast.Ident); ok {
+			return id.Name + "." + typed.Sel.Name
+		}
+		return ""
 	case *ast.StarExpr:
-		return typeName(typed.X)
+		return qualifiedTypeName(pkg, typed.X)
 	case *ast.ArrayType:
-		return typeName(typed.Elt)
+		return qualifiedTypeName(pkg, typed.Elt)
 	case *ast.MapType:
-		return typeName(typed.Value)
+		return qualifiedTypeName(pkg, typed.Value)
 	default:
 		return ""
 	}

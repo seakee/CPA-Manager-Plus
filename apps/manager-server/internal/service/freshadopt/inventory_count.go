@@ -50,7 +50,7 @@ func CountSourceInventory(ctx context.Context, source Source) map[string]int {
 	}
 	for _, family := range cpa.ConfigRuleFamilyIDs() {
 		entry, ok := cpa.LookupConfigRuleFamily(family)
-		if !ok {
+		if !ok || ManagerOwned(entry.Path) {
 			continue
 		}
 		if raw, presence := cpa.LookupConfigValue(document, entry.Path); presence == cpa.ConfigPresent && collectionCount(raw) > 0 {
@@ -59,39 +59,69 @@ func CountSourceInventory(ctx context.Context, source Source) map[string]int {
 		}
 	}
 
-	// Provider API key groups and OAuth model maps.
+	// Provider API key groups, OAuth model maps, and structured whole-PUT sections.
 	for _, section := range ProviderSections() {
 		if ManagerOwned(section) {
 			continue
 		}
 		if raw, presence := cpa.LookupConfigValue(document, section); presence == cpa.ConfigPresent {
-			if n := collectionCount(raw); n > 0 {
+			counted := raw
+			if section == "credentials.concurrency" {
+				clean, ok := stripConcurrencyRevisions(raw)
+				if !ok || len(clean) == 0 {
+					continue
+				}
+				counted = clean
+			}
+			if n := collectionCount(counted); n > 0 {
 				ref := cpa.AdoptionItemRef(section)
 				counts[string(ref)] += n
 			}
 		}
 	}
 
-	// Manual-review configuration sections (non-empty keys present at source).
-	manualSections := []struct {
-		path string
-		ref  bootstrap.ResourceRef
-	}{
-		{path: "server", ref: bootstrap.AdoptionRefConfigServer},
-		{path: "management", ref: bootstrap.AdoptionRefConfigManagement},
-		{path: "plugins", ref: bootstrap.AdoptionRefConfigPlugins},
-		{path: "observability", ref: bootstrap.AdoptionRefConfigObservability},
-		{path: "observability.logs", ref: bootstrap.AdoptionRefConfigLogging},
-		{path: "observability.usage", ref: bootstrap.AdoptionRefConfigUsage},
+	// Host-managed configuration sections (count only host-exclusive keys present at source).
+	if n := countPresentPaths(document, []string{
+		"server.server-id",
+		"server.host",
+		"server.port",
+		"server.tls",
+		"server.discovery",
+		"server.kv-store.path",
+	}); n > 0 {
+		counts[string(bootstrap.AdoptionRefConfigServer)] = n
 	}
-	for _, entry := range manualSections {
-		if raw, presence := cpa.LookupConfigValue(document, entry.path); presence == cpa.ConfigPresent {
-			if n := collectionCount(raw); n > 0 {
-				counts[string(entry.ref)] = n
-			}
+	if raw, presence := cpa.LookupConfigValue(document, "management"); presence == cpa.ConfigPresent {
+		if n := collectionCount(raw); n > 0 {
+			counts[string(bootstrap.AdoptionRefConfigManagement)] = n
 		}
 	}
-
+	if n := countPresentPaths(document, []string{
+		"plugins.enabled",
+		"plugins.dir",
+		"plugins.auth-revision",
+	}); n > 0 {
+		counts[string(bootstrap.AdoptionRefConfigPlugins)] = n
+	}
+	if n := countPresentPaths(document, []string{
+		"observability.logs.logging-to-file",
+		"observability.logs.logs-max-total-size-mb",
+		"observability.logs.error-logs-max-files",
+	}); n > 0 {
+		counts[string(bootstrap.AdoptionRefConfigLogging)] = n
+	}
+	if raw, presence := cpa.LookupConfigValue(document, "observability.usage"); presence == cpa.ConfigPresent {
+		if n := collectionCount(raw); n > 0 {
+			counts[string(bootstrap.AdoptionRefConfigUsage)] = n
+		}
+	}
+	if n := countHostObservabilitySubtrees(document); n > 0 {
+		counts[string(bootstrap.AdoptionRefConfigObservability)] = n
+	}
+	scan := cpa.InspectV8UnknownConfig(document)
+	if !scan.ArchiveScanIncomplete && len(scan.ArchiveCandidates) == 0 {
+		counts[string(bootstrap.AdoptionRefConfigUnknown)] = len(scan.JSONPaths)
+	}
 	if len(counts) == 0 {
 		return nil
 	}
@@ -114,6 +144,8 @@ func nonEmptyStringSliceLen(raw any) int {
 
 func collectionCount(raw any) int {
 	switch typed := raw.(type) {
+	case turnCredentialsRedactedSentinel:
+		return 1
 	case []any:
 		return len(typed)
 	case map[string]any:
@@ -128,3 +160,43 @@ func collectionCount(raw any) int {
 		return 0
 	}
 }
+
+func countPresentPaths(document map[string]any, paths []string) int {
+	n := 0
+	for _, path := range paths {
+		if raw, presence := cpa.LookupConfigValue(document, path); presence == cpa.ConfigPresent && nonEmptyPresentValue(raw) {
+			n++
+		}
+	}
+	return n
+}
+
+func nonEmptyPresentValue(raw any) bool {
+	switch typed := raw.(type) {
+	case map[string]any:
+		return collectionCount(typed) > 0
+	case []any:
+		return len(typed) > 0
+	default:
+		return typed != nil
+	}
+}
+
+func countHostObservabilitySubtrees(document map[string]any) int {
+	n := 0
+	if raw, presence := cpa.LookupConfigValue(document, "observability.usage"); presence == cpa.ConfigPresent && collectionCount(raw) > 0 {
+		n++
+	}
+	if raw, presence := cpa.LookupConfigValue(document, "observability.pprof"); presence == cpa.ConfigPresent && collectionCount(raw) > 0 {
+		n++
+	}
+	if countPresentPaths(document, []string{
+		"observability.logs.logging-to-file",
+		"observability.logs.logs-max-total-size-mb",
+		"observability.logs.error-logs-max-files",
+	}) > 0 {
+		n++
+	}
+	return n
+}
+

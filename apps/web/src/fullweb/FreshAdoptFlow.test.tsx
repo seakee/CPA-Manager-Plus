@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { act, create, type ReactTestRenderer } from 'react-test-renderer';
+import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { sha256RawTextHex } from '@/utils/apiKeyHash';
 import { FreshSetupWizard } from './FreshSetupWizard';
@@ -10,10 +10,10 @@ import {
   type FreshOperation,
   type FreshStrategyCheckpoint,
 } from './bootstrapTransport';
-import type { AdoptionItem, AdoptionSummary } from './freshAdoption';
+import type { AdoptionDecision, AdoptionItem, AdoptionSummary } from './freshAdoption';
 import type { createPublicApiClient, PublicApiClient } from './publicApi';
 import { setFullWebLanguage } from '../i18n/fullweb';
-import { adoptGuidanceText, adoptReasonText, adoptText } from '../i18n/freshAdopt';
+import { adoptGuidanceText, adoptReasonText, adoptResourceText, adoptText } from '../i18n/freshAdopt';
 import { bootstrapJourneyText as j } from '../i18n/bootstrapJourney';
 import { shellText as s } from '../i18n/consoleShell';
 
@@ -429,10 +429,18 @@ async function adoptServer(
     // i.e. strictly between the page's decision read and its staging POST.
     stageOnRuntime?: boolean;
     inventoryCounts?: Record<string, number>;
+    decisions?: AdoptionDecision[];
   } = {}
 ) {
   // A resume is a browser that reloaded a committed adoption: the checkpoint is
   // durable and the source key is not.
+  const checkpointBase: FreshStrategyCheckpoint = options.decisions
+    ? {
+        ...adoptCheckpoint,
+        adoptionResources: options.decisions.map((decision) => decision.ResourceRef),
+        adoptionDecisions: options.decisions,
+      }
+    : adoptCheckpoint;
   let operation: FreshOperation =
     options.resume || options.staged
       ? {
@@ -449,7 +457,8 @@ async function adoptServer(
             stage: 'committed',
             committed: true,
           },
-          strategy: { ...adoptCheckpoint, stage: options.staged ? 'staged' : 'committed' },
+          strategy: { ...checkpointBase, stage: options.staged ? 'staged' : 'committed' },
+          ...(options.inventoryCounts ? { inventoryCounts: options.inventoryCounts } : {}),
         }
       : {
           version: 1,
@@ -525,7 +534,7 @@ async function adoptServer(
         operation = {
           ...operation,
           revision: operation.revision + 1,
-          strategy: { ...adoptCheckpoint, pluginsEnabled: stagedPlugins },
+          strategy: { ...checkpointBase, pluginsEnabled: stagedPlugins },
         };
       }
       return Response.json(runtime);
@@ -557,7 +566,7 @@ async function adoptServer(
           operation = {
             ...operation,
             revision: operation.revision + 1,
-            strategy: { ...adoptCheckpoint, pluginsEnabled: stagedPlugins },
+            strategy: { ...checkpointBase, pluginsEnabled: stagedPlugins },
           };
       }
       operationReads.push(operation.revision);
@@ -614,7 +623,7 @@ async function adoptServer(
         operation = {
           ...operation,
           revision: operation.revision + 1,
-          strategy: { ...adoptCheckpoint, pluginsEnabled: body.pluginsEnabled === true },
+          strategy: { ...checkpointBase, pluginsEnabled: body.pluginsEnabled === true },
         };
         throw new TypeError('Failed to fetch');
       }
@@ -633,7 +642,7 @@ async function adoptServer(
       operation = {
         ...operation,
         revision: operation.revision + 1,
-        strategy: { ...adoptCheckpoint, pluginsEnabled: body.pluginsEnabled === true },
+        strategy: { ...checkpointBase, pluginsEnabled: body.pluginsEnabled === true },
       };
       return Response.json(
         options.inventoryCounts
@@ -2412,5 +2421,330 @@ it('renders per-resource source counts and summary banner on the staged inventor
 
   expect(byID('adopt-resource-count-client-api-keys').props.children).toBe(3);
   expect(byID('adopt-resource-count-cpa-config-plugins').props.children).toBe(2);
-  expect(byID('adopt-inventory-counts-banner')).toBeTruthy();
+  expect(byID('adopt-platform-managed').props.open).toBeUndefined();
+  expect(text()).toContain(adoptText('inventoryCountsBannerClean', { migrate: 3 }));
 });
+
+function nodeText(node: ReactTestInstance): string {
+  return node.children
+    .map((child) => (typeof child === 'string' ? child : nodeText(child)))
+    .join(' ');
+}
+
+it('separates platform-managed host bindings into a collapsed disclosure when manual count is zero', async () => {
+  const manualDecision = (ref: string, action = 'reconfigure_after_adoption'): AdoptionDecision => ({
+    ResourceRef: ref,
+    Kind: 'cpa_configuration',
+    Scope: 'management_api_fields',
+    ReadEvidenceRef: '',
+    ReplayEvidenceRef: '',
+    VerifyEvidenceRef: '',
+    Qualification: 'pending',
+    ManualAction: action,
+    Disposition: 'manual_action',
+  });
+  await adoptServer({
+    decisions: [
+      adoptCheckpoint.adoptionDecisions![0],
+      manualDecision('cpa-config-server'),
+      manualDecision('cpa-config-management'),
+      manualDecision('cpa-config-logging'),
+      manualDecision('cpa-config-usage'),
+      manualDecision('cpa-config-observability'),
+      manualDecision('cpa-config-plugins'),
+      manualDecision('cpa-config-unknown'),
+    ],
+    inventoryCounts: {
+      'client-api-keys': 5,
+      'cpa-config-server': 2,
+      'cpa-config-management': 1,
+      'cpa-config-unknown': 0,
+    },
+  });
+  await click('adopt-read-inventory');
+  await settle();
+
+  expect(byID('adopt-decision-row-manual_action').findAllByType('li')).toHaveLength(0);
+  const platformManaged = byID('adopt-platform-managed');
+  expect(platformManaged.props.open).toBeUndefined();
+  expect(nodeText(platformManaged)).toContain(adoptText('platformManagedGroup'));
+  expect(nodeText(platformManaged)).toContain(adoptText('platformManagedHelp'));
+  expect(platformManaged.findAllByType('li')).toHaveLength(6);
+  expect(nodeText(platformManaged)).not.toContain(adoptResourceText('cpa-config-unknown'));
+  expect(nodeText(byID('adopt-inventory-counts-banner'))).toContain(
+    adoptText('inventoryCountsBannerClean', { migrate: 5 })
+  );
+});
+
+it('keeps genuine manual items in manual_action when unknown config count is positive or provider state requires action', async () => {
+  await adoptServer({
+    decisions: [
+      adoptCheckpoint.adoptionDecisions![0],
+      {
+        ResourceRef: 'cpa-config-server',
+        Kind: 'cpa_configuration',
+        Scope: 'management_api_fields',
+        ReadEvidenceRef: '',
+        ReplayEvidenceRef: '',
+        VerifyEvidenceRef: '',
+        Qualification: 'pending',
+        ManualAction: 'reconfigure_after_adoption',
+        Disposition: 'manual_action',
+      },
+      {
+        ResourceRef: 'cpa-config-unknown',
+        Kind: 'cpa_configuration',
+        Scope: 'management_api_fields',
+        ReadEvidenceRef: '',
+        ReplayEvidenceRef: '',
+        VerifyEvidenceRef: '',
+        Qualification: 'pending',
+        ManualAction: 'reconfigure_after_adoption',
+        Disposition: 'manual_action',
+      },
+      {
+        ResourceRef: 'provider-state-providers',
+        Kind: 'provider_runtime_state',
+        Scope: 'provider_state',
+        ReadEvidenceRef: '',
+        ReplayEvidenceRef: '',
+        VerifyEvidenceRef: '',
+        Qualification: 'pending',
+        ManualAction: 'reauthenticate_after_adoption',
+        Disposition: 'manual_action',
+      },
+    ],
+    inventoryCounts: {
+      'client-api-keys': 4,
+      'cpa-config-unknown': 2,
+    },
+  });
+  await click('adopt-read-inventory');
+  await settle();
+
+  const manualRowText = nodeText(byID('adopt-decision-row-manual_action'));
+  expect(manualRowText).toContain('Other configuration');
+  expect(manualRowText).toContain('Provider runtime state');
+  expect(manualRowText).not.toContain('Server settings');
+  expect(byID('adopt-resource-count-cpa-config-unknown').props.children).toBe(2);
+  expect(nodeText(byID('adopt-platform-managed'))).toContain('Server settings');
+  expect(nodeText(byID('adopt-inventory-counts-banner'))).toContain(
+    adoptText('inventoryCountsBanner', { migrate: 4, manual: 2 })
+  );
+});
+
+it('keeps cpa-config-unknown in manual_action when source counts were not observed', async () => {
+  await adoptServer({
+    decisions: [
+      adoptCheckpoint.adoptionDecisions![0],
+      adoptCheckpoint.adoptionDecisions![1],
+      {
+        ResourceRef: 'cpa-config-unknown',
+        Kind: 'cpa_configuration',
+        Scope: 'management_api_fields',
+        ReadEvidenceRef: '',
+        ReplayEvidenceRef: '',
+        VerifyEvidenceRef: '',
+        Qualification: 'pending',
+        ManualAction: 'reconfigure_after_adoption',
+        Disposition: 'manual_action',
+      },
+    ],
+  });
+  await click('adopt-read-inventory');
+  await settle();
+
+  const manualRowText = nodeText(byID('adopt-decision-row-manual_action'));
+  expect(manualRowText).toContain('Other configuration');
+  expect(manualRowText).not.toContain('Plugin settings');
+  expect(nodeText(byID('adopt-platform-managed'))).toContain('Plugin settings');
+});
+
+it('keeps cpa-config-unknown visible in manual_action without a count badge when omitted from non-empty inventoryCounts', async () => {
+  await adoptServer({
+    decisions: [
+      adoptCheckpoint.adoptionDecisions![0],
+      adoptCheckpoint.adoptionDecisions![1],
+      {
+        ResourceRef: 'cpa-config-unknown',
+        Kind: 'cpa_configuration',
+        Scope: 'management_api_fields',
+        ReadEvidenceRef: '',
+        ReplayEvidenceRef: '',
+        VerifyEvidenceRef: '',
+        Qualification: 'pending',
+        ManualAction: 'reconfigure_after_adoption',
+        Disposition: 'manual_action',
+      },
+    ],
+    inventoryCounts: {
+      'client-api-keys': 2,
+    },
+  });
+  await click('adopt-read-inventory');
+  await settle();
+
+  const manualRowText = nodeText(byID('adopt-decision-row-manual_action'));
+  expect(manualRowText).toContain('Other configuration');
+  expect(maybe('adopt-resource-count-cpa-config-unknown')).toHaveLength(0);
+  expect(nodeText(byID('adopt-inventory-counts-banner'))).toContain(
+    adoptText('inventoryCountsBanner', { migrate: 2, manual: 1 })
+  );
+});
+
+it.each(['en', 'zh-CN', 'zh-TW', 'ru'])(
+  'auto-expands migrated group when clean, collapses unset-in-source, and strips item prefixes (%s)',
+  async (language) => {
+    setFullWebLanguage(language);
+    const cleanWithUnset: AdoptionSummary = {
+      runId: runA,
+      items: withIdentity([
+        {
+          item: 'config:routing.strategy',
+          kind: 'config_leaf',
+          outcome: 'migrated',
+          reason: '',
+          retryable: false,
+        },
+        {
+          item: 'section:api-keys.gemini',
+          kind: 'provider_section',
+          outcome: 'migrated',
+          reason: '',
+          retryable: false,
+        },
+        {
+          item: 'rules:replace',
+          kind: 'config_family',
+          outcome: 'migrated',
+          reason: '',
+          retryable: false,
+        },
+        {
+          item: 'family:default',
+          kind: 'config_family',
+          outcome: 'migrated',
+          reason: '',
+          retryable: false,
+        },
+        {
+          item: 'config:observability.logs.debug',
+          kind: 'config_leaf',
+          outcome: 'absent_at_source',
+          reason: '',
+          retryable: false,
+        },
+        {
+          item: 'section:api-keys.claude',
+          kind: 'provider_section',
+          outcome: 'absent_at_source',
+          reason: '',
+          retryable: false,
+        },
+      ]),
+      planned: 6,
+      finished: true,
+      running: false,
+      retryable: 0,
+      counts: { migrated: 4, manual: 0, failed: 0, absent_at_source: 2 },
+    };
+    await adoptServer({ summaries: [cleanWithUnset] });
+    await click('adopt-read-inventory');
+    expect(nodeText(byID('adopt-platform-managed'))).toContain(
+      adoptText('platformManagedGroup')
+    );
+    await input('adopt-confirm-inventory', true);
+    await click('adopt-confirm-migrate');
+    await settle();
+
+    const migratedGroup = byID('adopt-group-migrated');
+    const absentGroup = byID('adopt-group-absent_at_source');
+    expect(migratedGroup.findByType('details').props.open).toBe(true);
+    expect(absentGroup.findByType('details').props.open).toBeUndefined();
+    expect(nodeText(absentGroup)).toContain(adoptText('absentBadge'));
+    expect(byID('adopt-progress').props.children).toBe(
+      adoptText('progress', { settled: 6, planned: 6 })
+    );
+    expect(byID('adopt-progress-breakdown').props.children).toBe(
+      adoptText('progressBreakdown', { migrated: 4, absent: 2 })
+    );
+    expect(
+      migratedGroup
+        .findAllByProps({ className: 'adopt-item-readable' })
+        .map((node) => node.props.children)
+    ).toEqual(['routing.strategy', 'api-keys.gemini', 'replace', 'default']);
+  }
+);
+
+it.each(['en', 'zh-CN', 'zh-TW', 'ru'])(
+  'renders source-review reason and guidance for family:unknown-config instead of payload-rule wording (%s)',
+  async (language) => {
+    await act(async () => setFullWebLanguage(language));
+    const unknownConfigSummary: AdoptionSummary = {
+      runId: runA,
+      items: [
+        {
+          id: itemID('u-reconfig'),
+          item: 'family:unknown-config',
+          kind: 'config_family',
+          outcome: 'manual',
+          reason: 'reconfigure_after_adoption',
+          retryable: false,
+          left: 0,
+        },
+        {
+          id: itemID('u-archived'),
+          item: 'family:unknown-config',
+          kind: 'config_family',
+          outcome: 'manual',
+          reason: 'archived_or_commented_settings',
+          retryable: false,
+          left: 0,
+        },
+        {
+          id: itemID('u-incomplete'),
+          item: 'family:unknown-config',
+          kind: 'config_family',
+          outcome: 'manual',
+          reason: 'archive_scan_incomplete',
+          retryable: false,
+          left: 0,
+        },
+        {
+          id: itemID('rules-default'),
+          item: 'rules:default',
+          kind: 'config_family',
+          outcome: 'manual',
+          reason: 'reconfigure_after_adoption',
+          retryable: false,
+          left: 0,
+        },
+      ],
+      planned: 4,
+      finished: true,
+      running: false,
+      retryable: 0,
+      counts: { migrated: 0, manual: 4, failed: 0, absent_at_source: 0 },
+    };
+    await adoptServer({ summaries: [unknownConfigSummary] });
+    await click('adopt-read-inventory');
+    await input('adopt-confirm-inventory', true);
+    await click('adopt-confirm-migrate');
+    await settle();
+
+    const payloadRuleGuidance = adoptText('guidanceConfigFamily');
+    for (const [id, reason] of [
+      ['u-reconfig', 'reconfigure_after_adoption'],
+      ['u-archived', 'archived_or_commented_settings'],
+      ['u-incomplete', 'archive_scan_incomplete'],
+    ] as const) {
+      const rowText = nodeText(byID(`adopt-item-${itemID(id)}`));
+      expect(rowText).toContain(adoptReasonText(reason));
+      expect(rowText).toContain(
+        adoptGuidanceText('config_family', reason, 0, 'family:unknown-config')
+      );
+      expect(rowText).not.toContain(payloadRuleGuidance);
+    }
+    expect(nodeText(byID(`adopt-item-${itemID('rules-default')}`))).toContain(payloadRuleGuidance);
+  }
+);

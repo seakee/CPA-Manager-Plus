@@ -1594,7 +1594,7 @@ export function FreshSetupWizard({
                           <span className="adopt-item-reason">{adoptReasonText(item.reason)}</span>
                         )}
                         <p className="journey-help">
-                          {adoptGuidanceText(item.kind, item.reason, item.left)}
+                          {adoptGuidanceText(item.kind, item.reason, item.left, item.item)}
                         </p>
                       </li>
                     ))}

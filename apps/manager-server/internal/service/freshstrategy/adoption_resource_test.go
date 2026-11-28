@@ -425,7 +425,7 @@ func TestPersistedAdoptionOperationRechecksResourceQualification(t *testing.T) {
 		ExpectedArtifactID: record.ArtifactID}
 	service := &Service{options: options, production: true, consumers: consumers}
 	staged, err := service.Execute(t.Context(), operation(), request)
-	if err != nil || staged.Checkpoint.Stage != "staged" || sourceCalls.Load() != 1 || len(runtime.stages) != 0 || len(runtime.starts) != 0 {
+	if err != nil || staged.Checkpoint.Stage != "staged" || sourceCalls.Load() != 2 || len(runtime.stages) != 0 || len(runtime.starts) != 0 {
 		t.Fatalf("stage: %+v %v source=%d", staged, err, sourceCalls.Load())
 	}
 	op := operation()
@@ -444,7 +444,7 @@ func TestPersistedAdoptionOperationRechecksResourceQualification(t *testing.T) {
 	result, err := restarted.Execute(t.Context(), op, request)
 	var blocker *Blocker
 	if !errors.As(err, &blocker) || blocker.Code != "adoption_resource_qualification_required" || result.Checkpoint.Strategy != "" ||
-		sourceCalls.Load() != 1 || len(runtime.stages) != 0 || len(runtime.starts) != 0 {
+		sourceCalls.Load() != 2 || len(runtime.stages) != 0 || len(runtime.starts) != 0 {
 		t.Fatalf("persisted resource qualification not rechecked: result=%+v err=%v source=%d", result, err, sourceCalls.Load())
 	}
 }

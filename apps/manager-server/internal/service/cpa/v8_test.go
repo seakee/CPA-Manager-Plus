@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -171,4 +172,246 @@ func TestFreshV8CancellationAndURLBoundary(t *testing.T) {
 	if _, err := ReadV8Config(ctx, server.URL, "private"); err == nil || time.Since(start) > time.Second {
 		t.Fatalf("deadline not enforced: %v", err)
 	}
+}
+
+func TestReadV8ConfigEmitsUnknownResourceForNestedOffTableKeysUnderNamedRoots(t *testing.T) {
+	namedOnlyClean := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"auth"},"access":{"api-keys":["k1"]},"plugins":{"enabled":false}}`))
+	}))
+	defer namedOnlyClean.Close()
+	cleanObs, err := ReadV8Config(t.Context(), namedOnlyClean.URL, "secret")
+	if err != nil {
+		t.Fatalf("ReadV8Config clean: %v", err)
+	}
+	if slices.Contains(cleanObs.ResourceSections, "unknown_cpa_native_resource") {
+		t.Fatalf("clean named-roots config unexpectedly emitted unknown_cpa_native_resource: %v", cleanObs.ResourceSections)
+	}
+
+	namedWithMystery := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"auth"},"access":{"api-keys":["k1"]},"plugins":{"enabled":false,"mystery_flag":true}}`))
+	}))
+	defer namedWithMystery.Close()
+	mysteryObs, err := ReadV8Config(t.Context(), namedWithMystery.URL, "secret")
+	if err != nil {
+		t.Fatalf("ReadV8Config mystery: %v", err)
+	}
+	if !slices.Contains(mysteryObs.ResourceSections, "unknown_cpa_native_resource") {
+		t.Fatalf("named-roots config with plugins.mystery_flag omitted unknown_cpa_native_resource: %v", mysteryObs.ResourceSections)
+	}
+}
+
+func TestReadV8AdoptionSnapshotDetectsArchivedYAMLUnknownKeysWithoutV0Fallback(t *testing.T) {
+	t.Run("detects archived unknown keys when JSON projection is clean", func(t *testing.T) {
+		var jsonCalls, yamlCalls, v0Calls atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "Bearer secret-mgmt" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			switch r.URL.Path {
+			case "/v8/management/config":
+				jsonCalls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"auth"},"access":{"api-keys":["k1"]},"routing":{"strategy":"round-robin"},"plugins":{}}`))
+			case "/v8/management/config.yaml":
+				yamlCalls.Add(1)
+				if r.Header.Get("Cache-Control") != "no-store" || r.Header.Get("Accept-Encoding") != "identity, gzip" {
+					t.Errorf("missing safe-read headers on config.yaml: %v", r.Header)
+				}
+				w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+				_, _ = w.Write([]byte(`# operator header
+config-version: 8
+server:
+    port: 8317
+oauth: {auth-dir: "auth", providers: {codex: {}}}
+plugins: {}
+upstream:
+    codex:
+        disable-codex-cloaking: true
+
+# oauth.providers.codex.retired-setting: false
+# plugins.mystery_flag: true
+`))
+			default:
+				if strings.HasPrefix(r.URL.Path, "/v0/") {
+					v0Calls.Add(1)
+				}
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer server.Close()
+
+		snapshot, err := ReadV8AdoptionSnapshot(t.Context(), server.URL, "secret-mgmt")
+		if err != nil {
+			t.Fatalf("ReadV8AdoptionSnapshot: %v", err)
+		}
+		if !slices.Contains(snapshot.ResourceSections, "unknown_cpa_native_resource") {
+			t.Fatalf("expected unknown_cpa_native_resource in %v", snapshot.ResourceSections)
+		}
+		if jsonCalls.Load() != 1 || yamlCalls.Load() != 1 || v0Calls.Load() != 0 {
+			t.Fatalf("unexpected calls json=%d yaml=%d v0=%d", jsonCalls.Load(), yamlCalls.Load(), v0Calls.Load())
+		}
+
+		// ReadV8Config (External read-only probe) must keep strictly 1 request and never touch .yaml.
+		obs, err := ReadV8Config(t.Context(), server.URL, "secret-mgmt")
+		if err != nil {
+			t.Fatalf("ReadV8Config: %v", err)
+		}
+		if jsonCalls.Load() != 2 || yamlCalls.Load() != 1 || v0Calls.Load() != 0 {
+			t.Fatalf("ReadV8Config made unexpected yaml/v0 requests: json=%d yaml=%d v0=%d (obs=%+v)", jsonCalls.Load(), yamlCalls.Load(), v0Calls.Load(), obs)
+		}
+	})
+
+	t.Run("clean alias YAML emits zero unknowns while failed or malformed YAML fails closed without v0 fallback", func(t *testing.T) {
+		type yamlOutcome struct {
+			name        string
+			status      int
+			body        string
+			hang        bool
+			wantUnknown bool
+		}
+		cases := []yamlOutcome{
+			{
+				name:   "clean normalized relay alias with pre-active legacy comments and trailing plain prose",
+				status: http.StatusOK,
+				body: `# operator comment
+# debug: false
+# Note: operator header note
+config-version: 8
+server:
+    port: 8317
+oauth:
+    auth-dir: /private/auth
+    providers:
+        codex:
+            live-media-relay:
+                disable-private-remote-ips: false
+# operator trailing comment without mapping syntax
+`,
+				wantUnknown: false,
+			},
+			{
+				name:   "non-identifier spaced archived key triggers unknown",
+				status: http.StatusOK,
+				body: `config-version: 8
+server:
+    port: 8317
+
+# plugins.future flag: true
+`,
+				wantUnknown: true,
+			},
+			{
+				name:   "colliding dotted archive path triggers unknown",
+				status: http.StatusOK,
+				body: `config-version: 8
+server:
+    port: 8317
+
+# server.kv-store.path: /tmp/colliding-sibling
+`,
+				wantUnknown: true,
+			},
+			{
+				name:        "404 not found fails closed",
+				status:      http.StatusNotFound,
+				wantUnknown: true,
+			},
+			{
+				name:        "500 internal error fails closed",
+				status:      http.StatusInternalServerError,
+				wantUnknown: true,
+			},
+			{
+				name:        "empty body fails closed",
+				status:      http.StatusOK,
+				body:        "   \n",
+				wantUnknown: true,
+			},
+			{
+				name:        "malformed YAML fails closed",
+				status:      http.StatusOK,
+				body:        "config-version: [8\n",
+				wantUnknown: true,
+			},
+			{
+				name:        "oversized YAML >1 MiB fails closed",
+				status:      http.StatusOK,
+				body:        strings.Repeat("# comment\n", (safeReadLimit/len("# comment\n"))+16) + "config-version: 8\n",
+				wantUnknown: true,
+			},
+			{
+				name:        "timeout on config.yaml fails closed",
+				hang:        true,
+				wantUnknown: true,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				var v0Calls atomic.Int32
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case "/v8/management/config":
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = w.Write([]byte(safeV8Config))
+					case "/v8/management/config.yaml":
+						if tc.hang {
+							<-r.Context().Done()
+							return
+						}
+						w.WriteHeader(tc.status)
+						if tc.body != "" {
+							_, _ = w.Write([]byte(tc.body))
+						}
+					default:
+						if strings.HasPrefix(r.URL.Path, "/v0/") {
+							v0Calls.Add(1)
+						}
+						w.WriteHeader(http.StatusNotFound)
+					}
+				}))
+				defer server.Close()
+
+				ctx, cancel := context.WithTimeout(t.Context(), 150*time.Millisecond)
+				defer cancel()
+				if !tc.hang {
+					ctx = t.Context()
+				}
+				snapshot, err := ReadV8AdoptionSnapshot(ctx, server.URL, "secret-mgmt")
+				if err != nil {
+					t.Fatalf("ReadV8AdoptionSnapshot failed: %v", err)
+				}
+				if v0Calls.Load() != 0 {
+					t.Fatalf("unexpected v0 calls: %d", v0Calls.Load())
+				}
+				gotUnknown := slices.Contains(snapshot.ResourceSections, "unknown_cpa_native_resource")
+				if gotUnknown != tc.wantUnknown {
+					t.Fatalf("unknown_cpa_native_resource=%v, want %v (sections=%v)", gotUnknown, tc.wantUnknown, snapshot.ResourceSections)
+				}
+			})
+		}
+	})
+
+	t.Run("skips YAML probe when JSON already surfaced unknown key", func(t *testing.T) {
+		var yamlCalls atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/v8/management/config":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"auth"},"access":{"api-keys":["k1"]},"plugins":{"mystery_flag":true}}`))
+			case "/v8/management/config.yaml":
+				yamlCalls.Add(1)
+				w.WriteHeader(http.StatusOK)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer server.Close()
+		snapshot, err := ReadV8AdoptionSnapshot(t.Context(), server.URL, "secret-mgmt")
+		if err != nil || !slices.Contains(snapshot.ResourceSections, "unknown_cpa_native_resource") || yamlCalls.Load() != 0 {
+			t.Fatalf("snapshot=%+v err=%v yamlCalls=%d", snapshot, err, yamlCalls.Load())
+		}
+	})
 }

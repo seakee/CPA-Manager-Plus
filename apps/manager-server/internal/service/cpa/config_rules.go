@@ -143,14 +143,18 @@ func validateReplaceConfigRule(object map[string]any) error {
 	}
 	for key := range target {
 		switch key {
-		case "role", "positions", "all":
+		case "role", "positions", "all", "paths":
 		default:
 			return ErrInvalidConfigPath
 		}
 	}
-	role, ok := target["role"].(string)
-	if !ok || role != "user" {
-		return ErrInvalidConfigPath
+	var role string
+	if rawRole, hasRole := target["role"]; hasRole && rawRole != nil {
+		s, ok := rawRole.(string)
+		if !ok {
+			return ErrInvalidConfigPath
+		}
+		role = s
 	}
 	allVal, hasAll := target["all"]
 	allFlag := false
@@ -163,49 +167,148 @@ func validateReplaceConfigRule(object map[string]any) error {
 	}
 	posVal, hasPos := target["positions"]
 	var positions []any
-	if hasPos {
+	if hasPos && posVal != nil {
 		list, ok := posVal.([]any)
 		if !ok {
 			return ErrInvalidConfigPath
 		}
 		positions = list
 		for _, rawPos := range positions {
-			num, ok := rawPos.(json.Number)
-			if !ok {
-				return ErrInvalidConfigPath
-			}
-			n, err := num.Int64()
-			if err != nil || n <= 0 {
+			if !isPositiveConfigInt(rawPos) {
 				return ErrInvalidConfigPath
 			}
 		}
 	}
-	if allFlag {
-		if len(positions) != 0 {
+	pathsVal, hasPaths := target["paths"]
+	if hasPaths && pathsVal != nil {
+		paths, err := parseReplaceTargetPaths(pathsVal)
+		if err != nil || len(paths) == 0 {
 			return ErrInvalidConfigPath
 		}
-	} else if len(positions) == 0 {
-		return ErrInvalidConfigPath
+		if role != "" || allFlag || len(positions) != 0 {
+			return ErrInvalidConfigPath
+		}
+	} else {
+		switch role {
+		case "system", "developer", "user":
+		default:
+			return ErrInvalidConfigPath
+		}
+		if allFlag {
+			if len(positions) != 0 {
+				return ErrInvalidConfigPath
+			}
+		} else if len(positions) == 0 {
+			return ErrInvalidConfigPath
+		}
 	}
 	replacements, ok := object["replacements"].([]any)
 	if !ok || len(replacements) == 0 {
 		return ErrInvalidConfigPath
 	}
 	for _, rawEntry := range replacements {
-		entryMap, ok := rawEntry.(map[string]any)
-		if !ok || len(entryMap) != 1 {
-			return ErrInvalidConfigPath
-		}
-		for k, v := range entryMap {
-			if k == "" {
-				return ErrInvalidConfigPath
-			}
-			if _, ok := v.(string); !ok {
-				return ErrInvalidConfigPath
-			}
+		if err := validateReplaceEntry(rawEntry); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func isPositiveConfigInt(raw any) bool {
+	switch typed := raw.(type) {
+	case json.Number:
+		n, err := typed.Int64()
+		return err == nil && n > 0
+	case int:
+		return typed > 0
+	case int64:
+		return typed > 0
+	case float64:
+		return typed > 0 && typed == float64(int64(typed))
+	default:
+		return false
+	}
+}
+
+func parseReplaceTargetPaths(raw any) ([]string, error) {
+	switch typed := raw.(type) {
+	case []string:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if strings.TrimSpace(item) == "" {
+				return nil, ErrInvalidConfigPath
+			}
+			out = append(out, item)
+		}
+		return out, nil
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, rawItem := range typed {
+			item, ok := rawItem.(string)
+			if !ok || strings.TrimSpace(item) == "" {
+				return nil, ErrInvalidConfigPath
+			}
+			out = append(out, item)
+		}
+		return out, nil
+	default:
+		return nil, ErrInvalidConfigPath
+	}
+}
+
+func validateReplaceEntry(raw any) error {
+	switch typed := raw.(type) {
+	case map[string]string:
+		switch len(typed) {
+		case 1:
+			for k := range typed {
+				if k == "" {
+					return ErrInvalidConfigPath
+				}
+			}
+			return nil
+		case 2:
+			if _, hasPattern := typed["pattern"]; !hasPattern {
+				return ErrInvalidConfigPath
+			}
+			if _, hasReplacement := typed["replacement"]; !hasReplacement {
+				return ErrInvalidConfigPath
+			}
+			return nil
+		default:
+			return ErrInvalidConfigPath
+		}
+	case map[string]any:
+		switch len(typed) {
+		case 1:
+			for k, v := range typed {
+				if k == "" {
+					return ErrInvalidConfigPath
+				}
+				if _, ok := v.(string); !ok {
+					return ErrInvalidConfigPath
+				}
+			}
+			return nil
+		case 2:
+			rawPattern, hasPattern := typed["pattern"]
+			rawReplacement, hasReplacement := typed["replacement"]
+			if !hasPattern || !hasReplacement {
+				return ErrInvalidConfigPath
+			}
+			if _, ok := rawPattern.(string); !ok {
+				return ErrInvalidConfigPath
+			}
+			if _, ok := rawReplacement.(string); !ok {
+				return ErrInvalidConfigPath
+			}
+			return nil
+		default:
+			return ErrInvalidConfigPath
+		}
+	default:
+		return ErrInvalidConfigPath
+	}
 }
 func validateConfigModel(model any) error {
 	object, ok := model.(map[string]any)

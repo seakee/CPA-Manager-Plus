@@ -8,8 +8,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshadopt"
 )
 
 // writeCPAFixture writes a stopped 1.x stack: a Manager data directory, the
@@ -874,5 +878,786 @@ func TestCPASourceGroupingReproducesCPAsOwnShape(t *testing.T) {
 	again, ok := groupLegacyAPIKeys(groups, "gemini")
 	if !ok || len(again.([]any)) != 2 {
 		t.Fatalf("an already grouped list was regrouped: %#v", again)
+	}
+}
+
+// richV7BusinessConfig exercises every adoptable business path in CPA's flat/v7
+// grammar alongside v7 host-exclusive keys so tests verify complete migration
+// into the normalized v8 document with zero false manual items.
+const richV7BusinessConfig = `
+host: "127.0.0.1"
+port: 8317
+tls:
+  enable: true
+  cert: "/etc/ssl/cpa.pem"
+discovery:
+  enabled: true
+  service-type: "consul"
+remote-management:
+  allow-remote: true
+  secret-key: "v7-secret"
+auth-dir: "/var/lib/cpa/auths"
+usage-statistics-enabled: true
+redis-usage-queue-retention-seconds: 3600
+pprof:
+  enable: true
+  addr: "127.0.0.1:6060"
+logging-to-file: true
+logs-max-total-size-mb: 256
+error-logs-max-files: 12
+api-keys:
+  - "client-key-v7-1"
+
+routing:
+  strategy: "fill-first"
+  session-affinity: true
+  session-affinity-ttl: "20m"
+  session-affinity-subagents: true
+  session-affinity-rebind-on: "quota"
+force-model-prefix: true
+request-retry: 4
+max-retry-credentials: 3
+max-retry-interval: 45
+disable-cooling: true
+save-cooldown-status: true
+transient-error-cooldown-seconds: 30
+
+quota-exceeded:
+  switch-project: true
+  switch-preview-model: false
+  antigravity-credits: true
+
+models:
+  catalog: "https://catalog.example.com/models.json"
+  codex-catalog: "https://catalog.example.com/codex.json"
+  devin-catalog: "https://catalog.example.com/devin.json"
+
+auth-auto-refresh-workers: 8
+ws-auth: true
+
+proxy-url: "http://127.0.0.1:7890"
+tls-handshake-timeout-seconds: 15
+passthrough-headers: true
+nonstream-keepalive-interval: 20
+streaming:
+  keepalive-seconds: 15
+  bootstrap-retries: 2
+  send-keepalive-before-ft: true
+
+payload:
+  default:
+    - models: [{name: "gpt-*", protocol: "codex"}]
+      params: {"temperature": 0.2}
+  default-raw:
+    - models: [{name: "claude-*", protocol: "claude"}]
+      params: {"metadata.tier": "pro"}
+  override:
+    - models: [{name: "gemini-*", protocol: "gemini"}]
+      params: {"topP": 0.9}
+  override-raw:
+    - models: [{name: "xai-*", protocol: "xai"}]
+      params: {"stream": true}
+  replace:
+    - models: [{name: "gpt-5", protocol: "codex"}]
+      rules:
+        - path: "input"
+          old: "legacy"
+          new: "modern"
+  filter:
+    - models: [{name: "gpt-*", protocol: "codex"}]
+      params: ["reasoning.encrypted_content"]
+
+disable-image-generation: "chat"
+gpt-image-2-base-model: "gpt-image-2"
+video-result-auth-cache-ttl: "10m"
+
+max-request-body-bytes: 16777216
+shutdown-timeout: 30
+commercial-mode: true
+trusted-proxies:
+  - "10.0.0.0/8"
+github-token: "ghp_v7source_token"
+kv-store:
+  path: "/var/lib/cpa/kv.db"
+  disabled: true
+response-compression:
+  enabled: true
+  min-bytes: 2048
+
+debug: true
+request-log: true
+
+client:
+  codex:
+    enable-apply-patch: true
+    web-search-result-cache:
+      enabled: true
+      ttl: "15m"
+      limit: 500
+  claude:
+    show-codex-commentary: true
+
+codex:
+  optimize-multi-agent-v2: true
+  response-steering: true
+  disable-codex-cloaking: true
+  stream-bootstrap-buffering: true
+  stream-bootstrap-timeout: "12s"
+  orphan-delegation-compatibility: true
+  model-level-cooling: true
+  upstream-request-compression: true
+  upstream-request-compression-min-bytes: 4096
+  websocket-compression: true
+  signin-with-chatgpt-identifier: "custom-client-id"
+  live-media-relay:
+    enabled: true
+    max-sessions: 25
+    disable-private-remote-ips: true
+    public-ip: "203.0.113.10"
+    udp-port-min: 30000
+    udp-port-max: 30100
+    ice-servers:
+      - urls: ["turn:turn.example.com:3478?transport=udp"]
+        username: "turn-user"
+        credential: "turn-secret-unredacted"
+
+codex-header-defaults:
+  user-agent: "codex_cli_rs/0.25.0"
+  beta-features: "responses=v1"
+
+claude:
+  oauth-include-create-api-key: false
+  model-level-cooling: true
+  tool-search: true
+  server-side-fallback: true
+  session-date-pin-days: 7
+claude-code:
+  disable-cloaking-model-list: true
+disable-claude-cloak-mode: true
+claude-header-defaults:
+  user-agent: "claude-cli/2.0.0"
+  package-version: "2.0.0"
+  runtime-version: "22.12.0"
+  os: "Linux"
+  arch: "x64"
+  timeout: "45"
+  timezone: "UTC"
+  stabilize-device-profile: true
+  inject-diagnostics: true
+  client-request-id: "passthrough"
+  native-entrypoints:
+    - "t3-code"
+  anthropic-beta-strip:
+    - "interleaved-thinking-2025-05-14"
+  anthropic-beta-append:
+    - "prompt-caching-2024-07-31"
+
+xai:
+  inject-x-search: true
+
+antigravity-signature-cache-enabled: false
+antigravity-signature-bypass-strict: true
+antigravity:
+  tos-pause-window: "6h"
+  connection-pool:
+    enabled: true
+    idle-conn-timeout: "90s"
+    max-idle-conns-per-host: 64
+  sensitive-words:
+    - "secret-token"
+  sensitive-words-replace:
+    "Codex": "Assistant"
+  sensitive-patterns-replace:
+    - pattern: "sk-[0-9]+"
+      replacement: "sk-redacted"
+
+devin:
+  sensitive-words:
+    - "devin-secret"
+  sensitive-words-replace:
+    "Devin": "Agent"
+  sensitive-patterns-replace:
+    - pattern: "dv-[0-9]+"
+      replacement: "dv-redacted"
+
+credential-concurrency:
+  lifecycle-config-revision: "source-rev-1"
+  observation-barrier-revision: 42
+  default: 6
+  per-provider:
+    codex: 4
+credential-in-flight:
+  max-concurrent-per-credential: 3
+
+plugins:
+  enabled: true
+  dir: "/opt/cpa/plugins"
+  auth-revision: 9
+  store-sources:
+    - "https://plugins.example.com/index.json"
+  store-auth:
+    - match: "https://plugins.example.com/*"
+      apply-to: ["registry", "artifact"]
+      type: "bearer"
+      token-env: "PLUGIN_TOKEN"
+      allow-insecure: true
+  configs:
+    sample-plugin:
+      mode: "strict"
+
+oauth-model-alias:
+  codex:
+    - name: "gpt-5"
+      alias: "gpt-5-alias"
+oauth-excluded-models:
+  claude:
+    - "claude-legacy"
+oauth-settings:
+  auto-refresh: true
+oauth-request-scoped-errors:
+  codex:
+    - "429"
+
+gemini-api-key:
+  - api-key: "gem-1"
+    base-url: "https://gem.example.com"
+    connection-pool:
+      enabled: true
+interactions-api-key:
+  - api-key: "int-1"
+vertex-api-key:
+  - api-key: "vtx-1"
+codex-api-key:
+  - api-key: "cdx-1"
+claude-api-key:
+  - api-key: "cld-1"
+xai-api-key:
+  - api-key: "xai-1"
+meta-api-key:
+  - api-key: "met-1"
+openai-compatibility:
+  - name: "custom-openai"
+    base-url: "https://oai.example.com/v1"
+    api-key-entries:
+      - api-key: "oai-1"
+`
+
+// richV8BusinessConfig exercises every adoptable business path in canonical
+// config-version: 8 alongside all host-exclusive v8 keys, empty known
+// containers, and explicit nulls.
+const richV8BusinessConfig = `config-version: 8
+server:
+  server-id: "src-server-uuid"
+  host: "0.0.0.0"
+  port: 8317
+  tls:
+    enable: true
+    cert: "/etc/ssl/v8.pem"
+  discovery:
+    enabled: true
+  kv-store:
+    path: "/var/lib/cpa/v8-kv.db"
+    disabled: false
+  max-request-body-bytes: 33554432
+  shutdown-timeout: 25
+  commercial-mode: true
+  trusted-proxies:
+    - "192.168.0.0/16"
+  github-token: "ghp_v8source_token"
+  response-compression:
+    enabled: true
+    min-bytes: 1024
+management:
+  allow-remote: true
+  secret-key: "v8-mgmt-secret"
+access:
+  api-keys:
+    - "client-key-v8-1"
+plugins:
+  enabled: true
+  dir: "/var/lib/cpa/plugins"
+  auth-revision: 11
+  store-sources:
+    - "https://store.v8.example/index.json"
+  store-auth:
+    - match: "https://store.v8.example/*"
+      apply-to: ["artifact"]
+      type: "header"
+      header-name: "X-Plugin-Key"
+      header-value-env: "PLUGIN_HDR"
+  configs:
+    audit-plugin:
+      enabled: true
+observability:
+  usage:
+    usage-statistics-enabled: true
+    redis-usage-queue-retention-seconds: 7200
+  pprof:
+    enable: false
+  logs:
+    debug: false
+    request-log: true
+    logging-to-file: true
+    logs-max-total-size-mb: 512
+    error-logs-max-files: 20
+routing:
+  strategy: "round-robin"
+  session-affinity: false
+  session-affinity-ttl: "30m"
+  session-affinity-subagents: false
+  session-affinity-rebind-on: "never"
+  force-model-prefix: false
+  retry:
+    request-retry: 2
+    max-retry-credentials: 5
+    max-retry-interval: 60
+  cooldown:
+    disable-cooling: false
+    save-cooldown-status: false
+    transient-error-cooldown-seconds: 15
+quota-exceeded:
+  switch-project: false
+  switch-preview-model: true
+models:
+  catalog: "https://v8.example/models.json"
+  codex-catalog: "https://v8.example/codex.json"
+  devin-catalog: "https://v8.example/devin.json"
+requests:
+  proxy-url: "socks5://127.0.0.1:1080"
+  tls-handshake-timeout-seconds: 20
+  passthrough-headers: false
+  nonstream-keepalive-interval: 10
+  streaming:
+    keepalive-seconds: 20
+    bootstrap-retries: 4
+    send-keepalive-before-ft: false
+  payload:
+    default:
+      - models: [{name: "gpt-*", protocol: "codex"}]
+        params: {"temperature": 0.5}
+    default-raw:
+      - models: [{name: "claude-*", protocol: "claude"}]
+        params: {"foo": "bar"}
+    override:
+      - models: [{name: "gemini-*", protocol: "gemini"}]
+        params: {"topK": 32}
+    override-raw:
+      - models: [{name: "xai-*", protocol: "xai"}]
+        params: {"raw": 1}
+    replace:
+      - models: [{name: "gpt-5", protocol: "codex"}]
+        rules:
+          - path: "instructions"
+            old: "a"
+            new: "b"
+    filter:
+      - models: [{name: "gpt-*", protocol: "codex"}]
+        params: ["tools"]
+multimedia:
+  disable-image-generation: "passthrough"
+  gpt-image-2-base-model: "gpt-image-2-v8"
+  video-result-auth-cache-ttl: "5m"
+client:
+  codex:
+    enable-apply-patch: false
+    optimize-multi-agent-v2: false
+    web-search-result-cache:
+      enabled: false
+      ttl: "5m"
+      limit: 200
+  claude:
+    show-codex-commentary: false
+upstream:
+  codex:
+    response-steering: false
+    disable-codex-cloaking: false
+    stream-bootstrap-buffering: false
+    stream-bootstrap-timeout: "8s"
+    orphan-delegation-compatibility: false
+    model-level-cooling: false
+    upstream-request-compression: false
+    upstream-request-compression-min-bytes: 2048
+    websocket-compression: false
+  claude:
+    model-level-cooling: false
+    disable-claude-cloak-mode: false
+    disable-cloaking-model-list: false
+    tool-search: false
+    server-side-fallback: false
+    session-date-pin-days: 3
+    header-defaults:
+      user-agent: "claude-cli/2.1.0"
+      package-version: "2.1.0"
+      runtime-version: "22.13.0"
+      os: "Darwin"
+      arch: "arm64"
+      timeout: "30"
+      timezone: "America/Los_Angeles"
+      stabilize-device-profile: false
+      inject-diagnostics: false
+      client-request-id: "off"
+      native-entrypoints:
+        - "custom-ide"
+      anthropic-beta-strip:
+        - "beta-1"
+      anthropic-beta-append:
+        - "beta-2"
+  xai:
+    inject-x-search: false
+oauth:
+  auth-dir: "/var/lib/cpa/v8-auths"
+  auth-auto-refresh-workers: 4
+  model-alias:
+    codex:
+      - name: "gpt-5"
+        alias: "gpt5"
+  excluded-models:
+    gemini:
+      - "gemini-1.0"
+  settings:
+    auto-refresh: false
+  request-scoped-errors:
+    claude:
+      - "500"
+  providers:
+    aistudio:
+      ws-auth: false
+    claude:
+      oauth-include-create-api-key: true
+    codex:
+      signin-with-chatgpt-identifier: "v8-client-id"
+      header-defaults:
+        user-agent: "codex_cli_rs/0.30.0"
+        beta-features: "responses=v2"
+      live-media-relay:
+        enabled: false
+        max-sessions: 10
+        disable-private-remote-ips: false
+        public-ip: "198.51.100.7"
+        udp-port-min: 40000
+        udp-port-max: 40100
+        ice-servers:
+          - urls: ["turns:relay.v8.example:5349"]
+            username: "v8-turn-user"
+            credential: "v8-turn-secret"
+    antigravity:
+      antigravity-credits: false
+      signature-cache-enabled: true
+      signature-bypass-strict: false
+      tos-pause-window: "12h"
+      connection-pool:
+        enabled: false
+        idle-conn-timeout: "45s"
+        max-idle-conns-per-host: 32
+      sensitive-words:
+        - "v8-word"
+      sensitive-words-replace:
+        "secret": "masked"
+      sensitive-patterns-replace:
+        - pattern: "ag-[0-9]+"
+          replacement: "ag-x"
+    devin:
+      sensitive-words:
+        - "v8-devin"
+      sensitive-words-replace:
+        "internal": "public"
+      sensitive-patterns-replace:
+        - pattern: "dv-[a-z]+"
+          replacement: "dv-x"
+credentials:
+  concurrency:
+    lifecycle-config-revision: "v8-src-rev"
+    observation-barrier-revision: 7
+    default: 8
+  in-flight:
+    max-concurrent-per-credential: 5
+api-keys:
+  gemini:
+    - name: "gem-g1"
+      keys: [{api-key: "v8-gem-1"}]
+  interactions:
+    - name: "int-g1"
+      keys: [{api-key: "v8-int-1"}]
+  vertex:
+    - name: "vtx-g1"
+      keys: [{api-key: "v8-vtx-1"}]
+  codex:
+    - name: "cdx-g1"
+      keys: [{api-key: "v8-cdx-1"}]
+  claude:
+    - name: "cld-g1"
+      keys: [{api-key: "v8-cld-1"}]
+  xai:
+    - name: "xai-g1"
+      keys: [{api-key: "v8-xai-1"}]
+  meta:
+    - name: "met-g1"
+      keys: [{api-key: "v8-met-1"}]
+  openai-compatibility:
+    - name: "oai-g1"
+      base-url: "https://v8-oai.example/v1"
+      keys: [{api-key: "v8-oai-1"}]
+`
+
+func assertFullBusinessUniverseMapped(t *testing.T, source *cpaManagedSource) {
+	t.Helper()
+	if len(source.manual) != 0 {
+		t.Fatalf("expected 0 manual items for pure business config, got %+v", source.manual)
+	}
+	for _, leaf := range cpa.ConfigLeafPaths() {
+		if _, presence := lookupDocumentPath(source.document, leaf); presence != documentPresent {
+			t.Fatalf("leaf %q missing from migrated document (presence=%v)", leaf, presence)
+		}
+	}
+	for _, familyID := range cpa.ConfigRuleFamilyIDs() {
+		entry, ok := cpa.LookupConfigRuleFamily(familyID)
+		if !ok {
+			t.Fatalf("LookupConfigRuleFamily(%q) failed", familyID)
+		}
+		if _, presence := lookupDocumentPath(source.document, entry.Path); presence != documentPresent {
+			t.Fatalf("rule family %q (%s) missing from migrated document", entry.Path, familyID)
+		}
+	}
+	for _, section := range freshadopt.ProviderSections() {
+		if _, presence := lookupDocumentPath(source.document, section); presence != documentPresent {
+			t.Fatalf("provider/structured section %q missing from migrated document", section)
+		}
+	}
+	for _, forbidden := range []string{
+		"server.server-id", "server.host", "server.port", "server.tls", "server.discovery", "server.kv-store.path",
+		"management", "remote-management", "access.api-keys",
+		"oauth.auth-dir", "auth-dir",
+		"plugins.enabled", "plugins.dir", "plugins.auth-revision",
+		"observability.usage", "observability.pprof",
+		"observability.logs.logging-to-file", "observability.logs.logs-max-total-size-mb", "observability.logs.error-logs-max-files",
+	} {
+		if val, presence := lookupDocumentPath(source.document, forbidden); presence == documentPresent {
+			t.Fatalf("host-exclusive path %q leaked into migrated document: %#v", forbidden, val)
+		}
+	}
+}
+
+func TestCPASourceMigratesFullRichV7ConfigWithZeroFalseManualItems(t *testing.T) {
+	legacyRoot, _ := writeCPAFixture(t, richV7BusinessConfig, nil)
+	source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "8.0.55"})
+	if err != nil {
+		t.Fatalf("openManagedCPASource(richV7BusinessConfig): %v", err)
+	}
+	assertFullBusinessUniverseMapped(t, source)
+
+	if got, _ := lookupDocumentPath(source.document, "oauth.providers.claude.oauth-include-create-api-key"); got != false {
+		t.Fatalf("claude.oauth-include-create-api-key = %#v, want false", got)
+	}
+	if got, _ := lookupDocumentPath(source.document, "server.kv-store.disabled"); got != true {
+		t.Fatalf("server.kv-store.disabled = %#v, want true", got)
+	}
+	if got, _ := lookupDocumentPath(source.document, "server.github-token"); got != "ghp_v7source_token" {
+		t.Fatalf("server.github-token = %#v, want ghp_v7source_token", got)
+	}
+	if got, _ := lookupDocumentPath(source.document, "observability.logs.debug"); got != true {
+		t.Fatalf("observability.logs.debug = %#v, want true", got)
+	}
+	if got, _ := lookupDocumentPath(source.document, "observability.logs.request-log"); got != true {
+		t.Fatalf("observability.logs.request-log = %#v, want true", got)
+	}
+
+	// Check unredacted ICE servers migrated from config.yaml.
+	rawICE, _ := lookupDocumentPath(source.document, "oauth.providers.codex.live-media-relay.ice-servers")
+	iceList, ok := rawICE.([]any)
+	if !ok || len(iceList) != 1 {
+		t.Fatalf("ice-servers = %#v, want 1 item", rawICE)
+	}
+	iceEntry := iceList[0].(map[string]any)
+	if iceEntry["username"] != "turn-user" || iceEntry["credential"] != "turn-secret-unredacted" {
+		t.Fatalf("ice-servers credentials altered: %#v", iceEntry)
+	}
+
+	// Check credentials.concurrency stripped source read-only revisions.
+	rawConc, _ := lookupDocumentPath(source.document, "credentials.concurrency")
+	wantConc := map[string]any{"default": 6, "per-provider": map[string]any{"codex": 4}}
+	if !reflect.DeepEqual(rawConc, wantConc) {
+		t.Fatalf("credentials.concurrency = %#v, want %#v (revisions stripped)", rawConc, wantConc)
+	}
+
+	// Check connection-pool lifted onto group in api-keys.gemini.
+	rawGem, _ := lookupDocumentPath(source.document, "api-keys.gemini")
+	gemGroups := rawGem.([]any)
+	gemGroup := gemGroups[0].(map[string]any)
+	if _, lifted := gemGroup["connection-pool"]; !lifted {
+		t.Fatalf("connection-pool was not lifted to gemini group: %#v", gemGroup)
+	}
+	gemKey := gemGroup["keys"].([]any)[0].(map[string]any)
+	if _, leftover := gemKey["connection-pool"]; leftover {
+		t.Fatalf("connection-pool stayed on gemini key entry: %#v", gemKey)
+	}
+}
+
+func TestCPASourceMigratesFullRichV8ConfigWithZeroFalseManualItems(t *testing.T) {
+	legacyRoot, _ := writeCPAFixture(t, richV8BusinessConfig, nil)
+	source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "8.0.55"})
+	if err != nil {
+		t.Fatalf("openManagedCPASource(richV8BusinessConfig): %v", err)
+	}
+	assertFullBusinessUniverseMapped(t, source)
+
+	rawConc, _ := lookupDocumentPath(source.document, "credentials.concurrency")
+	wantConc := map[string]any{"default": 8}
+	if !reflect.DeepEqual(rawConc, wantConc) {
+		t.Fatalf("credentials.concurrency = %#v, want %#v", rawConc, wantConc)
+	}
+}
+
+func TestCPASourceSharedRootsDoNotMaskUnknownKeysAndHandleAliasesAndNulls(t *testing.T) {
+	config := `config-version: 8
+access:
+  api-keys:
+    - "client-key-1"
+server:
+  server-id: "srv-1"
+  host: "127.0.0.1"
+  port: 8317
+  tls:
+    enable: true
+    cert: "/etc/ssl/cert.pem"
+  discovery:
+    enabled: true
+  kv-store:
+    path: "/tmp/kv.db"
+    disabled: true
+    unknown-kv-flag: true
+  unknown-server-flag: 123
+plugins:
+  enabled: true
+  dir: "/plugins"
+  auth-revision: 4
+  unknown-plugin-flag: "x"
+observability:
+  usage:
+    usage-statistics-enabled: true
+  pprof:
+    enable: true
+  logs:
+    debug: true
+    logging-to-file: true
+    logs-max-total-size-mb: 100
+    error-logs-max-files: 5
+    unknown-log-flag: true
+  unknown-obs-flag: "y"
+routing: {}
+requests:
+  payload: {}
+oauth:
+  model-alias: null
+  providers:
+    codex:
+      optimize-multi-agent-v2: true
+      disable-codex-cloaking: true
+      live-media-relay:
+        allow-private-remote-ips: true
+      unknown-codex-flag: true
+    claude:
+      claude-code:
+        disable-cloaking-model-list: ["haiku"]
+      header-defaults:
+        native-entrypoints: true
+    xai:
+      inject-x-search: true
+credentials:
+  concurrency:
+    lifecycle-config-revision: "only-rev"
+    observation-barrier-revision: 1
+`
+	legacyRoot, _ := writeCPAFixture(t, config, nil)
+	source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "8.0.55"})
+	if err != nil {
+		t.Fatalf("openManagedCPASource: %v", err)
+	}
+
+	// Intermediate v8 aliases & deprecated allow-private-remote-ips mapped cleanly.
+	if got, _ := lookupDocumentPath(source.document, "client.codex.optimize-multi-agent-v2"); got != true {
+		t.Fatalf("client.codex.optimize-multi-agent-v2 = %#v, want true", got)
+	}
+	if got, _ := lookupDocumentPath(source.document, "upstream.codex.disable-codex-cloaking"); got != true {
+		t.Fatalf("upstream.codex.disable-codex-cloaking = %#v, want true", got)
+	}
+	if got, _ := lookupDocumentPath(source.document, "oauth.providers.codex.live-media-relay.disable-private-remote-ips"); got != false {
+		t.Fatalf("disable-private-remote-ips (inverted from allow=true) = %#v, want false", got)
+	}
+	if got, _ := lookupDocumentPath(source.document, "upstream.claude.header-defaults.native-entrypoints"); got != true {
+		t.Fatalf("native-entrypoints = %#v, want true", got)
+	}
+	if got, _ := lookupDocumentPath(source.document, "upstream.xai.inject-x-search"); got != true {
+		t.Fatalf("inject-x-search = %#v, want true", got)
+	}
+	if val, presence := lookupDocumentPath(source.document, "credentials.concurrency"); presence == documentPresent {
+		t.Fatalf("revision-only credentials.concurrency should be omitted, got %#v", val)
+	}
+	if val, presence := lookupDocumentPath(source.document, "oauth.model-alias"); presence == documentPresent {
+		t.Fatalf("null oauth.model-alias should not be written, got %#v", val)
+	}
+
+	// Genuinely unknown sibling keys under shared roots MUST NOT be masked,
+	// while empty known containers, null mapped paths, and host-exclusive keys
+	// must produce 0 manual items.
+	gotManual := make([]string, 0, len(source.manual))
+	for _, item := range source.manual {
+		gotManual = append(gotManual, item.item)
+	}
+	wantManual := []string{
+		"config:oauth.providers.codex.unknown-codex-flag",
+		"config:observability.logs.unknown-log-flag",
+		"config:observability.unknown-obs-flag",
+		"config:plugins.unknown-plugin-flag",
+		"config:server.kv-store.unknown-kv-flag",
+		"config:server.unknown-server-flag",
+	}
+	if !reflect.DeepEqual(gotManual, wantManual) {
+		t.Fatalf("manual items = %v, want %v", gotManual, wantManual)
+	}
+}
+
+func TestCPASourceAllowPrivateRemoteIPsNullSetsDisablePrivateRemoteIPsTrue(t *testing.T) {
+	cases := []struct {
+		name   string
+		config string
+	}{
+		{
+			name: "canonical v8 null",
+			config: `config-version: 8
+access:
+  api-keys:
+    - "client-key-1"
+oauth:
+  providers:
+    codex:
+      live-media-relay:
+        allow-private-remote-ips: null
+`,
+		},
+		{
+			name: "legacy v7 null",
+			config: `api-keys:
+  - "client-key-1"
+codex:
+  live-media-relay:
+    allow-private-remote-ips: null
+`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			legacyRoot, _ := writeCPAFixture(t, tc.config, nil)
+			source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "8.0.55"})
+			if err != nil {
+				t.Fatalf("openManagedCPASource: %v", err)
+			}
+			if len(source.manual) != 0 {
+				t.Fatalf("unexpected manual items: %+v", source.manual)
+			}
+			got, presence := lookupDocumentPath(source.document, "oauth.providers.codex.live-media-relay.disable-private-remote-ips")
+			if presence != documentPresent || got != true {
+				t.Fatalf("disable-private-remote-ips = (%#v, %v), want (true, present)", got, presence)
+			}
+		})
 	}
 }

@@ -1029,32 +1029,26 @@ func TestBoundedManualItemTruncatesOnARuneBoundary(t *testing.T) {
 	}
 }
 
-// TestCPASourceKeepsCodexHeaderDefaultsAsAStatedGap pins the Low finding: the
-// section is not silently dropped and not invented onto a destination path that
-// does not exist, and the operator is told where CPA v8 keeps it.
-func TestCPASourceKeepsCodexHeaderDefaultsAsAStatedGap(t *testing.T) {
-	config := "api-keys:\n  - \"legacy-client-key-1\"\ncodex-header-defaults:\n  user-agent: \"codex_cli_rs/0.20.0\"\n  beta-features: \"responses=v1\"\n"
+// TestCPASourceMigratesCodexHeaderDefaultsToOAuthProvidersCodex verifies both
+// v7 `codex-header-defaults.*` and v8 `oauth.providers.codex.header-defaults.*`
+// map onto `oauth.providers.codex.header-defaults.*` with zero manual items,
+// while an unknown sibling key inside `codex-header-defaults` is still reported.
+func TestCPASourceMigratesCodexHeaderDefaultsToOAuthProvidersCodex(t *testing.T) {
+	config := "api-keys:\n  - \"legacy-client-key-1\"\ncodex-header-defaults:\n  user-agent: \"codex_cli_rs/0.20.0\"\n  beta-features: \"responses=v1\"\n  unexpected-header: \"keep-reported\"\n"
 	legacyRoot, _ := writeCPAFixture(t, config, nil)
 	source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "8.0.55"})
 	if err != nil {
 		t.Fatalf("open a source carrying codex header defaults: %v", err)
 	}
-	for _, item := range source.manual {
-		if item.item != "section:codex-header-defaults" {
-			continue
-		}
-		if item.reason != "destination_surface_missing" {
-			t.Fatalf("codex header defaults reason = %q, want destination_surface_missing", item.reason)
-		}
-		if !strings.Contains(item.instruction, "oauth.providers.codex.header-defaults") {
-			t.Fatalf("the instruction does not name where CPA v8 keeps the field: %q", item.instruction)
-		}
-		if _, mapped := lookupDocumentPath(source.document, "oauth.providers.codex.header-defaults"); mapped == documentPresent {
-			t.Fatal("the import invented a destination leaf for codex header defaults")
-		}
-		return
+	if got, presence := lookupDocumentPath(source.document, "oauth.providers.codex.header-defaults.user-agent"); presence != documentPresent || got != "codex_cli_rs/0.20.0" {
+		t.Fatalf("user-agent = %#v (presence=%v), want codex_cli_rs/0.20.0", got, presence)
 	}
-	t.Fatalf("codex header defaults were dropped; manual items = %+v", source.manual)
+	if got, presence := lookupDocumentPath(source.document, "oauth.providers.codex.header-defaults.beta-features"); presence != documentPresent || got != "responses=v1" {
+		t.Fatalf("beta-features = %#v (presence=%v), want responses=v1", got, presence)
+	}
+	if len(source.manual) != 1 || source.manual[0].item != "config:codex-header-defaults.unexpected-header" || source.manual[0].reason != "not_in_import_scope" {
+		t.Fatalf("manual items = %+v, want only config:codex-header-defaults.unexpected-header (not_in_import_scope)", source.manual)
+	}
 }
 
 func TestImportCPAReplayRestartsOfflineManagedRuntime(t *testing.T) {
@@ -1388,7 +1382,7 @@ func TestImportCPARecoversCrossGenerationWhenRestartedChildIsStarting(t *testing
 
 		// Generation 4: StageDestination + initial :start succeed, child stays in
 		// Starting until caller deadline expires.
-		gen4Ctx, gen4Cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+		gen4Ctx, gen4Cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
 		defer gen4Cancel()
 		_, err := ImportCPA(gen4Ctx, options)
 		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationUnready {
@@ -1409,7 +1403,7 @@ func TestImportCPARecoversCrossGenerationWhenRestartedChildIsStarting(t *testing
 
 		// First retry on Generation 5 mints :start:2, spawns the child into
 		// RuntimeStateStarting, and times out before ready.
-		gen5FirstCtx, gen5FirstCancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+		gen5FirstCtx, gen5FirstCancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
 		defer gen5FirstCancel()
 		_, err = ImportCPA(gen5FirstCtx, options)
 		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationUnready {
@@ -1471,7 +1465,7 @@ func TestImportCPARecoversCrossGenerationWhenRestartedChildIsStarting(t *testing
 		plugins := false
 		options := importOptions(fixture, rt, destination.server.URL, &plugins)
 
-		shortCtx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+		shortCtx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
 		defer cancel()
 		_, _ = ImportCPA(shortCtx, options)
 
@@ -1500,7 +1494,7 @@ func TestImportCPARecoversCrossGenerationWhenRestartedChildIsStarting(t *testing
 		options := importOptions(fixture, rt, destination.server.URL, &plugins)
 		paths := newTargetPaths(fixture.targetRoot)
 
-		shortCtx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+		shortCtx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
 		defer cancel()
 		_, _ = ImportCPA(shortCtx, options)
 

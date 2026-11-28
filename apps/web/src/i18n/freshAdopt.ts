@@ -36,19 +36,25 @@ const en = {
   unsupportedGroup: 'Cannot be migrated',
   confirmInventory: 'I reviewed the inventory and want to copy it to this CPA.',
   confirmAndMigrate: 'Confirm and migrate',
+  platformManagedGroup: 'Platform-managed (no action needed)',
+  platformManagedHelp:
+    'Listener address, management secret, auth and plugin directories, and usage or file-log bindings are configured automatically by the managed runtime.',
   inventoryCountsBanner:
-    'Detected {migrate} migratable source items · {manual} config categories stay under target control.',
+    'Detected {migrate} migratable source items · {manual} category(ies) need manual review.',
+  inventoryCountsBannerClean:
+    'Detected {migrate} migratable source items · No manual configuration required.',
   credentialItemTitle: 'Credential file #{n}',
   migrationTitle: 'Migration',
   migrationHelp:
     'The destination is committed. The copy continues in the background and this page polls its recorded progress.',
   waiting: 'Reading the migration record…',
   progress: '{settled} of {planned} items settled',
+  progressBreakdown: '{migrated} migrated · {absent} unset in source (skipped)',
   migratedGroup: 'Migrated',
   manualBadge: 'Needs manual work',
   failedGroup: 'Failed',
   retryableBadge: 'Retryable',
-  absentBadge: 'Not set at the source',
+  absentBadge: 'Unset in source (skipped)',
   resumeTitle: 'Resume the migration',
   resumeHelp:
     'A run that stops can continue from the items it already recorded. The source key is not kept in this browser, so enter it again.',
@@ -119,6 +125,12 @@ const en = {
     'Set this gateway setting on the destination CPA’s gateway configuration page.',
   guidanceConfigFamily:
     'Replace this payload rule list on the destination CPA’s gateway configuration page.',
+  guidanceUnknownConfig:
+    'Review the source config.yaml for unrecognized settings outside the migrated scope and reconfigure any needed settings on the destination CPA.',
+  guidanceUnknownArchiveIncomplete:
+    'The source config.yaml could not be completely scanned for archived settings; review the source config.yaml and reconfigure any needed settings on the destination CPA.',
+  guidanceUnknownArchiveCandidates:
+    'The source config.yaml contains archived or commented-out entries that may have been omitted; review the source config.yaml and reconfigure any needed settings on the destination CPA.',
   guidanceProviderSection:
     'Copy this provider section into the destination CPA’s configuration, including its provider keys.',
   guidanceFallback: 'Review this item on the destination CPA.',
@@ -154,17 +166,22 @@ const zh: typeof en = {
   unsupportedGroup: '无法迁移',
   confirmInventory: '我已确认清单，并同意复制到本 CPA。',
   confirmAndMigrate: '确认并开始迁移',
-  inventoryCountsBanner: '已探测到源端 {migrate} 项可自动迁移数据 · {manual} 类配置保留为目标侧独立管理',
+  platformManagedGroup: '平台自动托管项（无需操作）',
+  platformManagedHelp:
+    '监听地址、管理密钥、认证与插件目录以及用量和文件日志绑定均由受管运行时自动配置，无需手动录入。',
+  inventoryCountsBanner: '已探测到源端 {migrate} 项可自动迁移数据 · {manual} 类配置需手动核对',
+  inventoryCountsBannerClean: '已探测到源端 {migrate} 项可自动迁移数据 · 无需手动补录配置',
   credentialItemTitle: '凭证文件 #{n}',
   migrationTitle: '正在迁移',
   migrationHelp: '目标已提交。复制在后台继续，本页会轮询已记录的进度。',
   waiting: '正在读取迁移记录…',
   progress: '已处理 {settled} / {planned} 项',
+  progressBreakdown: '已迁移 {migrated} 项 · 源端未配置跳过 {absent} 项',
   migratedGroup: '已迁移',
   manualBadge: '需要手动处理',
   failedGroup: '失败',
   retryableBadge: '可重试',
-  absentBadge: '源中未设置',
+  absentBadge: '源端未配置（已跳过）',
   resumeTitle: '继续迁移',
   resumeHelp: '中断的迁移会从已记录的条目继续。源密钥不会保存在浏览器中，请重新输入。',
   resumeKeyNotice: '请重新输入源地址与同一个管理密钥。插件选项已随本次操作记录，不能再更改。',
@@ -214,6 +231,12 @@ const zh: typeof en = {
     '有 {count} 个凭证文件放不进迁移记录，留在了源端。请手动复制到目标 CPA 的认证目录。',
   guidanceConfigLeaf: '请在目标 CPA 的网关配置页面设置该配置项。',
   guidanceConfigFamily: '请在目标 CPA 的网关配置页面替换该载荷规则列表。',
+  guidanceUnknownConfig:
+    '请检查源端 config.yaml 中迁移范围之外的未识别配置，并在目标 CPA 中按需重新配置。',
+  guidanceUnknownArchiveIncomplete:
+    '未能完整扫描源端 config.yaml 中的已归档配置；请检查源端 config.yaml，并在目标 CPA 中按需重新配置。',
+  guidanceUnknownArchiveCandidates:
+    '源端 config.yaml 含有可能被省略的已归档或注释配置；请检查源端 config.yaml，并在目标 CPA 中按需重新配置。',
   guidanceProviderSection: '请把该提供商配置段（含其提供商密钥）复制到目标 CPA 的配置中。',
   guidanceFallback: '请在目标 CPA 上检查该项。',
   pluginConflict: '本次操作记录的插件选项不同。请刷新页面并按已记录的选项继续。',
@@ -247,16 +270,21 @@ const tw: typeof en = {
   confirmInventory: '我已確認清單，並同意複製到本 CPA。',
   confirmAndMigrate: '確認並開始遷移',
   migrationTitle: '正在遷移',
-  inventoryCountsBanner: '已偵測到來源端 {migrate} 項可自動遷移資料 · {manual} 類設定保留為目標側獨立管理',
+  platformManagedGroup: '平台自動託管項（無需操作）',
+  platformManagedHelp:
+    '監聽位址、管理金鑰、認證與外掛目錄以及用量和檔案日誌綁定皆由受管執行環境自動設定，無需手動輸入。',
+  inventoryCountsBanner: '已偵測到來源端 {migrate} 項可自動遷移資料 · {manual} 類設定需手動核對',
+  inventoryCountsBannerClean: '已偵測到來源端 {migrate} 項可自動遷移資料 · 無需手動補錄設定',
   credentialItemTitle: '憑證檔案 #{n}',
   migrationHelp: '目標已提交。複製會在背景繼續，本頁會輪詢已記錄的進度。',
   waiting: '正在讀取遷移記錄…',
   progress: '已處理 {settled} / {planned} 項',
+  progressBreakdown: '已遷移 {migrated} 項 · 來源端未設定略過 {absent} 項',
   migratedGroup: '已遷移',
   manualBadge: '需要手動處理',
   failedGroup: '失敗',
   retryableBadge: '可重試',
-  absentBadge: '來源未設定',
+  absentBadge: '來源端未設定（已略過）',
   resumeTitle: '繼續遷移',
   resumeHelp: '中斷的遷移會從已記錄的項目繼續。來源金鑰不會保存在瀏覽器中，請重新輸入。',
   resumeKeyNotice: '請重新輸入來源位址與同一個管理金鑰。外掛選項已隨本次操作記錄，不能再變更。',
@@ -306,6 +334,12 @@ const tw: typeof en = {
     '有 {count} 個憑證檔案放不進遷移記錄，留在來源端。請手動複製到目標 CPA 的認證目錄。',
   guidanceConfigLeaf: '請在目標 CPA 的閘道設定頁面設定該項目。',
   guidanceConfigFamily: '請在目標 CPA 的閘道設定頁面取代該載荷規則清單。',
+  guidanceUnknownConfig:
+    '請檢查來源端 config.yaml 中遷移範圍之外的未識別設定，並在目標 CPA 中依需要重新設定。',
+  guidanceUnknownArchiveIncomplete:
+    '未能完整掃描來源端 config.yaml 中的已封存設定；請檢查來源端 config.yaml，並在目標 CPA 中依需要重新設定。',
+  guidanceUnknownArchiveCandidates:
+    '來源端 config.yaml 含有可能被省略的已封存或註解設定；請檢查來源端 config.yaml，並在目標 CPA 中依需要重新設定。',
   guidanceProviderSection: '請把該供應商設定區段（含其供應商金鑰）複製到目標 CPA 的設定中。',
   guidanceFallback: '請在目標 CPA 上檢查該項目。',
   pluginConflict: '本次操作記錄的外掛選項不同。請重新整理頁面並依已記錄的選項繼續。',
@@ -346,18 +380,24 @@ const ru: typeof en = {
   confirmInventory: 'Я проверил состав и хочу скопировать его в этот CPA.',
   confirmAndMigrate: 'Подтвердить и перенести',
   migrationTitle: 'Перенос',
+  platformManagedGroup: 'Управляется платформой (действий не требуется)',
+  platformManagedHelp:
+    'Адрес прослушивания, ключ управления, каталоги аутентификации и плагинов, а также привязки статистики и файловых журналов настраиваются управляемой средой автоматически.',
   inventoryCountsBanner:
-    'Обнаружено элементов для автопереноса: {migrate} · категорий под управлением цели: {manual}',
+    'Обнаружено элементов для автопереноса: {migrate} · категорий для ручной проверки: {manual}',
+  inventoryCountsBannerClean:
+    'Обнаружено элементов для автопереноса: {migrate} · ручная настройка не требуется',
   credentialItemTitle: 'Файл учётных данных #{n}',
   migrationHelp:
     'Целевой CPA зафиксирован. Копирование идёт в фоне, а страница опрашивает сохранённый прогресс.',
   waiting: 'Чтение записи о переносе…',
   progress: 'Обработано {settled} из {planned}',
+  progressBreakdown: 'Перенесено: {migrated} · не задано в источнике (пропущено): {absent}',
   migratedGroup: 'Перенесено',
   manualBadge: 'Требует ручной работы',
   failedGroup: 'Ошибки',
   retryableBadge: 'Можно повторить',
-  absentBadge: 'Нет в источнике',
+  absentBadge: 'Не задано в источнике (пропущено)',
   resumeTitle: 'Продолжить перенос',
   resumeHelp:
     'Прерванный перенос продолжается с уже записанных элементов. Ключ источника не хранится в браузере, поэтому введите его снова.',
@@ -417,6 +457,12 @@ const ru: typeof en = {
   guidanceConfigLeaf: 'Задайте эту настройку шлюза на странице конфигурации шлюза целевого CPA.',
   guidanceConfigFamily:
     'Замените этот список правил нагрузки на странице конфигурации шлюза целевого CPA.',
+  guidanceUnknownConfig:
+    'Проверьте config.yaml источника на наличие нераспознанных настроек вне области переноса и при необходимости задайте их на целевом CPA.',
+  guidanceUnknownArchiveIncomplete:
+    'Не удалось полностью просканировать config.yaml источника на наличие архивных настроек; проверьте config.yaml источника и при необходимости задайте нужные настройки на целевом CPA.',
+  guidanceUnknownArchiveCandidates:
+    'Файл config.yaml источника содержит архивные или закомментированные записи, которые могли быть пропущены; проверьте config.yaml источника и при необходимости задайте нужные настройки на целевом CPA.',
   guidanceProviderSection:
     'Скопируйте этот раздел провайдера, включая его ключи провайдера, в конфигурацию целевого CPA.',
   guidanceFallback: 'Проверьте этот элемент на целевом CPA.',
@@ -513,6 +559,10 @@ const enReasons: Record<string, string> = {
   adoption_inventory_too_large: 'The source holds more items than one run can record.',
   reauthenticate_after_adoption: 'Re-authenticate this provider on the destination.',
   reconfigure_after_adoption: 'Reconfigure this resource on the destination.',
+  archive_scan_incomplete:
+    'The source config.yaml could not be scanned completely for archived settings.',
+  archived_or_commented_settings:
+    'The source config.yaml contains archived or commented-out settings that may have been omitted.',
 };
 const zhReasons: Record<string, string> = {
   runtime_only_credential: '该凭证只存在于源进程中，没有对应文件。请在目标重新认证。',
@@ -533,6 +583,8 @@ const zhReasons: Record<string, string> = {
   adoption_inventory_too_large: '源条目超过单次运行可记录的上限。',
   reauthenticate_after_adoption: '请在目标重新认证该提供商。',
   reconfigure_after_adoption: '请在目标重新配置该资源。',
+  archive_scan_incomplete: '无法完整扫描源端 config.yaml 中的已归档配置。',
+  archived_or_commented_settings: '源端 config.yaml 含有已归档或被注释掉的配置，可能未被自动迁移。',
 };
 const twReasons: Record<string, string> = {
   runtime_only_credential: '該憑證只存在於來源程序，沒有對應檔案。請在目標重新認證。',
@@ -553,6 +605,8 @@ const twReasons: Record<string, string> = {
   adoption_inventory_too_large: '來源項目超過單次執行可記錄的上限。',
   reauthenticate_after_adoption: '請在目標重新認證該供應商。',
   reconfigure_after_adoption: '請在目標重新設定該資源。',
+  archive_scan_incomplete: '無法完整掃描來源端 config.yaml 中的已封存設定。',
+  archived_or_commented_settings: '來源端 config.yaml 含有已封存或被註解掉的設定，可能未被自動遷移。',
 };
 const ruReasons: Record<string, string> = {
   runtime_only_credential:
@@ -574,6 +628,10 @@ const ruReasons: Record<string, string> = {
   adoption_inventory_too_large: 'В источнике больше элементов, чем может записать один запуск.',
   reauthenticate_after_adoption: 'Повторно авторизуйте этого провайдера на целевом CPA.',
   reconfigure_after_adoption: 'Настройте этот ресурс на целевом CPA.',
+  archive_scan_incomplete:
+    'Не удалось полностью просканировать config.yaml источника на наличие архивных настроек.',
+  archived_or_commented_settings:
+    'Файл config.yaml источника содержит архивные или закомментированные настройки, которые могли быть пропущены.',
 };
 
 // Strategy blockers. `adoption_source_read_unavailable` also covers a v7 or
@@ -815,12 +873,25 @@ const reasonGuidanceKeys: Record<string, keyof typeof en> = {
   adoption_inventory_too_large: 'guidanceCredentialInventoryExcess',
 };
 
+const unknownReasonGuidanceKeys: Record<string, keyof typeof en> = {
+  archive_scan_incomplete: 'guidanceUnknownArchiveIncomplete',
+  archived_or_commented_settings: 'guidanceUnknownArchiveCandidates',
+};
+
 /** adoptGuidanceText is the operator's next step for one recorded item. */
-export const adoptGuidanceText = (kind: string, reason = '', count = 0): string => {
+export const adoptGuidanceText = (
+  kind: string,
+  reason = '',
+  count = 0,
+  item = ''
+): string => {
+  if (item === 'family:unknown-config') {
+    const unknownKey = unknownReasonGuidanceKeys[reason] ?? 'guidanceUnknownConfig';
+    return adoptText(unknownKey, { count });
+  }
   const key = (kind === 'credential' && reasonGuidanceKeys[reason]) || guidanceKeys[kind];
   return key ? adoptText(key, { count }) : copy[locale()].guidanceFallback;
 };
-
 /** adoptBlockerText explains one strategy refusal. */
 export const adoptBlockerText = (code: string | undefined): string =>
   (code && blockers[locale()][code]) || copy[locale()].failure;

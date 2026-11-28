@@ -856,7 +856,7 @@ func TestPersistedAdoptionOperationRechecksApplicability(t *testing.T) {
 		ExpectedArtifactID: record.ArtifactID}
 	service := &Service{options: options, production: true, consumers: consumers}
 	staged, err := service.Execute(t.Context(), operation(), request)
-	if err != nil || staged.Checkpoint.Stage != "staged" || sourceCalls.Load() != 1 || len(runtime.stages) != 0 || len(runtime.starts) != 0 || !staged.GatewayPending {
+	if err != nil || staged.Checkpoint.Stage != "staged" || sourceCalls.Load() != 2 || len(runtime.stages) != 0 || len(runtime.starts) != 0 || !staged.GatewayPending {
 		t.Fatalf("stage: %+v %v source=%d", staged, err, sourceCalls.Load())
 	}
 	op := operation()
@@ -879,7 +879,7 @@ func TestPersistedAdoptionOperationRechecksApplicability(t *testing.T) {
 	result, err := restarted.Execute(t.Context(), op, request)
 	var blocker *Blocker
 	if !errors.As(err, &blocker) || blocker.Code != "adoption_source_qualification_required" || result.Checkpoint.Strategy != "" ||
-		sourceCalls.Load() != 1 || len(runtime.stages) != 0 || len(runtime.starts) != 0 || !result.GatewayPending {
+		sourceCalls.Load() != 2 || len(runtime.stages) != 0 || len(runtime.starts) != 0 || !result.GatewayPending {
 		t.Fatalf("persisted scope bypassed recheck: result=%+v err=%v source=%d", result, err, sourceCalls.Load())
 	}
 }
@@ -892,6 +892,9 @@ func newScopeTestServer(t *testing.T, calls *atomic.Int32) *httptest.Server {
 		switch r.URL.Path {
 		case "/v8/management/config":
 			_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"auth"},"access":{"api-keys":["source-client"]}}`))
+		case "/v8/management/config.yaml":
+			w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+			_, _ = w.Write([]byte("config-version: 8\nserver:\n  port: 8317\noauth:\n  auth-dir: auth\naccess:\n  api-keys:\n    - source-client\n"))
 		case "/v0/management/config":
 			w.Header().Set("X-CPA-VERSION", "8.0.55")
 			_, _ = w.Write([]byte(`{"tls":{"enable":false},"api-keys":["source-client"]}`))

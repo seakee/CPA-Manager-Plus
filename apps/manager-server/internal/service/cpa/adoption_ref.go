@@ -1,13 +1,16 @@
 package cpa
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"slices"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"gopkg.in/yaml.v3"
 )
 
 // This file is the single adoption classification of the product: the reference
@@ -159,42 +162,62 @@ var adoptionProviderSectionRefs = func() map[string]bootstrap.ResourceRef {
 	return refs
 }()
 
-// adoptionUncopiedSourceKeys are keys of the accepted CPA v8.0.13 configuration
-// document that sit under a named reader root and that no copyable item carries:
-// not a gateway leaf, not a rule family, not a provider section. They are in the
-// universe as representatives so that their root's set states them as
-// configuration nothing copies, instead of the reader reporting a root whose
-// every key is either copied or forgotten.
-//
-// A root with a whole-root fallback does not need such a list: its fallback
-// already tells the operator to redo the whole block (`server`, `management`,
-// `plugins`, `observability`, `access`, `providers`). The keys below are under
-// `oauth`, which carries copyable provider sections, so without them the record
-// would report `oauth` as fully accounted for while these two keys vanished.
-//
-// Verified against CPA v8.0.13 (tag d7914af):
-//
-//	internal/config/config_v8.go:84    auth-auto-refresh-workers→oauth.auth-auto-refresh-workers
-//	internal/config/config.go:84       AuthAutoRefreshWorkers `yaml:"auth-auto-refresh-workers"`
-//	internal/config/config_v8.go:86    ws-auth→oauth.providers.aistudio.ws-auth
-//	internal/config/config_v8.go:93-101 codex→oauth.providers.codex,
-//	                                   antigravity→oauth.providers.antigravity,
-//	                                   devin→oauth.providers.devin
-//
-// `oauth.providers` is one key for the whole provider runtime block: its canonical
-// children (codex header defaults and live media relay, antigravity, devin,
-// aistudio) are not gateway leaves, not rule families and not copyable sections,
-// so nothing copies them. The `oauth.providers.*` spellings that do have a
-// canonical home are the aliases `internal/config/config_v8.go:28-46` projects
-// to `client.codex.*` and `upstream.*`, and those are copied there, under the
-// gateway table's own leaves.
-//
-// `oauth.auth-dir` is deliberately absent: it is the directory the credentials are
-// discovered in, so `credential:<name>` — `cpa-auth-files` — is what carries it.
-var adoptionUncopiedSourceKeys = []string{
-	"oauth.auth-auto-refresh-workers",
-	"oauth.providers",
+// adoptionStructuredConfigSections lists structured whole-PUT CPA v8 business
+// configuration sections outside api-keys/oauth maps. Each section is gated
+// under AdoptionRefConfigRouting (`cpa-config-routing`).
+var adoptionStructuredConfigSections = []string{
+	"oauth.providers.codex.live-media-relay.ice-servers",
+	"credentials.concurrency",
+	"credentials.in-flight",
+	"plugins.store-sources",
+	"plugins.store-auth",
+	"plugins.configs",
 }
+
+// StructuredConfigAdoptionSections returns the structured whole-PUT CPA v8
+// business configuration sections in stable order.
+func StructuredConfigAdoptionSections() []string {
+	return slices.Clone(adoptionStructuredConfigSections)
+}
+
+var adoptionStructuredSectionRefs = func() map[string]bootstrap.ResourceRef {
+	refs := make(map[string]bootstrap.ResourceRef, len(adoptionStructuredConfigSections))
+	for _, section := range adoptionStructuredConfigSections {
+		refs[section] = bootstrap.AdoptionRefConfigRouting
+	}
+	return refs
+}()
+
+// adoptionHostManagedSourceKeys maps host-exclusive configuration paths that
+// share a named root (`server`, `plugins`, `observability`) with migrated
+// business keys back to their platform-managed ResourceRef. They are never copied;
+// keeping them in the universe ensures Discovery emits the root's platform
+// reference alongside `cpa-config-routing`.
+var adoptionHostManagedSourceKeys = map[string]bootstrap.ResourceRef{
+	"server.server-id":                          bootstrap.AdoptionRefConfigServer,
+	"server.host":                               bootstrap.AdoptionRefConfigServer,
+	"server.port":                               bootstrap.AdoptionRefConfigServer,
+	"server.tls":                                bootstrap.AdoptionRefConfigServer,
+	"server.discovery":                          bootstrap.AdoptionRefConfigServer,
+	"server.kv-store.path":                      bootstrap.AdoptionRefConfigServer,
+	"plugins.enabled":                           bootstrap.AdoptionRefConfigPlugins,
+	"plugins.dir":                               bootstrap.AdoptionRefConfigPlugins,
+	"plugins.auth-revision":                     bootstrap.AdoptionRefConfigPlugins,
+	"observability.usage":                       bootstrap.AdoptionRefConfigObservability,
+	"observability.pprof":                       bootstrap.AdoptionRefConfigObservability,
+	"observability.logs.logging-to-file":        bootstrap.AdoptionRefConfigObservability,
+	"observability.logs.logs-max-total-size-mb": bootstrap.AdoptionRefConfigObservability,
+	"observability.logs.error-logs-max-files":   bootstrap.AdoptionRefConfigObservability,
+}
+
+var adoptionHostManagedSourceKeyList = func() []string {
+	keys := make([]string, 0, len(adoptionHostManagedSourceKeys))
+	for key := range adoptionHostManagedSourceKeys {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
+}()
 
 // adoptionFamilyPaths is the set of payload rule family paths. A family is a
 // configuration path like any other (`requests.payload.default`), so the same
@@ -227,6 +250,9 @@ func AdoptionItemRef(item string) bootstrap.ResourceRef {
 	if ref, ok := adoptionProviderSectionRefs[item]; ok {
 		return ref
 	}
+	if ref, ok := adoptionStructuredSectionRefs[item]; ok {
+		return ref
+	}
 	if _, ok := LookupConfigLeaf(item); ok {
 		return bootstrap.AdoptionRefConfigRouting
 	}
@@ -238,23 +264,27 @@ func AdoptionItemRef(item string) bootstrap.ResourceRef {
 		// path, so both spellings classify.
 		return bootstrap.AdoptionRefConfigRouting
 	}
+	if ref, ok := adoptionHostManagedSourceKeys[item]; ok {
+		return ref
+	}
 	return bootstrap.AdoptionRefConfigUnknown
 }
 
 // AdoptionItemUniverse returns every item the adoption can enumerate: each
-// gateway leaf, each payload rule family path, each copyable provider section,
-// and one representative of each item class that has no enumerable path
-// (credentials and keys the reader did not name).
+// gateway leaf, each payload rule family path, each copyable provider and
+// structured section, host-managed keys under shared roots, and one
+// representative of each item class that has no enumerable path.
 //
 // The executor walks the same three tables and records items of the same two
 // classes; the invariant tests and the pin walk this, so a widened table is
 // covered without a second inventory.
 func AdoptionItemUniverse() []string {
-	items := make([]string, 0, len(ConfigLeafPaths())+len(ConfigRuleFamilyPaths())+len(adoptionProviderSections)+len(adoptionUncopiedSourceKeys)+2)
+	items := make([]string, 0, len(ConfigLeafPaths())+len(ConfigRuleFamilyPaths())+len(adoptionProviderSections)+len(adoptionStructuredConfigSections)+len(adoptionHostManagedSourceKeyList)+2)
 	items = append(items, ConfigLeafPaths()...)
 	items = append(items, ConfigRuleFamilyPaths()...)
 	items = append(items, adoptionProviderSections...)
-	items = append(items, adoptionUncopiedSourceKeys...)
+	items = append(items, adoptionStructuredConfigSections...)
+	items = append(items, adoptionHostManagedSourceKeyList...)
 	items = append(items, CredentialItemClass, OffTableConfigItemClass)
 	return items
 }
@@ -329,4 +359,407 @@ func AdoptionUniverseDigest(items ...string) string {
 		_, _ = hash.Write([]byte("\n"))
 	}
 	return hex.EncodeToString(hash.Sum(nil))
+}
+
+type v8ConfigSchemaIndex struct {
+	leaves  map[string]bool
+	wholes  map[string]bool
+	parents map[string]bool
+}
+
+var knownV8ConfigSchema = sync.OnceValue(func() v8ConfigSchemaIndex {
+	leaves := make(map[string]bool, len(ConfigLeafPaths()))
+	for _, path := range ConfigLeafPaths() {
+		leaves[path] = true
+	}
+	wholes := map[string]bool{
+		"config-version":  true,
+		"access.api-keys": true,
+		"oauth.auth-dir":  true,
+		"management":      true,
+		"providers":       true,
+		"logging":         true,
+		"usage":           true,
+	}
+	for key := range adoptionHostManagedSourceKeys {
+		wholes[key] = true
+	}
+	for _, path := range ConfigRuleFamilyPaths() {
+		wholes[path] = true
+	}
+	for _, section := range adoptionProviderSections {
+		wholes[section] = true
+	}
+	for _, section := range adoptionStructuredConfigSections {
+		wholes[section] = true
+	}
+	parents := make(map[string]bool)
+	addParents := func(path string) {
+		parts := strings.Split(path, ".")
+		for i := 1; i < len(parts); i++ {
+			parents[strings.Join(parts[:i], ".")] = true
+		}
+	}
+	for path := range leaves {
+		addParents(path)
+	}
+	for path := range wholes {
+		addParents(path)
+	}
+	return v8ConfigSchemaIndex{leaves: leaves, wholes: wholes, parents: parents}
+})
+
+// archivedV8YAMLScanKeyPrefix reserves NUL-prefixed in-memory map keys used to
+// carry YAML archive scan state on a decoded v8 config document. A NUL-prefixed
+// key cannot exist in JSON or YAML config objects, and UnknownV8ConfigPaths skips
+// all keys carrying this prefix at top level.
+const (
+	archivedV8YAMLScanKeyPrefix     = "\x00cpamp_"
+	archivedV8YAMLScanCandidatesKey = "\x00cpamp_archived_unknown_v8_paths"
+	archivedV8YAMLScanIncompleteKey = "\x00cpamp_archived_yaml_scan_incomplete"
+)
+
+// V8UnknownConfigScan separates definite JSON-visible unknown configuration
+// paths from heuristic trailing YAML archive comment candidates and incomplete
+// YAML scan state.
+type V8UnknownConfigScan struct {
+	JSONPaths             []string
+	ArchiveCandidates     []string
+	ArchiveScanIncomplete bool
+}
+
+// HasAny reports whether the source carries definite JSON unknown keys,
+// possible archived/commented YAML unknown candidates, or an incomplete YAML
+// archive scan that must fail closed as a manual review item.
+func (s V8UnknownConfigScan) HasAny() bool {
+	return len(s.JSONPaths) > 0 || len(s.ArchiveCandidates) > 0 || s.ArchiveScanIncomplete
+}
+
+// AttachV8YAMLArchiveScan attaches the YAML archive scan result from
+// GET /v8/management/config.yaml to doc using reserved NUL-prefixed carrier keys
+// so InspectV8UnknownConfig can read both definite JSON unknowns and heuristic/
+// incomplete YAML scan state without polluting UnknownV8ConfigPaths.
+func AttachV8YAMLArchiveScan(doc map[string]any, candidates []string, complete bool) {
+	if doc == nil {
+		return
+	}
+	cleaned := normalizeV8ArchiveCandidates(candidates)
+	if len(cleaned) > 0 {
+		doc[archivedV8YAMLScanCandidatesKey] = cleaned
+	} else {
+		delete(doc, archivedV8YAMLScanCandidatesKey)
+	}
+	if !complete {
+		doc[archivedV8YAMLScanIncompleteKey] = true
+	} else {
+		delete(doc, archivedV8YAMLScanIncompleteKey)
+	}
+}
+
+// InspectV8UnknownConfig returns the combined definite JSON unknown paths and
+// attached YAML archive scan state from doc.
+func InspectV8UnknownConfig(doc map[string]any) V8UnknownConfigScan {
+	if len(doc) == 0 {
+		return V8UnknownConfigScan{}
+	}
+	incomplete, _ := doc[archivedV8YAMLScanIncompleteKey].(bool)
+	return V8UnknownConfigScan{
+		JSONPaths:             UnknownV8ConfigPaths(doc),
+		ArchiveCandidates:     attachedV8YAMLArchiveCandidates(doc),
+		ArchiveScanIncomplete: incomplete,
+	}
+}
+
+func normalizeV8ArchiveCandidates(candidates []string) []string {
+	if len(candidates) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate != "" {
+			out = append(out, candidate)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+func attachedV8YAMLArchiveCandidates(doc map[string]any) []string {
+	if doc == nil {
+		return nil
+	}
+	raw, ok := doc[archivedV8YAMLScanCandidatesKey]
+	if !ok || raw == nil {
+		return nil
+	}
+	switch typed := raw.(type) {
+	case []string:
+		return normalizeV8ArchiveCandidates(typed)
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return normalizeV8ArchiveCandidates(out)
+	default:
+		return nil
+	}
+}
+
+// ScanV8YAMLArchiveCandidates inspects the trailing root.FootComment archive
+// block of GET /v8/management/config.yaml for possible CPA-archived or
+// operator-commented `# <dotted.section>: ...` entries after the last active YAML
+// line of the first YAML document (before `...` or any subsequent `---`).
+//
+// complete is true only when projectedV8YAML is valid UTF-8, non-empty, and its
+// first YAML document decodes cleanly as a mapping node. Heuristic trailing
+// comment matches are returned as candidates rather than exact active key
+// counts, because operator comments in `# path: value` form are syntactically
+// indistinguishable from CPA archive blocks.
+func ScanV8YAMLArchiveCandidates(projectedV8YAML []byte) (candidates []string, complete bool) {
+	if !utf8.Valid(projectedV8YAML) {
+		return nil, false
+	}
+	raw := bytes.TrimPrefix(projectedV8YAML, []byte("\xef\xbb\xbf"))
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil, false
+	}
+	normalized := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	dec := yaml.NewDecoder(strings.NewReader(normalized))
+	var doc yaml.Node
+	if err := dec.Decode(&doc); err != nil || doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 || doc.Content[0] == nil || doc.Content[0].Kind != yaml.MappingNode {
+		return nil, false
+	}
+	lines := strings.Split(normalized, "\n")
+	maxLine := maxYAMLNodeLine(doc.Content[0])
+	firstDocEnd := len(lines)
+	for i, line := range lines {
+		if i+1 <= maxLine {
+			continue
+		}
+		if yamlDocumentMarker(line, "...") || yamlDocumentMarker(line, "---") {
+			firstDocEnd = i
+			break
+		}
+	}
+	firstDocLines := lines[:firstDocEnd]
+	tailStart := len(firstDocLines)
+	for i := len(firstDocLines) - 1; i >= 0; i-- {
+		line := strings.TrimRight(firstDocLines[i], "\r")
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(line, "#") {
+			tailStart = i
+			continue
+		}
+		break
+	}
+	if tailStart >= len(firstDocLines) {
+		return nil, true
+	}
+	trailing := firstDocLines[tailStart:]
+	var found []string
+	var cur []string
+	pendingBlanks := 0
+	startedExplicitKey := false
+	awaitingExplicitColon := false
+	scanIncomplete := false
+	flush := func() {
+		pendingBlanks = 0
+		wasExplicit := startedExplicitKey
+		startedExplicitKey = false
+		awaitingExplicitColon = false
+		if len(cur) == 0 {
+			return
+		}
+		blockText := strings.Join(cur, "\n")
+		cur = nil
+		if section, ok := decodeArchivedYAMLMappingSection(blockText); ok {
+			found = append(found, section)
+		} else if wasExplicit {
+			scanIncomplete = true
+		}
+	}
+	for _, rawLine := range trailing {
+		line := strings.TrimRight(rawLine, "\r")
+		if strings.TrimSpace(line) == "" || !strings.HasPrefix(line, "#") {
+			flush()
+			if scanIncomplete {
+				return nil, false
+			}
+			continue
+		}
+		if isBlankArchiveCommentLine(line) {
+			if len(cur) > 0 {
+				pendingBlanks++
+			}
+			continue
+		}
+		isExplicitValueLine := line == "# :" || strings.HasPrefix(line, "# : ") || strings.HasPrefix(line, "# :\t")
+		if len(cur) > 0 && (isArchiveCommentContinuationLine(line) || (awaitingExplicitColon && !strings.HasPrefix(line, "# ? "))) {
+			for ; pendingBlanks > 0; pendingBlanks-- {
+				cur = append(cur, "")
+			}
+			cur = append(cur, stripArchiveCommentPrefix(line))
+			if isExplicitValueLine {
+				awaitingExplicitColon = false
+			}
+			continue
+		}
+		flush()
+		if scanIncomplete {
+			return nil, false
+		}
+		if !strings.HasPrefix(line, "# ") {
+			continue
+		}
+		bodyLine := line[2:]
+		if strings.HasPrefix(bodyLine, "#") {
+			continue
+		}
+		cur = []string{bodyLine}
+		if strings.HasPrefix(bodyLine, "? ") {
+			startedExplicitKey = true
+			awaitingExplicitColon = true
+		}
+	}
+	flush()
+	if scanIncomplete {
+		return nil, false
+	}
+	if len(found) == 0 {
+		return nil, true
+	}
+	slices.Sort(found)
+	return slices.Compact(found), true
+}
+
+func maxYAMLNodeLine(node *yaml.Node) int {
+	if node == nil {
+		return 0
+	}
+	maxLine := node.Line
+	for _, child := range node.Content {
+		if childLine := maxYAMLNodeLine(child); childLine > maxLine {
+			maxLine = childLine
+		}
+	}
+	return maxLine
+}
+
+func yamlDocumentMarker(line, marker string) bool {
+	line = strings.TrimRight(line, "\r")
+	if !strings.HasPrefix(line, marker) {
+		return false
+	}
+	if len(line) == len(marker) {
+		return true
+	}
+	switch line[len(marker)] {
+	case ' ', '\t':
+		return true
+	default:
+		return false
+	}
+}
+
+func isBlankArchiveCommentLine(line string) bool {
+	return strings.TrimSpace(strings.TrimPrefix(line, "#")) == ""
+}
+
+func isArchiveCommentContinuationLine(line string) bool {
+	if strings.HasPrefix(line, "#  ") || strings.HasPrefix(line, "# \t") || strings.HasPrefix(line, "#\t") {
+		return true
+	}
+	if line == "# -" || strings.HasPrefix(line, "# - ") || strings.HasPrefix(line, "# -\t") {
+		return true
+	}
+	if line == "# :" || strings.HasPrefix(line, "# : ") || strings.HasPrefix(line, "# :\t") {
+		return true
+	}
+	trimmed := strings.TrimSpace(strings.TrimPrefix(line, "#"))
+	return trimmed == "]" || trimmed == "}" || strings.HasPrefix(trimmed, "],") || strings.HasPrefix(trimmed, "},")
+}
+
+func stripArchiveCommentPrefix(line string) string {
+	if strings.HasPrefix(line, "# ") {
+		return line[2:]
+	}
+	return strings.TrimPrefix(line, "#")
+}
+
+func decodeArchivedYAMLMappingSection(blockText string) (string, bool) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(blockText), &doc); err != nil {
+		return "", false
+	}
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) != 1 || doc.Content[0] == nil {
+		return "", false
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode || len(root.Content) != 2 {
+		return "", false
+	}
+	keyNode := root.Content[0]
+	if keyNode == nil || keyNode.Kind != yaml.ScalarNode {
+		return "", false
+	}
+	if keyNode.ShortTag() == "!!null" && keyNode.Style == 0 {
+		return "", false
+	}
+	if keyNode.Value == "" {
+		return "<empty>", true
+	}
+	return keyNode.Value, true
+}
+
+// UnknownV8ConfigPaths returns the sorted dotted paths of definite active
+// unrecognized non-nil configuration entries in a decoded CPA v8 JSON config
+// document (including off-table sibling keys nested under named roots such as
+// server, plugins, oauth, routing, or observability). Reserved in-memory scan
+// carrier keys prefixed with `\x00cpamp_` are ignored.
+func UnknownV8ConfigPaths(doc map[string]any) []string {
+	if len(doc) == 0 {
+		return nil
+	}
+	index := knownV8ConfigSchema()
+	var unknown []string
+	var walk func(prefix string, obj map[string]any)
+	walk = func(prefix string, obj map[string]any) {
+		for key, val := range obj {
+			if prefix == "" && strings.HasPrefix(key, archivedV8YAMLScanKeyPrefix) {
+				continue
+			}
+			path := key
+			if prefix != "" {
+				path = prefix + "." + key
+			}
+			if index.leaves[path] || index.wholes[path] {
+				continue
+			}
+			if index.parents[path] {
+				if val == nil {
+					continue
+				}
+				if child, ok := val.(map[string]any); ok {
+					walk(path, child)
+				} else {
+					unknown = append(unknown, path)
+				}
+				continue
+			}
+			if val != nil {
+				unknown = append(unknown, path)
+			}
+		}
+	}
+	walk("", doc)
+	if len(unknown) == 0 {
+		return nil
+	}
+	slices.Sort(unknown)
+	return slices.Compact(unknown)
 }

@@ -139,27 +139,31 @@ const cpaPresenceAtFirstV7 = "v7.0.0"
 
 // cpaConfigPath is one path this step copies.
 //
-// `legacy` is the v7 spelling; empty means the path exists only in the v8 layout
-// (a v8 old-layout source can carry it, a v7 one cannot). `current` is the v8
-// path the destination accepts. `whole` marks a value copied as a whole (a
-// provider group, a rule family) instead of a single leaf; `grouped` marks the
-// eight `api-keys.*` families, whose v7 list is one flat entry per credential and
-// whose v8 form is one group per entry.
+// `legacy` is the Go Config struct YAML path (v7 spelling, or identical to
+// `current` for native v8 paths that kept their spelling). `aliases` lists
+// intermediate v8 spellings in precedence order when CPA renamed or merged a
+// path more than once (v8ClientPaths / v8SharedPaths / v8SharedStructPaths).
+// `current` is the canonical v8 path the destination accepts. `whole` marks a
+// value copied as a whole (a provider group, a rule family, a structured
+// whole-PUT section, or a KVMap leaf whose keys are user strings); `grouped`
+// marks the eight `api-keys.*` families, whose v7 list is one flat entry per
+// credential and whose v8 form is one group per entry.
 type cpaConfigPath struct {
 	legacy     string
+	aliases    []string
 	current    string
 	introduced string
 	whole      bool
 	grouped    bool
 }
 
-// cpaConfigPaths is the bounded mapping this import applies. Order is the order
+// cpaConfigPaths is the bounded mapping this import applies. It covers every
+// business leaf (cpa.ConfigLeafPaths), every payload rule family
+// (cpa.ConfigRuleFamilyIDs), every provider section, and every structured
+// whole-PUT config section (freshadopt.ProviderSections). Order is the order
 // the copy visits the paths.
 var cpaConfigPaths = []cpaConfigPath{
-	// The eight api-keys.* provider groups. CPA v8 keeps one group per legacy
-	// entry because equal endpoints do not imply equal routing, headers, models
-	// or credential policies (config_v8.go:419-425), so the copy reproduces that
-	// grouping rather than handing the destination a v7-shaped list.
+	// The eight api-keys.* provider groups (whole-PUT, grouped from v7 lists).
 	{legacy: "gemini-api-key", current: "api-keys.gemini", introduced: cpaPresenceAtFirstV7, whole: true, grouped: true},
 	{legacy: "interactions-api-key", current: "api-keys.interactions", introduced: "v7.2.51", whole: true, grouped: true},
 	{legacy: "vertex-api-key", current: "api-keys.vertex", introduced: cpaPresenceAtFirstV7, whole: true, grouped: true},
@@ -169,63 +173,298 @@ var cpaConfigPaths = []cpaConfigPath{
 	{legacy: "meta-api-key", current: "api-keys.meta", introduced: "v7.3.4", whole: true, grouped: true},
 	{legacy: "openai-compatibility", current: "api-keys.openai-compatibility", introduced: cpaPresenceAtFirstV7, whole: true, grouped: true},
 
-	// The oauth maps that are provider state. `oauth.settings` is deliberately
-	// absent: no v7 release has an `oauth-settings` key (checked at every tag), so
-	// a v7 source cannot carry it and mapping it would be an invented entry.
+	// The oauth provider maps (whole-PUT sections).
 	{legacy: "oauth-model-alias", current: "oauth.model-alias", introduced: cpaPresenceAtFirstV7, whole: true},
 	{legacy: "oauth-excluded-models", current: "oauth.excluded-models", introduced: cpaPresenceAtFirstV7, whole: true},
+	{legacy: "oauth-settings", current: "oauth.settings", introduced: "v8.0.13", whole: true},
 	{legacy: "oauth-request-scoped-errors", current: "oauth.request-scoped-errors", introduced: "v7.2.138", whole: true},
 
-	// The five payload rule families, copied as whole values.
+	// Structured whole-PUT sections (freshadopt.ProviderSections).
+	{legacy: "codex.live-media-relay.ice-servers", current: "oauth.providers.codex.live-media-relay.ice-servers", introduced: "v7.2.101", whole: true},
+	{legacy: "credential-concurrency", current: "credentials.concurrency", introduced: "v7.2.97", whole: true},
+	{legacy: "credential-in-flight", current: "credentials.in-flight", introduced: "v7.2.97", whole: true},
+	{legacy: "plugins.store-sources", current: "plugins.store-sources", introduced: "v7.2.2", whole: true},
+	{legacy: "plugins.store-auth", current: "plugins.store-auth", introduced: "v7.2.44", whole: true},
+	{legacy: "plugins.configs", current: "plugins.configs", introduced: "v7.1.47", whole: true},
+
+	// The six payload rule families, copied as whole values.
 	{legacy: "payload.default", current: "requests.payload.default", introduced: cpaPresenceAtFirstV7, whole: true},
 	{legacy: "payload.default-raw", current: "requests.payload.default-raw", introduced: cpaPresenceAtFirstV7, whole: true},
 	{legacy: "payload.override", current: "requests.payload.override", introduced: cpaPresenceAtFirstV7, whole: true},
 	{legacy: "payload.override-raw", current: "requests.payload.override-raw", introduced: cpaPresenceAtFirstV7, whole: true},
+	{legacy: "payload.replace", current: "requests.payload.replace", introduced: "main", whole: true},
 	{legacy: "payload.filter", current: "requests.payload.filter", introduced: cpaPresenceAtFirstV7, whole: true},
 
-	// Gateway leaves. Each one is a path the gateway configuration page reads and
-	// writes against CPA v8 (cpa.ConfigLeafPaths), so each one has a readback.
+	// Routing, quota, models, oauth, requests, multimedia, server, observability leaves.
+	{legacy: "routing.strategy", current: "routing.strategy", introduced: cpaPresenceAtFirstV7},
+	{legacy: "routing.session-affinity", current: "routing.session-affinity", introduced: cpaPresenceAtFirstV7},
+	{legacy: "routing.session-affinity-ttl", current: "routing.session-affinity-ttl", introduced: cpaPresenceAtFirstV7},
+	{legacy: "routing.session-affinity-subagents", current: "routing.session-affinity-subagents", introduced: "v7.2.148"},
+	{legacy: "routing.session-affinity-rebind-on", current: "routing.session-affinity-rebind-on", introduced: "v8.0.51"},
+	{legacy: "force-model-prefix", current: "routing.force-model-prefix", introduced: cpaPresenceAtFirstV7},
 	{legacy: "request-retry", current: "routing.retry.request-retry", introduced: cpaPresenceAtFirstV7},
 	{legacy: "max-retry-credentials", current: "routing.retry.max-retry-credentials", introduced: cpaPresenceAtFirstV7},
 	{legacy: "max-retry-interval", current: "routing.retry.max-retry-interval", introduced: cpaPresenceAtFirstV7},
 	{legacy: "disable-cooling", current: "routing.cooldown.disable-cooling", introduced: cpaPresenceAtFirstV7},
 	{legacy: "save-cooldown-status", current: "routing.cooldown.save-cooldown-status", introduced: "v7.2.19"},
 	{legacy: "transient-error-cooldown-seconds", current: "routing.cooldown.transient-error-cooldown-seconds", introduced: "v7.2.19"},
+
+	{legacy: "quota-exceeded.switch-project", current: "quota-exceeded.switch-project", introduced: cpaPresenceAtFirstV7},
+	{legacy: "quota-exceeded.switch-preview-model", current: "quota-exceeded.switch-preview-model", introduced: cpaPresenceAtFirstV7},
+
+	{legacy: "models.catalog", current: "models.catalog", introduced: "v8.0.51"},
+	{legacy: "models.codex-catalog", current: "models.codex-catalog", introduced: "v8.0.51"},
+	{legacy: "models.devin-catalog", current: "models.devin-catalog", introduced: "v8.0.51"},
+
+	{legacy: "auth-auto-refresh-workers", current: "oauth.auth-auto-refresh-workers", introduced: cpaPresenceAtFirstV7},
+	{legacy: "ws-auth", current: "oauth.providers.aistudio.ws-auth", introduced: cpaPresenceAtFirstV7},
+	{legacy: "claude.oauth-include-create-api-key", current: "oauth.providers.claude.oauth-include-create-api-key", introduced: "main"},
+
 	{legacy: "proxy-url", current: "requests.proxy-url", introduced: cpaPresenceAtFirstV7},
+	{legacy: "tls-handshake-timeout-seconds", current: "requests.tls-handshake-timeout-seconds", introduced: "v8.0.51"},
+	{legacy: "passthrough-headers", current: "requests.passthrough-headers", introduced: cpaPresenceAtFirstV7},
+	{legacy: "nonstream-keepalive-interval", current: "requests.nonstream-keepalive-interval", introduced: cpaPresenceAtFirstV7},
+	{legacy: "streaming.keepalive-seconds", current: "requests.streaming.keepalive-seconds", introduced: cpaPresenceAtFirstV7},
+	{legacy: "streaming.bootstrap-retries", current: "requests.streaming.bootstrap-retries", introduced: cpaPresenceAtFirstV7},
+	{legacy: "streaming.send-keepalive-before-ft", current: "requests.streaming.send-keepalive-before-ft", introduced: "v8.0.51"},
 
-	// The codex provider block. v8 loads `codex.<leaf>` as
-	// `oauth.providers.codex.<leaf>` and then prefers the canonical
-	// `upstream.codex.*` spelling (config_v8.go:23-46), so the canonical path is
-	// what this table writes. `codex.identity-confuse` is absent on purpose: it is
-	// a v7 field v8 drops, reported as a manual item instead.
-	//
-	// `codex-header-defaults` is absent for a different reason, recorded in
-	// cpaUnadoptableSections: v8 still loads it, but the destination gateway table
-	// has no `upstream.codex.header-defaults` leaf, so there is no path to write.
-	// The sibling `claude-header-defaults.*` leaves below do exist in that table,
-	// which is why they are mapped and the codex ones are not.
-	{legacy: "codex.disable-codex-cloaking", current: "upstream.codex.disable-codex-cloaking", introduced: "v7.2.110"},
-	{legacy: "codex.stream-bootstrap-buffering", current: "upstream.codex.stream-bootstrap-buffering", introduced: "v7.2.138"},
-	{legacy: "codex.stream-bootstrap-timeout", current: "upstream.codex.stream-bootstrap-timeout", introduced: "v7.3.3"},
-	{legacy: "codex.orphan-delegation-compatibility", current: "upstream.codex.orphan-delegation-compatibility", introduced: "v7.2.149"},
-	{legacy: "codex.model-level-cooling", current: "upstream.codex.model-level-cooling", introduced: "v7.2.156"},
-	{legacy: "codex.response-steering", current: "upstream.codex.response-steering", introduced: "v7.3.9"},
-	{legacy: "codex.optimize-multi-agent-v2", current: "client.codex.optimize-multi-agent-v2", introduced: "v7.2.98"},
+	{legacy: "disable-image-generation", current: "multimedia.disable-image-generation", introduced: cpaPresenceAtFirstV7},
+	{legacy: "gpt-image-2-base-model", current: "multimedia.gpt-image-2-base-model", introduced: "v7.1.23"},
+	{legacy: "video-result-auth-cache-ttl", current: "multimedia.video-result-auth-cache-ttl", introduced: "v7.2.5"},
 
-	// The claude provider block.
-	{legacy: "claude.model-level-cooling", current: "upstream.claude.model-level-cooling", introduced: "v7.3.7"},
-	{legacy: "disable-claude-cloak-mode", current: "upstream.claude.disable-claude-cloak-mode", introduced: "v7.2.8"},
-	{legacy: "claude-header-defaults.user-agent", current: "upstream.claude.header-defaults.user-agent", introduced: cpaPresenceAtFirstV7},
-	{legacy: "claude-header-defaults.package-version", current: "upstream.claude.header-defaults.package-version", introduced: cpaPresenceAtFirstV7},
-	{legacy: "claude-header-defaults.runtime-version", current: "upstream.claude.header-defaults.runtime-version", introduced: cpaPresenceAtFirstV7},
-	{legacy: "claude-header-defaults.os", current: "upstream.claude.header-defaults.os", introduced: cpaPresenceAtFirstV7},
-	{legacy: "claude-header-defaults.arch", current: "upstream.claude.header-defaults.arch", introduced: cpaPresenceAtFirstV7},
-	{legacy: "claude-header-defaults.timeout", current: "upstream.claude.header-defaults.timeout", introduced: cpaPresenceAtFirstV7},
-	{legacy: "claude-header-defaults.timezone", current: "upstream.claude.header-defaults.timezone", introduced: "v7.2.116"},
-	{legacy: "claude-header-defaults.stabilize-device-profile", current: "upstream.claude.header-defaults.stabilize-device-profile", introduced: cpaPresenceAtFirstV7},
+	{legacy: "max-request-body-bytes", current: "server.max-request-body-bytes", introduced: "v8.0.51"},
+	{legacy: "shutdown-timeout", current: "server.shutdown-timeout", introduced: "main"},
+	{legacy: "commercial-mode", current: "server.commercial-mode", introduced: cpaPresenceAtFirstV7},
+	{legacy: "trusted-proxies", current: "server.trusted-proxies", introduced: "v7.3.20"},
+	{legacy: "github-token", current: "server.github-token", introduced: "v8.0.51"},
+	{legacy: "kv-store.disabled", current: "server.kv-store.disabled", introduced: "v8.0.55"},
+	{legacy: "response-compression.enabled", current: "server.response-compression.enabled", introduced: "v8.0.51"},
+	{legacy: "response-compression.min-bytes", current: "server.response-compression.min-bytes", introduced: "v8.0.51"},
 
-	// The xai provider block.
-	{legacy: "xai.inject-x-search", current: "upstream.xai.inject-x-search", introduced: "v7.2.102"},
+	{legacy: "debug", current: "observability.logs.debug", introduced: cpaPresenceAtFirstV7},
+	{legacy: "request-log", current: "observability.logs.request-log", introduced: cpaPresenceAtFirstV7},
+
+	// Client compatibility leaves.
+	{legacy: "client.codex.enable-apply-patch", current: "client.codex.enable-apply-patch", introduced: "v8.0.13"},
+	{
+		legacy:     "codex.optimize-multi-agent-v2",
+		aliases:    []string{"oauth.providers.codex.optimize-multi-agent-v2", "providers.codex.optimize-multi-agent-v2"},
+		current:    "client.codex.optimize-multi-agent-v2",
+		introduced: "v7.2.98",
+	},
+	{legacy: "client.codex.web-search-result-cache.enabled", current: "client.codex.web-search-result-cache.enabled", introduced: "v8.0.51"},
+	{legacy: "client.codex.web-search-result-cache.ttl", current: "client.codex.web-search-result-cache.ttl", introduced: "v8.0.51"},
+	{legacy: "client.codex.web-search-result-cache.limit", current: "client.codex.web-search-result-cache.limit", introduced: "v8.0.51"},
+	{legacy: "client.claude.show-codex-commentary", current: "client.claude.show-codex-commentary", introduced: "v8.0.51"},
+
+	// Codex upstream & provider leaves. `codex.identity-confuse` is absent on
+	// purpose: it is a v7 field v8 drops, reported as a manual item instead.
+	{
+		legacy:     "codex.response-steering",
+		aliases:    []string{"oauth.providers.codex.response-steering"},
+		current:    "upstream.codex.response-steering",
+		introduced: "v7.3.9",
+	},
+	{
+		legacy:     "codex.disable-codex-cloaking",
+		aliases:    []string{"oauth.providers.codex.disable-codex-cloaking"},
+		current:    "upstream.codex.disable-codex-cloaking",
+		introduced: "v7.2.110",
+	},
+	{
+		legacy:     "codex.stream-bootstrap-buffering",
+		aliases:    []string{"oauth.providers.codex.stream-bootstrap-buffering"},
+		current:    "upstream.codex.stream-bootstrap-buffering",
+		introduced: "v7.2.138",
+	},
+	{
+		legacy:     "codex.stream-bootstrap-timeout",
+		aliases:    []string{"oauth.providers.codex.stream-bootstrap-timeout"},
+		current:    "upstream.codex.stream-bootstrap-timeout",
+		introduced: "v7.3.3",
+	},
+	{
+		legacy:     "codex.orphan-delegation-compatibility",
+		aliases:    []string{"oauth.providers.codex.orphan-delegation-compatibility"},
+		current:    "upstream.codex.orphan-delegation-compatibility",
+		introduced: "v7.2.149",
+	},
+	{
+		legacy:     "codex.model-level-cooling",
+		aliases:    []string{"oauth.providers.codex.model-level-cooling"},
+		current:    "upstream.codex.model-level-cooling",
+		introduced: "v7.2.156",
+	},
+	{
+		legacy:     "codex.upstream-request-compression",
+		aliases:    []string{"oauth.providers.codex.upstream-request-compression"},
+		current:    "upstream.codex.upstream-request-compression",
+		introduced: "v8.0.51",
+	},
+	{
+		legacy:     "codex.upstream-request-compression-min-bytes",
+		aliases:    []string{"oauth.providers.codex.upstream-request-compression-min-bytes"},
+		current:    "upstream.codex.upstream-request-compression-min-bytes",
+		introduced: "v8.0.51",
+	},
+	{
+		legacy:     "codex.websocket-compression",
+		aliases:    []string{"oauth.providers.codex.websocket-compression"},
+		current:    "upstream.codex.websocket-compression",
+		introduced: "v8.0.51",
+	},
+	{legacy: "codex.signin-with-chatgpt-identifier", current: "oauth.providers.codex.signin-with-chatgpt-identifier", introduced: "v8.0.51"},
+	{legacy: "codex-header-defaults.user-agent", current: "oauth.providers.codex.header-defaults.user-agent", introduced: cpaPresenceAtFirstV7},
+	{legacy: "codex-header-defaults.beta-features", current: "oauth.providers.codex.header-defaults.beta-features", introduced: cpaPresenceAtFirstV7},
+	{legacy: "codex.live-media-relay.enabled", current: "oauth.providers.codex.live-media-relay.enabled", introduced: "v7.2.101"},
+	{legacy: "codex.live-media-relay.max-sessions", current: "oauth.providers.codex.live-media-relay.max-sessions", introduced: "v7.2.101"},
+	{legacy: "codex.live-media-relay.disable-private-remote-ips", current: "oauth.providers.codex.live-media-relay.disable-private-remote-ips", introduced: "v7.2.101"},
+	{legacy: "codex.live-media-relay.public-ip", current: "oauth.providers.codex.live-media-relay.public-ip", introduced: "v7.2.101"},
+	{legacy: "codex.live-media-relay.udp-port-min", current: "oauth.providers.codex.live-media-relay.udp-port-min", introduced: "v7.2.101"},
+	{legacy: "codex.live-media-relay.udp-port-max", current: "oauth.providers.codex.live-media-relay.udp-port-max", introduced: "v7.2.101"},
+
+	// Claude upstream leaves.
+	{
+		legacy:     "claude.model-level-cooling",
+		aliases:    []string{"oauth.providers.claude.model-level-cooling", "claude-code.model-level-cooling"},
+		current:    "upstream.claude.model-level-cooling",
+		introduced: "v7.3.7",
+	},
+	{
+		legacy:     "disable-claude-cloak-mode",
+		aliases:    []string{"oauth.providers.claude.disable-claude-cloak-mode", "claude.disable-claude-cloak-mode", "claude-code.disable-claude-cloak-mode"},
+		current:    "upstream.claude.disable-claude-cloak-mode",
+		introduced: "v7.2.8",
+	},
+	{
+		legacy:     "claude-code.disable-cloaking-model-list",
+		aliases:    []string{"oauth.providers.claude.claude-code.disable-cloaking-model-list", "claude.disable-cloaking-model-list"},
+		current:    "upstream.claude.disable-cloaking-model-list",
+		introduced: "v7.2.109",
+	},
+	{
+		legacy:     "claude.tool-search",
+		aliases:    []string{"oauth.providers.claude.tool-search", "claude-code.tool-search"},
+		current:    "upstream.claude.tool-search",
+		introduced: "v8.0.51",
+	},
+	{
+		legacy:     "claude.server-side-fallback",
+		aliases:    []string{"oauth.providers.claude.server-side-fallback", "claude-code.server-side-fallback"},
+		current:    "upstream.claude.server-side-fallback",
+		introduced: "main",
+	},
+	{
+		legacy:     "claude.session-date-pin-days",
+		aliases:    []string{"oauth.providers.claude.session-date-pin-days", "claude-code.session-date-pin-days"},
+		current:    "upstream.claude.session-date-pin-days",
+		introduced: "v8.0.51",
+	},
+	{
+		legacy:     "claude-header-defaults.user-agent",
+		aliases:    []string{"oauth.providers.claude.header-defaults.user-agent"},
+		current:    "upstream.claude.header-defaults.user-agent",
+		introduced: cpaPresenceAtFirstV7,
+	},
+	{
+		legacy:     "claude-header-defaults.package-version",
+		aliases:    []string{"oauth.providers.claude.header-defaults.package-version"},
+		current:    "upstream.claude.header-defaults.package-version",
+		introduced: cpaPresenceAtFirstV7,
+	},
+	{
+		legacy:     "claude-header-defaults.runtime-version",
+		aliases:    []string{"oauth.providers.claude.header-defaults.runtime-version"},
+		current:    "upstream.claude.header-defaults.runtime-version",
+		introduced: cpaPresenceAtFirstV7,
+	},
+	{
+		legacy:     "claude-header-defaults.os",
+		aliases:    []string{"oauth.providers.claude.header-defaults.os"},
+		current:    "upstream.claude.header-defaults.os",
+		introduced: cpaPresenceAtFirstV7,
+	},
+	{
+		legacy:     "claude-header-defaults.arch",
+		aliases:    []string{"oauth.providers.claude.header-defaults.arch"},
+		current:    "upstream.claude.header-defaults.arch",
+		introduced: cpaPresenceAtFirstV7,
+	},
+	{
+		legacy:     "claude-header-defaults.timeout",
+		aliases:    []string{"oauth.providers.claude.header-defaults.timeout"},
+		current:    "upstream.claude.header-defaults.timeout",
+		introduced: cpaPresenceAtFirstV7,
+	},
+	{
+		legacy:     "claude-header-defaults.timezone",
+		aliases:    []string{"oauth.providers.claude.header-defaults.timezone"},
+		current:    "upstream.claude.header-defaults.timezone",
+		introduced: "v7.2.116",
+	},
+	{
+		legacy:     "claude-header-defaults.stabilize-device-profile",
+		aliases:    []string{"oauth.providers.claude.header-defaults.stabilize-device-profile"},
+		current:    "upstream.claude.header-defaults.stabilize-device-profile",
+		introduced: cpaPresenceAtFirstV7,
+	},
+	{
+		legacy:     "claude-header-defaults.inject-diagnostics",
+		aliases:    []string{"oauth.providers.claude.header-defaults.inject-diagnostics"},
+		current:    "upstream.claude.header-defaults.inject-diagnostics",
+		introduced: "v8.0.51",
+	},
+	{
+		legacy:     "claude-header-defaults.client-request-id",
+		aliases:    []string{"oauth.providers.claude.header-defaults.client-request-id"},
+		current:    "upstream.claude.header-defaults.client-request-id",
+		introduced: "v8.0.51",
+	},
+	{
+		legacy:     "claude-header-defaults.native-entrypoints",
+		aliases:    []string{"oauth.providers.claude.header-defaults.native-entrypoints"},
+		current:    "upstream.claude.header-defaults.native-entrypoints",
+		introduced: "v8.0.55",
+	},
+	{
+		legacy:     "claude-header-defaults.anthropic-beta-strip",
+		aliases:    []string{"oauth.providers.claude.header-defaults.anthropic-beta-strip"},
+		current:    "upstream.claude.header-defaults.anthropic-beta-strip",
+		introduced: "v8.0.51",
+	},
+	{
+		legacy:     "claude-header-defaults.anthropic-beta-append",
+		aliases:    []string{"oauth.providers.claude.header-defaults.anthropic-beta-append"},
+		current:    "upstream.claude.header-defaults.anthropic-beta-append",
+		introduced: "v8.0.51",
+	},
+
+	// xAI upstream leaves.
+	{
+		legacy:     "xai.inject-x-search",
+		aliases:    []string{"oauth.providers.xai.inject-x-search"},
+		current:    "upstream.xai.inject-x-search",
+		introduced: "v7.2.102",
+	},
+
+	// Antigravity provider leaves. `sensitive-words-replace` is a KVMap leaf whose
+	// keys are user strings, so `whole: true` prevents inner entries from being
+	// reported as unmapped leaves.
+	{legacy: "quota-exceeded.antigravity-credits", current: "oauth.providers.antigravity.antigravity-credits", introduced: cpaPresenceAtFirstV7},
+	{legacy: "antigravity-signature-cache-enabled", current: "oauth.providers.antigravity.signature-cache-enabled", introduced: cpaPresenceAtFirstV7},
+	{legacy: "antigravity-signature-bypass-strict", current: "oauth.providers.antigravity.signature-bypass-strict", introduced: cpaPresenceAtFirstV7},
+	{legacy: "antigravity.tos-pause-window", current: "oauth.providers.antigravity.tos-pause-window", introduced: "main"},
+	{legacy: "antigravity.connection-pool.enabled", current: "oauth.providers.antigravity.connection-pool.enabled", introduced: "v7.2.155"},
+	{legacy: "antigravity.connection-pool.idle-conn-timeout", current: "oauth.providers.antigravity.connection-pool.idle-conn-timeout", introduced: "v7.2.155"},
+	{legacy: "antigravity.connection-pool.max-idle-conns-per-host", current: "oauth.providers.antigravity.connection-pool.max-idle-conns-per-host", introduced: "v7.2.155"},
+	{legacy: "antigravity.sensitive-words", current: "oauth.providers.antigravity.sensitive-words", introduced: "v7.2.137"},
+	{legacy: "antigravity.sensitive-words-replace", current: "oauth.providers.antigravity.sensitive-words-replace", introduced: "main", whole: true},
+	{legacy: "antigravity.sensitive-patterns-replace", current: "oauth.providers.antigravity.sensitive-patterns-replace", introduced: "main"},
+
+	// Devin provider leaves.
+	{legacy: "devin.sensitive-words", current: "oauth.providers.devin.sensitive-words", introduced: "v7.3.0"},
+	{legacy: "devin.sensitive-words-replace", current: "oauth.providers.devin.sensitive-words-replace", introduced: "main", whole: true},
+	{legacy: "devin.sensitive-patterns-replace", current: "oauth.providers.devin.sensitive-patterns-replace", introduced: "main"},
 }
 
 // cpaRemovedConfigPaths are the v7 spellings this import knows v8 dropped. They
@@ -250,38 +489,58 @@ var cpaRemovedConfigPaths = []struct {
 
 // cpaUnadoptableSections are the v7 sections CPA v8 still loads but this import
 // cannot copy, because the destination's adoptable surface has no leaf for them.
-// Each one is kept as a manual item that names the destination path and says why
-// nothing was written, so the gap is recorded instead of the key disappearing.
-//
-// `codex-header-defaults` is the one such section today. CPA v8 keeps the field
-// — `codex-header-defaults` loads as `oauth.providers.codex.header-defaults`
-// (internal/config/config_v8.go:93, internal/config/config.go:144 at v8.0.13) —
-// but that subtree is provider runtime state the destination's gateway table
-// does not expose, so the adoption executor has no leaf to write and `oauth` is
-// a Manager-owned root (freshadopt.ManagerOwned). There is no
-// `upstream.codex.header-defaults` destination path, and inventing one would
-// write a key CPA never reads.
-var cpaUnadoptableSections = map[string]string{
-	"codex-header-defaults": "CPA v8 keeps codex header defaults (`codex-header-defaults` loads as `oauth.providers.codex.header-defaults`), but this import has no adoptable destination path for them, so they were not copied. Set them in the destination CPA configuration if you still need them.",
-}
+// `codex-header-defaults` now maps to `oauth.providers.codex.header-defaults.*`,
+// so this map is currently empty.
+var cpaUnadoptableSections = map[string]string{}
 
-// cpaExcludedSourceSections are the source keys the destination must keep its
-// own value for. They are neither copied nor reported: the Manager owns the
-// destination's management secret, listener, plugin root, auth directory and
-// client key list, and copying the source's would hand the destination the wrong
-// identity.
+// cpaExcludedSourceSections are top-level sections whose entire namespace belongs
+// exclusively to the destination host/runtime, so nothing inside them is copied
+// or reported. Shared roots (`server`, `plugins`, `observability`, `oauth`,
+// `access`, `kv-store`) are deliberately NOT here: they carry both adoptable
+// keys and host-exclusive keys (listed in cpaHostExclusivePaths), so genuinely
+// unknown sibling keys under those shared roots are never masked.
 var cpaExcludedSourceSections = map[string]bool{
-	"server":            true,
-	"host":              true,
-	"port":              true,
-	"tls":               true,
-	"management":        true,
-	"remote-management": true,
-	"plugins":           true,
-	"auth-dir":          true,
-	cpaConfigVersionKey: true,
+	"host":                                true,
+	"port":                                true,
+	"tls":                                 true,
+	"discovery":                           true,
+	"management":                          true,
+	"remote-management":                   true,
+	"auth-dir":                            true,
+	"pprof":                               true,
+	"usage-statistics-enabled":            true,
+	"redis-usage-queue-retention-seconds": true,
+	"logging-to-file":                     true,
+	"logs-max-total-size-mb":              true,
+	"error-logs-max-files":                true,
+	cpaConfigVersionKey:                   true,
 }
 
+// cpaHostExclusivePaths lists host-managed paths inside shared roots (both v8
+// and v7 spellings). They are neither copied into the destination document nor
+// reported as manual work, while leaving sibling unknown keys under the same
+// shared parent visible to reportUnmappedLeaves.
+var cpaHostExclusivePaths = []struct {
+	path  string
+	whole bool
+}{
+	{path: "server.server-id"},
+	{path: "server.host"},
+	{path: "server.port"},
+	{path: "server.tls", whole: true},
+	{path: "server.discovery", whole: true},
+	{path: "server.kv-store.path"},
+	{path: "kv-store.path"},
+	{path: "plugins.enabled"},
+	{path: "plugins.dir"},
+	{path: "plugins.auth-revision"},
+	{path: "oauth.auth-dir"},
+	{path: "observability.usage", whole: true},
+	{path: "observability.pprof", whole: true},
+	{path: "observability.logs.logging-to-file"},
+	{path: "observability.logs.logs-max-total-size-mb"},
+	{path: "observability.logs.error-logs-max-files"},
+}
 // cpaClientKeyPathV8 is where a v8 CPA keeps its client API key list, and
 // cpaClientKeyPathV7 is where a v7 CPA keeps the same list as one flat entry per
 // key. The two generations disagree about `api-keys`: a v7 file lists the client
@@ -994,8 +1253,13 @@ func configVersionNumber(value any) (int, bool) {
 // mapDocument maps the source onto the v8 document the destination accepts and
 // collects everything it does not map.
 func (s *cpaManagedSource) mapDocument(document map[string]any) error {
-	consumed := map[string]bool{
-		"oauth.auth-dir": true,
+	consumed := map[string]bool{}
+	consumedPrefixes := map[string]bool{}
+	for _, hostPath := range cpaHostExclusivePaths {
+		consumed[hostPath.path] = true
+		if hostPath.whole {
+			consumedPrefixes[hostPath.path] = true
+		}
 	}
 	if configured, found := lookupFirst(document, "oauth.auth-dir", "auth-dir"); found {
 		if raw, ok := configured.(string); ok {
@@ -1003,21 +1267,44 @@ func (s *cpaManagedSource) mapDocument(document map[string]any) error {
 		}
 	}
 	roots := map[string]bool{}
+	knownContainers := map[string]bool{}
+	addKnownPath := func(p string) {
+		if p == "" {
+			return
+		}
+		roots[firstSegment(p)] = true
+		for idx := strings.IndexByte(p, '.'); idx >= 0; {
+			knownContainers[p[:idx]] = true
+			next := strings.IndexByte(p[idx+1:], '.')
+			if next < 0 {
+				break
+			}
+			idx += 1 + next
+		}
+	}
 	for _, path := range cpaConfigPaths {
-		if path.legacy != "" {
-			roots[firstSegment(path.legacy)] = true
+		addKnownPath(path.legacy)
+		addKnownPath(path.current)
+		for _, alias := range path.aliases {
+			addKnownPath(alias)
 		}
-		if path.current != "" {
-			roots[firstSegment(path.current)] = true
-		}
+	}
+	for _, hostPath := range cpaHostExclusivePaths {
+		addKnownPath(hostPath.path)
 	}
 	for _, key := range []string{cpaClientKeyPathV8, cpaClientKeyPathV7} {
-		roots[firstSegment(key)] = true
+		addKnownPath(key)
 	}
+	addKnownPath("oauth.providers.codex.live-media-relay.allow-private-remote-ips")
+	addKnownPath("codex.live-media-relay.allow-private-remote-ips")
 
 	for _, path := range cpaConfigPaths {
-		value, found := s.sourceValue(document, path)
-		if !found {
+		value, presence := s.sourceValue(document, path)
+		if presence == documentMissing {
+			continue
+		}
+		if presence == documentNull {
+			markPathConsumed(consumed, consumedPrefixes, path)
 			continue
 		}
 		if path.grouped {
@@ -1028,28 +1315,33 @@ func (s *cpaManagedSource) mapDocument(document map[string]any) error {
 					reason:      "value_shape_unsupported",
 					instruction: "The source " + path.legacy + " entries are not the list CPA reads. Re-add this provider's keys on the destination Console.",
 				})
+				markPathConsumed(consumed, consumedPrefixes, path)
 				continue
 			}
 			value = grouped
 		}
-		setDocumentPath(s.document, path.current, value)
-		if path.whole {
-			consumed[path.current] = true
-			if path.legacy != "" {
-				consumed[path.legacy] = true
+		if path.current == "credentials.concurrency" {
+			cleaned, keep := stripConcurrencySourceRevisions(value)
+			if !keep {
+				markPathConsumed(consumed, consumedPrefixes, path)
+				continue
 			}
-			continue
+			value = cleaned
 		}
-		consumed[path.legacy] = true
-		consumed[path.current] = true
+		setDocumentPath(s.document, path.current, value)
+		markPathConsumed(consumed, consumedPrefixes, path)
 	}
+
+	// Handle deprecated codex live-media-relay allow-private-remote-ips when
+	// neither canonical nor legacy disable-private-remote-ips was explicitly set.
+	s.applyLiveRelayAllowPrivateRemoteIPs(document, consumed)
 
 	// The client key list is installed by the destination stage and proved by
 	// cpa.VerifyV8Adoption, so the source spelling that carries it is consumed
 	// here: it is copied, just not as configuration. Only that spelling is
 	// consumed — a canonical v8 `api-keys` mapping is the provider groups, and
 	// consuming it wholesale would hide every family the table does not map.
-	keys, clientKeyPath, found := cpaClientKeyList(document)
+	keys, clientKeyPath, found := cpaClientKeyList(document, consumed)
 	if found {
 		consumed[clientKeyPath] = true
 		s.clientKeys = keys
@@ -1059,25 +1351,113 @@ func (s *cpaManagedSource) mapDocument(document map[string]any) error {
 		s.clientKeys = nil
 	}
 
-	s.reportUnmapped(document, roots, consumed)
+	s.reportUnmapped(document, roots, knownContainers, consumed, consumedPrefixes)
 	return nil
 }
 
-// sourceValue reads one table path from the source. The v8 spelling wins when
-// both spellings are present, which is exactly how CPA itself resolves an
-// old-layout file (config_v8.go:241-347).
-func (s *cpaManagedSource) sourceValue(document map[string]any, path cpaConfigPath) (any, bool) {
+func markPathConsumed(consumed, consumedPrefixes map[string]bool, path cpaConfigPath) {
+	mark := func(p string) {
+		if p == "" {
+			return
+		}
+		consumed[p] = true
+		if path.whole {
+			consumedPrefixes[p] = true
+		}
+	}
+	mark(path.current)
+	mark(path.legacy)
+	for _, alias := range path.aliases {
+		mark(alias)
+	}
+}
+
+func stripConcurrencySourceRevisions(raw any) (any, bool) {
+	mapping, ok := raw.(map[string]any)
+	if !ok {
+		return raw, true
+	}
+	clean := make(map[string]any, len(mapping))
+	for key, item := range mapping {
+		if key == "lifecycle-config-revision" || key == "observation-barrier-revision" {
+			continue
+		}
+		clean[key] = item
+	}
+	if len(clean) == 0 {
+		return nil, false
+	}
+	return clean, true
+}
+
+func (s *cpaManagedSource) applyLiveRelayAllowPrivateRemoteIPs(document map[string]any, consumed map[string]bool) {
+	const (
+		canonicalDisable = "oauth.providers.codex.live-media-relay.disable-private-remote-ips"
+		legacyDisable    = "codex.live-media-relay.disable-private-remote-ips"
+		canonicalAllow   = "oauth.providers.codex.live-media-relay.allow-private-remote-ips"
+		legacyAllow      = "codex.live-media-relay.allow-private-remote-ips"
+	)
+	_, canonicalSet := lookupDocumentPath(document, canonicalDisable)
+	_, legacySet := lookupDocumentPath(document, legacyDisable)
+	_, canonicalAllowPresence := lookupDocumentPath(document, canonicalAllow)
+	_, legacyAllowPresence := lookupDocumentPath(document, legacyAllow)
+	if canonicalAllowPresence != documentMissing {
+		consumed[canonicalAllow] = true
+	}
+	if legacyAllowPresence != documentMissing {
+		consumed[legacyAllow] = true
+	}
+	if canonicalSet != documentMissing || legacySet != documentMissing {
+		return
+	}
+	for _, candidate := range []string{canonicalAllow, legacyAllow} {
+		value, presence := lookupDocumentPath(document, candidate)
+		if presence == documentMissing {
+			continue
+		}
+		if presence == documentNull {
+			// Upstream CPA unmarshals allow-private-remote-ips: null as false and
+			// inverts it to disable-private-remote-ips: true.
+			setDocumentPath(s.document, canonicalDisable, true)
+			return
+		}
+		allow, ok := value.(bool)
+		if !ok {
+			s.addManual(cpaManualItem{
+				item:        "config:" + candidate,
+				reason:      "value_shape_unsupported",
+				instruction: "The source " + candidate + " flag is not a boolean. Set disable-private-remote-ips on the destination Console.",
+			})
+			return
+		}
+		setDocumentPath(s.document, canonicalDisable, !allow)
+		return
+	}
+}
+
+// sourceValue reads one table path from the source. The canonical v8 spelling
+// wins by presence (including null) over intermediate aliases, which win over
+// the legacy v7 spelling, matching CPA's flattenV8 precedence (config_v8.go).
+func (s *cpaManagedSource) sourceValue(document map[string]any, path cpaConfigPath) (any, documentPresence) {
 	if path.current != "" {
-		if value, presence := lookupDocumentPath(document, path.current); presence == documentPresent {
-			return value, true
+		if value, presence := lookupDocumentPath(document, path.current); presence != documentMissing {
+			return value, presence
 		}
 	}
-	if path.legacy != "" {
-		if value, presence := lookupDocumentPath(document, path.legacy); presence == documentPresent {
-			return value, true
+	for _, alias := range path.aliases {
+		if alias == "" || alias == path.current {
+			continue
+		}
+		if value, presence := lookupDocumentPath(document, alias); presence != documentMissing {
+			return value, presence
 		}
 	}
-	return nil, false
+	if path.legacy != "" && path.legacy != path.current {
+		if value, presence := lookupDocumentPath(document, path.legacy); presence != documentMissing {
+			return value, presence
+		}
+	}
+	return nil, documentMissing
 }
 
 // cpaClientKeyList resolves the client key list and the path it was read from.
@@ -1087,11 +1467,24 @@ func (s *cpaManagedSource) sourceValue(document map[string]any, path cpaConfigPa
 // is the list: in a v8 document it is the provider-group mapping, and reading a
 // mapping as a string list yields nothing. That distinction is what keeps a
 // correctly written v8 source from being refused as "holds no client API key".
-func cpaClientKeyList(document map[string]any) ([]string, string, bool) {
-	if value, presence := lookupDocumentPath(document, cpaClientKeyPathV8); presence == documentPresent {
+func cpaClientKeyList(document map[string]any, consumed map[string]bool) ([]string, string, bool) {
+	if value, presence := lookupDocumentPath(document, cpaClientKeyPathV8); presence != documentMissing {
+		if legacyVal, legacyPresence := lookupDocumentPath(document, cpaClientKeyPathV7); legacyPresence != documentMissing {
+			if _, isList := legacyVal.([]any); isList || legacyPresence == documentNull {
+				consumed[cpaClientKeyPathV7] = true
+			}
+		}
+		if presence == documentNull {
+			consumed[cpaClientKeyPathV8] = true
+			return nil, "", false
+		}
 		return stringList(value), cpaClientKeyPathV8, true
 	}
-	if value, presence := lookupDocumentPath(document, cpaClientKeyPathV7); presence == documentPresent {
+	if value, presence := lookupDocumentPath(document, cpaClientKeyPathV7); presence != documentMissing {
+		if presence == documentNull {
+			consumed[cpaClientKeyPathV7] = true
+			return nil, "", false
+		}
 		if _, isList := value.([]any); isList {
 			return stringList(value), cpaClientKeyPathV7, true
 		}
@@ -1099,11 +1492,11 @@ func cpaClientKeyList(document map[string]any) ([]string, string, bool) {
 	return nil, "", false
 }
 
-// reportUnmapped turns every source key this step does not copy into a manual
-// item. Nothing is dropped silently: a top-level section the table does not name
-// is reported by name, and a leaf inside a mapped section that the table does not
-// name is reported by its dotted path.
-func (s *cpaManagedSource) reportUnmapped(document map[string]any, roots, consumed map[string]bool) {
+// reportUnmapped puts every top-level section or dotted leaf the copy did not
+// use on the source as a manual item. Nothing is dropped silently: a top-level
+// section the table does not name is reported by name, and a leaf inside a
+// mapped section that the table does not name is reported by its dotted path.
+func (s *cpaManagedSource) reportUnmapped(document map[string]any, roots, knownContainers, consumed, consumedPrefixes map[string]bool) {
 	topLevel := make([]string, 0, len(document))
 	for key := range document {
 		topLevel = append(topLevel, key)
@@ -1117,7 +1510,7 @@ func (s *cpaManagedSource) reportUnmapped(document map[string]any, roots, consum
 		// section of the same name: `codex` is a mapped root whose one removed
 		// leaf is reported by its own path.
 		if roots[key] {
-			s.reportUnmappedLeaves(key, document[key], consumed)
+			s.reportUnmappedLeaves(key, document, document[key], knownContainers, consumed, consumedPrefixes)
 			continue
 		}
 		if isRemovedSection(key) {
@@ -1171,12 +1564,15 @@ func cpaRemovedSectionInstruction(key string) (string, bool) {
 
 // reportUnmappedLeaves reports the leaves of one mapped section the table does
 // not carry.
-func (s *cpaManagedSource) reportUnmappedLeaves(section string, value any, consumed map[string]bool) {
+func (s *cpaManagedSource) reportUnmappedLeaves(section string, document map[string]any, value any, knownContainers, consumed, consumedPrefixes map[string]bool) {
 	leaves := map[string]bool{}
 	collectDocumentLeaves(section, value, leaves)
 	paths := make([]string, 0, len(leaves))
 	for path := range leaves {
-		if consumed[path] || underConsumedPrefix(path, consumed) {
+		if consumed[path] || underConsumedPrefix(path, consumedPrefixes) {
+			continue
+		}
+		if knownContainers[path] && isEmptyContainerOrNull(document, path) {
 			continue
 		}
 		paths = append(paths, path)
@@ -1638,9 +2034,20 @@ func legacyOpenAICompatibilityKeys(entry map[string]any) []any {
 var cpaSharedKeyFields = map[string]bool{
 	"priority": true, "prefix": true, "proxy-url": true, "headers": true,
 	"models": true, "excluded-models": true, "disable-cooling": true,
-	"request-retry": true, "request-scoped-errors": true,
+	"request-retry": true, "request-scoped-errors": true, "connection-pool": true,
 }
 
+func isEmptyContainerOrNull(document map[string]any, path string) bool {
+	value, presence := lookupDocumentPath(document, path)
+	if presence == documentNull {
+		return true
+	}
+	if presence != documentPresent {
+		return false
+	}
+	mapping, ok := value.(map[string]any)
+	return ok && len(mapping) == 0
+}
 // documentPresence is the three-state presence a source path can have.
 type documentPresence int
 

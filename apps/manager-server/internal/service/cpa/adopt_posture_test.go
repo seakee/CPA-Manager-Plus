@@ -76,6 +76,18 @@ func TestAdoptPostureAcceptsTheAdoptedDestination(t *testing.T) {
 			`"port":8317`, `"port":8317,"read-header-timeout":"10s"`,
 			`"routing":`, `"telemetry":{"enabled":false},"routing":`,
 		).Replace(adoptDestinationConfig),
+		"full cpa v8.0.55 migrated business config": strings.NewReplacer(
+			`"port":8317`,
+			`"port":8317,"commercial-mode":true,"max-request-body-bytes":8388608,"shutdown-timeout":15,"trusted-proxies":["10.0.0.0/8"],"response-compression":{"enabled":true,"min-bytes":1024},"github-token":"ghp_migrated","kv-store":{"disabled":true}`,
+			`"auth-dir":"/runtime/supervisor/destination/auth"`,
+			`"auth-dir":"/runtime/supervisor/destination/auth","auth-auto-refresh-workers":4,"providers":{"aistudio":{"ws-auth":true},"claude":{"oauth-include-create-api-key":false},"codex":{"live-media-relay":{"enabled":true,"ice-servers":[{"urls":["turn:relay.example:3478"],"username":"u","credential":"p"}]}}}`,
+			`"enabled":false,"dir":"/runtime/supervisor/plugins"`,
+			`"enabled":true,"dir":"/runtime/supervisor/plugins","configs":{"sample":{"enabled":true}},"store-sources":["https://plugins.example/index.json"],"store-auth":[{"host":"plugins.example","token":"tok"}]`,
+			`"logging-to-file":false`,
+			`"logging-to-file":false,"debug":true,"request-log":true`,
+			`"routing":`,
+			`"models":{"catalog":"https://models.example/catalog.json"},"quota-exceeded":{"switch-project":true},"credentials":{"concurrency":{"max-limit":100},"in-flight":{"snapshot-interval":"3s","stale-after":"15s"}},"requests":{"payload":{"replace":[{"models":[{"name":"*"}],"target":{"role":"system","all":true},"replacements":[{"pattern":"a","replacement":"b"}]}]}},"routing":`,
+		).Replace(adoptDestinationConfig),
 	} {
 		if !adoptProofPosture().matches([]byte(body)) {
 			t.Fatalf("allowed adopted configuration %q rejected", name)

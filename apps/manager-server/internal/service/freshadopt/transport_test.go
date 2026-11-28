@@ -86,3 +86,34 @@ func TestEndpointsReuseTheManagementSafeReadTransport(t *testing.T) {
 		t.Fatalf("a hung source was not bounded: %s", elapsed)
 	}
 }
+
+func TestDestinationReadIceServersUsesYAMLWithoutRedactedJSONFallback(t *testing.T) {
+	var hitJSONPath, hitYAML int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v8/management/config.yaml":
+			hitYAML++
+			w.WriteHeader(http.StatusNotFound)
+		case "/v8/management/config/oauth/providers/codex/live-media-relay/ice-servers":
+			hitJSONPath++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"urls":["turn:turn.example.com:3478"]}]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	dest, err := NewDestination(t.Context(), Endpoint{BaseURL: srv.URL, ManagementKey: "key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dest.Close()
+
+	if _, _, err := dest.ReadConfigValue(t.Context(), iceServersSectionPath); err == nil {
+		t.Fatal("expected ReadConfigValue to fail when config.yaml is unavailable")
+	}
+	if hitYAML != 1 || hitJSONPath != 0 {
+		t.Fatalf("unexpected endpoints hit: yaml=%d jsonPath=%d", hitYAML, hitJSONPath)
+	}
+}

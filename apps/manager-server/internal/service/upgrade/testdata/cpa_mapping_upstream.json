@@ -8,16 +8,16 @@
   "sources": [
     {
       "role": "v8-alias-table",
-      "ref": "v8.0.13",
-      "commit": "d7914afdedca7af95ee974a42453dc49fc1388ce",
+      "ref": "main",
+      "commit": "49a54e1e1507ed20fde127276a6df224cae25835",
       "path": "internal/config/config_v8.go",
-      "sha256": "db781a14c5a4d7a4d61ffe21e22b6ed9566a9185cb0db36b761f9e8dcbb7575a"
+      "sha256": "e0c0a2faa1305a18643372671716037f54251511be04380c6b83086f55817876"
     },
     {
       "role": "config-struct-yaml-tags",
-      "ref": "v7.0.0..v8.0.51",
+      "ref": "v7.0.0..main",
       "commit": "",
-      "path": "internal/config/*.go (non-test)"
+      "path": "internal/config/*.go + internal/registry/*.go (non-test)"
     }
   ],
   "versions": [
@@ -233,9 +233,12 @@
     "v8.0.3",
     "v8.0.4",
     "v8.0.13",
-    "v8.0.51"
+    "v8.0.51",
+    "v8.0.55",
+    "main"
   ],
   "tagCommits": {
+    "main": "49a54e1e1507ed20fde127276a6df224cae25835",
     "v7.0.0": "a44e5eb1ab419c33ab8bfad2b9e4794ad6ece1c5",
     "v7.0.1": "15ac7fb9324095330e60f522147b8a8e81f16ab5",
     "v7.0.10": "f4c6c41f0bec778f07832a9ced37d349a278c2e9",
@@ -448,7 +451,8 @@
     "v8.0.13": "d7914afdedca7af95ee974a42453dc49fc1388ce",
     "v8.0.3": "acdace936fa7df2905500c7f5e0a97d683138dea",
     "v8.0.4": "d33f63f8e3d98428440ebca5a5b6a981a61ff71e",
-    "v8.0.51": "7cad1cb7df48c6c5ffb7ff0b34ef8198806115bc"
+    "v8.0.51": "7cad1cb7df48c6c5ffb7ff0b34ef8198806115bc",
+    "v8.0.55": "e6e5708e677adb2463d45accdd24bc9fd028ddd8"
   },
   "families": [
     {
@@ -531,6 +535,21 @@
       "kind": "leaf"
     },
     {
+      "legacy": "oauth.providers.codex.upstream-request-compression",
+      "current": "upstream.codex.upstream-request-compression",
+      "kind": "leaf"
+    },
+    {
+      "legacy": "oauth.providers.codex.upstream-request-compression-min-bytes",
+      "current": "upstream.codex.upstream-request-compression-min-bytes",
+      "kind": "leaf"
+    },
+    {
+      "legacy": "oauth.providers.codex.websocket-compression",
+      "current": "upstream.codex.websocket-compression",
+      "kind": "leaf"
+    },
+    {
       "legacy": "oauth.providers.claude.model-level-cooling",
       "current": "upstream.claude.model-level-cooling",
       "kind": "leaf"
@@ -601,13 +620,28 @@
       "kind": "prefix"
     },
     {
+      "legacy": "max-request-body-bytes",
+      "current": "server.max-request-body-bytes",
+      "kind": "prefix"
+    },
+    {
       "legacy": "trusted-proxies",
       "current": "server.trusted-proxies",
       "kind": "prefix"
     },
     {
+      "legacy": "github-token",
+      "current": "server.github-token",
+      "kind": "prefix"
+    },
+    {
       "legacy": "tls",
       "current": "server.tls",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "shutdown-timeout",
+      "current": "server.shutdown-timeout",
       "kind": "prefix"
     },
     {
@@ -618,6 +652,11 @@
     {
       "legacy": "discovery",
       "current": "server.discovery",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "kv-store",
+      "current": "server.kv-store",
       "kind": "prefix"
     },
     {
@@ -681,6 +720,11 @@
       "kind": "prefix"
     },
     {
+      "legacy": "tls-handshake-timeout-seconds",
+      "current": "requests.tls-handshake-timeout-seconds",
+      "kind": "prefix"
+    },
+    {
       "legacy": "passthrough-headers",
       "current": "requests.passthrough-headers",
       "kind": "prefix"
@@ -698,6 +742,11 @@
     {
       "legacy": "payload",
       "current": "requests.payload",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "response-compression",
+      "current": "server.response-compression",
       "kind": "prefix"
     },
     {
@@ -766,6 +815,21 @@
       "kind": "prefix"
     },
     {
+      "legacy": "codex.upstream-request-compression",
+      "current": "upstream.codex.upstream-request-compression",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "codex.upstream-request-compression-min-bytes",
+      "current": "upstream.codex.upstream-request-compression-min-bytes",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "codex.websocket-compression",
+      "current": "upstream.codex.websocket-compression",
+      "kind": "prefix"
+    },
+    {
       "legacy": "codex",
       "current": "oauth.providers.codex",
       "kind": "prefix"
@@ -773,6 +837,11 @@
     {
       "legacy": "codex-header-defaults",
       "current": "oauth.providers.codex.header-defaults",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "claude.oauth-include-create-api-key",
+      "current": "oauth.providers.claude.oauth-include-create-api-key",
       "kind": "prefix"
     },
     {
@@ -879,7 +948,363 @@
       "legacy": "pprof",
       "current": "observability.pprof",
       "kind": "prefix"
+    },
+    {
+      "legacy": "oauth.providers.claude.header-defaults",
+      "current": "upstream.claude.header-defaults",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "oauth.providers.claude.claude-code",
+      "current": "upstream.claude",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "oauth.providers.claude",
+      "current": "upstream.claude",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "oauth.providers.xai",
+      "current": "upstream.xai",
+      "kind": "prefix"
     }
+  ],
+  "nativePaths": [
+    "claude-api-key.api-key",
+    "claude-api-key.base-url",
+    "claude-api-key.cloak",
+    "claude-api-key.cloak.cache-user-id",
+    "claude-api-key.cloak.mode",
+    "claude-api-key.cloak.sensitive-patterns-replace",
+    "claude-api-key.cloak.sensitive-patterns-replace.pattern",
+    "claude-api-key.cloak.sensitive-patterns-replace.replacement",
+    "claude-api-key.cloak.sensitive-words",
+    "claude-api-key.cloak.sensitive-words-replace",
+    "claude-api-key.cloak.strict-mode",
+    "claude-api-key.connection-pool",
+    "claude-api-key.connection-pool.enabled",
+    "claude-api-key.connection-pool.idle-conn-timeout",
+    "claude-api-key.connection-pool.max-idle-conns-per-host",
+    "claude-api-key.disable-cooling",
+    "claude-api-key.excluded-models",
+    "claude-api-key.experimental-cch-signing",
+    "claude-api-key.fingerprint-profile",
+    "claude-api-key.headers",
+    "claude-api-key.models",
+    "claude-api-key.models.alias",
+    "claude-api-key.models.display-name",
+    "claude-api-key.models.force-mapping",
+    "claude-api-key.models.is-compat",
+    "claude-api-key.models.max-context-length",
+    "claude-api-key.models.name",
+    "claude-api-key.models.thinking",
+    "claude-api-key.models.thinking.disable-type",
+    "claude-api-key.models.thinking.dynamic-allowed",
+    "claude-api-key.models.thinking.levels",
+    "claude-api-key.models.thinking.max",
+    "claude-api-key.models.thinking.min",
+    "claude-api-key.models.thinking.zero-allowed",
+    "claude-api-key.native-tool-search",
+    "claude-api-key.prefix",
+    "claude-api-key.priority",
+    "claude-api-key.proxy-url",
+    "claude-api-key.rebuild-mid-system-message",
+    "claude-api-key.request-retry",
+    "claude-api-key.request-scoped-errors",
+    "claude-api-key.request-scoped-errors.action",
+    "claude-api-key.request-scoped-errors.match",
+    "claude-api-key.request-scoped-errors.match-regexr",
+    "claude-api-key.request-scoped-errors.status",
+    "claude-api-key.weight",
+    "client",
+    "client.claude",
+    "client.claude.show-codex-commentary",
+    "client.codex",
+    "client.codex.enable-apply-patch",
+    "client.codex.optimize-multi-agent-v2",
+    "client.codex.web-search-result-cache",
+    "client.codex.web-search-result-cache.enabled",
+    "client.codex.web-search-result-cache.limit",
+    "client.codex.web-search-result-cache.ttl",
+    "codex-api-key.alpha-search",
+    "codex-api-key.api-key",
+    "codex-api-key.base-url",
+    "codex-api-key.connection-pool",
+    "codex-api-key.connection-pool.enabled",
+    "codex-api-key.connection-pool.idle-conn-timeout",
+    "codex-api-key.connection-pool.max-idle-conns-per-host",
+    "codex-api-key.disable-codex-cloaking",
+    "codex-api-key.disable-cooling",
+    "codex-api-key.excluded-models",
+    "codex-api-key.headers",
+    "codex-api-key.models",
+    "codex-api-key.models.alias",
+    "codex-api-key.models.display-name",
+    "codex-api-key.models.force-mapping",
+    "codex-api-key.models.is-compat",
+    "codex-api-key.models.max-context-length",
+    "codex-api-key.models.name",
+    "codex-api-key.models.support-configuration-update",
+    "codex-api-key.models.thinking",
+    "codex-api-key.models.thinking.disable-type",
+    "codex-api-key.models.thinking.dynamic-allowed",
+    "codex-api-key.models.thinking.levels",
+    "codex-api-key.models.thinking.max",
+    "codex-api-key.models.thinking.min",
+    "codex-api-key.models.thinking.zero-allowed",
+    "codex-api-key.prefix",
+    "codex-api-key.priority",
+    "codex-api-key.proxy-url",
+    "codex-api-key.request-retry",
+    "codex-api-key.request-scoped-errors",
+    "codex-api-key.request-scoped-errors.action",
+    "codex-api-key.request-scoped-errors.match",
+    "codex-api-key.request-scoped-errors.match-regexr",
+    "codex-api-key.request-scoped-errors.status",
+    "codex-api-key.websockets",
+    "codex-api-key.weight",
+    "gemini-api-key.api-key",
+    "gemini-api-key.base-url",
+    "gemini-api-key.connection-pool",
+    "gemini-api-key.connection-pool.enabled",
+    "gemini-api-key.connection-pool.idle-conn-timeout",
+    "gemini-api-key.connection-pool.max-idle-conns-per-host",
+    "gemini-api-key.disable-cooling",
+    "gemini-api-key.excluded-models",
+    "gemini-api-key.headers",
+    "gemini-api-key.models",
+    "gemini-api-key.models.alias",
+    "gemini-api-key.models.display-name",
+    "gemini-api-key.models.force-mapping",
+    "gemini-api-key.models.is-compat",
+    "gemini-api-key.models.max-context-length",
+    "gemini-api-key.models.name",
+    "gemini-api-key.models.thinking",
+    "gemini-api-key.models.thinking.disable-type",
+    "gemini-api-key.models.thinking.dynamic-allowed",
+    "gemini-api-key.models.thinking.levels",
+    "gemini-api-key.models.thinking.max",
+    "gemini-api-key.models.thinking.min",
+    "gemini-api-key.models.thinking.zero-allowed",
+    "gemini-api-key.prefix",
+    "gemini-api-key.priority",
+    "gemini-api-key.proxy-url",
+    "gemini-api-key.request-retry",
+    "gemini-api-key.request-scoped-errors",
+    "gemini-api-key.request-scoped-errors.action",
+    "gemini-api-key.request-scoped-errors.match",
+    "gemini-api-key.request-scoped-errors.match-regexr",
+    "gemini-api-key.request-scoped-errors.status",
+    "gemini-api-key.weight",
+    "interactions-api-key.api-key",
+    "interactions-api-key.base-url",
+    "interactions-api-key.connection-pool",
+    "interactions-api-key.connection-pool.enabled",
+    "interactions-api-key.connection-pool.idle-conn-timeout",
+    "interactions-api-key.connection-pool.max-idle-conns-per-host",
+    "interactions-api-key.disable-cooling",
+    "interactions-api-key.excluded-models",
+    "interactions-api-key.headers",
+    "interactions-api-key.models",
+    "interactions-api-key.models.alias",
+    "interactions-api-key.models.display-name",
+    "interactions-api-key.models.force-mapping",
+    "interactions-api-key.models.is-compat",
+    "interactions-api-key.models.max-context-length",
+    "interactions-api-key.models.name",
+    "interactions-api-key.models.thinking",
+    "interactions-api-key.models.thinking.disable-type",
+    "interactions-api-key.models.thinking.dynamic-allowed",
+    "interactions-api-key.models.thinking.levels",
+    "interactions-api-key.models.thinking.max",
+    "interactions-api-key.models.thinking.min",
+    "interactions-api-key.models.thinking.zero-allowed",
+    "interactions-api-key.prefix",
+    "interactions-api-key.priority",
+    "interactions-api-key.proxy-url",
+    "interactions-api-key.request-retry",
+    "interactions-api-key.request-scoped-errors",
+    "interactions-api-key.request-scoped-errors.action",
+    "interactions-api-key.request-scoped-errors.match",
+    "interactions-api-key.request-scoped-errors.match-regexr",
+    "interactions-api-key.request-scoped-errors.status",
+    "interactions-api-key.weight",
+    "meta-api-key.alpha-search",
+    "meta-api-key.api-key",
+    "meta-api-key.base-url",
+    "meta-api-key.connection-pool",
+    "meta-api-key.connection-pool.enabled",
+    "meta-api-key.connection-pool.idle-conn-timeout",
+    "meta-api-key.connection-pool.max-idle-conns-per-host",
+    "meta-api-key.disable-codex-cloaking",
+    "meta-api-key.disable-cooling",
+    "meta-api-key.excluded-models",
+    "meta-api-key.headers",
+    "meta-api-key.models",
+    "meta-api-key.models.alias",
+    "meta-api-key.models.display-name",
+    "meta-api-key.models.force-mapping",
+    "meta-api-key.models.is-compat",
+    "meta-api-key.models.max-context-length",
+    "meta-api-key.models.name",
+    "meta-api-key.models.support-configuration-update",
+    "meta-api-key.models.thinking",
+    "meta-api-key.models.thinking.disable-type",
+    "meta-api-key.models.thinking.dynamic-allowed",
+    "meta-api-key.models.thinking.levels",
+    "meta-api-key.models.thinking.max",
+    "meta-api-key.models.thinking.min",
+    "meta-api-key.models.thinking.zero-allowed",
+    "meta-api-key.prefix",
+    "meta-api-key.priority",
+    "meta-api-key.proxy-url",
+    "meta-api-key.request-retry",
+    "meta-api-key.request-scoped-errors",
+    "meta-api-key.request-scoped-errors.action",
+    "meta-api-key.request-scoped-errors.match",
+    "meta-api-key.request-scoped-errors.match-regexr",
+    "meta-api-key.request-scoped-errors.status",
+    "meta-api-key.websockets",
+    "meta-api-key.weight",
+    "models",
+    "models.catalog",
+    "models.codex-catalog",
+    "models.devin-catalog",
+    "openai-compatibility.api-key-entries",
+    "openai-compatibility.api-key-entries.api-key",
+    "openai-compatibility.api-key-entries.connection-pool",
+    "openai-compatibility.api-key-entries.connection-pool.enabled",
+    "openai-compatibility.api-key-entries.connection-pool.idle-conn-timeout",
+    "openai-compatibility.api-key-entries.connection-pool.max-idle-conns-per-host",
+    "openai-compatibility.api-key-entries.proxy-url",
+    "openai-compatibility.api-key-entries.weight",
+    "openai-compatibility.base-url",
+    "openai-compatibility.connection-pool",
+    "openai-compatibility.connection-pool.enabled",
+    "openai-compatibility.connection-pool.idle-conn-timeout",
+    "openai-compatibility.connection-pool.max-idle-conns-per-host",
+    "openai-compatibility.disable-cooling",
+    "openai-compatibility.disabled",
+    "openai-compatibility.headers",
+    "openai-compatibility.models",
+    "openai-compatibility.models.alias",
+    "openai-compatibility.models.display-name",
+    "openai-compatibility.models.force-mapping",
+    "openai-compatibility.models.image",
+    "openai-compatibility.models.input-modalities",
+    "openai-compatibility.models.is-compat",
+    "openai-compatibility.models.max-context-length",
+    "openai-compatibility.models.name",
+    "openai-compatibility.models.output-modalities",
+    "openai-compatibility.models.thinking",
+    "openai-compatibility.models.thinking.disable-type",
+    "openai-compatibility.models.thinking.dynamic-allowed",
+    "openai-compatibility.models.thinking.levels",
+    "openai-compatibility.models.thinking.max",
+    "openai-compatibility.models.thinking.min",
+    "openai-compatibility.models.thinking.zero-allowed",
+    "openai-compatibility.models.use-max-completion-tokens",
+    "openai-compatibility.name",
+    "openai-compatibility.prefix",
+    "openai-compatibility.priority",
+    "openai-compatibility.request-retry",
+    "openai-compatibility.request-scoped-errors",
+    "openai-compatibility.request-scoped-errors.action",
+    "openai-compatibility.request-scoped-errors.match",
+    "openai-compatibility.request-scoped-errors.match-regexr",
+    "openai-compatibility.request-scoped-errors.status",
+    "openai-compatibility.support-prompt-cache-key",
+    "plugins",
+    "plugins.auth-revision",
+    "plugins.configs",
+    "plugins.configs.enabled",
+    "plugins.configs.priority",
+    "plugins.dir",
+    "plugins.enabled",
+    "plugins.store-auth",
+    "plugins.store-sources",
+    "quota-exceeded",
+    "quota-exceeded.switch-preview-model",
+    "quota-exceeded.switch-project",
+    "routing",
+    "routing.session-affinity",
+    "routing.session-affinity-rebind-on",
+    "routing.session-affinity-subagents",
+    "routing.session-affinity-ttl",
+    "routing.strategy",
+    "vertex-api-key.api-key",
+    "vertex-api-key.base-url",
+    "vertex-api-key.connection-pool",
+    "vertex-api-key.connection-pool.enabled",
+    "vertex-api-key.connection-pool.idle-conn-timeout",
+    "vertex-api-key.connection-pool.max-idle-conns-per-host",
+    "vertex-api-key.disable-cooling",
+    "vertex-api-key.excluded-models",
+    "vertex-api-key.headers",
+    "vertex-api-key.interactions",
+    "vertex-api-key.models",
+    "vertex-api-key.models.alias",
+    "vertex-api-key.models.display-name",
+    "vertex-api-key.models.force-mapping",
+    "vertex-api-key.models.name",
+    "vertex-api-key.models.openapi",
+    "vertex-api-key.models.thinking",
+    "vertex-api-key.models.thinking.disable-type",
+    "vertex-api-key.models.thinking.dynamic-allowed",
+    "vertex-api-key.models.thinking.levels",
+    "vertex-api-key.models.thinking.max",
+    "vertex-api-key.models.thinking.min",
+    "vertex-api-key.models.thinking.zero-allowed",
+    "vertex-api-key.openapi",
+    "vertex-api-key.openapi-location",
+    "vertex-api-key.prefix",
+    "vertex-api-key.priority",
+    "vertex-api-key.proxy-url",
+    "vertex-api-key.request-retry",
+    "vertex-api-key.request-scoped-errors",
+    "vertex-api-key.request-scoped-errors.action",
+    "vertex-api-key.request-scoped-errors.match",
+    "vertex-api-key.request-scoped-errors.match-regexr",
+    "vertex-api-key.request-scoped-errors.status",
+    "vertex-api-key.weight",
+    "xai-api-key.alpha-search",
+    "xai-api-key.api-key",
+    "xai-api-key.base-url",
+    "xai-api-key.connection-pool",
+    "xai-api-key.connection-pool.enabled",
+    "xai-api-key.connection-pool.idle-conn-timeout",
+    "xai-api-key.connection-pool.max-idle-conns-per-host",
+    "xai-api-key.disable-codex-cloaking",
+    "xai-api-key.disable-cooling",
+    "xai-api-key.excluded-models",
+    "xai-api-key.headers",
+    "xai-api-key.models",
+    "xai-api-key.models.alias",
+    "xai-api-key.models.display-name",
+    "xai-api-key.models.force-mapping",
+    "xai-api-key.models.is-compat",
+    "xai-api-key.models.max-context-length",
+    "xai-api-key.models.name",
+    "xai-api-key.models.support-configuration-update",
+    "xai-api-key.models.thinking",
+    "xai-api-key.models.thinking.disable-type",
+    "xai-api-key.models.thinking.dynamic-allowed",
+    "xai-api-key.models.thinking.levels",
+    "xai-api-key.models.thinking.max",
+    "xai-api-key.models.thinking.min",
+    "xai-api-key.models.thinking.zero-allowed",
+    "xai-api-key.prefix",
+    "xai-api-key.priority",
+    "xai-api-key.proxy-url",
+    "xai-api-key.request-retry",
+    "xai-api-key.request-scoped-errors",
+    "xai-api-key.request-scoped-errors.action",
+    "xai-api-key.request-scoped-errors.match",
+    "xai-api-key.request-scoped-errors.match-regexr",
+    "xai-api-key.request-scoped-errors.status",
+    "xai-api-key.websockets",
+    "xai-api-key.weight"
   ],
   "presence": {
     "ampcode": {
@@ -951,8 +1376,23 @@
     "antigravity.connection-pool.max-idle-conns-per-host": {
       "first": "v7.2.155"
     },
+    "antigravity.sensitive-patterns-replace": {
+      "first": "main"
+    },
+    "antigravity.sensitive-patterns-replace.pattern": {
+      "first": "main"
+    },
+    "antigravity.sensitive-patterns-replace.replacement": {
+      "first": "main"
+    },
     "antigravity.sensitive-words": {
       "first": "v7.2.137"
+    },
+    "antigravity.sensitive-words-replace": {
+      "first": "main"
+    },
+    "antigravity.tos-pause-window": {
+      "first": "main"
     },
     "api-keys": {
       "first": "v7.0.0"
@@ -984,8 +1424,20 @@
     "claude-api-key.cloak.mode": {
       "first": "v7.0.0"
     },
+    "claude-api-key.cloak.sensitive-patterns-replace": {
+      "first": "main"
+    },
+    "claude-api-key.cloak.sensitive-patterns-replace.pattern": {
+      "first": "main"
+    },
+    "claude-api-key.cloak.sensitive-patterns-replace.replacement": {
+      "first": "main"
+    },
     "claude-api-key.cloak.sensitive-words": {
       "first": "v7.0.0"
+    },
+    "claude-api-key.cloak.sensitive-words-replace": {
+      "first": "main"
     },
     "claude-api-key.cloak.strict-mode": {
       "first": "v7.0.0"
@@ -1039,6 +1491,24 @@
       "first": "v7.0.0"
     },
     "claude-api-key.models.thinking": {
+      "first": "v7.2.109"
+    },
+    "claude-api-key.models.thinking.disable-type": {
+      "first": "v8.0.51"
+    },
+    "claude-api-key.models.thinking.dynamic-allowed": {
+      "first": "v7.2.109"
+    },
+    "claude-api-key.models.thinking.levels": {
+      "first": "v7.2.109"
+    },
+    "claude-api-key.models.thinking.max": {
+      "first": "v7.2.109"
+    },
+    "claude-api-key.models.thinking.min": {
+      "first": "v7.2.109"
+    },
+    "claude-api-key.models.thinking.zero-allowed": {
       "first": "v7.2.109"
     },
     "claude-api-key.native-tool-search": {
@@ -1101,6 +1571,9 @@
     "claude-header-defaults.inject-diagnostics": {
       "first": "v8.0.51"
     },
+    "claude-header-defaults.native-entrypoints": {
+      "first": "v8.0.55"
+    },
     "claude-header-defaults.os": {
       "first": "v7.0.0"
     },
@@ -1124,6 +1597,12 @@
     },
     "claude.model-level-cooling": {
       "first": "v7.3.7"
+    },
+    "claude.oauth-include-create-api-key": {
+      "first": "main"
+    },
+    "claude.server-side-fallback": {
+      "first": "main"
     },
     "claude.session-date-pin-days": {
       "first": "v8.0.51"
@@ -1225,6 +1704,24 @@
       "first": "v7.3.20"
     },
     "codex-api-key.models.thinking": {
+      "first": "v7.2.109"
+    },
+    "codex-api-key.models.thinking.disable-type": {
+      "first": "v8.0.51"
+    },
+    "codex-api-key.models.thinking.dynamic-allowed": {
+      "first": "v7.2.109"
+    },
+    "codex-api-key.models.thinking.levels": {
+      "first": "v7.2.109"
+    },
+    "codex-api-key.models.thinking.max": {
+      "first": "v7.2.109"
+    },
+    "codex-api-key.models.thinking.min": {
+      "first": "v7.2.109"
+    },
+    "codex-api-key.models.thinking.zero-allowed": {
       "first": "v7.2.109"
     },
     "codex-api-key.prefix": {
@@ -1415,8 +1912,20 @@
     "devin": {
       "first": "v7.3.0"
     },
+    "devin.sensitive-patterns-replace": {
+      "first": "main"
+    },
+    "devin.sensitive-patterns-replace.pattern": {
+      "first": "main"
+    },
+    "devin.sensitive-patterns-replace.replacement": {
+      "first": "main"
+    },
     "devin.sensitive-words": {
       "first": "v7.3.0"
+    },
+    "devin.sensitive-words-replace": {
+      "first": "main"
     },
     "disable-claude-cloak-mode": {
       "first": "v7.2.8"
@@ -1519,6 +2028,24 @@
       "first": "v7.0.0"
     },
     "gemini-api-key.models.thinking": {
+      "first": "v7.2.109"
+    },
+    "gemini-api-key.models.thinking.disable-type": {
+      "first": "v8.0.51"
+    },
+    "gemini-api-key.models.thinking.dynamic-allowed": {
+      "first": "v7.2.109"
+    },
+    "gemini-api-key.models.thinking.levels": {
+      "first": "v7.2.109"
+    },
+    "gemini-api-key.models.thinking.max": {
+      "first": "v7.2.109"
+    },
+    "gemini-api-key.models.thinking.min": {
+      "first": "v7.2.109"
+    },
+    "gemini-api-key.models.thinking.zero-allowed": {
       "first": "v7.2.109"
     },
     "gemini-api-key.prefix": {
@@ -1658,6 +2185,24 @@
     "interactions-api-key.models.thinking": {
       "first": "v7.2.109"
     },
+    "interactions-api-key.models.thinking.disable-type": {
+      "first": "v8.0.51"
+    },
+    "interactions-api-key.models.thinking.dynamic-allowed": {
+      "first": "v7.2.109"
+    },
+    "interactions-api-key.models.thinking.levels": {
+      "first": "v7.2.109"
+    },
+    "interactions-api-key.models.thinking.max": {
+      "first": "v7.2.109"
+    },
+    "interactions-api-key.models.thinking.min": {
+      "first": "v7.2.109"
+    },
+    "interactions-api-key.models.thinking.zero-allowed": {
+      "first": "v7.2.109"
+    },
     "interactions-api-key.prefix": {
       "first": "v7.2.51"
     },
@@ -1688,6 +2233,15 @@
     "interactions-api-key.weight": {
       "first": "v7.2.109"
     },
+    "kv-store": {
+      "first": "v8.0.55"
+    },
+    "kv-store.disabled": {
+      "first": "v8.0.55"
+    },
+    "kv-store.path": {
+      "first": "v8.0.55"
+    },
     "logging-to-file": {
       "first": "v7.0.0"
     },
@@ -1706,7 +2260,127 @@
     "meta-api-key": {
       "first": "v7.3.4"
     },
+    "meta-api-key.alpha-search": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.api-key": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.base-url": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.connection-pool": {
+      "first": "v8.0.51"
+    },
+    "meta-api-key.connection-pool.enabled": {
+      "first": "v8.0.51"
+    },
+    "meta-api-key.connection-pool.idle-conn-timeout": {
+      "first": "v8.0.51"
+    },
+    "meta-api-key.connection-pool.max-idle-conns-per-host": {
+      "first": "v8.0.51"
+    },
+    "meta-api-key.disable-codex-cloaking": {
+      "first": "v7.3.20"
+    },
+    "meta-api-key.disable-cooling": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.excluded-models": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.headers": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.models": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.models.alias": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.models.display-name": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.models.force-mapping": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.models.is-compat": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.models.max-context-length": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.models.name": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.models.support-configuration-update": {
+      "first": "v7.3.20"
+    },
+    "meta-api-key.models.thinking": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.models.thinking.disable-type": {
+      "first": "v8.0.51"
+    },
+    "meta-api-key.models.thinking.dynamic-allowed": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.models.thinking.levels": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.models.thinking.max": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.models.thinking.min": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.models.thinking.zero-allowed": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.prefix": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.priority": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.proxy-url": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.request-retry": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.request-scoped-errors": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.request-scoped-errors.action": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.request-scoped-errors.match": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.request-scoped-errors.match-regexr": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.request-scoped-errors.status": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.websockets": {
+      "first": "v7.3.4"
+    },
+    "meta-api-key.weight": {
+      "first": "v7.3.4"
+    },
     "models": {
+      "first": "v8.0.51"
+    },
+    "models.catalog": {
+      "first": "v8.0.51"
+    },
+    "models.codex-catalog": {
+      "first": "v8.0.51"
+    },
+    "models.devin-catalog": {
       "first": "v8.0.51"
     },
     "nonstream-keepalive-interval": {
@@ -1848,6 +2522,24 @@
       "first": "v7.2.52"
     },
     "openai-compatibility.models.thinking": {
+      "first": "v7.0.0"
+    },
+    "openai-compatibility.models.thinking.disable-type": {
+      "first": "v8.0.51"
+    },
+    "openai-compatibility.models.thinking.dynamic-allowed": {
+      "first": "v7.0.0"
+    },
+    "openai-compatibility.models.thinking.levels": {
+      "first": "v7.0.0"
+    },
+    "openai-compatibility.models.thinking.max": {
+      "first": "v7.0.0"
+    },
+    "openai-compatibility.models.thinking.min": {
+      "first": "v7.0.0"
+    },
+    "openai-compatibility.models.thinking.zero-allowed": {
       "first": "v7.0.0"
     },
     "openai-compatibility.models.use-max-completion-tokens": {
@@ -2074,6 +2766,54 @@
     "payload.override.params": {
       "first": "v7.0.0"
     },
+    "payload.replace": {
+      "first": "main"
+    },
+    "payload.replace.models": {
+      "first": "main"
+    },
+    "payload.replace.models.exist": {
+      "first": "main"
+    },
+    "payload.replace.models.from-protocol": {
+      "first": "main"
+    },
+    "payload.replace.models.headers": {
+      "first": "main"
+    },
+    "payload.replace.models.match": {
+      "first": "main"
+    },
+    "payload.replace.models.name": {
+      "first": "main"
+    },
+    "payload.replace.models.not-exist": {
+      "first": "main"
+    },
+    "payload.replace.models.not-match": {
+      "first": "main"
+    },
+    "payload.replace.models.protocol": {
+      "first": "main"
+    },
+    "payload.replace.replacements": {
+      "first": "main"
+    },
+    "payload.replace.target": {
+      "first": "main"
+    },
+    "payload.replace.target.all": {
+      "first": "main"
+    },
+    "payload.replace.target.paths": {
+      "first": "main"
+    },
+    "payload.replace.target.positions": {
+      "first": "main"
+    },
+    "payload.replace.target.role": {
+      "first": "main"
+    },
     "plugins": {
       "first": "v7.1.47"
     },
@@ -2192,6 +2932,9 @@
     "save-cooldown-status": {
       "first": "v7.2.19"
     },
+    "shutdown-timeout": {
+      "first": "main"
+    },
     "streaming": {
       "first": "v7.0.0"
     },
@@ -2282,6 +3025,24 @@
     "vertex-api-key.models.thinking": {
       "first": "v7.2.109"
     },
+    "vertex-api-key.models.thinking.disable-type": {
+      "first": "v8.0.51"
+    },
+    "vertex-api-key.models.thinking.dynamic-allowed": {
+      "first": "v7.2.109"
+    },
+    "vertex-api-key.models.thinking.levels": {
+      "first": "v7.2.109"
+    },
+    "vertex-api-key.models.thinking.max": {
+      "first": "v7.2.109"
+    },
+    "vertex-api-key.models.thinking.min": {
+      "first": "v7.2.109"
+    },
+    "vertex-api-key.models.thinking.zero-allowed": {
+      "first": "v7.2.109"
+    },
     "vertex-api-key.openapi": {
       "first": "v8.0.51"
     },
@@ -2300,6 +3061,21 @@
     "vertex-api-key.request-retry": {
       "first": "v7.2.137"
     },
+    "vertex-api-key.request-scoped-errors": {
+      "first": "main"
+    },
+    "vertex-api-key.request-scoped-errors.action": {
+      "first": "main"
+    },
+    "vertex-api-key.request-scoped-errors.match": {
+      "first": "main"
+    },
+    "vertex-api-key.request-scoped-errors.match-regexr": {
+      "first": "main"
+    },
+    "vertex-api-key.request-scoped-errors.status": {
+      "first": "main"
+    },
     "vertex-api-key.weight": {
       "first": "v7.2.109"
     },
@@ -2314,6 +3090,117 @@
     },
     "xai-api-key": {
       "first": "v7.2.73"
+    },
+    "xai-api-key.alpha-search": {
+      "first": "v7.2.115"
+    },
+    "xai-api-key.api-key": {
+      "first": "v7.2.73"
+    },
+    "xai-api-key.base-url": {
+      "first": "v7.2.73"
+    },
+    "xai-api-key.connection-pool": {
+      "first": "v8.0.51"
+    },
+    "xai-api-key.connection-pool.enabled": {
+      "first": "v8.0.51"
+    },
+    "xai-api-key.connection-pool.idle-conn-timeout": {
+      "first": "v8.0.51"
+    },
+    "xai-api-key.connection-pool.max-idle-conns-per-host": {
+      "first": "v8.0.51"
+    },
+    "xai-api-key.disable-codex-cloaking": {
+      "first": "v7.3.20"
+    },
+    "xai-api-key.disable-cooling": {
+      "first": "v7.2.73"
+    },
+    "xai-api-key.excluded-models": {
+      "first": "v7.2.73"
+    },
+    "xai-api-key.headers": {
+      "first": "v7.2.73"
+    },
+    "xai-api-key.models": {
+      "first": "v7.2.73"
+    },
+    "xai-api-key.models.alias": {
+      "first": "v7.2.73"
+    },
+    "xai-api-key.models.display-name": {
+      "first": "v7.2.73"
+    },
+    "xai-api-key.models.force-mapping": {
+      "first": "v7.2.73"
+    },
+    "xai-api-key.models.is-compat": {
+      "first": "v7.2.137"
+    },
+    "xai-api-key.models.max-context-length": {
+      "first": "v7.2.115"
+    },
+    "xai-api-key.models.name": {
+      "first": "v7.2.73"
+    },
+    "xai-api-key.models.support-configuration-update": {
+      "first": "v7.3.20"
+    },
+    "xai-api-key.models.thinking": {
+      "first": "v7.2.109"
+    },
+    "xai-api-key.models.thinking.disable-type": {
+      "first": "v8.0.51"
+    },
+    "xai-api-key.models.thinking.dynamic-allowed": {
+      "first": "v7.2.109"
+    },
+    "xai-api-key.models.thinking.levels": {
+      "first": "v7.2.109"
+    },
+    "xai-api-key.models.thinking.max": {
+      "first": "v7.2.109"
+    },
+    "xai-api-key.models.thinking.min": {
+      "first": "v7.2.109"
+    },
+    "xai-api-key.models.thinking.zero-allowed": {
+      "first": "v7.2.109"
+    },
+    "xai-api-key.prefix": {
+      "first": "v7.2.73"
+    },
+    "xai-api-key.priority": {
+      "first": "v7.2.73"
+    },
+    "xai-api-key.proxy-url": {
+      "first": "v7.2.73"
+    },
+    "xai-api-key.request-retry": {
+      "first": "v7.2.137"
+    },
+    "xai-api-key.request-scoped-errors": {
+      "first": "v7.2.137"
+    },
+    "xai-api-key.request-scoped-errors.action": {
+      "first": "v7.2.137"
+    },
+    "xai-api-key.request-scoped-errors.match": {
+      "first": "v7.2.137"
+    },
+    "xai-api-key.request-scoped-errors.match-regexr": {
+      "first": "v7.2.137"
+    },
+    "xai-api-key.request-scoped-errors.status": {
+      "first": "v7.2.137"
+    },
+    "xai-api-key.websockets": {
+      "first": "v7.2.73"
+    },
+    "xai-api-key.weight": {
+      "first": "v7.2.109"
     },
     "xai.inject-x-search": {
       "first": "v7.2.102"

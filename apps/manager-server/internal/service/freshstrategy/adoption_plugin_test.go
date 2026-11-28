@@ -18,15 +18,24 @@ import (
 func adoptionPluginFixture(t *testing.T) (*Service, *adoptionRuntime, Request) {
 	t.Helper()
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "GET" || r.URL.Path != "/v8/management/config" || r.Header.Get("Authorization") != "Bearer source-management" {
+		if r.Method != "GET" || r.Header.Get("Authorization") != "Bearer source-management" {
 			t.Error("source lifecycle/history/config mutated")
 			w.WriteHeader(403)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		// The source's own plugins stay as they are: only access, server and the
-		// auth directory are read where the item universe names them.
-		_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"source-auth"},"access":{"api-keys":["source-client-one","source-client-two"]},"plugins":{"enabled":true}}`))
+		switch r.URL.Path {
+		case "/v8/management/config":
+			w.Header().Set("Content-Type", "application/json")
+			// The source's own plugins stay as they are: only access, server and the
+			// auth directory are read where the item universe names them.
+			_, _ = w.Write([]byte(`{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"source-auth"},"access":{"api-keys":["source-client-one","source-client-two"]},"plugins":{"enabled":true}}`))
+		case "/v8/management/config.yaml":
+			w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+			_, _ = w.Write([]byte("config-version: 8\nserver:\n  port: 8317\noauth:\n  auth-dir: source-auth\naccess:\n  api-keys:\n    - source-client-one\n    - source-client-two\nplugins:\n  enabled: true\n"))
+		default:
+			t.Error("source lifecycle/history/config mutated")
+			w.WriteHeader(403)
+		}
 	}))
 	t.Cleanup(source.Close)
 	artifact := model.RuntimeArtifactID("sha256:" + strings.Repeat("a", 64))

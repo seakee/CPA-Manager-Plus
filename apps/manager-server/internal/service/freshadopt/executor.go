@@ -232,6 +232,9 @@ func (e *Executor) record(ctx context.Context, summary *freshstore.AdoptionSumma
 		// observe would be a claim it cannot make.
 		return err
 	}
+	if item.Reason != "" {
+		item.Reason = boundedAdoptionReason(item.Outcome, item.Reason)
+	}
 	// A provisional record is the one entry this run may replace in place. It is
 	// the failed attempt of a run that wrote nothing; the item it names keeps its
 	// position, so the record still reads in migration order.
@@ -287,17 +290,19 @@ func (e *Executor) Run(ctx context.Context, previous freshstore.AdoptionSummary,
 	// refuse is a run that stops at the offending item, and every replay then
 	// repeats that item and stops again: the loop this preflight exists to make
 	// impossible.
-	files, err = e.preflightInventory(ctx, &summary, files, checkpoint)
+	unknownScan := cpa.InspectV8UnknownConfig(document)
+	hasUnknown := unknownScan.HasAny()
+	files, err = e.preflightInventory(ctx, &summary, files, hasUnknown, checkpoint)
 	if err != nil {
 		return Result{Summary: summary}, err
 	}
 	// The plan is fixed here, after the preflight and before the first write: the
 	// exact list of items this run will settle, in the order it visits them. It is
-	// the same list the four passes iterate, and `Planned` is its size plus what
-	// the preflight has already recorded, so it is what the item list has to reach
+	// the same list the passes iterate, and `Planned` is its size plus what the
+	// preflight has already recorded, so it is what the item list has to reach
 	// for this run to have finished. A run that stops early leaves
 	// `len(Items) < Planned` with `Finished` still false.
-	plan := e.plan(&summary, files)
+	plan := e.plan(&summary, files, hasUnknown)
 	// `Planned` is the size the item list must reach: what the record already
 	// holds, plus every planned item it does not hold yet. A provisional failure is
 	// already recorded and is replaced in place, so counting it again would demand
@@ -318,6 +323,9 @@ func (e *Executor) Run(ctx context.Context, previous freshstore.AdoptionSummary,
 		return Result{Summary: summary}, err
 	}
 	if err := e.migrateProviderSections(ctx, &summary, document, checkpoint); err != nil {
+		return Result{Summary: summary}, err
+	}
+	if err := e.migrateUnknownConfig(ctx, &summary, unknownScan, checkpoint); err != nil {
 		return Result{Summary: summary}, err
 	}
 	// Every planned item is now settled or recorded as retryable, so this run
@@ -346,8 +354,12 @@ func (e *Executor) Run(ctx context.Context, previous freshstore.AdoptionSummary,
 // from the credential list the preflight approved, after excluding what an earlier
 // run already settled, so the plan and the run can never disagree about what
 // "every planned item" means.
-func (e *Executor) plan(summary *freshstore.AdoptionSummary, files []CredentialFile) []string {
-	plan := make([]string, 0, len(files)+len(cpa.ConfigLeafPaths())+len(cpa.ConfigRuleFamilyIDs())+len(ProviderSections()))
+func (e *Executor) plan(summary *freshstore.AdoptionSummary, files []CredentialFile, hasUnknown bool) []string {
+	extra := 0
+	if hasUnknown {
+		extra = 1
+	}
+	plan := make([]string, 0, len(files)+len(cpa.ConfigLeafPaths())+len(cpa.ConfigRuleFamilyIDs())+len(ProviderSections())+extra)
 	for _, file := range files {
 		if item := credentialItemName(file.Name); !summary.Settled(item) {
 			plan = append(plan, item)
@@ -367,6 +379,9 @@ func (e *Executor) plan(summary *freshstore.AdoptionSummary, files []CredentialF
 		if item := providerSectionItemName(section); !summary.Settled(item) {
 			plan = append(plan, item)
 		}
+	}
+	if hasUnknown && !summary.Settled(unknownConfigItemName) {
+		plan = append(plan, unknownConfigItemName)
 	}
 	return plan
 }
@@ -452,6 +467,9 @@ func CanonicalItem(item freshstore.AdoptionItem) bool {
 		path, ok := strings.CutPrefix(item.Item, "config:")
 		return ok && containsName(cpa.ConfigLeafPaths(), path)
 	case freshstore.AdoptionKindConfigFamily:
+		if item.Item == unknownConfigItemName {
+			return true
+		}
 		family, ok := strings.CutPrefix(item.Item, "rules:")
 		return ok && containsName(cpa.ConfigRuleFamilyIDs(), family)
 	case freshstore.AdoptionKindProviderSection:
@@ -484,11 +502,7 @@ func boundedName(name string) string {
 // sanitizeReason bounds a reason to the vocabulary the record accepts without
 // ever carrying a value: an upstream message can quote YAML.
 func sanitizeReason(reason string) string {
-	reason = strings.TrimSpace(reason)
-	if len(reason) > 120 {
-		reason = reason[:120]
-	}
-	return reason
+	return boundedAdoptionReason(freshstore.AdoptionManual, reason)
 }
 
 // manualInstruction is the concrete thing an operator has to do for one item.
@@ -499,9 +513,18 @@ func manualInstruction(kind freshstore.AdoptionItemKind, name string) string {
 	case freshstore.AdoptionKindConfigLeaf:
 		return "Set " + name + " on the destination CPA's gateway configuration page."
 	case freshstore.AdoptionKindConfigFamily:
+		if name == unknownConfigItemName {
+			return "Review and manually reconfigure unrecognized source configuration keys on the destination CPA."
+		}
 		return "Replace the " + name + " payload rule list on the destination CPA's gateway configuration page."
 	case freshstore.AdoptionKindProviderSection:
-		return "Copy " + name + " into the destination CPA's configuration, including its provider keys."
+		if name == iceServersSectionPath {
+			return "Configure " + name + " (including TURN credentials) on the destination CPA."
+		}
+		if strings.HasPrefix(name, "api-keys.") || strings.HasPrefix(name, "oauth.") {
+			return "Copy " + name + " into the destination CPA's configuration, including its provider keys."
+		}
+		return "Copy " + name + " into the destination CPA's configuration."
 	default:
 		return "Review this item in the destination CPA."
 	}
@@ -512,22 +535,6 @@ func manualInstruction(kind freshstore.AdoptionItemKind, name string) string {
 // because a per-credential report would need exactly the room that is missing.
 const excessCredentialItem = "credential-inventory-excess"
 
-// preflightInventory bounds the plan before the first write. It returns the
-// credentials this run may attempt and records the rest as manual work.
-//
-// Two bounds are decided here, both from the store's own limits rather than a
-// second copy of them:
-//
-//   - a credential whose stable item identity is longer than the store accepts
-//     can never be recorded under its own name, so it is reported with a
-//     bounded, stable identity and an instruction instead of stopping the run
-//     at it;
-//   - the whole inventory must fit the summary. The fixed part of the plan (the
-//     gateway leaves, the rule families and the provider sections) is known
-//     exactly, so the credential allowance is the remainder. Anything past it is
-//     reported by one aggregate marker: a bounded, valid record the operator can
-//     act on is strictly better than a record the store refuses.
-//
 // One budget pays for every item this preflight persists — an ordinary
 // credential's record, an overlong name's manual record and the aggregate marker
 // itself all draw on the same allowance. Charging one kind and not another would
@@ -538,14 +545,16 @@ const excessCredentialItem = "credential-inventory-excess"
 // The summary is validated against the store's own checker before it is
 // checkpointed, so a plan that still does not fit ends the run here, before any
 // write, instead of failing during it.
-func (e *Executor) preflightInventory(ctx context.Context, summary *freshstore.AdoptionSummary, files []CredentialFile, checkpoint Checkpoint) ([]CredentialFile, error) {
+func (e *Executor) preflightInventory(ctx context.Context, summary *freshstore.AdoptionSummary, files []CredentialFile, hasUnknown bool, checkpoint Checkpoint) ([]CredentialFile, error) {
 	limit := freshstore.MaxAdoptionItems()
 	nameLimit := freshstore.MaxAdoptionItemName()
 	// The fixed part of every run. A leaf the source never set is not recorded,
 	// so this is an upper bound on what the three configuration passes append.
 	fixed := len(cpa.ConfigLeafPaths()) + len(cpa.ConfigRuleFamilyIDs()) + len(ProviderSections())
+	if hasUnknown {
+		fixed++
+	}
 	// One slot is reserved for the single aggregate marker below, so the plan and
-	// its own report always fit.
 	allowed := limit - len(summary.Items) - fixed - 1
 	if allowed < 0 {
 		allowed = 0
@@ -719,7 +728,7 @@ func (e *Executor) migrateCredential(ctx context.Context, item string, file Cred
 		}
 		reason := "verify_mismatch"
 		if uploadErr != nil {
-			reason = sanitizeReason(errorCode(uploadErr))
+			reason = boundedAdoptionReason(freshstore.AdoptionFailed, errorCode(uploadErr))
 		}
 		return freshstore.AdoptionItem{
 			Item: item, Kind: freshstore.AdoptionKindCredential, Outcome: freshstore.AdoptionFailed,
@@ -799,8 +808,36 @@ func (e *Executor) credentialOutcome(ctx context.Context, item, name string, sou
 	}
 }
 
+const unknownConfigItemName = "family:unknown-config"
+
+// coupledConfigGroups lists gateway configuration groups whose leaves share
+// cross-field validation in CPA (`ValidateV8Config` / `ParseConfigBytes`) and
+// must be written together in one atomic PATCH request.
+var coupledConfigGroups = map[string]bool{
+	"live_relay": true,
+}
+
 func (e *Executor) migrateConfigLeaves(ctx context.Context, summary *freshstore.AdoptionSummary, document map[string]any, checkpoint Checkpoint) error {
-	for _, path := range cpa.ConfigLeafPaths() {
+	leaves := cpa.ConfigLeafPaths()
+	handled := make(map[string]bool, len(leaves))
+	for _, path := range leaves {
+		if handled[path] {
+			continue
+		}
+		if leafMeta, ok := cpa.LookupConfigLeaf(path); ok && coupledConfigGroups[leafMeta.Group] {
+			var groupPaths []string
+			for _, candidate := range leaves {
+				if candidateMeta, ok := cpa.LookupConfigLeaf(candidate); ok && candidateMeta.Group == leafMeta.Group {
+					groupPaths = append(groupPaths, candidate)
+					handled[candidate] = true
+				}
+			}
+			if err := e.migrateCoupledConfigGroup(ctx, summary, document, leafMeta.Group, groupPaths, checkpoint); err != nil {
+				return err
+			}
+			continue
+		}
+		handled[path] = true
 		item := configLeafItemName(path)
 		if summary.Settled(item) {
 			continue
@@ -845,44 +882,224 @@ func (e *Executor) migrateConfigLeaves(ctx context.Context, summary *freshstore.
 			}
 			continue
 		}
-		prefix, err := configLeafPrefix(path)
-		if err != nil {
-			if err := e.record(ctx, summary, freshstore.AdoptionItem{
-				Item: item, Kind: freshstore.AdoptionKindConfigLeaf, Outcome: freshstore.AdoptionFailed,
-				Reason: "path_unresolved", Instruction: manualInstruction(freshstore.AdoptionKindConfigLeaf, path),
-			}, checkpoint); err != nil {
-				return err
+		isKVMap := cpa.IsConfigKVMapLeaf(path)
+		var (
+			prefix string
+			body   []byte
+			err    error
+		)
+		if isKVMap {
+			body, err = encodeJSONValue(value)
+			if err != nil {
+				if err := e.record(ctx, summary, freshstore.AdoptionItem{
+					Item: item, Kind: freshstore.AdoptionKindConfigLeaf, Outcome: freshstore.AdoptionFailed,
+					Reason: "payload_unresolved", Instruction: manualInstruction(freshstore.AdoptionKindConfigLeaf, path),
+				}, checkpoint); err != nil {
+					return err
+				}
+				continue
 			}
-			continue
-		}
-		body, err := leafPatchPayload(prefix, path, value)
-		if err != nil {
-			if err := e.record(ctx, summary, freshstore.AdoptionItem{
-				Item: item, Kind: freshstore.AdoptionKindConfigLeaf, Outcome: freshstore.AdoptionFailed,
-				Reason: "payload_unresolved", Instruction: manualInstruction(freshstore.AdoptionKindConfigLeaf, path),
-			}, checkpoint); err != nil {
-				return err
+		} else {
+			prefix, err = configLeafPrefix(path)
+			if err != nil {
+				if err := e.record(ctx, summary, freshstore.AdoptionItem{
+					Item: item, Kind: freshstore.AdoptionKindConfigLeaf, Outcome: freshstore.AdoptionFailed,
+					Reason: "path_unresolved", Instruction: manualInstruction(freshstore.AdoptionKindConfigLeaf, path),
+				}, checkpoint); err != nil {
+					return err
+				}
+				continue
 			}
-			continue
+			body, err = leafPatchPayload(prefix, path, value)
+			if err != nil {
+				if err := e.record(ctx, summary, freshstore.AdoptionItem{
+					Item: item, Kind: freshstore.AdoptionKindConfigLeaf, Outcome: freshstore.AdoptionFailed,
+					Reason: "payload_unresolved", Instruction: manualInstruction(freshstore.AdoptionKindConfigLeaf, path),
+				}, checkpoint); err != nil {
+					return err
+				}
+				continue
+			}
 		}
-		if err := e.record(ctx, summary, e.writeLeaf(ctx, item, path, prefix, value, body), checkpoint); err != nil {
+		if err := e.record(ctx, summary, e.writeLeaf(ctx, item, path, prefix, isKVMap, value, body), checkpoint); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+// migrateCoupledConfigGroup validates and normalizes every unsettled present
+// leaf in a cross-validated group first, writes all valid present leaves in
+// one atomic PATCH request under the shared group prefix, and then reads back
+// and records each leaf individually in deterministic ConfigLeafPaths() order.
+func (e *Executor) migrateCoupledConfigGroup(ctx context.Context, summary *freshstore.AdoptionSummary, document map[string]any, groupID string, groupPaths []string, checkpoint Checkpoint) error {
+	outcomes := make(map[string]freshstore.AdoptionItem, len(groupPaths))
+	presentValid := make(map[string]any, len(groupPaths))
+	presentOrder := make([]string, 0, len(groupPaths))
+	invalidFound := false
+
+	for _, path := range groupPaths {
+		item := configLeafItemName(path)
+		if summary.Settled(item) {
+			continue
+		}
+		if ManagerOwned(path) {
+			outcomes[path] = freshstore.AdoptionItem{
+				Item: item, Kind: freshstore.AdoptionKindConfigLeaf, Outcome: freshstore.AdoptionManual,
+				Reason: "manager_owned", Instruction: manualInstruction(freshstore.AdoptionKindConfigLeaf, path),
+			}
+			continue
+		}
+		if gated, ok := e.gated(freshstore.AdoptionItem{Item: item, Kind: freshstore.AdoptionKindConfigLeaf}, path); ok {
+			outcomes[path] = gated
+			continue
+		}
+		rawValue, presence := cpa.LookupConfigValue(document, path)
+		if presence != cpa.ConfigPresent {
+			outcomes[path] = freshstore.AdoptionItem{
+				Item: item, Kind: freshstore.AdoptionKindConfigLeaf, Outcome: freshstore.AdoptionAbsentAtSource,
+			}
+			continue
+		}
+		value := normalizeValue(rawValue)
+		if err := cpa.ValidateConfigLeafValue(path, value); err != nil {
+			invalidFound = true
+			outcomes[path] = freshstore.AdoptionItem{
+				Item: item, Kind: freshstore.AdoptionKindConfigLeaf, Outcome: freshstore.AdoptionManual,
+				Reason: "value_shape_unsupported", Instruction: manualInstruction(freshstore.AdoptionKindConfigLeaf, path),
+			}
+			continue
+		}
+		if _, err := encodeJSONValue(value); err != nil {
+			invalidFound = true
+			outcomes[path] = freshstore.AdoptionItem{
+				Item: item, Kind: freshstore.AdoptionKindConfigLeaf, Outcome: freshstore.AdoptionFailed,
+				Reason: "payload_unresolved", Instruction: manualInstruction(freshstore.AdoptionKindConfigLeaf, path),
+			}
+			continue
+		}
+		presentValid[path] = value
+		presentOrder = append(presentOrder, path)
+	}
+
+	if invalidFound {
+		// Never send a half-populated PATCH when any sibling leaf in the coupled
+		// group failed local validation.
+		for _, path := range presentOrder {
+			outcomes[path] = freshstore.AdoptionItem{
+				Item: configLeafItemName(path), Kind: freshstore.AdoptionKindConfigLeaf, Outcome: freshstore.AdoptionManual,
+				Reason: "reconfigure_after_adoption", Instruction: manualInstruction(freshstore.AdoptionKindConfigLeaf, path),
+			}
+		}
+	} else if len(presentOrder) > 0 {
+		prefix, prefixErr := cpa.ConfigGroupPrefix(groupID)
+		if prefixErr != nil {
+			for _, path := range presentOrder {
+				outcomes[path] = freshstore.AdoptionItem{
+					Item: configLeafItemName(path), Kind: freshstore.AdoptionKindConfigLeaf, Outcome: freshstore.AdoptionFailed,
+					Reason: "path_unresolved", Instruction: manualInstruction(freshstore.AdoptionKindConfigLeaf, path),
+				}
+			}
+		} else {
+			allMatch := true
+			for _, path := range presentOrder {
+				observed, presence, err := e.destination.ReadConfigValue(ctx, path)
+				if !(err == nil && presence == cpa.ConfigPresent && equalConfigValue(presentValid[path], observed)) {
+					allMatch = false
+					break
+				}
+			}
+			if allMatch {
+				for _, path := range presentOrder {
+					outcomes[path] = freshstore.AdoptionItem{
+						Item: configLeafItemName(path), Kind: freshstore.AdoptionKindConfigLeaf, Outcome: freshstore.AdoptionMigrated,
+					}
+				}
+			} else {
+				payload, payloadErr := groupPatchPayload(prefix, presentValid)
+				if payloadErr != nil {
+					for _, path := range presentOrder {
+						outcomes[path] = freshstore.AdoptionItem{
+							Item: configLeafItemName(path), Kind: freshstore.AdoptionKindConfigLeaf, Outcome: freshstore.AdoptionFailed,
+							Reason: "payload_unresolved", Instruction: manualInstruction(freshstore.AdoptionKindConfigLeaf, path),
+						}
+					}
+				} else {
+					writeErr := e.destination.PatchConfigPath(ctx, prefix, payload)
+					for _, path := range presentOrder {
+						item := configLeafItemName(path)
+						observed, presence, readErr := e.destination.ReadConfigValue(ctx, path)
+						applied := readErr == nil && presence == cpa.ConfigPresent && equalConfigValue(presentValid[path], observed)
+						switch {
+						case applied:
+							outcomes[path] = freshstore.AdoptionItem{
+								Item: item, Kind: freshstore.AdoptionKindConfigLeaf, Outcome: freshstore.AdoptionMigrated,
+							}
+						case writeErr != nil && isDefiniteRefusal(writeErr):
+							outcomes[path] = freshstore.AdoptionItem{
+								Item: item, Kind: freshstore.AdoptionKindConfigLeaf, Outcome: freshstore.AdoptionManual,
+								Reason: boundedAdoptionReason(freshstore.AdoptionManual, errorCode(writeErr)), Instruction: manualInstruction(freshstore.AdoptionKindConfigLeaf, path),
+							}
+						default:
+							outcomes[path] = freshstore.AdoptionItem{
+								Item: item, Kind: freshstore.AdoptionKindConfigLeaf, Outcome: freshstore.AdoptionFailed,
+								Reason: "verify_mismatch", Instruction: manualInstruction(freshstore.AdoptionKindConfigLeaf, path),
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	for _, path := range groupPaths {
+		outcome, ok := outcomes[path]
+		if !ok {
+			continue
+		}
+		if err := e.record(ctx, summary, outcome, checkpoint); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *Executor) migrateUnknownConfig(ctx context.Context, summary *freshstore.AdoptionSummary, unknownScan cpa.V8UnknownConfigScan, checkpoint Checkpoint) error {
+	if !unknownScan.HasAny() || summary.Settled(unknownConfigItemName) {
+		return nil
+	}
+	item := e.manual(freshstore.AdoptionItem{
+		Item: unknownConfigItemName,
+		Kind: freshstore.AdoptionKindConfigFamily,
+	}, unknownConfigItemName, bootstrap.AdoptionRefConfigUnknown)
+	switch {
+	case unknownScan.ArchiveScanIncomplete:
+		item.Reason = "archive_scan_incomplete"
+		item.Instruction = "Source configuration YAML could not be completely scanned for archived settings; review the source config.yaml and reconfigure any unsupported settings in the destination CPA."
+	case len(unknownScan.ArchiveCandidates) > 0 && len(unknownScan.JSONPaths) == 0:
+		item.Reason = "archived_or_commented_settings"
+		item.Instruction = "Source configuration YAML contains archived or commented-out settings that may have been omitted; review the source config.yaml and reconfigure any needed settings in the destination CPA."
+	}
+	return e.record(ctx, summary, item, checkpoint)
+}
+
 // writeLeaf writes one leaf and resolves the outcome by reading it back. A
 // definite refusal is manual work; an unknown effect is decided by what the
-// destination holds now and never by resending the write.
-func (e *Executor) writeLeaf(ctx context.Context, item, path, prefix string, value any, payload []byte) freshstore.AdoptionItem {
+// destination holds now and never by resending the write. KVMap leaves use PUT
+// at the leaf path so deleted entries on the source do not survive a PATCH merge.
+func (e *Executor) writeLeaf(ctx context.Context, item, path, prefix string, replaceWhole bool, value any, payload []byte) freshstore.AdoptionItem {
 	// Read before writing: a value the destination already holds is recorded as
 	// migrated without a write, so a crash before the checkpoint and a change the
 	// operator made on the destination both survive a replay.
 	if observed, presence, err := e.destination.ReadConfigValue(ctx, path); err == nil && presence == cpa.ConfigPresent && equalConfigValue(value, observed) {
 		return freshstore.AdoptionItem{Item: item, Kind: freshstore.AdoptionKindConfigLeaf, Outcome: freshstore.AdoptionMigrated}
 	}
-	writeErr := e.destination.PatchConfigPath(ctx, prefix, payload)
+	var writeErr error
+	if replaceWhole {
+		writeErr = e.destination.PutConfigValue(ctx, path, payload)
+	} else {
+		writeErr = e.destination.PatchConfigPath(ctx, prefix, payload)
+	}
 	observed, presence, readErr := e.destination.ReadConfigValue(ctx, path)
 	applied := readErr == nil && presence == cpa.ConfigPresent && equalConfigValue(value, observed)
 	switch {
@@ -891,7 +1108,7 @@ func (e *Executor) writeLeaf(ctx context.Context, item, path, prefix string, val
 	case writeErr != nil && isDefiniteRefusal(writeErr):
 		return freshstore.AdoptionItem{
 			Item: item, Kind: freshstore.AdoptionKindConfigLeaf, Outcome: freshstore.AdoptionManual,
-			Reason: sanitizeReason(errorCode(writeErr)), Instruction: manualInstruction(freshstore.AdoptionKindConfigLeaf, path),
+			Reason: boundedAdoptionReason(freshstore.AdoptionManual, errorCode(writeErr)), Instruction: manualInstruction(freshstore.AdoptionKindConfigLeaf, path),
 		}
 	default:
 		return freshstore.AdoptionItem{
@@ -981,6 +1198,47 @@ func (e *Executor) migrateProviderSections(ctx context.Context, summary *freshst
 			}
 			continue
 		}
+		if _, redacted := value.(turnCredentialsRedactedSentinel); redacted {
+			if err := e.record(ctx, summary, freshstore.AdoptionItem{
+				Item: item, Kind: freshstore.AdoptionKindProviderSection, Outcome: freshstore.AdoptionManual,
+				Reason: "reconfigure_after_adoption", Instruction: manualInstruction(freshstore.AdoptionKindProviderSection, section),
+			}, checkpoint); err != nil {
+				return err
+			}
+			continue
+		}
+		if section == "credentials.concurrency" {
+			if presence != cpa.ConfigPresent {
+				if err := e.record(ctx, summary, freshstore.AdoptionItem{
+					Item: item, Kind: freshstore.AdoptionKindProviderSection, Outcome: freshstore.AdoptionAbsentAtSource,
+				}, checkpoint); err != nil {
+					return err
+				}
+				continue
+			}
+			cleanSource, ok := stripConcurrencyRevisions(value)
+			if !ok {
+				if err := e.record(ctx, summary, freshstore.AdoptionItem{
+					Item: item, Kind: freshstore.AdoptionKindProviderSection, Outcome: freshstore.AdoptionManual,
+					Reason: "value_shape_unsupported", Instruction: manualInstruction(freshstore.AdoptionKindProviderSection, section),
+				}, checkpoint); err != nil {
+					return err
+				}
+				continue
+			}
+			if len(cleanSource) == 0 {
+				if err := e.record(ctx, summary, freshstore.AdoptionItem{
+					Item: item, Kind: freshstore.AdoptionKindProviderSection, Outcome: freshstore.AdoptionAbsentAtSource,
+				}, checkpoint); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := e.record(ctx, summary, e.writeConcurrencySection(ctx, item, section, cleanSource), checkpoint); err != nil {
+				return err
+			}
+			continue
+		}
 		payload, err := encodeJSONValue(value)
 		if err != nil {
 			if err := e.record(ctx, summary, freshstore.AdoptionItem{
@@ -998,6 +1256,67 @@ func (e *Executor) migrateProviderSections(ctx context.Context, summary *freshst
 	return nil
 }
 
+func (e *Executor) writeConcurrencySection(ctx context.Context, item, section string, cleanSource map[string]any) freshstore.AdoptionItem {
+	cleanPayload, err := encodeJSONValue(cleanSource)
+	if err != nil {
+		return freshstore.AdoptionItem{
+			Item: item, Kind: freshstore.AdoptionKindProviderSection, Outcome: freshstore.AdoptionManual,
+			Reason: "value_shape_unsupported", Instruction: manualInstruction(freshstore.AdoptionKindProviderSection, section),
+		}
+	}
+	digest := digestSHA256(cleanPayload)
+
+	var dstRevisions map[string]any
+	if observed, presence, readErr := e.destination.ReadConfigValue(ctx, section); readErr == nil && presence == cpa.ConfigPresent {
+		if equalWholeConfigValue(freshstore.AdoptionKindProviderSection, section, cleanSource, observed) {
+			return freshstore.AdoptionItem{
+				Item: item, Kind: freshstore.AdoptionKindProviderSection, Outcome: freshstore.AdoptionMigrated,
+				SourceSHA256: digest, DestinationSHA256: digestOfValue(observed),
+			}
+		}
+		if dstMap, ok := observed.(map[string]any); ok {
+			dstRevisions = extractConcurrencyRevisions(dstMap)
+		}
+	}
+
+	putBody := make(map[string]any, len(cleanSource)+len(dstRevisions))
+	for k, v := range cleanSource {
+		putBody[k] = v
+	}
+	for k, v := range dstRevisions {
+		putBody[k] = v
+	}
+	putPayload, err := encodeJSONValue(putBody)
+	if err != nil {
+		return freshstore.AdoptionItem{
+			Item: item, Kind: freshstore.AdoptionKindProviderSection, Outcome: freshstore.AdoptionFailed,
+			Reason: "payload_unresolved", Instruction: manualInstruction(freshstore.AdoptionKindProviderSection, section),
+			SourceSHA256: digest,
+		}
+	}
+	writeErr := e.destination.PutConfigValue(ctx, section, putPayload)
+	observed, presence, readErr := e.destination.ReadConfigValue(ctx, section)
+	applied := readErr == nil && presence == cpa.ConfigPresent && equalWholeConfigValue(freshstore.AdoptionKindProviderSection, section, cleanSource, observed)
+	switch {
+	case applied:
+		return freshstore.AdoptionItem{
+			Item: item, Kind: freshstore.AdoptionKindProviderSection, Outcome: freshstore.AdoptionMigrated,
+			SourceSHA256: digest, DestinationSHA256: digestOfValue(observed),
+		}
+	case writeErr != nil && isDefiniteRefusal(writeErr):
+		return freshstore.AdoptionItem{
+			Item: item, Kind: freshstore.AdoptionKindProviderSection, Outcome: freshstore.AdoptionManual,
+			Reason: boundedAdoptionReason(freshstore.AdoptionManual, errorCode(writeErr)), Instruction: manualInstruction(freshstore.AdoptionKindProviderSection, section),
+			SourceSHA256: digest,
+		}
+	default:
+		return freshstore.AdoptionItem{
+			Item: item, Kind: freshstore.AdoptionKindProviderSection, Outcome: freshstore.AdoptionFailed,
+			Reason: "verify_mismatch", Instruction: manualInstruction(freshstore.AdoptionKindProviderSection, section),
+			SourceSHA256: digest,
+		}
+	}
+}
 // writeWhole replaces one whole section or rule family and resolves the outcome
 // by reading that path back, on the same terms as writeLeaf.
 func (e *Executor) writeWhole(ctx context.Context, kind freshstore.AdoptionItemKind, item, path string, value any, payload []byte) freshstore.AdoptionItem {
@@ -1022,7 +1341,7 @@ func (e *Executor) writeWhole(ctx context.Context, kind freshstore.AdoptionItemK
 	case writeErr != nil && isDefiniteRefusal(writeErr):
 		return freshstore.AdoptionItem{
 			Item: item, Kind: kind, Outcome: freshstore.AdoptionManual,
-			Reason: sanitizeReason(errorCode(writeErr)), Instruction: manualInstruction(kind, path),
+			Reason: boundedAdoptionReason(freshstore.AdoptionManual, errorCode(writeErr)), Instruction: manualInstruction(kind, path),
 			SourceSHA256: digest,
 		}
 	default:
@@ -1073,7 +1392,48 @@ func equalWholeConfigValue(kind freshstore.AdoptionItemKind, path string, source
 		}
 		return equalConfigValue(cleanSource, cleanDestination)
 	}
+	if kind == freshstore.AdoptionKindProviderSection && path == "credentials.concurrency" {
+		cleanSource, okSource := stripConcurrencyRevisions(source)
+		cleanDestination, okDestination := stripConcurrencyRevisions(destination)
+		if !okSource || !okDestination {
+			return false
+		}
+		return equalConfigValue(cleanSource, cleanDestination)
+	}
 	return equalConfigValue(source, destination)
+}
+
+var concurrencyRevisionKeys = []string{
+	"lifecycle-config-revision",
+	"observation-barrier-revision",
+}
+
+func stripConcurrencyRevisions(value any) (map[string]any, bool) {
+	mapping, ok := value.(map[string]any)
+	if !ok || mapping == nil {
+		return nil, false
+	}
+	cleaned := make(map[string]any, len(mapping))
+	for k, v := range mapping {
+		cleaned[k] = v
+	}
+	for _, key := range concurrencyRevisionKeys {
+		delete(cleaned, key)
+	}
+	return cleaned, true
+}
+
+func extractConcurrencyRevisions(mapping map[string]any) map[string]any {
+	if mapping == nil {
+		return nil
+	}
+	out := make(map[string]any, len(concurrencyRevisionKeys))
+	for _, key := range concurrencyRevisionKeys {
+		if val, exists := mapping[key]; exists && val != nil {
+			out[key] = val
+		}
+	}
+	return out
 }
 
 func stripAPIKeysAuthIndex(path string, value any) (any, bool) {
