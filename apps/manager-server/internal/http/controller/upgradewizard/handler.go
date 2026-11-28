@@ -1220,7 +1220,7 @@ func (h *Handler) servePreflight(w http.ResponseWriter, r *http.Request, mount m
 	h.rememberPreflightParityGaps(hasGaps)
 	qualifiedCPAArtifactID := ""
 	if artifactID, qErr := freshstrategy.QualifiedUpgradeAdoptionArtifactID(); qErr == nil {
-		qualifiedCPAArtifactID = string(artifactID)
+		qualifiedCPAArtifactID = abbreviateArtifactID(string(artifactID))
 	}
 	writeJSON(w, http.StatusOK, preflightDocument{
 		ContractVersion: Contract,
@@ -2484,6 +2484,27 @@ func abbreviate(value string) string {
 		return trimmed[:12] + "…"
 	}
 	return trimmed
+}
+
+// abbreviateArtifactID shortens a sha256:<64hex> baseline digest to
+// sha256:<12hex>… so preflight never publishes a full 64-hex digest.
+func abbreviateArtifactID(value string) string {
+	trimmed := strings.TrimSpace(value)
+	const prefix = "sha256:"
+	if !strings.HasPrefix(trimmed, prefix) {
+		return ""
+	}
+	hexPart := trimmed[len(prefix):]
+	if len(hexPart) != 64 {
+		return ""
+	}
+	for i := range len(hexPart) {
+		c := hexPart[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return ""
+		}
+	}
+	return prefix + hexPart[:12] + "…"
 }
 
 // readOnlyDataSourceName mirrors the bounded admission DSN: read-only, no

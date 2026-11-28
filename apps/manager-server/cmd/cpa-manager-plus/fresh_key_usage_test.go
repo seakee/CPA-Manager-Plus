@@ -4268,9 +4268,20 @@ func TestPostStartMonitoringSwitchTransientErrorStopsCollectorAndRetriesCleanly(
 
 		var rejectQueue atomic.Bool
 		rejectQueue.Store(true)
+		release401 := make(chan struct{})
+		var releaseOnce sync.Once
+		unblock401 := func() {
+			releaseOnce.Do(func() { close(release401) })
+		}
+		t.Cleanup(unblock401)
 		fixture, _ := adoptionFixtureWithDestination(t, func(dest *migrationFakeCPA) string {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/v0/management/usage-queue" && rejectQueue.Load() {
+					select {
+					case <-release401:
+					case <-r.Context().Done():
+						return
+					}
 					http.Error(w, "unauthorized", http.StatusUnauthorized)
 					return
 				}
@@ -4290,7 +4301,11 @@ func TestPostStartMonitoringSwitchTransientErrorStopsCollectorAndRetriesCleanly(
 		fixture.app.runtimeSettings = &faultOnceSettingRepo{
 			Repository: fixture.app.runtimeSettings,
 			failWhen: func() bool {
-				return fixture.app.legacyCollector.StartCount() == 1 && !failedOnce.Swap(true)
+				if fixture.app.legacyCollector.StartCount() == 1 && !failedOnce.Swap(true) {
+					unblock401()
+					return true
+				}
+				return false
 			},
 			failErr: errors.New("transient settings failure"),
 		}

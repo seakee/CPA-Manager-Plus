@@ -422,7 +422,7 @@ export function parseUpgradePreflight(value: unknown): UpgradePreflight | null {
   if (document.qualifiedCpaArtifactId !== undefined) {
     if (
       typeof document.qualifiedCpaArtifactId !== 'string' ||
-      !/^sha256:[0-9a-f]{64}$/.test(document.qualifiedCpaArtifactId)
+      !/^sha256:[0-9a-f]{12}(?:…|[0-9a-f]{52})$/.test(document.qualifiedCpaArtifactId)
     ) {
       return null;
     }
@@ -1737,7 +1737,11 @@ export function FreshUpgradeFlow({
                     <dd
                       className="upgrade-fact-mono"
                       data-testid="upgrade-preflight-cpa-baseline"
-                      title={preflightReport.qualifiedCpaArtifactId}
+                      title={
+                        preflightReport.qualifiedCpaArtifactId.endsWith('…')
+                          ? undefined
+                          : preflightReport.qualifiedCpaArtifactId
+                      }
                     >
                       {formatPreflightCpaBaseline(preflightReport.qualifiedCpaArtifactId)}
                     </dd>

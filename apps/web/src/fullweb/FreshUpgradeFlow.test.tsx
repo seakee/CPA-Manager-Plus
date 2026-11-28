@@ -3611,22 +3611,27 @@ describe('Full Web upgrade wizard', () => {
   });
 
   it('surfaces the pinned Managed CPA baseline artifact on preflight and rejects malformed digests', async () => {
-    const digest = 'sha256:' + 'e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7';
-    expect(parseUpgradePreflight(preflightDocument({ qualifiedCpaArtifactId: digest }))?.qualifiedCpaArtifactId).toBe(
-      digest
+    const abbrev = 'sha256:e48c85c75a19…';
+    const fullDigest = 'sha256:' + 'e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7';
+    expect(parseUpgradePreflight(preflightDocument({ qualifiedCpaArtifactId: abbrev }))?.qualifiedCpaArtifactId).toBe(
+      abbrev
+    );
+    expect(parseUpgradePreflight(preflightDocument({ qualifiedCpaArtifactId: fullDigest }))?.qualifiedCpaArtifactId).toBe(
+      fullDigest
     );
     expect(parseUpgradePreflight(preflightDocument({ qualifiedCpaArtifactId: '' }))).toBeNull();
     expect(parseUpgradePreflight(preflightDocument({ qualifiedCpaArtifactId: 'sha256:short' }))).toBeNull();
+    expect(parseUpgradePreflight(preflightDocument({ qualifiedCpaArtifactId: 'sha256:e48c85c75a19' }))).toBeNull();
     expect(parseUpgradePreflight(preflightDocument({ qualifiedCpaArtifactId: 123 }))).toBeNull();
     const read: UpgradeWizardRead = vi.fn(async (resource) =>
       resource === 'installation/upgrade/status'
         ? unrecordedStatus()
-        : preflightDocument({ qualifiedCpaArtifactId: digest })
+        : preflightDocument({ qualifiedCpaArtifactId: abbrev })
     );
     await mount(read);
     const baseline = byTestId('upgrade-preflight-cpa-baseline');
-    expect(baseline.props.title).toBe(digest);
-    expect(baseline.children.join('')).toBe('sha256:e48c85c75a19…');
+    expect(baseline.props.title).toBeUndefined();
+    expect(baseline.children.join('')).toBe(abbrev);
   });
 
   it('keeps the Console and Gateway URL copy banner visible on result even when accessInfo is omitted after canonical cutover', async () => {
