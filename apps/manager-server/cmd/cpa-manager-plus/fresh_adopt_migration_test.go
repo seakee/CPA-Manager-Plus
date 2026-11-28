@@ -63,6 +63,11 @@ type migrationFakeCPA struct {
 	// a source read that wrote nothing is reproduced: the item is recorded as
 	// retryable and the next run may attempt it again.
 	downloadFailures map[string]bool
+	serveUsageAPI    bool
+	usageQueueMu     sync.Mutex
+	usageQueue       []string
+	usageQueuePolls  int
+	onUsageQueuePoll func(poll int)
 }
 
 func newMigrationFakeCPA(t *testing.T) *migrationFakeCPA {
@@ -130,6 +135,23 @@ func (f *migrationFakeCPA) serve(w http.ResponseWriter, r *http.Request) {
 		body, _ := json.Marshal(f.config)
 		f.mu.Unlock()
 		_, _ = w.Write(body)
+	case f.serveUsageAPI && path == "/v0/management/config" && r.Method == http.MethodGet:
+		w.Header().Set("X-CPA-Version", "v8.0.13")
+		_, _ = w.Write([]byte(`{}`))
+	case f.serveUsageAPI && path == "/v0/management/usage-queue" && r.Method == http.MethodGet:
+		f.usageQueueMu.Lock()
+		f.usageQueuePolls++
+		poll := f.usageQueuePolls
+		hook := f.onUsageQueuePoll
+		f.usageQueueMu.Unlock()
+		if hook != nil {
+			hook(poll)
+		}
+		f.usageQueueMu.Lock()
+		payload := "[" + strings.Join(f.usageQueue, ",") + "]"
+		f.usageQueue = nil
+		f.usageQueueMu.Unlock()
+		_, _ = w.Write([]byte(payload))
 	case strings.HasPrefix(path, "/v8/management/config/") && r.Method != http.MethodGet:
 		f.writeConfig(w, r, strings.TrimPrefix(path, "/v8/management/config/"))
 	case strings.HasPrefix(path, "/v8/management/config/") && r.Method == http.MethodGet:

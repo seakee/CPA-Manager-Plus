@@ -1311,6 +1311,20 @@ func TestUpgradeManagedAndExternalKeyWorkspacesPreserveIdentitiesAndEnforceAutho
 			t.Fatalf("unqualified artifact POST api-keys = %d %s, want 503", badArtifactCreate.Code, badArtifactCreate.Body.String())
 		}
 
+
+		// Retired qualified adoption artifact from an earlier CPAMP release stays operational,
+		// while unqualified artifacts above remain fail-closed.
+		retiredArtifact := model.RuntimeArtifactID("sha256:" + strings.Repeat("e", 64))
+		doc["intent"].(map[string]any)["expectedActiveArtifactId"] = string(retiredArtifact)
+		retiredBytes, _ := json.Marshal(doc)
+		if _, err := db.ExecContext(ctx, `update settings set value = ? where key = ?`, string(retiredBytes), upgradeImportDestinationSettingKey); err != nil {
+			t.Fatal(err)
+		}
+		freshstrategy.WithRetiredUpgradeAdoptionArtifactsForTesting([]model.RuntimeArtifactID{retiredArtifact}, func() {
+			if retiredList := callWS(handler2, http.MethodGet, "api-keys", ""); retiredList.Code != http.StatusOK {
+				t.Fatalf("retired qualified artifact GET api-keys = %d %s, want 200", retiredList.Code, retiredList.Body.String())
+			}
+		})
 		// Restore valid destination, then mismatch upgrade_operations.source_fingerprint_after -> 409 Conflict.
 		if _, err := db.ExecContext(ctx, `update settings set value = ? where key = ?`, rawImport, upgradeImportDestinationSettingKey); err != nil {
 			t.Fatal(err)

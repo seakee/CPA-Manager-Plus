@@ -1,6 +1,7 @@
 import axios, { type AxiosRequestConfig } from 'axios';
 import { normalizeUsageServiceBase } from '@/services/api/usageService';
 import { REQUEST_TIMEOUT_MS } from '@/utils/constants';
+import { isValidHeaderCredentialValue } from '@/utils/headerCredential';
 
 export const CPA_UPDATE_MAX_UPLOAD_BYTES = 64 * 1024 * 1024;
 export const CPA_UPDATE_MAX_CDN_PREFIX_LENGTH = 512;
@@ -519,6 +520,9 @@ async function request<T>(
   // Guard the transport as well as the UI, including direct calls.
   if (__PANEL_LITE__ || !connection.base || !connection.key) {
     throw new CPAUpdateAPIError('unavailable', 'update_unavailable');
+  }
+  if (!isValidHeaderCredentialValue(connection.key)) {
+    throw new CPAUpdateAPIError('context_changed', 'unauthorized');
   }
   try {
     const response = await axios.request<unknown>({

@@ -6,6 +6,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import type {
+  ApiError,
   AuthSessionMode,
   AuthState,
   LoginCredentials,
@@ -23,6 +24,7 @@ import { useQuotaStore } from './useQuotaStore';
 import { useUsageServiceStore } from './useUsageServiceStore';
 import { detectApiBaseFromLocation, normalizeApiBase } from '@/utils/connection';
 import { sha256Hex } from '@/utils/apiKeyHash';
+import { isValidHeaderCredentialValue } from '@/utils/headerCredential';
 
 interface AuthStoreState extends AuthState {
   sessionMode: AuthSessionMode | '';
@@ -211,6 +213,13 @@ export const useAuthStore = create<AuthStoreState>()(
           });
           useModelsStore.getState().clearCache();
 
+
+          if (!isValidHeaderCredentialValue(managementKey)) {
+            const invalidKeyError = new Error('Request failed with status code 401') as ApiError;
+            invalidKeyError.name = 'ApiError';
+            invalidKeyError.status = 401;
+            throw invalidKeyError;
+          }
           // 配置 API 客户端
           apiClient.setConfig({
             apiBase,

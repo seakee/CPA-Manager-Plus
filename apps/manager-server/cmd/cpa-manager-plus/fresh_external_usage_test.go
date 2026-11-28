@@ -2371,3 +2371,183 @@ func TestExternalPostCreatedKeyAttributesImmediateUsageBeforeNextPollAndWakesPro
 		t.Fatalf("key1 post-retirement usage leaked/changed = %+v", detailAfter)
 	}
 }
+
+func TestExternalRunRetentionDefersUntilMonitoringStillEnabled(t *testing.T) {
+	hostCtx, stopHost := context.WithCancel(t.Context())
+	defer stopHost()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v0/management/config":
+			w.Header().Set("X-CPA-Version", "v8.0.13")
+			_, _ = w.Write([]byte(`{"redis-usage-queue-retention-seconds":10}`))
+		case "/v0/management/usage-statistics-enabled":
+			_, _ = w.Write([]byte(`{"usage-statistics-enabled":true}`))
+		case "/v0/management/usage-queue":
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	app := newExternalApp(t, upstream.URL, externalAuthorityManagement)
+	app.runCtx = hostCtx
+	app.cfg.CollectorMode = "http"
+	app.cfg.PollInterval = 15 * time.Millisecond
+
+	record, err := app.store.Load(hostCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Disable monitoring right when External collector finishes starting, before
+	// attemptUsageStartWithWarmState performs its post-start stillEnabled check.
+	var once sync.Once
+	var pendingBeforeCheck bool
+	var capturedWaiter *runRetentionWaiter
+	app.afterExternalCollectorStart = func() {
+		once.Do(func() {
+			app.obsMu.Lock()
+			capturedWaiter = app.runRetentions[1]
+			pendingBeforeCheck = capturedWaiter != nil && !capturedWaiter.done
+			app.obsMu.Unlock()
+			if _, err := app.runtimeSettings.PatchManagerCollectorEnabled(hostCtx, false); err != nil {
+				t.Errorf("PatchManagerCollectorEnabled(false): %v", err)
+			}
+		})
+	}
+
+	app.startUsageCollection(record.Operation)
+	if !pendingBeforeCheck {
+		t.Fatal("runRetentions[1] was resolved before stillEnabled check; want pending until monitoring check succeeds")
+	}
+	if app.usageCollectionStarted() || app.collectionPhase() != usageapp.PhaseStopped {
+		t.Fatalf("external collector stayed running after concurrent disable: started=%v phase=%s", app.usageCollectionStarted(), app.collectionPhase())
+	}
+	if got := app.usageStartBlock(); got != usageStartReasonMonitoringDisabled {
+		t.Fatalf("usageStartBlock = %q, want %q", got, usageStartReasonMonitoringDisabled)
+	}
+	if startedAt, ok := readSettingInt64(t, app.usageDB, "fresh_usage_collection_started_at_ms"); ok || startedAt != 0 {
+		t.Fatalf("fresh_usage_collection_started_at_ms = (%d, %v), want unset when monitoring disabled mid-start", startedAt, ok)
+	}
+	app.obsMu.Lock()
+	resolvedDone := capturedWaiter != nil && capturedWaiter.done && capturedWaiter.err != nil
+	clearedMap := app.runRetentions == nil
+	app.obsMu.Unlock()
+	if !resolvedDone || !clearedMap {
+		t.Fatalf("runRetentions cleanup after stillEnabled=false: resolvedDone=%v clearedMap=%v", resolvedDone, clearedMap)
+	}
+}
+
+func TestExternalCPAUsageStatisticsDisabledRecordsGapAndAdvancesCollectingAtOnReenable(t *testing.T) {
+	hostCtx, stopHost := context.WithCancel(t.Context())
+	defer stopHost()
+
+	var statsEnabled atomic.Bool
+	statsEnabled.Store(true)
+	var clockMS atomic.Int64
+	clockMS.Store(1_760_000_000_000)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v0/management/config":
+			w.Header().Set("X-CPA-Version", "v8.0.13")
+			_, _ = io.WriteString(w, `{"usage-statistics-enabled":`+boolText(statsEnabled.Load())+`,"redis-usage-queue-retention-seconds":60}`)
+		case "/v0/management/usage-statistics-enabled":
+			if r.Method == http.MethodPut {
+				statsEnabled.Store(true)
+			}
+			_, _ = io.WriteString(w, `{"usage-statistics-enabled":`+boolText(statsEnabled.Load())+`}`)
+		case "/v0/management/usage-queue":
+			_, _ = io.WriteString(w, `[]`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	app := newExternalApp(t, upstream.URL, externalAuthorityManagement)
+	app.runCtx = hostCtx
+	app.cfg.CollectorMode = "http"
+	app.cfg.PollInterval = 15 * time.Millisecond
+	app.usage.SetClock(clockMS.Load)
+	app.legacyCollector.SetNowFunc(clockMS.Load)
+
+	op, err := app.current(hostCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Run 1 with usage-statistics-enabled=true establishes initial collectingAt.
+	app.startUsageCollection(op)
+	waitForCondition(t, func() bool {
+		v, ok := readSettingInt64(t, app.usageDB, "fresh_usage_collection_started_at_ms")
+		return ok && v > 0
+	})
+	collecting1, _ := readSettingInt64(t, app.usageDB, "fresh_usage_collection_started_at_ms")
+
+	// Stop Run 1, disable statistics on External CPA, and attempt startup without confirmation.
+	app.usageStartMu.Lock()
+	waitStop := app.stopCurrentUsageCollectionLocked(hostCtx)
+	app.usageStartMu.Unlock()
+	if waitStop != nil {
+		_ = waitStop(hostCtx)
+	}
+	statsEnabled.Store(false)
+	clockMS.Add(1_000)
+	app.startUsageCollection(op)
+	if app.usageCollectionStarted() || app.usageStartBlock() != usageStartReasonStatisticsDisabled {
+		t.Fatalf("refused state = (started=%v, reason=%q), want (false, %q)", app.usageCollectionStarted(), app.usageStartBlock(), usageStartReasonStatisticsDisabled)
+	}
+	if gap, ok := readSettingInt64(t, app.usageDB, "fresh_usage_unreplayed_gap"); !ok || gap != 1 {
+		t.Fatalf("fresh_usage_unreplayed_gap after disabled probe = (%d, %v), want (1, true)", gap, ok)
+	}
+
+	// Confirm re-enable within 45s (< max retention): Run 2 must advance collectingAt instead of preserving Run 1's collectingAt,
+	// and must restore verified retention budget after read-back proves statistics enabled.
+	clockMS.Add(2_000)
+	reqBody := `{"requestId":"` + strings.Repeat("e", 32) + `","confirmEnableStatistics":true}`
+	confirmReq := httptest.NewRequest(http.MethodPost, currentInstallManagementAPIV2Prefix+"external/usage", strings.NewReader(reqBody))
+	confirmReq.Header.Set("Content-Type", "application/json")
+	confirmReq.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+	confirmRes := httptest.NewRecorder()
+	app.canonicalAPI(confirmRes, confirmReq)
+	if confirmRes.Code != http.StatusOK {
+		t.Fatalf("confirm POST external/usage = %d %s, want 200", confirmRes.Code, confirmRes.Body.String())
+	}
+	waitForCondition(t, func() bool {
+		v, ok := readSettingInt64(t, app.usageDB, "fresh_usage_collection_started_at_ms")
+		return ok && v > collecting1
+	})
+	collecting2, _ := readSettingInt64(t, app.usageDB, "fresh_usage_collection_started_at_ms")
+	if collecting2 <= collecting1 {
+		t.Fatalf("Run 2 collectingAt = %d preserved Run 1 collectingAt = %d after confirmed re-enable", collecting2, collecting1)
+	}
+	if budget, ok := readSettingInt64(t, app.usageDB, "fresh_usage_last_retention_ms"); !ok || budget != 45_000 {
+		t.Fatalf("fresh_usage_last_retention_ms after confirmed re-enable = (%d, %v), want (45000, true)", budget, ok)
+	}
+
+	// Also verify manual enable on CPA after refused startup within 45s advances collectingAt on Run 3.
+	app.usageStartMu.Lock()
+	waitStop2 := app.stopCurrentUsageCollectionLocked(hostCtx)
+	app.usageStartMu.Unlock()
+	if waitStop2 != nil {
+		_ = waitStop2(hostCtx)
+	}
+	statsEnabled.Store(false)
+	clockMS.Add(1_000)
+	app.startUsageCollection(op)
+	if app.usageStartBlock() != usageStartReasonStatisticsDisabled {
+		t.Fatalf("Run 3 refused reason = %q, want %q", app.usageStartBlock(), usageStartReasonStatisticsDisabled)
+	}
+	statsEnabled.Store(true)
+	clockMS.Add(2_000)
+	app.startUsageCollection(op)
+	waitForCondition(t, func() bool {
+		v, ok := readSettingInt64(t, app.usageDB, "fresh_usage_collection_started_at_ms")
+		return ok && v > collecting2
+	})
+}

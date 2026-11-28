@@ -2,6 +2,7 @@ import axios from 'axios';
 import type { UsagePayload } from '@/features/monitoring/hooks/useUsageData';
 import type { QuotaModelScope } from '@/types';
 import { normalizeApiBase } from '@/utils/connection';
+import { isValidHeaderCredentialValue } from '@/utils/headerCredential';
 import type { ModelPrice } from '@/utils/usage';
 
 const USAGE_SERVICE_ERROR_CODES = new Set([
@@ -1885,8 +1886,17 @@ const buildUrl = (base: string, path: string): string => {
   return `${normalized}${path}`;
 };
 
-const authHeaders = (managementKey?: string) =>
-  managementKey ? { Authorization: `Bearer ${managementKey}` } : undefined;
+const authHeaders = (managementKey?: string) => {
+  if (!managementKey) return undefined;
+  if (!isValidHeaderCredentialValue(managementKey)) {
+    const apiError = new Error('Invalid admin key') as UsageServiceApiError;
+    apiError.name = 'UsageServiceApiError';
+    apiError.status = 401;
+    apiError.code = 'invalid_admin_key';
+    throw apiError;
+  }
+  return { Authorization: `Bearer ${managementKey}` };
+};
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object';

@@ -1,11 +1,14 @@
 package cpa
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"math/big"
 	"net/http"
 	"strconv"
 	"strings"
@@ -14,10 +17,12 @@ import (
 
 type UsageConfig struct {
 	UsageStatisticsEnabled          bool `json:"usageStatisticsEnabled"`
+	HasUsageStatisticsEnabled       bool `json:"hasUsageStatisticsEnabled,omitempty"`
 	RedisUsageQueueRetentionSeconds int  `json:"redisUsageQueueRetentionSeconds"`
 	RetentionSourceDefault          bool `json:"retentionSourceDefault"`
+	RetentionConfigValid            bool `json:"retentionConfigValid,omitempty"`
+	RetentionVerified               bool `json:"retentionVerified,omitempty"`
 }
-
 type ManagementConfig struct {
 	UsageConfig
 	ProxyURL string `json:"proxyUrl,omitempty"`
@@ -123,20 +128,95 @@ func fetchManagementConfigDirect(ctx context.Context, baseURL string, key string
 	if err != nil || len(limited) > maxResponseBytes {
 		return ManagementConfig{}, errors.New("management API config response invalid")
 	}
-	var raw map[string]any
-	if err := json.Unmarshal(limited, &raw); err != nil {
+	return parseManagementConfigPayload(limited)
+}
+
+// ObserveUsageAuthorityConfig authenticates against /v0/management/config in a
+// single HTTP round-trip and verifies CPA retention metadata when JSON is valid.
+// A 2xx response with non-JSON or <= 0 retention succeeds authentication with
+// RetentionVerified=false so callers fail closed on cross-run queue continuity.
+func ObserveUsageAuthorityConfig(ctx context.Context, baseURL string, key string) (UsageConfig, error) {
+	doObserve := func(reqCtx context.Context, targetBaseURL, targetKey string) (UsageConfig, error) {
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, NormalizeBaseURL(targetBaseURL)+"/v0/management/config", nil)
+		if err != nil {
+			return UsageConfig{}, err
+		}
+		req.Header.Set("Authorization", "Bearer "+targetKey)
+		client := managementHTTPClient(reqCtx, 30*time.Second, false)
+		res, err := client.Do(req)
+		if err != nil {
+			return UsageConfig{}, err
+		}
+		ObserveExternalResponseStatus(reqCtx, res.StatusCode)
+		defer res.Body.Close()
+		if res.StatusCode < 200 || res.StatusCode >= 300 {
+			_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, maxResponseBytes))
+			return UsageConfig{}, &managementStatusError{what: "management API validation failed", code: res.StatusCode, status: res.Status}
+		}
+		limited, err := io.ReadAll(io.LimitReader(res.Body, maxResponseBytes+1))
+		if err != nil || len(limited) > maxResponseBytes {
+			return UsageConfig{RetentionVerified: false}, nil
+		}
+		parsed, parseErr := parseManagementConfigPayload(limited)
+		if parseErr != nil {
+			return UsageConfig{RetentionVerified: false}, nil
+		}
+		return parsed.UsageConfig, nil
+	}
+	if gate := ExternalSavedCredentialGateFromContext(ctx); gate != nil {
+		var out UsageConfig
+		err := gate(ctx, func(requestCtx context.Context, target ExternalSavedCredentialTarget) error {
+			var fetchErr error
+			out, fetchErr = doObserve(requestCtx, target.BaseURL, target.ManagementKey)
+			return fetchErr
+		})
+		return out, err
+	}
+	return doObserve(ctx, baseURL, key)
+}
+
+func parseManagementConfigPayload(limited []byte) (ManagementConfig, error) {
+	raw, err := decodeJSONObject(limited)
+	if err != nil {
 		return ManagementConfig{}, err
 	}
-	usageEnabled := readBoolField(raw, "usage-statistics-enabled", "usageStatisticsEnabled")
-	retention, hasRetention := readIntField(raw, "redis-usage-queue-retention-seconds", "redisUsageQueueRetentionSeconds")
+	maps := []map[string]any{raw}
+	if obsRaw, ok := raw["observability"]; ok && obsRaw != nil {
+		obsMap, isMap := obsRaw.(map[string]any)
+		if !isMap {
+			return ManagementConfig{}, errors.New("invalid observability config object")
+		}
+		if usageRaw, hasUsage := obsMap["usage"]; hasUsage && usageRaw != nil {
+			usageMap, isUsageMap := usageRaw.(map[string]any)
+			if !isUsageMap {
+				return ManagementConfig{}, errors.New("invalid observability usage config object")
+			}
+			maps = append(maps, usageMap)
+		}
+	}
+	usageEnabled, hasUsageEnabled, err := inspectBoolCandidates(maps, "usage-statistics-enabled", "usageStatisticsEnabled")
+	if err != nil {
+		return ManagementConfig{}, err
+	}
+	retention, hasRetention, err := inspectIntCandidates(maps, "redis-usage-queue-retention-seconds", "redisUsageQueueRetentionSeconds")
+	if err != nil {
+		return ManagementConfig{}, err
+	}
+	retentionConfigValid := true
 	if !hasRetention {
 		retention = 60
+	} else if retention <= 0 {
+		retentionConfigValid = false
 	}
+	verified := retentionConfigValid && (!hasUsageEnabled || usageEnabled)
 	return ManagementConfig{
 		UsageConfig: UsageConfig{
 			UsageStatisticsEnabled:          usageEnabled,
+			HasUsageStatisticsEnabled:       hasUsageEnabled,
 			RedisUsageQueueRetentionSeconds: retention,
 			RetentionSourceDefault:          !hasRetention,
+			RetentionConfigValid:            retentionConfigValid,
+			RetentionVerified:               verified,
 		},
 		ProxyURL: readStringField(raw, "proxy-url", "proxyUrl", "proxy_url"),
 	}, nil
@@ -179,9 +259,12 @@ func ValidateCollectorConfig(ctx context.Context, baseURL string, key string, po
 	if err != nil {
 		return err
 	}
-	retentionMS := usageCfg.RedisUsageQueueRetentionSeconds * 1000
-	if retentionMS <= 0 {
+	if usageCfg.RedisUsageQueueRetentionSeconds <= 0 {
 		return errors.New("CPA redis-usage-queue-retention-seconds must be greater than 0")
+	}
+	retentionMS := math.MaxInt
+	if usageCfg.RedisUsageQueueRetentionSeconds <= math.MaxInt/1000 {
+		retentionMS = usageCfg.RedisUsageQueueRetentionSeconds * 1000
 	}
 	if pollIntervalMS > retentionMS {
 		return fmt.Errorf(
@@ -212,43 +295,139 @@ func NormalizeBaseURL(raw string) string {
 	return value
 }
 
-func readBoolField(raw map[string]any, keys ...string) bool {
-	for _, key := range keys {
-		value, ok := raw[key]
-		if !ok {
-			continue
-		}
-		switch typed := value.(type) {
-		case bool:
-			return typed
-		case string:
-			normalized := strings.ToLower(strings.TrimSpace(typed))
-			return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on"
-		}
+func decodeJSONObject(data []byte) (map[string]any, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var raw map[string]any
+	if err := dec.Decode(&raw); err != nil {
+		return nil, err
 	}
-	return false
+	if raw == nil {
+		return nil, errors.New("expected JSON object")
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, errors.New("unexpected trailing JSON data")
+	}
+	return raw, nil
 }
 
-func readIntField(raw map[string]any, keys ...string) (int, bool) {
-	for _, key := range keys {
-		value, ok := raw[key]
-		if !ok || value == nil {
+func inspectBoolCandidates(maps []map[string]any, keys ...string) (bool, bool, error) {
+	seen := false
+	seenVal := false
+	for _, m := range maps {
+		if m == nil {
 			continue
 		}
-		switch typed := value.(type) {
-		case float64:
-			return int(typed), true
-		case int:
-			return typed, true
-		case json.Number:
-			parsed, err := strconv.Atoi(typed.String())
-			return parsed, err == nil
-		case string:
-			parsed, err := strconv.Atoi(strings.TrimSpace(typed))
-			return parsed, err == nil
+		for _, key := range keys {
+			value, ok := m[key]
+			if !ok {
+				continue
+			}
+			parsed, valid := parseStrictBool(value)
+			if !valid {
+				return false, true, fmt.Errorf("invalid boolean field %q", key)
+			}
+			if seen && parsed != seenVal {
+				return false, true, fmt.Errorf("conflicting boolean field %q", key)
+			}
+			seen = true
+			seenVal = parsed
 		}
 	}
-	return 0, false
+	return seenVal, seen, nil
+}
+
+func inspectIntCandidates(maps []map[string]any, keys ...string) (int, bool, error) {
+	seen := false
+	seenVal := 0
+	for _, m := range maps {
+		if m == nil {
+			continue
+		}
+		for _, key := range keys {
+			value, ok := m[key]
+			if !ok {
+				continue
+			}
+			parsed, valid := parseStrictInt(value)
+			if !valid {
+				return 0, true, fmt.Errorf("invalid integer field %q", key)
+			}
+			if seen && parsed != seenVal {
+				return 0, true, fmt.Errorf("conflicting integer field %q", key)
+			}
+			seen = true
+			seenVal = parsed
+		}
+	}
+	return seenVal, seen, nil
+}
+
+func parseStrictBool(value any) (bool, bool) {
+	switch typed := value.(type) {
+	case bool:
+		return typed, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "1", "true", "yes", "on":
+			return true, true
+		case "0", "false", "no", "off":
+			return false, true
+		default:
+			return false, false
+		}
+	default:
+		return false, false
+	}
+}
+
+func parseStrictInt(value any) (int, bool) {
+	switch typed := value.(type) {
+	case int:
+		return typed, true
+	case int64:
+		if typed < math.MinInt || typed > math.MaxInt {
+			return 0, false
+		}
+		return int(typed), true
+	case json.Number:
+		return parseStrictIntString(typed.String(), true)
+	case float64:
+		if math.IsNaN(typed) || math.IsInf(typed, 0) || math.Trunc(typed) != typed {
+			return 0, false
+		}
+		return parseStrictIntString(strconv.FormatFloat(typed, 'f', 0, 64), false)
+	case string:
+		return parseStrictIntString(typed, false)
+	default:
+		return 0, false
+	}
+}
+
+func parseStrictIntString(raw string, allowRat bool) (int, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0, false
+	}
+	if n, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+		if n < math.MinInt || n > math.MaxInt {
+			return 0, false
+		}
+		return int(n), true
+	}
+	if !allowRat || len(trimmed) > 32 || strings.Contains(trimmed, "/") {
+		return 0, false
+	}
+	rat, ok := new(big.Rat).SetString(trimmed)
+	if !ok || !rat.IsInt() || !rat.Num().IsInt64() {
+		return 0, false
+	}
+	n := rat.Num().Int64()
+	if n < math.MinInt || n > math.MaxInt {
+		return 0, false
+	}
+	return int(n), true
 }
 
 func readStringField(raw map[string]any, keys ...string) string {

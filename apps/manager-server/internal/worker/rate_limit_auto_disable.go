@@ -63,11 +63,15 @@ type RateLimitAutoDisableWorker struct {
 	mu                  sync.RWMutex
 	baseURL             string
 	managementKey       string
+	configGen           uint64
+	rejectedBaseURL     string
+	rejectedKey         string
 	enableCheckInterval time.Duration
 	lifecycle           workerLifecycle
 }
 
 type quotaAutoDisableCandidate struct {
+	ConfigGen       uint64
 	BaseURL         string
 	ManagementKey   string
 	FileName        string
@@ -116,7 +120,7 @@ func NewRateLimitAutoDisableWorkerWithMutationCoordinator(
 		enableCheckInterval: quotaAutoDisableDefaultTick,
 	}
 	if len(initial) > 0 {
-		w.setRuntimeConfig(initial[0].CPAUpstreamURL, initial[0].ManagementKey)
+		_, _ = w.setRuntimeConfig(initial[0].CPAUpstreamURL, initial[0].ManagementKey)
 	}
 	return w
 }
@@ -144,10 +148,42 @@ func (w *RateLimitAutoDisableWorker) UpdateRuntimeConfig(ctx context.Context, cf
 	if baseURL == "" || managementKey == "" {
 		return
 	}
-	if w.setRuntimeConfig(baseURL, managementKey) {
+	changed, gen := w.setRuntimeConfig(baseURL, managementKey)
+	if gen == 0 {
+		return
+	}
+	if changed {
 		log.Printf("[quota-auto-disable] runtime config synced baseURL=%q managementKeySet=%t", baseURL, managementKey != "")
 	}
 	w.enableDue(ctx, time.Now())
+}
+
+// RejectRuntimeConfig retires a refused management credential so periodic
+// cooldown recovery and queued candidates stop presenting it until a different
+// credential is bound.
+func (w *RateLimitAutoDisableWorker) RejectRuntimeConfig(cfg collectorpkg.RuntimeConfig) {
+	if w == nil {
+		return
+	}
+	baseURL := strings.TrimSpace(cfg.CPAUpstreamURL)
+	managementKey := strings.TrimSpace(cfg.ManagementKey)
+	if managementKey == "" {
+		return
+	}
+	w.mu.Lock()
+	w.rejectedBaseURL = baseURL
+	w.rejectedKey = managementKey
+	cleared := false
+	if w.managementKey == managementKey && (baseURL == "" || w.baseURL == baseURL) {
+		w.configGen++
+		w.baseURL = ""
+		w.managementKey = ""
+		cleared = true
+	}
+	w.mu.Unlock()
+	if cleared {
+		log.Printf("[quota-auto-disable] cleared rejected runtime credential baseURL=%q", baseURL)
+	}
 }
 
 // HandleUsageEvents is called by the request-monitoring collector after raw CPA
@@ -162,7 +198,11 @@ func (w *RateLimitAutoDisableWorker) HandleUsageEvents(ctx context.Context, cfg 
 	if baseURL == "" || managementKey == "" {
 		return
 	}
-	if w.setRuntimeConfig(baseURL, managementKey) {
+	changed, gen := w.setRuntimeConfig(baseURL, managementKey)
+	if gen == 0 {
+		return
+	}
+	if changed {
 		log.Printf("[quota-auto-disable] runtime config synced baseURL=%q managementKeySet=%t", baseURL, managementKey != "")
 	}
 	if len(events) == 0 {
@@ -174,6 +214,7 @@ func (w *RateLimitAutoDisableWorker) HandleUsageEvents(ctx context.Context, cfg 
 		if !ok {
 			continue
 		}
+		candidate.ConfigGen = gen
 		select {
 		case w.jobs <- candidate:
 		case <-ctx.Done():
@@ -232,21 +273,94 @@ func waitWorkerTrialHoldRelease(ctx context.Context) bool {
 	return ctx.Err() == nil
 }
 
-func (w *RateLimitAutoDisableWorker) setRuntimeConfig(baseURL string, managementKey string) bool {
+func (w *RateLimitAutoDisableWorker) setRuntimeConfig(baseURL string, managementKey string) (bool, uint64) {
 	baseURL = strings.TrimSpace(baseURL)
 	managementKey = strings.TrimSpace(managementKey)
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.rejectedKey != "" && managementKey == w.rejectedKey &&
+		(w.rejectedBaseURL == "" || baseURL == w.rejectedBaseURL) {
+		return false, 0
+	}
 	changed := w.baseURL != baseURL || w.managementKey != managementKey
+	if baseURL != "" && managementKey != "" {
+		if changed || w.configGen == 0 {
+			w.configGen++
+		}
+		w.rejectedBaseURL = ""
+		w.rejectedKey = ""
+	} else if changed && w.configGen > 0 {
+		w.configGen++
+	}
 	w.baseURL = baseURL
 	w.managementKey = managementKey
-	return changed
+	if w.baseURL == "" || w.managementKey == "" {
+		return changed, 0
+	}
+	return changed, w.configGen
+}
+
+var errRuntimeCredentialSuperseded = errors.New("CPA runtime credential binding was superseded or rejected")
+
+func (w *RateLimitAutoDisableWorker) isCredentialRejected(baseURL string, managementKey string) bool {
+	if w == nil {
+		return false
+	}
+	baseURL = strings.TrimSpace(baseURL)
+	managementKey = strings.TrimSpace(managementKey)
+	if managementKey == "" {
+		return false
+	}
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if w.rejectedKey == "" || managementKey != w.rejectedKey {
+		return false
+	}
+	return w.rejectedBaseURL == "" || baseURL == w.rejectedBaseURL
+}
+
+func (w *RateLimitAutoDisableWorker) isCandidateAuthorized(candidate quotaAutoDisableCandidate) bool {
+	baseURL := strings.TrimSpace(candidate.BaseURL)
+	managementKey := strings.TrimSpace(candidate.ManagementKey)
+	if baseURL == "" || managementKey == "" {
+		return false
+	}
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if w.rejectedKey != "" && managementKey == w.rejectedKey &&
+		(w.rejectedBaseURL == "" || baseURL == w.rejectedBaseURL) {
+		return false
+	}
+	if candidate.ConfigGen != 0 {
+		return candidate.ConfigGen == w.configGen && w.baseURL == baseURL && w.managementKey == managementKey
+	}
+	if w.configGen != 0 {
+		return w.baseURL == baseURL && w.managementKey == managementKey
+	}
+	return true
 }
 
 func (w *RateLimitAutoDisableWorker) runtimeConfig() (string, string) {
+	baseURL, managementKey, _ := w.runtimeConfigWithGen()
+	return baseURL, managementKey
+}
+
+func (w *RateLimitAutoDisableWorker) runtimeConfigWithGen() (string, string, uint64) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
-	return w.baseURL, w.managementKey
+	if w.baseURL == "" || w.managementKey == "" {
+		return "", "", 0
+	}
+	return w.baseURL, w.managementKey, w.configGen
+}
+
+func (w *RateLimitAutoDisableWorker) isRuntimeGenerationCurrent(gen uint64, baseURL string, managementKey string) bool {
+	if gen == 0 {
+		return false
+	}
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.configGen == gen && w.baseURL == baseURL && w.managementKey == managementKey
 }
 
 func (w *RateLimitAutoDisableWorker) handleCandidate(ctx context.Context, candidate quotaAutoDisableCandidate) {
@@ -273,7 +387,7 @@ func (w *RateLimitAutoDisableWorker) handleCandidateLocked(ctx context.Context, 
 		log.Printf("[quota-auto-disable] store unavailable, skip auth file %q", candidate.FileName)
 		return
 	}
-	if candidate.FileName == "" || candidate.BaseURL == "" || candidate.ManagementKey == "" {
+	if candidate.FileName == "" || !w.isCandidateAuthorized(candidate) {
 		return
 	}
 	now := time.Now()
@@ -291,7 +405,9 @@ func (w *RateLimitAutoDisableWorker) handleCandidateLocked(ctx context.Context, 
 		return
 	}
 	defer releaseMutation()
-
+	if !w.isCandidateAuthorized(candidate) {
+		return
+	}
 	provider := normalizeQuotaProvider(candidate.Provider)
 	accountSnapshot := quotaActionAccountSnapshot(candidate.FileName, candidate.AccountSnapshot)
 	accountID := strings.TrimSpace(candidate.AccountID)
@@ -319,6 +435,9 @@ func (w *RateLimitAutoDisableWorker) handleCandidateLocked(ctx context.Context, 
 				accountSnapshot = ""
 			}
 		}
+	}
+	if !w.isCandidateAuthorized(candidate) {
+		return
 	}
 	target, ok, err := w.currentAuthFileTarget(ctx, candidate.BaseURL, candidate.ManagementKey, cpaauthfiles.Identity{
 		AuthFileName:      candidate.FileName,
@@ -384,9 +503,11 @@ func (w *RateLimitAutoDisableWorker) handleCandidateLocked(ctx context.Context, 
 	}
 	observedEnabledAtMS := time.Now().UnixMilli()
 
+	if !w.isCandidateAuthorized(candidate) {
+		return
+	}
 	log.Printf("[quota-auto-disable] quota limit reached for auth file %q account=%q provider=%q resetAt=%s, disabling", candidate.FileName, candidate.DisplayAccount, candidate.Provider, candidate.ResetAt.Format(time.RFC3339))
 	if err := w.patchAuthFileTarget(ctx, candidate.BaseURL, candidate.ManagementKey, target, true); err != nil {
-		log.Printf("[quota-auto-disable] failed to disable auth file %q: %v", candidate.FileName, err)
 		return
 	}
 	disabledAtMS := time.Now().UnixMilli()
@@ -415,22 +536,29 @@ func (w *RateLimitAutoDisableWorker) handleCandidateLocked(ctx context.Context, 
 		log.Printf("[quota-auto-disable] disabled auth file %q but failed to persist cooldown ownership: %v", candidate.FileName, err)
 		rollbackCtx, cancelRollback := detachedAuthFileMutationContext(ctx, w.compensationTimeout)
 		defer cancelRollback()
-		rollbackTarget, rollbackErr := cpaauthfiles.New(w.client, quotaAutoDisableActionTimeout).ResolveVerifiedStatusMutationTarget(
-			rollbackCtx,
-			candidate.BaseURL,
-			candidate.ManagementKey,
-			cpaauthfiles.Identity{
-				AuthFileName:      target.File.Name,
-				AuthIndex:         target.File.AuthIndex,
-				Provider:          target.File.Provider,
-				AccountSnapshot:   target.File.AccountSnapshot,
-				AccountIDSnapshot: target.File.AccountID,
-			},
-		)
-		if rollbackErr != nil {
-			rollbackErr = fmt.Errorf("revalidate rollback target: %w", rollbackErr)
+		var rollbackErr error
+		if !w.isCandidateAuthorized(candidate) {
+			rollbackErr = errRuntimeCredentialSuperseded
 		} else {
-			rollbackErr = w.patchAuthFileTarget(rollbackCtx, candidate.BaseURL, candidate.ManagementKey, rollbackTarget, false)
+			rollbackTarget, resolveErr := cpaauthfiles.New(w.client, quotaAutoDisableActionTimeout).ResolveVerifiedStatusMutationTarget(
+				rollbackCtx,
+				candidate.BaseURL,
+				candidate.ManagementKey,
+				cpaauthfiles.Identity{
+					AuthFileName:      target.File.Name,
+					AuthIndex:         target.File.AuthIndex,
+					Provider:          target.File.Provider,
+					AccountSnapshot:   target.File.AccountSnapshot,
+					AccountIDSnapshot: target.File.AccountID,
+				},
+			)
+			if resolveErr != nil {
+				rollbackErr = fmt.Errorf("revalidate rollback target: %w", resolveErr)
+			} else if !w.isCandidateAuthorized(candidate) {
+				rollbackErr = errRuntimeCredentialSuperseded
+			} else {
+				rollbackErr = w.patchAuthFileTarget(rollbackCtx, candidate.BaseURL, candidate.ManagementKey, rollbackTarget, false)
+			}
 		}
 		if rollbackErr != nil {
 			log.Printf("[quota-auto-disable] failed to roll back auth file %q after cooldown persistence error: %v", candidate.FileName, rollbackErr)
@@ -662,8 +790,8 @@ func (w *RateLimitAutoDisableWorker) enableDueLocked(ctx context.Context, now ti
 	if w.store == nil || w.store.QuotaCooldowns == nil {
 		return
 	}
-	baseURL, managementKey := w.runtimeConfig()
-	if baseURL == "" || managementKey == "" {
+	baseURL, managementKey, gen := w.runtimeConfigWithGen()
+	if gen == 0 || baseURL == "" || managementKey == "" {
 		return
 	}
 	due, err := w.store.ListDueQuotaCooldowns(ctx, now.UnixMilli(), quotaCooldownDueLimit)
@@ -672,10 +800,10 @@ func (w *RateLimitAutoDisableWorker) enableDueLocked(ctx context.Context, now ti
 		return
 	}
 	for _, item := range due {
-		if middleware.IsProcessTrialHoldActive() {
+		if middleware.IsProcessTrialHoldActive() || !w.isRuntimeGenerationCurrent(gen, baseURL, managementKey) {
 			return
 		}
-		_, _ = w.recoverCooldown(ctx, baseURL, managementKey, item, now)
+		_, _ = w.recoverCooldown(ctx, gen, baseURL, managementKey, item, now)
 	}
 }
 
@@ -709,8 +837,8 @@ func (w *RateLimitAutoDisableWorker) RecoverOwnedCooldown(
 	if w.store == nil || w.store.QuotaCooldowns == nil {
 		return false, errors.New("quota cooldown store is unavailable")
 	}
-	baseURL, managementKey := w.runtimeConfig()
-	if baseURL == "" || managementKey == "" {
+	baseURL, managementKey, gen := w.runtimeConfigWithGen()
+	if gen == 0 || baseURL == "" || managementKey == "" {
 		return false, errors.New("CPA runtime configuration is unavailable")
 	}
 	active, err := w.store.QuotaCooldowns.ListActive(ctx)
@@ -742,10 +870,10 @@ func (w *RateLimitAutoDisableWorker) RecoverOwnedCooldown(
 		return false, nil
 	}
 
-	return w.recoverCooldown(ctx, baseURL, managementKey, *matched, time.Now())
+	return w.recoverCooldown(ctx, gen, baseURL, managementKey, *matched, time.Now())
 }
 
-func (w *RateLimitAutoDisableWorker) recoverCooldown(ctx context.Context, baseURL string, managementKey string, item store.QuotaCooldown, now time.Time) (bool, error) {
+func (w *RateLimitAutoDisableWorker) recoverCooldown(ctx context.Context, gen uint64, baseURL string, managementKey string, item store.QuotaCooldown, now time.Time) (bool, error) {
 	if item.Owner != model.QuotaCooldownOwnerUsage429 && item.Owner != model.QuotaCooldownOwnerXAIFreeUsage {
 		reason := "unknown owner"
 		_ = w.store.MarkQuotaCooldownSkipped(ctx, item.ID, item.UpdatedAtMS, reason)
@@ -807,7 +935,9 @@ func (w *RateLimitAutoDisableWorker) recoverCooldown(ctx context.Context, baseUR
 		return false, err
 	}
 	defer releaseMutation()
-	// Re-read after acquiring the credential mutation lock as well. Waiting for
+	if gen != 0 && !w.isRuntimeGenerationCurrent(gen, baseURL, managementKey) {
+		return false, nil
+	}
 	// another auth-file action must not turn an old generation into enable intent.
 	active, err := w.store.QuotaCooldowns.ListActive(ctx)
 	if err != nil {
@@ -821,6 +951,9 @@ func (w *RateLimitAutoDisableWorker) recoverCooldown(ctx context.Context, baseUR
 		}
 	}
 	if !current {
+		return false, nil
+	}
+	if (gen != 0 && !w.isRuntimeGenerationCurrent(gen, baseURL, managementKey)) || w.isCredentialRejected(baseURL, managementKey) {
 		return false, nil
 	}
 	target, ok, err := w.currentAuthFileTarget(ctx, baseURL, managementKey, cpaauthfiles.Identity{
@@ -867,6 +1000,9 @@ func (w *RateLimitAutoDisableWorker) recoverCooldown(ctx context.Context, baseUR
 		_ = w.store.RecordQuotaCooldownFailure(ctx, item.ID, err.Error())
 		return false, err
 	}
+	if (gen != 0 && !w.isRuntimeGenerationCurrent(gen, baseURL, managementKey)) || w.isCredentialRejected(baseURL, managementKey) {
+		return false, nil
+	}
 	claimedUpdatedAtMS, err := w.store.ClaimQuotaCooldownRecovery(ctx, item.ID, item.UpdatedAtMS, quotaCooldownEnableClaimReason)
 	if err != nil {
 		if !errors.Is(err, quotacooldownrepo.ErrConflict) {
@@ -875,27 +1011,36 @@ func (w *RateLimitAutoDisableWorker) recoverCooldown(ctx context.Context, baseUR
 		log.Printf("[quota-auto-disable] cooldown id=%d for auth file %q could not claim its generation before enabling; credential left untouched: %v", item.ID, item.AuthFileName, err)
 		return false, err
 	}
-	patchErr := w.patchAuthFileTarget(ctx, baseURL, managementKey, target, false)
+	var patchErr error
+	if (gen != 0 && !w.isRuntimeGenerationCurrent(gen, baseURL, managementKey)) || w.isCredentialRejected(baseURL, managementKey) {
+		patchErr = errRuntimeCredentialSuperseded
+	} else {
+		patchErr = w.patchAuthFileTarget(ctx, baseURL, managementKey, target, false)
+	}
 	// The enable PATCH already applied. This generation keeps no automatic
 	// enable authority unless this call observes the enabled state: a human (or
 	// CPA itself) may disable the credential again before the next due tick, and
 	// an active row would let that tick override the decision.
 	verifyDetail := ""
 	if patchErr == nil {
-		verifiedTarget, verified, verifyErr := w.currentAuthFileTarget(ctx, baseURL, managementKey, cpaauthfiles.Identity{
-			AuthFileName:      target.File.Name,
-			AuthIndex:         target.File.AuthIndex,
-			Provider:          target.File.Provider,
-			AccountSnapshot:   target.File.AccountSnapshot,
-			AccountIDSnapshot: target.File.AccountID,
-		})
-		switch {
-		case verifyErr != nil:
-			verifyDetail = fmt.Sprintf("verify enabled auth file after recovery: %v", verifyErr)
-		case !verified:
-			verifyDetail = "verify enabled auth file after recovery: credential is no longer resolvable"
-		case verifiedTarget.File.Disabled:
-			verifyDetail = "verify enabled auth file after recovery: credential still reports disabled"
+		if (gen != 0 && !w.isRuntimeGenerationCurrent(gen, baseURL, managementKey)) || w.isCredentialRejected(baseURL, managementKey) {
+			verifyDetail = fmt.Sprintf("verify enabled auth file after recovery: %v", errRuntimeCredentialSuperseded)
+		} else {
+			verifiedTarget, verified, verifyErr := w.currentAuthFileTarget(ctx, baseURL, managementKey, cpaauthfiles.Identity{
+				AuthFileName:      target.File.Name,
+				AuthIndex:         target.File.AuthIndex,
+				Provider:          target.File.Provider,
+				AccountSnapshot:   target.File.AccountSnapshot,
+				AccountIDSnapshot: target.File.AccountID,
+			})
+			switch {
+			case verifyErr != nil:
+				verifyDetail = fmt.Sprintf("verify enabled auth file after recovery: %v", verifyErr)
+			case !verified:
+				verifyDetail = "verify enabled auth file after recovery: credential is no longer resolvable"
+			case verifiedTarget.File.Disabled:
+				verifyDetail = "verify enabled auth file after recovery: credential still reports disabled"
+			}
 		}
 	}
 	// Whether the enable applied or not, quota evidence recorded for the same
@@ -910,21 +1055,21 @@ func (w *RateLimitAutoDisableWorker) recoverCooldown(ctx context.Context, baseUR
 	case newerErr != nil:
 		// Cannot prove that no newer generation took over while the enable was in
 		// flight; fail closed towards the disabled state a cooldown requires.
-		return w.retireClaimedGeneration(ctx, baseURL, managementKey, item, target, claimedUpdatedAtMS,
+		return w.retireClaimedGeneration(ctx, gen, baseURL, managementKey, item, target, claimedUpdatedAtMS,
 			fmt.Sprintf("newer cooldown generations could not be inspected after recovery: %v", newerErr), false, true)
 	case newerFound:
-		compensate := patchErr == nil || !cpaauthfiles.ActionErrorProvesNoMutation(patchErr)
-		return w.retireClaimedGeneration(ctx, baseURL, managementKey, item, target, claimedUpdatedAtMS,
+		noMutation := cpaauthfiles.ActionErrorProvesNoMutation(patchErr) || errors.Is(patchErr, errRuntimeCredentialSuperseded)
+		compensate := patchErr == nil || !noMutation
+		return w.retireClaimedGeneration(ctx, gen, baseURL, managementKey, item, target, claimedUpdatedAtMS,
 			fmt.Sprintf("newer cooldown generation id=%d updated_at_ms=%d owns this credential", newerGeneration.ID, newerGeneration.UpdatedAtMS), true, compensate)
 	}
 	if patchErr != nil {
-		if !cpaauthfiles.ActionErrorProvesNoMutation(patchErr) {
+		if !cpaauthfiles.ActionErrorProvesNoMutation(patchErr) && !errors.Is(patchErr, errRuntimeCredentialSuperseded) {
 			// The request may have reached CPA and may have been applied. Nothing
 			// below may treat this generation as retryable enable intent.
-			return w.retireClaimedGeneration(ctx, baseURL, managementKey, item, target, claimedUpdatedAtMS,
+			return w.retireClaimedGeneration(ctx, gen, baseURL, managementKey, item, target, claimedUpdatedAtMS,
 				fmt.Sprintf("enable request outcome is unknown: %v", patchErr), false, false)
 		}
-		// CPA rejected the request, or it was never sent: the generation may
 		// retry once it is active again.
 		releaseCtx, cancelRelease := detachedAuthFileMutationContext(ctx, w.compensationTimeout)
 		defer cancelRelease()
@@ -947,10 +1092,10 @@ func (w *RateLimitAutoDisableWorker) recoverCooldown(ctx context.Context, baseUR
 		return false, patchErr
 	}
 	if verifyDetail != "" {
-		return w.retireClaimedGeneration(ctx, baseURL, managementKey, item, target, claimedUpdatedAtMS, verifyDetail, false, false)
+		return w.retireClaimedGeneration(ctx, gen, baseURL, managementKey, item, target, claimedUpdatedAtMS, verifyDetail, false, false)
 	}
 	if err := w.store.MarkQuotaCooldownClaimedRecovered(ctx, item.ID, claimedUpdatedAtMS, now.UnixMilli()); err != nil {
-		rollbackErr := w.disableAfterFailedRecovery(ctx, baseURL, managementKey, target)
+		rollbackErr := w.disableAfterFailedRecovery(ctx, gen, baseURL, managementKey, target)
 		reason := fmt.Sprintf("cooldown recovery marker persistence failed: %v", err)
 		if rollbackErr != nil {
 			reason += fmt.Sprintf("; rollback disable failed: %v", rollbackErr)
@@ -1021,7 +1166,10 @@ func (w *RateLimitAutoDisableWorker) newerActiveCooldownGeneration(
 // when an enable cannot be confirmed. It revalidates the mutation target so a
 // replacement credential is never disabled, and runs on a detached bounded
 // context so a cancelled or expired caller cannot skip the compensation.
-func (w *RateLimitAutoDisableWorker) disableAfterFailedRecovery(ctx context.Context, baseURL string, managementKey string, target cpaauthfiles.StatusMutationTarget) error {
+func (w *RateLimitAutoDisableWorker) disableAfterFailedRecovery(ctx context.Context, gen uint64, baseURL string, managementKey string, target cpaauthfiles.StatusMutationTarget) error {
+	if (gen != 0 && !w.isRuntimeGenerationCurrent(gen, baseURL, managementKey)) || w.isCredentialRejected(baseURL, managementKey) {
+		return errRuntimeCredentialSuperseded
+	}
 	rollbackCtx, cancelRollback := detachedAuthFileMutationContext(ctx, w.compensationTimeout)
 	defer cancelRollback()
 	rollbackTarget, err := cpaauthfiles.New(w.client, quotaAutoDisableActionTimeout).ResolveVerifiedStatusMutationTarget(
@@ -1039,6 +1187,9 @@ func (w *RateLimitAutoDisableWorker) disableAfterFailedRecovery(ctx context.Cont
 	if err != nil {
 		return fmt.Errorf("revalidate rollback target: %w", err)
 	}
+	if (gen != 0 && !w.isRuntimeGenerationCurrent(gen, baseURL, managementKey)) || w.isCredentialRejected(baseURL, managementKey) {
+		return errRuntimeCredentialSuperseded
+	}
 	return w.patchAuthFileTarget(rollbackCtx, baseURL, managementKey, rollbackTarget, true)
 }
 
@@ -1048,6 +1199,7 @@ func (w *RateLimitAutoDisableWorker) disableAfterFailedRecovery(ctx context.Cont
 // in place and still grants no automatic enable authority.
 func (w *RateLimitAutoDisableWorker) retireClaimedGeneration(
 	ctx context.Context,
+	gen uint64,
 	baseURL string,
 	managementKey string,
 	item store.QuotaCooldown,
@@ -1064,7 +1216,7 @@ func (w *RateLimitAutoDisableWorker) retireClaimedGeneration(
 		log.Printf("[quota-auto-disable] auth file %q cooldown id=%d stays terminal; failed to record the unconfirmed enable: %v", item.AuthFileName, item.ID, err)
 	}
 	if compensate {
-		if compensateErr := w.disableAfterFailedRecovery(markerCtx, baseURL, managementKey, target); compensateErr != nil {
+		if compensateErr := w.disableAfterFailedRecovery(markerCtx, gen, baseURL, managementKey, target); compensateErr != nil {
 			reason += fmt.Sprintf("; compensating disable failed: %v", compensateErr)
 		}
 	}
@@ -1702,6 +1854,9 @@ func parseCommonTime(text string) (time.Time, bool) {
 }
 
 func (w *RateLimitAutoDisableWorker) currentAuthFileTarget(ctx context.Context, baseURL string, managementKey string, identity cpaauthfiles.Identity) (cpaauthfiles.StatusMutationTarget, bool, error) {
+	if w.isCredentialRejected(baseURL, managementKey) {
+		return cpaauthfiles.StatusMutationTarget{}, false, errRuntimeCredentialSuperseded
+	}
 	target, err := cpaauthfiles.New(w.client, quotaAutoDisableActionTimeout).ResolveVerifiedStatusMutationTarget(ctx, baseURL, managementKey, identity)
 	if errors.Is(err, cpaauthfiles.ErrAuthFileNotFound) {
 		return cpaauthfiles.StatusMutationTarget{}, false, nil
@@ -1867,6 +2022,9 @@ func codexCooldownIdentity(item store.QuotaCooldown) (workspace string, member s
 }
 
 func (w *RateLimitAutoDisableWorker) patchAuthFileTarget(ctx context.Context, baseURL string, managementKey string, target cpaauthfiles.StatusMutationTarget, disabled bool) error {
+	if w.isCredentialRejected(baseURL, managementKey) {
+		return errRuntimeCredentialSuperseded
+	}
 	return cpaauthfiles.New(w.client, quotaAutoDisableActionTimeout).PatchDisabledTarget(ctx, baseURL, managementKey, target, disabled)
 }
 

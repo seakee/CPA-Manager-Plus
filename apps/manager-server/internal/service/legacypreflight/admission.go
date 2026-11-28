@@ -749,9 +749,9 @@ type managedImportDestination struct {
 // identity for one attempt of one source, the source identity is the digest the
 // managed source stamps, the class selects the Supervisor's 1.x arm, and the
 // authority, artifact, key list and plugin choice are the request the destination
-// was staged with. The artifact is compared with the compiled adoption record this
-// build carries, so a store completed on another build's artifact is not admitted
-// by this one.
+// was staged with. Completed stores compare the recorded artifact against both
+// this build's compiled adoption record and retired release baselines so CPAMP
+// updates that renew `consumer.json` keep previously completed Managed stores admitted.
 func requireManagedDestinationProvenance(destination managedImportDestination) error {
 	switch {
 	case strings.TrimSpace(destination.BaseURL) == "":
@@ -775,12 +775,14 @@ func requireManagedDestinationProvenance(destination managedImportDestination) e
 	case destination.Intent.PluginsEnabled == nil:
 		return errors.New("a complete Managed Upgrade record's CPA import destination names no plugin choice the stage request published")
 	}
-	qualifiedArtifact, err := freshstrategy.QualifiedUpgradeAdoptionArtifactID()
+	admittedArtifact, err := freshstrategy.AdmittedCompletedUpgradeAdoptionArtifactID(
+		model.RuntimeArtifactID(destination.Intent.ExpectedActiveArtifactID),
+	)
 	if err != nil {
 		return fmt.Errorf("this build carries no accepted CPA adoption artifact to compare the recorded destination against: %w", err)
 	}
-	if model.RuntimeArtifactID(destination.Intent.ExpectedActiveArtifactID) != qualifiedArtifact {
-		return errors.New("a complete Managed Upgrade record's CPA import destination was staged on an artifact this build's adoption record is not qualified against")
+	if !admittedArtifact {
+		return errors.New("a complete Managed Upgrade record's CPA import destination was staged on an artifact no accepted adoption record qualified")
 	}
 	return nil
 }

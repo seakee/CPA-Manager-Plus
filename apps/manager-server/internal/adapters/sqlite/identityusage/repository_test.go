@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
 	"path/filepath"
@@ -1283,4 +1284,602 @@ func TestWindowsReadsModelPricesAndEventsFromSingleReadOnlySnapshot(t *testing.T
 		after.EstimatedCostUSD == nil || math.Abs(*after.EstimatedCostUSD-3.60) > 1e-6 {
 		t.Fatalf("post-write snapshot window = %+v, want calls=2 cost=3.60", after)
 	}
+}
+
+func TestAdvanceCollectionStartedAndMonitoringDisabledGap(t *testing.T) {
+	_, rawRepo := setupTestDB(t)
+	repo := rawRepo.(*repository)
+	ctx := t.Context()
+
+	const (
+		t0 = int64(1_760_000_000_000)
+		t1 = int64(1_760_000_060_000)
+		t2 = int64(1_760_000_120_000)
+	)
+	if err := repo.MarkCollectionStarted(ctx, t0); err != nil {
+		t.Fatalf("MarkCollectionStarted(t0): %v", err)
+	}
+	gap, err := repo.MonitoringDisabledGap(ctx)
+	if err != nil || gap {
+		t.Fatalf("initial MonitoringDisabledGap = (%v, %v), want (false, nil)", gap, err)
+	}
+
+	// Recording a disabled gap sets the flag and leaves T0 intact until re-enabled.
+	if err := repo.RecordMonitoringDisabledGap(ctx, t1); err != nil {
+		t.Fatalf("RecordMonitoringDisabledGap: %v", err)
+	}
+	gap, err = repo.MonitoringDisabledGap(ctx)
+	if err != nil || !gap {
+		t.Fatalf("MonitoringDisabledGap after record = (%v, %v), want (true, nil)", gap, err)
+	}
+	got, err := repo.CollectionStartedAtMS(ctx)
+	if err != nil || got != t0 {
+		t.Fatalf("CollectionStartedAtMS before advance = (%d, %v), want (%d, nil)", got, err, t0)
+	}
+
+	// MarkCollectionStarted must preserve T0 on normal restarts (insert-if-absent semantics).
+	if err := repo.MarkCollectionStarted(ctx, t2); err != nil {
+		t.Fatalf("MarkCollectionStarted(t2): %v", err)
+	}
+	got, err = repo.CollectionStartedAtMS(ctx)
+	if err != nil || got != t0 {
+		t.Fatalf("CollectionStartedAtMS after MarkCollectionStarted = (%d, %v), want (%d, nil)", got, err, t0)
+	}
+
+	// AdvanceCollectionStarted moves T0 forward to T2 and atomically clears the disabled gap.
+	if err := repo.AdvanceCollectionStarted(ctx, t2); err != nil {
+		t.Fatalf("AdvanceCollectionStarted(t2): %v", err)
+	}
+	got, err = repo.CollectionStartedAtMS(ctx)
+	if err != nil || got != t2 {
+		t.Fatalf("CollectionStartedAtMS after AdvanceCollectionStarted(t2) = (%d, %v), want (%d, nil)", got, err, t2)
+	}
+	gap, err = repo.MonitoringDisabledGap(ctx)
+	if err != nil || gap {
+		t.Fatalf("MonitoringDisabledGap after advance = (%v, %v), want (false, nil)", gap, err)
+	}
+
+	// AdvanceCollectionStarted must never move the boundary backward.
+	if err := repo.AdvanceCollectionStarted(ctx, t0); err != nil {
+		t.Fatalf("AdvanceCollectionStarted(t0): %v", err)
+	}
+	got, err = repo.CollectionStartedAtMS(ctx)
+	if err != nil || got != t2 {
+		t.Fatalf("CollectionStartedAtMS after stale AdvanceCollectionStarted(t0) = (%d, %v), want (%d, nil)", got, err, t2)
+	}
+}
+
+func TestRecordObservedCollectionStartAtomicSQLiteRules(t *testing.T) {
+	const (
+		admittedAt = int64(1_760_000_000_000)
+		within45s  = admittedAt + 10_000
+		after45s   = admittedAt + 50_000
+	)
+
+	seed := func(t *testing.T, db *sql.DB, k, v string) {
+		t.Helper()
+		if _, err := db.Exec(`insert into settings(key, value, updated_at_ms) values(?, ?, 1)
+			on conflict(key) do update set value=excluded.value`, k, v); err != nil {
+			t.Fatalf("seed %s: %v", k, err)
+		}
+	}
+
+	t.Run("retained queue within 45s and matching completion seq backfills to gatewayAdmittedAtMS", func(t *testing.T) {
+		db, rawRepo := setupTestDB(t)
+		repo := rawRepo.(*repository)
+		seed(t, db, gatewayAdmittedAtKey, fmt.Sprintf("%d", admittedAt))
+		seed(t, db, monitoringDisableSeqKey, "2")
+		seed(t, db, completionDisableSeqKey, "2")
+
+		if err := repo.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:       within45s,
+			RetainedQueue:      true,
+			Transport:          "http",
+			SourceID:           "src-1",
+			RetentionBudgetMS:  45_000,
+			ObservedDisableSeq: 2,
+			HasDisableSeq:      true,
+			InitialRunObserve:  true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := repo.CollectionStartedAtMS(t.Context())
+		if err != nil || got != admittedAt {
+			t.Fatalf("CollectionStartedAtMS = (%d, %v), want %d", got, err, admittedAt)
+		}
+	})
+
+	t.Run("non-replay subscribe keeps observedAtMS instead of gatewayAdmittedAtMS", func(t *testing.T) {
+		db, rawRepo := setupTestDB(t)
+		repo := rawRepo.(*repository)
+		seed(t, db, gatewayAdmittedAtKey, fmt.Sprintf("%d", admittedAt))
+		seed(t, db, monitoringDisableSeqKey, "0")
+		seed(t, db, completionDisableSeqKey, "0")
+
+		if err := repo.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:       within45s,
+			RetainedQueue:      false,
+			Transport:          "subscribe",
+			SourceID:           "src-1",
+			RetentionBudgetMS:  0,
+			ObservedDisableSeq: 0,
+			HasDisableSeq:      true,
+			InitialRunObserve:  true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := repo.CollectionStartedAtMS(t.Context())
+		if err != nil || got != within45s {
+			t.Fatalf("CollectionStartedAtMS(subscribe) = (%d, %v), want %d", got, err, within45s)
+		}
+	})
+
+	t.Run("retained queue past 45s or mismatched disable seq does not backdate to gatewayAdmittedAtMS", func(t *testing.T) {
+		db, rawRepo := setupTestDB(t)
+		repo := rawRepo.(*repository)
+		seed(t, db, gatewayAdmittedAtKey, fmt.Sprintf("%d", admittedAt))
+		seed(t, db, monitoringDisableSeqKey, "0")
+		seed(t, db, completionDisableSeqKey, "0")
+
+		if err := repo.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:       after45s,
+			RetainedQueue:      true,
+			Transport:          "http",
+			SourceID:           "src-1",
+			RetentionBudgetMS:  45_000,
+			ObservedDisableSeq: 0,
+			HasDisableSeq:      true,
+			InitialRunObserve:  true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := repo.CollectionStartedAtMS(t.Context())
+		if err != nil || got != after45s {
+			t.Fatalf("CollectionStartedAtMS(>45s) = (%d, %v), want %d", got, err, after45s)
+		}
+
+		db2, rawRepo2 := setupTestDB(t)
+		repo2 := rawRepo2.(*repository)
+		seed(t, db2, gatewayAdmittedAtKey, fmt.Sprintf("%d", admittedAt))
+		seed(t, db2, monitoringDisableSeqKey, "1")
+		seed(t, db2, completionDisableSeqKey, "0")
+		if err := repo2.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:       within45s,
+			RetainedQueue:      true,
+			Transport:          "http",
+			SourceID:           "src-1",
+			RetentionBudgetMS:  45_000,
+			ObservedDisableSeq: 1,
+			HasDisableSeq:      true,
+			InitialRunObserve:  true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		got2, err := repo2.CollectionStartedAtMS(t.Context())
+		if err != nil || got2 != within45s {
+			t.Fatalf("CollectionStartedAtMS(seq mismatch) = (%d, %v), want %d", got2, err, within45s)
+		}
+	})
+
+	t.Run("disabled monitoring or stale seq/active fence refuses to publish and leaves gaps intact", func(t *testing.T) {
+		db, rawRepo := setupTestDB(t)
+		repo := rawRepo.(*repository)
+		seed(t, db, "manager_config_v1", `{"collector":{"enabled":false}}`)
+		seed(t, db, monitoringDisabledGapKey, "1")
+		seed(t, db, monitoringDisableSeqKey, "1")
+		if err := repo.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:       within45s,
+			RetainedQueue:      true,
+			Transport:          "http",
+			ObservedDisableSeq: 1,
+			HasDisableSeq:      true,
+			InitialRunObserve:  true,
+		}); !errors.Is(err, ports.ErrStaleObservation) {
+			t.Fatalf("err = %v, want ErrStaleObservation", err)
+		}
+		got, err := repo.CollectionStartedAtMS(t.Context())
+		if err != nil || got != 0 {
+			t.Fatalf("CollectionStartedAtMS(disabled) = (%d, %v), want 0", got, err)
+		}
+
+		// Re-enable and observe cleanly, then check stale seq rejection and inactive run rejection.
+		seed(t, db, "manager_config_v1", `{"collector":{"enabled":true}}`)
+		if err := repo.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:       within45s,
+			RetainedQueue:      false,
+			Transport:          "subscribe",
+			ObservedDisableSeq: 1,
+			HasDisableSeq:      true,
+			InitialRunObserve:  true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		// Simulate concurrent disable seq bump (1 -> 2) before an old seq=1 observation commits.
+		seed(t, db, monitoringDisabledGapKey, "1")
+		seed(t, db, monitoringDisableSeqKey, "2")
+		if err := repo.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:       within45s + 5,
+			RetainedQueue:      false,
+			Transport:          "subscribe",
+			ObservedDisableSeq: 1,
+			HasDisableSeq:      true,
+			InitialRunObserve:  true,
+		}); !errors.Is(err, ports.ErrStaleObservation) {
+			t.Fatalf("stale seq err = %v, want ErrStaleObservation", err)
+		}
+		if gap, gErr := repo.MonitoringDisabledGap(t.Context()); gErr != nil || !gap {
+			t.Fatalf("stale seq cleared monitoring_disabled_gap: gap=%v err=%v", gap, gErr)
+		}
+		if got, _ = repo.CollectionStartedAtMS(t.Context()); got != within45s {
+			t.Fatalf("stale seq altered collectingAt to %d, want %d", got, within45s)
+		}
+		if err := repo.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:       after45s,
+			RetainedQueue:      false,
+			Transport:          "subscribe",
+			ObservedDisableSeq: 2,
+			HasDisableSeq:      true,
+			InitialRunObserve:  true,
+			StillActive:        func() bool { return false },
+		}); !errors.Is(err, ports.ErrStaleObservation) {
+			t.Fatalf("inactive run err = %v, want ErrStaleObservation", err)
+		}
+		if gap, gErr := repo.MonitoringDisabledGap(t.Context()); gErr != nil || !gap {
+			t.Fatalf("inactive run cleared monitoring_disabled_gap: gap=%v err=%v", gap, gErr)
+		}
+
+		// Valid seq=2 active observation clears gap and advances collectingAt forward.
+		if err := repo.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:       after45s,
+			RetainedQueue:      false,
+			Transport:          "subscribe",
+			ObservedDisableSeq: 2,
+			HasDisableSeq:      true,
+			InitialRunObserve:  true,
+			StillActive:        func() bool { return true },
+		}); err != nil {
+			t.Fatal(err)
+		}
+		got, err = repo.CollectionStartedAtMS(t.Context())
+		if err != nil || got != after45s {
+			t.Fatalf("CollectionStartedAtMS(after valid seq=2) = (%d, %v), want %d", got, err, after45s)
+		}
+	})
+
+	t.Run("cross-run continuity preserves <=45s http/resp heartbeats and advances across subscribe or >45s outages", func(t *testing.T) {
+		db, rawRepo := setupTestDB(t)
+		repo := rawRepo.(*repository)
+		seed(t, db, gatewayAdmittedAtKey, fmt.Sprintf("%d", admittedAt))
+		seed(t, db, monitoringDisableSeqKey, "0")
+		seed(t, db, completionDisableSeqKey, "0")
+
+		// 1. Initial HTTP observation aligns to admittedAt and writes last_observed=within45s.
+		if err := repo.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:       within45s,
+			RetainedQueue:      true,
+			Transport:          "http",
+			SourceID:           "src-http",
+			RetentionBudgetMS:  45_000,
+			ObservedDisableSeq: 0,
+			HasDisableSeq:      true,
+			InitialRunObserve:  true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		// 2. Heartbeat at +20s updates last_observed without moving collectingAt.
+		hbMS := within45s + 20_000
+		if err := repo.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:       hbMS,
+			RetainedQueue:      true,
+			Transport:          "http",
+			SourceID:           "src-http",
+			RetentionBudgetMS:  45_000,
+			ObservedDisableSeq: 0,
+			HasDisableSeq:      true,
+			InitialRunObserve:  false,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := repo.CollectionStartedAtMS(t.Context()); got != admittedAt {
+			t.Fatalf("heartbeat changed collectingAt=%d, want %d", got, admittedAt)
+		}
+		// 3. New HTTP run within 45s of hbMS preserves admittedAt.
+		restartOK := hbMS + 30_000
+		if err := repo.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:       restartOK,
+			RetainedQueue:      true,
+			Transport:          "http",
+			SourceID:           "src-http",
+			RetentionBudgetMS:  45_000,
+			ObservedDisableSeq: 0,
+			HasDisableSeq:      true,
+			InitialRunObserve:  true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := repo.CollectionStartedAtMS(t.Context()); got != admittedAt {
+			t.Fatalf("new HTTP run within 45s of heartbeat changed collectingAt=%d, want %d", got, admittedAt)
+		}
+		// 4. New HTTP run >45s after restartOK advances collectingAt to staleRestartMS.
+		staleRestartMS := restartOK + 50_000
+		if err := repo.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:       staleRestartMS,
+			RetainedQueue:      true,
+			Transport:          "http",
+			SourceID:           "src-http",
+			RetentionBudgetMS:  45_000,
+			ObservedDisableSeq: 0,
+			HasDisableSeq:      true,
+			InitialRunObserve:  true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := repo.CollectionStartedAtMS(t.Context()); got != staleRestartMS {
+			t.Fatalf("HTTP restart >45s collectingAt=%d, want %d", got, staleRestartMS)
+		}
+		// 5. Switching to subscribe and back to HTTP never preserves continuity across subscribe.
+		subMS := staleRestartMS + 1_000
+		if err := repo.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:       subMS,
+			RetainedQueue:      false,
+			Transport:          "subscribe",
+			SourceID:           "src-sub",
+			RetentionBudgetMS:  0,
+			ObservedDisableSeq: 0,
+			HasDisableSeq:      true,
+			InitialRunObserve:  true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := repo.CollectionStartedAtMS(t.Context()); got != subMS {
+			t.Fatalf("switch to subscribe collectingAt=%d, want %d", got, subMS)
+		}
+		httpAfterSubMS := subMS + 1_000
+		if err := repo.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:       httpAfterSubMS,
+			RetainedQueue:      true,
+			Transport:          "http",
+			SourceID:           "src-http",
+			RetentionBudgetMS:  45_000,
+			ObservedDisableSeq: 0,
+			HasDisableSeq:      true,
+			InitialRunObserve:  true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := repo.CollectionStartedAtMS(t.Context()); got != httpAfterSubMS {
+			t.Fatalf("HTTP after subscribe collectingAt=%d, want %d", got, httpAfterSubMS)
+		}
+	})
+
+	t.Run("fails closed on missing HasDisableSeq, corrupted disableSeq, zero budget, lowered budget, or SourceID change", func(t *testing.T) {
+		db, rawRepo := setupTestDB(t)
+		repo := rawRepo.(*repository)
+		seed(t, db, gatewayAdmittedAtKey, fmt.Sprintf("%d", admittedAt))
+		seed(t, db, completionDisableSeqKey, "0")
+
+		// Missing HasDisableSeq -> ErrStaleObservation even when monitoring_disable_seq is absent.
+		if err := repo.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:      within45s,
+			RetainedQueue:     true,
+			Transport:         "http",
+			SourceID:          "src-a",
+			RetentionBudgetMS: 45_000,
+			HasDisableSeq:     false,
+			InitialRunObserve: true,
+		}); !errors.Is(err, ports.ErrStaleObservation) {
+			t.Fatalf("missing HasDisableSeq err = %v, want ErrStaleObservation", err)
+		}
+
+		// Corrupted monitoring_disable_seq -> ErrStaleObservation.
+		seed(t, db, monitoringDisableSeqKey, "corrupted")
+		if err := repo.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:       within45s,
+			RetainedQueue:      true,
+			Transport:          "http",
+			SourceID:           "src-a",
+			RetentionBudgetMS:  45_000,
+			ObservedDisableSeq: 0,
+			HasDisableSeq:      true,
+			InitialRunObserve:  true,
+		}); !errors.Is(err, ports.ErrStaleObservation) {
+			t.Fatalf("corrupted disableSeq err = %v, want ErrStaleObservation", err)
+		}
+
+		// Unverified retention budget (0) -> does NOT backdate to admittedAt.
+		seed(t, db, monitoringDisableSeqKey, "0")
+		if err := repo.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:       within45s,
+			RetainedQueue:      true,
+			Transport:          "http",
+			SourceID:           "src-a",
+			RetentionBudgetMS:  0,
+			ObservedDisableSeq: 0,
+			HasDisableSeq:      true,
+			InitialRunObserve:  true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := repo.CollectionStartedAtMS(t.Context()); got != within45s {
+			t.Fatalf("zero budget collectingAt = %d, want %d", got, within45s)
+		}
+
+		// Reset collectingAt and verify 7500ms budget preserves <=7500ms and advances >7500ms.
+		seed(t, db, collectionStartKey, "0")
+		t0 := admittedAt + 5_000
+		if err := repo.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:       t0,
+			RetainedQueue:      true,
+			Transport:          "http",
+			SourceID:           "src-a",
+			RetentionBudgetMS:  7_500,
+			ObservedDisableSeq: 0,
+			HasDisableSeq:      true,
+			InitialRunObserve:  true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := repo.CollectionStartedAtMS(t.Context()); got != admittedAt {
+			t.Fatalf("7500ms budget within window collectingAt = %d, want %d", got, admittedAt)
+		}
+		// Restart within 6s with same SourceID preserves admittedAt; >8s with lowered budget advances.
+		t1 := t0 + 6_000
+		if err := repo.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:       t1,
+			RetainedQueue:      true,
+			Transport:          "http",
+			SourceID:           "src-a",
+			RetentionBudgetMS:  45_000, // even if raised now, prior budget was 7500ms -> effective 7500ms
+			ObservedDisableSeq: 0,
+			HasDisableSeq:      true,
+			InitialRunObserve:  true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := repo.CollectionStartedAtMS(t.Context()); got != admittedAt {
+			t.Fatalf("restart <=7500ms collectingAt = %d, want %d", got, admittedAt)
+		}
+		// Lowered budget (7500ms) across 10s outage -> advances collectingAt!
+		t2 := t1 + 10_000
+		if err := repo.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:       t2,
+			RetainedQueue:      true,
+			Transport:          "http",
+			SourceID:           "src-a",
+			RetentionBudgetMS:  7_500,
+			ObservedDisableSeq: 0,
+			HasDisableSeq:      true,
+			InitialRunObserve:  true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := repo.CollectionStartedAtMS(t.Context()); got != t2 {
+			t.Fatalf("outage >7500ms collectingAt = %d, want %d", got, t2)
+		}
+		// Changed SourceID within 1s -> advances collectingAt!
+		t3 := t2 + 1_000
+		if err := repo.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:       t3,
+			RetainedQueue:      true,
+			Transport:          "http",
+			SourceID:           "src-b",
+			RetentionBudgetMS:  45_000,
+			ObservedDisableSeq: 0,
+			HasDisableSeq:      true,
+			InitialRunObserve:  true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := repo.CollectionStartedAtMS(t.Context()); got != t3 {
+			t.Fatalf("changed SourceID collectingAt = %d, want %d", got, t3)
+		}
+	})
+
+	t.Run("heartbeat and initial drain measure retention strictly against final ObservedAtMS", func(t *testing.T) {
+		db, rawRepo := setupTestDB(t)
+		repo := rawRepo.(*repository)
+		seed(t, db, gatewayAdmittedAtKey, fmt.Sprintf("%d", admittedAt))
+		seed(t, db, monitoringDisableSeqKey, "0")
+		seed(t, db, completionDisableSeqKey, "0")
+
+		// Final < batchSize batch finishing within 7500ms budget (at admittedAt+5000) backdates cleanly.
+		drainOK := admittedAt + 5_000
+		if err := repo.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:       drainOK,
+			RetainedQueue:      true,
+			Transport:          "http",
+			SourceID:           "src-drain",
+			RetentionBudgetMS:  7_500,
+			ObservedDisableSeq: 0,
+			HasDisableSeq:      true,
+			InitialRunObserve:  true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := repo.CollectionStartedAtMS(t.Context()); got != admittedAt {
+			t.Fatalf("final batch within budget collectingAt=%d, want %d", got, admittedAt)
+		}
+
+		// Initial drain finishing after 7500ms budget (admittedAt+12000) must NOT backfill to gatewayAdmittedAtMS.
+		dbLate, rawLateRepo := setupTestDB(t)
+		lateRepo := rawLateRepo.(*repository)
+		seed(t, dbLate, gatewayAdmittedAtKey, fmt.Sprintf("%d", admittedAt))
+		seed(t, dbLate, monitoringDisableSeqKey, "0")
+		seed(t, dbLate, completionDisableSeqKey, "0")
+		drainFinish := admittedAt + 12_000
+		if err := lateRepo.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:       drainFinish,
+			RetainedQueue:      true,
+			Transport:          "http",
+			SourceID:           "src-drain",
+			RetentionBudgetMS:  7_500,
+			ObservedDisableSeq: 0,
+			HasDisableSeq:      true,
+			InitialRunObserve:  true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := lateRepo.CollectionStartedAtMS(t.Context()); got != drainFinish {
+			t.Fatalf("final batch exceeding budget collectingAt=%d, want %d", got, drainFinish)
+		}
+
+		// Heartbeat with elapsed > 7500ms advances collectingAt instead of silently preserving.
+		staleHB := drainOK + 20_000
+		if err := repo.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:       staleHB,
+			RetainedQueue:      true,
+			Transport:          "http",
+			SourceID:           "src-drain",
+			RetentionBudgetMS:  7_500,
+			ObservedDisableSeq: 0,
+			HasDisableSeq:      true,
+			InitialRunObserve:  false,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := repo.CollectionStartedAtMS(t.Context()); got != staleHB {
+			t.Fatalf("stale heartbeat collectingAt=%d, want %d", got, staleHB)
+		}
+
+		// Heartbeat with unverified RetentionBudgetMS=0 advances collectingAt.
+		unverifiedHB := staleHB + 1_000
+		if err := repo.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:       unverifiedHB,
+			RetainedQueue:      true,
+			Transport:          "http",
+			SourceID:           "src-drain",
+			RetentionBudgetMS:  0,
+			ObservedDisableSeq: 0,
+			HasDisableSeq:      true,
+			InitialRunObserve:  false,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := repo.CollectionStartedAtMS(t.Context()); got != unverifiedHB {
+			t.Fatalf("unverified heartbeat collectingAt=%d, want %d", got, unverifiedHB)
+		}
+
+		// Corrupted monitoring_disabled_gap triggers error from MonitoringDisabledGap and forces gap advance on observation.
+		seed(t, db, monitoringDisabledGapKey, "corrupted")
+		if gap, err := repo.MonitoringDisabledGap(t.Context()); err == nil || !gap {
+			t.Fatalf("MonitoringDisabledGap(corrupted) = (%v, %v), want (true, error)", gap, err)
+		}
+		seed(t, db, lastRetentionMSKey, "7500")
+		afterCorruptGap := unverifiedHB + 1_000
+		if err := repo.RecordObservedCollectionStart(t.Context(), ports.ObservedCollectionStart{
+			ObservedAtMS:       afterCorruptGap,
+			RetainedQueue:      true,
+			Transport:          "http",
+			SourceID:           "src-drain",
+			RetentionBudgetMS:  7_500,
+			ObservedDisableSeq: 0,
+			HasDisableSeq:      true,
+			InitialRunObserve:  false,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := repo.CollectionStartedAtMS(t.Context()); got != afterCorruptGap {
+			t.Fatalf("corrupted gap heartbeat collectingAt=%d, want %d", got, afterCorruptGap)
+		}
+	})
 }

@@ -143,7 +143,7 @@ func CopyIn(ctx context.Context, options Options) (Result, error) {
 	if options.Lock == nil {
 		return Result{}, errors.New("copy-in requires the held 1.x ownership lock")
 	}
-	layout := sourceBundleLayout(sourceRoot)
+	layout := sourceBundleLayout(sourceRoot, false)
 	if err := requireSourceLock(options.Lock, layout.DatabasePath); err != nil {
 		return Result{}, err
 	}
@@ -259,9 +259,19 @@ func CopyIn(ctx context.Context, options Options) (Result, error) {
 			"the 1.x source changed while it was being fingerprinted; nothing was copied and nothing was recorded")
 	}
 	result.SourceFingerprintBefore = before.Digest
-	if err := validateSourceCompatibilitySnapshotWithBackup(ctx, layout.DatabasePath, sourceRoot, targetRoot, bundleDir, options.ScratchDir, options.DeclaredVersion); err != nil {
+	requiresArchives, err := validateSourceCompatibilitySnapshotWithBackup(ctx, layout.DatabasePath, sourceRoot, targetRoot, bundleDir, options.ScratchDir, options.DeclaredVersion)
+	if err != nil {
 		return Result{}, err
 	}
+	if requiresArchives {
+		if _, statErr := os.Lstat(layout.ArchivesPath); os.IsNotExist(statErr) {
+			return Result{}, newUpgradeError(UpgradeErrorCode(CodeSourceMissing),
+				"source usage-archives directory is missing while archive records exist", statErr)
+		} else if statErr != nil {
+			return Result{}, sourceFingerprintError(ctx, statErr, "")
+		}
+	}
+	layout = sourceBundleLayout(sourceRoot, requiresArchives)
 
 	manifest, digest, err := ensureBackup(ctx, layout, bundleDir, options.Lock, options.ScratchDir)
 	if err != nil {
@@ -405,56 +415,56 @@ func isDatabaseFileMissingOrEmpty(databasePath string) bool {
 	return true
 }
 
-func validateSourceCompatibilitySnapshot(ctx context.Context, databasePath, sourceRoot, targetRoot, scratchDir, declared string) error {
+func validateSourceCompatibilitySnapshot(ctx context.Context, databasePath, sourceRoot, targetRoot, scratchDir, declared string) (bool, error) {
 	return validateSourceCompatibilitySnapshotWithBackup(ctx, databasePath, sourceRoot, targetRoot, "", scratchDir, declared)
 }
 
-func validateSourceCompatibilitySnapshotWithBackup(ctx context.Context, databasePath, sourceRoot, targetRoot, bundleDir, scratchDir, declared string) error {
+func validateSourceCompatibilitySnapshotWithBackup(ctx context.Context, databasePath, sourceRoot, targetRoot, bundleDir, scratchDir, declared string) (bool, error) {
 	if err := ValidateScratchDirWithBackup(scratchDir, sourceRoot, targetRoot, bundleDir); err != nil {
-		return snapshotReadError(ctx, err)
+		return false, snapshotReadError(ctx, err)
 	}
 	if isDatabaseFileMissingOrEmpty(databasePath) {
-		return newUpgradeError(UpgradeErrorCode(CodeSourceMissing), "source database is missing", ErrSourceDatabaseMissing)
+		return false, newUpgradeError(UpgradeErrorCode(CodeSourceMissing), "source database is missing", ErrSourceDatabaseMissing)
 	}
 	snapshot, err := OpenSnapshot(ctx, databasePath, strings.TrimSpace(scratchDir))
 	if err != nil {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return false, ctx.Err()
 		}
 		if errors.Is(err, ErrSourceChanged) {
-			return newUpgradeError(UpgradeErrorSourceChanged,
+			return false, newUpgradeError(UpgradeErrorSourceChanged,
 				"the 1.x source changed while inspecting compatibility before the copy-in; nothing was backed up or recorded", err)
 		}
 		if errors.Is(err, ErrSnapshotFailed) {
-			return snapshotReadError(ctx, err)
+			return false, snapshotReadError(ctx, err)
 		}
 		code, detail := ownershipFailure(err)
-		return newUpgradeError(UpgradeErrorCode(code), detail, err)
+		return false, newUpgradeError(UpgradeErrorCode(code), detail, err)
 	}
 	defer func() { _ = snapshot.Close() }()
 	if err := quickCheckSource(ctx, snapshot.DB()); err != nil {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return false, ctx.Err()
 		}
 		code, detail := ownershipFailure(err)
-		return newUpgradeError(UpgradeErrorCode(code), detail, err)
+		return false, newUpgradeError(UpgradeErrorCode(code), detail, err)
 	}
 	schema, err := readSourceSchema(ctx, snapshot.DB())
 	if err != nil {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return false, ctx.Err()
 		}
 		code, detail := ownershipFailure(err)
-		return newUpgradeError(UpgradeErrorCode(code), detail, err)
+		return false, newUpgradeError(UpgradeErrorCode(code), detail, err)
 	}
 	_, check, err := evaluateSourceCompatibility(schema.sourceKind(), schema, declared)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if check.Status != StatusPass {
-		return newUpgradeError(UpgradeErrorCode(check.Code), check.Detail, nil)
+		return false, newUpgradeError(UpgradeErrorCode(check.Code), check.Detail, nil)
 	}
-	return nil
+	return schema.requiresArchives, nil
 }
 
 func validateStagedSourceCompatibility(ctx context.Context, stagedDatabase, sourceRoot, targetRoot, scratchDir, declared string) error {
@@ -948,16 +958,19 @@ func ValidateCPAImportScratchDir(scratchDir, legacyRoot, cpaDirectory, cpaAuthDi
 	return ValidateScratchRoots(scratchDir, roots...)
 }
 
-// sourceBundleLayout describes the 1.x data volume for maintenancebundle. The
-// archive root is required: a 1.x volume without it is not a complete source.
-func sourceBundleLayout(root string) maintenancebundle.Layout {
+// sourceBundleLayout describes the 1.x data volume for maintenancebundle. A 1.x
+// Manager creates usage-archives/ lazily on its first archive run, so the
+// directory is required only when the 1.x database records archive history; if
+// the directory is present on disk anyway, maintenancebundle still inspects,
+// backs up, and verifies every entry inside it.
+func sourceBundleLayout(root string, requireArchives bool) maintenancebundle.Layout {
 	return maintenancebundle.Layout{
 		DatabasePath:    filepath.Join(root, databaseFileName),
 		DataKeyPath:     filepath.Join(root, dataKeyFileName),
 		ConfigPath:      filepath.Join(root, configMemberName),
 		ArchivesPath:    filepath.Join(root, archivesDirName),
 		RequireConfig:   false,
-		RequireArchives: true,
+		RequireArchives: requireArchives,
 	}
 }
 

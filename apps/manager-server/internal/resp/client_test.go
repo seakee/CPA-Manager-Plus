@@ -198,3 +198,25 @@ func itoa(value int) string {
 	}
 	return string(buf[pos:])
 }
+
+func TestPopClassifiesDroppedReplyAsUncertainAndErrorFrameAsCertain(t *testing.T) {
+	client, server := newPipeClient(t)
+	go func() {
+		readRequest(t, server, "*3\r\n$4\r\nRPOP\r\n$5\r\nusage\r\n$1\r\n2\r\n")
+		_ = server.Close()
+	}()
+	_, dropErr := client.Pop("usage", "right", 2)
+	if !IsUncertainPop(dropErr) {
+		t.Fatalf("dropped reply err = %v, want IsUncertainPop=true", dropErr)
+	}
+
+	client2, server2 := newPipeClient(t)
+	go func() {
+		readRequest(t, server2, "*3\r\n$4\r\nRPOP\r\n$5\r\nusage\r\n$1\r\n2\r\n")
+		writeResponse(t, server2, "-ERR denied\r\n")
+	}()
+	_, frameErr := client2.Pop("usage", "right", 2)
+	if frameErr == nil || IsUncertainPop(frameErr) {
+		t.Fatalf("error frame = %v (uncertain=%v), want non-uncertain ErrorReply", frameErr, IsUncertainPop(frameErr))
+	}
+}

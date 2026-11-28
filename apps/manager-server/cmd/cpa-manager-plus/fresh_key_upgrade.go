@@ -446,8 +446,8 @@ func parseFullUpgradeManagedDestination(raw string, protector *security.Protecto
 			return upgradeDestinationRecord{}, "", freshkeyapply.ErrUnavailable
 		}
 	}
-	qualifiedArtifact, err := freshstrategy.QualifiedUpgradeAdoptionArtifactID()
-	if err != nil || rec.Intent.ExpectedActiveArtifactID != qualifiedArtifact {
+	admittedArtifact, err := freshstrategy.AdmittedCompletedUpgradeAdoptionArtifactID(rec.Intent.ExpectedActiveArtifactID)
+	if err != nil || !admittedArtifact {
 		return upgradeDestinationRecord{}, "", freshkeyapply.ErrUnavailable
 	}
 	envelope := strings.TrimSpace(rec.ManagementKey)
@@ -584,15 +584,29 @@ func verifyUpgradeManagedLiveRuntime(
 	if ctx != nil && ctx.Err() != nil {
 		return model.RuntimeObservedStatus{}, 0, "", ctx.Err()
 	}
-	if err != nil ||
-		obs.Validate() != nil ||
+	if err != nil {
+		return model.RuntimeObservedStatus{}, 0, "", freshkeyapply.ErrUnavailable
+	}
+	return verifyUpgradeManagedLiveRuntimeStatus(rec, obs)
+}
+
+func verifyUpgradeManagedLiveRuntimeStatus(
+	rec upgradeDestinationRecord,
+	obs model.RuntimeObservedStatus,
+) (model.RuntimeObservedStatus, uint64, string, error) {
+	// The completed upgrade installation pins ExpectedRuntimeIdentity while
+	// parseFullUpgradeManagedDestination retains ExpectedActiveArtifactID as
+	// install-time qualification provenance. ActivateUpdate and AdoptBundledBaseline
+	// switch ActiveGatewayArtifact in place under the same Runtime identity,
+	// matching Fresh Managed (freshkeyapply/service.go) and observeVerifiedManagedRuntime.
+	if obs.Validate() != nil ||
 		obs.ProtocolVersion != "v1" ||
 		obs.State != model.RuntimeStateReady ||
 		obs.Identity == "" ||
 		obs.Identity != rec.Intent.ExpectedRuntimeIdentity ||
 		obs.Generation == 0 ||
 		obs.ActiveGatewayArtifact == nil ||
-		obs.ActiveGatewayArtifact.ArtifactID != rec.Intent.ExpectedActiveArtifactID {
+		!obs.ActiveGatewayArtifact.ArtifactID.IsValid() {
 		return model.RuntimeObservedStatus{}, 0, "", freshkeyapply.ErrUnavailable
 	}
 	epoch := uint64(rec.Intent.ExpectedRuntimeGeneration)

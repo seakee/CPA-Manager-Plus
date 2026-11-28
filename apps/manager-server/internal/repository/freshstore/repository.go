@@ -17,6 +17,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/routing"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
@@ -222,6 +223,16 @@ func (r *repository) Load(ctx context.Context) (Record, error) {
 // what the install path stored. A row that is absent or already enabled is left
 // alone: this transition only supplies the default the pending fence withheld.
 func enableCollectorAtCompletion(ctx context.Context, tx *sql.Tx) error {
+	var gap string
+	switch err := tx.QueryRowContext(ctx, "select value from settings where key=?", sqliterepo.FreshUsageMonitoringDisabledGapKey).Scan(&gap); {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return err
+	default:
+		if strings.TrimSpace(gap) != "0" {
+			return nil
+		}
+	}
 	var data string
 	switch err := tx.QueryRowContext(ctx, "select value from settings where key='manager_config_v1'").Scan(&data); {
 	case errors.Is(err, sql.ErrNoRows):
@@ -240,6 +251,97 @@ func enableCollectorAtCompletion(ctx context.Context, tx *sql.Tx) error {
 	cfg.Collector.Enabled = &enabled
 	cfg.UpdatedAtMS = time.Now().UnixMilli()
 	return write(ctx, tx, "manager_config_v1", cfg)
+}
+
+func recordCompletionUsageEligibilityTx(ctx context.Context, tx *sql.Tx, strategy bootstrap.CPAStrategy, nowMS int64) error {
+	if strategy == bootstrap.NewManaged || strategy == bootstrap.AdoptExisting {
+		anchorMS := nowMS
+		var earliestBinding sql.NullInt64
+		if err := tx.QueryRowContext(ctx,
+			`select min(first_seen_at_ms) from `+sqliterepo.GatewayAPIKeySourceBindingsTable+` where retired_at_ms is null and first_seen_at_ms > 0`,
+		).Scan(&earliestBinding); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if earliestBinding.Valid && earliestBinding.Int64 > 0 && earliestBinding.Int64 < anchorMS {
+			anchorMS = earliestBinding.Int64
+		}
+		var earliestStaged sql.NullInt64
+		if err := tx.QueryRowContext(ctx,
+			`select min(i.created_at_ms)
+			 from fresh_client_api_keys k
+			 join `+sqliterepo.GatewayAPIKeyIdentitiesTable+` i on i.id = k.api_key_id
+			 where i.lifecycle != 'superseded' and i.created_at_ms > 0`,
+		).Scan(&earliestStaged); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if earliestStaged.Valid && earliestStaged.Int64 > 0 && earliestStaged.Int64 < anchorMS {
+			anchorMS = earliestStaged.Int64
+		}
+		if _, err := tx.ExecContext(ctx,
+			`insert into settings(key, value, updated_at_ms) values(?, ?, ?) on conflict(key) do nothing`,
+			sqliterepo.FreshGatewayAdmittedAtMSKey, strconv.FormatInt(anchorMS, 10), nowMS,
+		); err != nil {
+			return err
+		}
+	}
+	enabled := true
+	var cfgRaw string
+	switch err := tx.QueryRowContext(ctx, "select value from settings where key='manager_config_v1'").Scan(&cfgRaw); {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return err
+	default:
+		var cfg model.ManagerConfig
+		if err := json.Unmarshal([]byte(cfgRaw), &cfg); err != nil {
+			return err
+		}
+		if cfg.Collector.Enabled != nil {
+			enabled = *cfg.Collector.Enabled
+		}
+	}
+	var gapRaw string
+	disabledGap := false
+	switch err := tx.QueryRowContext(ctx, "select value from settings where key=?", sqliterepo.FreshUsageMonitoringDisabledGapKey).Scan(&gapRaw); {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return err
+	default:
+		disabledGap = strings.TrimSpace(gapRaw) != "0"
+	}
+	var seqRaw string
+	var disableSeq int64
+	corruptedDisableSeq := false
+	switch err := tx.QueryRowContext(ctx, "select value from settings where key=?", sqliterepo.FreshUsageMonitoringDisableSeqKey).Scan(&seqRaw); {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return err
+	default:
+		parsed, parseErr := strconv.ParseInt(strings.TrimSpace(seqRaw), 10, 64)
+		if parseErr != nil || parsed < 0 {
+			corruptedDisableSeq = true
+		} else {
+			disableSeq = parsed
+		}
+	}
+	if !enabled {
+		if _, err := tx.ExecContext(ctx,
+			`insert into settings(key, value, updated_at_ms) values(?, '1', ?) on conflict(key) do update set value='1', updated_at_ms=excluded.updated_at_ms`,
+			sqliterepo.FreshUsageMonitoringDisabledGapKey, nowMS,
+		); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `delete from settings where key=?`, sqliterepo.FreshUsageCompletionDisableSeqKey)
+		return err
+	}
+	if disabledGap || corruptedDisableSeq {
+		_, err := tx.ExecContext(ctx, `delete from settings where key=?`, sqliterepo.FreshUsageCompletionDisableSeqKey)
+		return err
+	}
+	_, err := tx.ExecContext(ctx,
+		`insert into settings(key, value, updated_at_ms) values(?, ?, ?) on conflict(key) do update set value=excluded.value, updated_at_ms=excluded.updated_at_ms`,
+		sqliterepo.FreshUsageCompletionDisableSeqKey, strconv.FormatInt(disableSeq, 10), nowMS,
+	)
+	return err
 }
 
 // writeInitialConnectionConfig persists manager_config_v1 when an installation
@@ -576,6 +678,9 @@ func (r *repository) UpdateTx(ctx context.Context, id bootstrap.FreshIdentity, r
 		// consumers in the same transaction.
 		setup := model.Setup{CPAUpstreamURL: v.Connection.CPABaseURL, ManagementKey: v.Connection.ManagementKey}
 		err = write(ctx, tx, "setup", setup)
+	}
+	if err == nil && v.Operation.ProductComplete && !before.Operation.ProductComplete {
+		err = recordCompletionUsageEligibilityTx(ctx, tx, v.Operation.Strategy.Strategy, time.Now().UnixMilli())
 	}
 	if err == nil {
 		err = writeConfigJournals(ctx, tx, before.Config, v.Config, v.ConfigDamaged, before.ConfigGroups, v.ConfigGroups, v.ConfigGroupsDamaged)

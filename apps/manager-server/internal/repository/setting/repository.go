@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 )
 
@@ -88,6 +89,11 @@ func (r *repository) SaveManagerConfigAndSetup(ctx context.Context, cfg model.Ma
 	return r.saveWithConnectionRevision(ctx, true, func(tx *sql.Tx) error {
 		if err := upsertSetting(ctx, tx, managerConfigKey, cfgData, cfg.UpdatedAtMS); err != nil {
 			return err
+		}
+		if cfg.Collector.Enabled != nil && !*cfg.Collector.Enabled {
+			if err := recordMonitoringDisabledInTx(ctx, tx, cfg.UpdatedAtMS); err != nil {
+				return err
+			}
 		}
 		return upsertSetting(ctx, tx, "setup", setupData, time.Now().UnixMilli())
 	})
@@ -175,7 +181,13 @@ func (r *repository) SaveManagerConfig(ctx context.Context, cfg model.ManagerCon
 		return err
 	}
 	return r.saveWithConnectionRevision(ctx, true, func(tx *sql.Tx) error {
-		return upsertSetting(ctx, tx, managerConfigKey, data, cfg.UpdatedAtMS)
+		if err := upsertSetting(ctx, tx, managerConfigKey, data, cfg.UpdatedAtMS); err != nil {
+			return err
+		}
+		if cfg.Collector.Enabled != nil && !*cfg.Collector.Enabled {
+			return recordMonitoringDisabledInTx(ctx, tx, cfg.UpdatedAtMS)
+		}
+		return nil
 	})
 }
 
@@ -202,12 +214,40 @@ func (r *repository) PatchManagerCollectorEnabled(ctx context.Context, enabled b
 			return err
 		}
 		patched = true
-		return upsertSetting(ctx, tx, managerConfigKey, data, updatedAtMS)
+		if err := upsertSetting(ctx, tx, managerConfigKey, data, updatedAtMS); err != nil {
+			return err
+		}
+		if !enabled {
+			return recordMonitoringDisabledInTx(ctx, tx, updatedAtMS)
+		}
+		return nil
 	})
 	if err != nil {
 		return false, err
 	}
 	return patched, nil
+}
+
+func recordMonitoringDisabledInTx(ctx context.Context, tx *sql.Tx, nowMS int64) error {
+	if err := upsertSetting(ctx, tx, sqliterepo.FreshUsageMonitoringDisabledGapKey, []byte("1"), nowMS); err != nil {
+		return err
+	}
+	var rawSeq string
+	var seq int64
+	switch err := tx.QueryRowContext(ctx, `select value from settings where key = ?`, sqliterepo.FreshUsageMonitoringDisableSeqKey).Scan(&rawSeq); {
+	case errors.Is(err, sql.ErrNoRows):
+		seq = 0
+	case err != nil:
+		return err
+	default:
+		parsed, parseErr := strconv.ParseInt(strings.TrimSpace(rawSeq), 10, 64)
+		if parseErr != nil || parsed < 0 || parsed == math.MaxInt64 {
+			return fmt.Errorf("invalid %s setting value", sqliterepo.FreshUsageMonitoringDisableSeqKey)
+		}
+		seq = parsed
+	}
+	seq++
+	return upsertSetting(ctx, tx, sqliterepo.FreshUsageMonitoringDisableSeqKey, []byte(strconv.FormatInt(seq, 10)), nowMS)
 }
 
 // patchCollectorEnabled replaces the `collector.enabled` leaf of a stored

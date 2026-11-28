@@ -532,6 +532,22 @@ func (c *upgradeCollectorController) handleExternalRejectionRecorded(
 	}
 	activeCfg, ok := c.manager.ActiveRuntimeConfig()
 	if !ok {
+		if c.cfg.DB != nil && c.cfg.Protector != nil {
+			checkCtx := ctx
+			if checkCtx == nil {
+				checkCtx = context.Background()
+			}
+			if binding, hasBinding, err := upgradeoperation.New(c.cfg.DB).ExternalBinding(checkCtx); err == nil &&
+				hasBinding && binding.Identity == identity &&
+				envelopeDigest(strings.TrimSpace(binding.ManagementKey)) == credDigest {
+				if dbSecret, decErr := c.cfg.Protector.UnprotectString(strings.TrimSpace(binding.ManagementKey)); decErr == nil {
+					c.manager.RejectRuntimeConfig(collector.RuntimeConfig{
+						CPAUpstreamURL: strings.TrimSpace(binding.BaseURL),
+						ManagementKey:  strings.TrimSpace(dbSecret),
+					})
+				}
+			}
+		}
 		return
 	}
 	activeCanonical, err := canonicalUpgradeUsageURL(activeCfg.CPAUpstreamURL)
@@ -595,5 +611,6 @@ func (c *upgradeCollectorController) stopRunIfStillMatching(
 		c.boundRunID = 0
 		c.boundTarget = verifiedUpgradeUsageTarget{}
 	}
+	c.manager.RejectRuntimeConfig(expectedCfg)
 	c.manager.Stop()
 }

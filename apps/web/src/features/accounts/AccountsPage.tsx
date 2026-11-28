@@ -7795,6 +7795,12 @@ export function AccountsPage() {
     setPage(1);
   };
 
+  const clearAllAccountFilters = () => {
+    setProviderFilter('all');
+    setSearch('');
+    resetAccountFilters();
+  };
+
   const commitAccountSortField = (value: AccountSortFieldValue) => {
     setAccountSort((prev) => {
       if (value === 'default') {
@@ -8426,23 +8432,86 @@ export function AccountsPage() {
   };
 
 
-  const renderAccountEmptyState = () => (
-    <EmptyState
-      variant="inline"
-      title={t('accounts.empty_title')}
-      description={t('accounts.empty_desc')}
-      action={
-        <Button
-          variant="secondary"
-          size="sm"
-          onClick={() => void refreshAccountsWorkspace()}
-        >
-          <IconRefreshCw size={15} />
-          {t('common.refresh')}
-        </Button>
-      }
-    />
-  );
+  const renderAccountEmptyState = () => {
+    if (rows.length === 0) {
+      return (
+        <EmptyState
+          variant="inline"
+          title={t('accounts.empty_no_credentials_title')}
+          description={t('accounts.empty_no_credentials_desc')}
+          action={
+            <>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={handleUploadClick}
+                disabled={disableControls || uploading}
+                loading={uploading}
+              >
+                {!uploading ? <IconPlus size={15} /> : null}
+                {t('auth_files.upload_button')}
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setAuthJsonPasteOpen(true)}
+                disabled={disableControls || authJsonPasteSaving}
+                loading={authJsonPasteSaving}
+              >
+                {!authJsonPasteSaving ? <IconFileText size={15} /> : null}
+                {t('auth_files.paste_button')}
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setActiveView('oauth')}
+                disabled={disableControls}
+              >
+                {t('accounts.view_oauth')}
+              </Button>
+            </>
+          }
+        />
+      );
+    }
+
+    const hasActiveFilters =
+      providerFilter !== 'all' ||
+      statusFilter !== 'all' ||
+      effectiveOperationalFilter !== 'all' ||
+      planFilter !== 'all' ||
+      quotaBandFilter !== 'all' ||
+      search.trim().length > 0;
+
+    return (
+      <EmptyState
+        variant="inline"
+        title={t('accounts.empty_title')}
+        description={t('accounts.empty_desc')}
+        action={
+          <>
+            {hasActiveFilters ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={clearAllAccountFilters}
+              >
+                {t('accounts.clear_filters')}
+              </Button>
+            ) : null}
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void refreshAccountsWorkspace()}
+            >
+              <IconRefreshCw size={15} />
+              {t('common.refresh')}
+            </Button>
+          </>
+        }
+      />
+    );
+  };
 
   const renderSingleQuotaWindowCard = (
     row: AccountRow,
@@ -8835,7 +8904,7 @@ export function AccountsPage() {
 
     return (
       <WorkspaceListPanel<AccountsLayoutMode>
-        showHeader={paged}
+        showHeader={paged && rows.length > 0}
         headerClassName={
           !isSelectionMode && !hasSelection ? styles.accountsHeaderIdle : undefined
         }
@@ -8854,6 +8923,7 @@ export function AccountsPage() {
                 size="sm"
                 className={styles.selectionModeButton}
                 onClick={() => setIsSelectionMode(true)}
+                disabled={rowsToRender.length === 0}
                 aria-pressed={isSelectionMode}
               >
                 <IconCheck size={15} />

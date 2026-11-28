@@ -67,6 +67,7 @@ type sourceSchema struct {
 	settings          map[string]string
 	archiveFormats    []string
 	unknownMigrations []string
+	requiresArchives  bool
 }
 
 // requiredLegacyTables is the structural lower bound a v1.14.x source must
@@ -229,6 +230,24 @@ func readSourceSchema(ctx context.Context, db *sql.DB) (sourceSchema, error) {
 		}
 		if err := archiveRows.Err(); err != nil {
 			return sourceSchema{}, err
+		}
+	}
+	for _, archiveTable := range []string{
+		"usage_archive_runs",
+		"usage_archive_segments",
+		"usage_archive_event_refs",
+		"usage_archive_deleted_coverage_daily",
+	} {
+		if !schema.tables[archiveTable] {
+			continue
+		}
+		var hasRows int
+		if err := db.QueryRowContext(ctx, `select exists(select 1 from `+archiveTable+` limit 1)`).Scan(&hasRows); err != nil {
+			return sourceSchema{}, err
+		}
+		if hasRows != 0 {
+			schema.requiresArchives = true
+			break
 		}
 	}
 	if schema.tables["usage_data_migrations"] {

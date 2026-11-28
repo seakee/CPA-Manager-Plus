@@ -8,13 +8,25 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
 var ErrUnsupported = errors.New("http usage queue is unsupported")
+
+// ErrUncertainPop marks a Pop failure where the request may already have
+// reached the upstream handler and removed events from the queue.
+var ErrUncertainPop = errors.New("usage queue pop outcome is uncertain")
+
+// IsUncertainPop reports whether err came from a Pop attempt that may have
+// removed items from the upstream queue before failing.
+func IsUncertainPop(err error) bool {
+	return errors.Is(err, ErrUncertainPop)
+}
 
 // ErrRejected reports a usage queue request the CPA refused as unauthenticated.
 // It is the transport-level form of a refused management credential: the server
@@ -25,8 +37,8 @@ type StatusError struct {
 	StatusCode int
 	Status     string
 	Body       string
+	Uncertain  bool
 }
-
 func (e *StatusError) Error() string {
 	if e.Body == "" {
 		return "usage queue request failed: " + e.Status
@@ -39,6 +51,9 @@ func (e *StatusError) Error() string {
 func (e *StatusError) Unwrap() error {
 	if e.StatusCode == http.StatusUnauthorized || e.StatusCode == http.StatusForbidden {
 		return ErrRejected
+	}
+	if e.Uncertain {
+		return ErrUncertainPop
 	}
 	return nil
 }
@@ -65,7 +80,26 @@ func (c *Client) Pop(ctx context.Context, count int) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if ctx != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	var sentOnWire atomic.Bool
+	reqCtx := ctx
+	if reqCtx == nil {
+		reqCtx = context.Background()
+	}
+	reqCtx = httptrace.WithClientTrace(reqCtx, &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) {
+			sentOnWire.Store(true)
+		},
+		WroteHeaders: func() {
+			sentOnWire.Store(true)
+		},
+		WroteRequest: func(httptrace.WroteRequestInfo) {
+			sentOnWire.Store(true)
+		},
+	})
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +113,7 @@ func (c *Client) Pop(ctx context.Context, count int) ([]string, error) {
 	}
 	res, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, classifyDoError(ctx != nil && ctx.Err() != nil && !sentOnWire.Load(), sentOnWire.Load(), err)
 	}
 	defer res.Body.Close()
 
@@ -88,17 +122,19 @@ func (c *Client) Pop(ctx context.Context, count int) ([]string, error) {
 		if isUnsupportedStatus(res.StatusCode) {
 			return nil, fmt.Errorf("%w: %s", ErrUnsupported, res.Status)
 		}
+		uncertain := res.StatusCode != http.StatusUnauthorized && res.StatusCode != http.StatusForbidden
 		return nil, &StatusError{
 			StatusCode: res.StatusCode,
 			Status:     res.Status,
 			Body:       strings.TrimSpace(string(body)),
+			Uncertain:  uncertain,
 		}
 	}
 
 	var entries []json.RawMessage
 	decoder := json.NewDecoder(res.Body)
 	if err := decoder.Decode(&entries); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrUncertainPop, err)
 	}
 
 	items := make([]string, 0, len(entries))
@@ -110,7 +146,7 @@ func (c *Client) Pop(ctx context.Context, count int) ([]string, error) {
 		if trimmed[0] == '"' {
 			var text string
 			if err := json.Unmarshal(trimmed, &text); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("%w: %w", ErrUncertainPop, err)
 			}
 			if strings.TrimSpace(text) != "" {
 				items = append(items, text)
@@ -118,11 +154,18 @@ func (c *Client) Pop(ctx context.Context, count int) ([]string, error) {
 			continue
 		}
 		if trimmed[0] != '{' {
-			return nil, fmt.Errorf("unexpected usage queue item %s", string(trimmed))
+			return nil, fmt.Errorf("%w: unexpected usage queue item %s", ErrUncertainPop, string(trimmed))
 		}
 		items = append(items, string(trimmed))
 	}
 	return items, nil
+}
+
+func classifyDoError(ctxCanceledBeforeDo bool, sentOnWire bool, err error) error {
+	if err == nil || ctxCanceledBeforeDo || !sentOnWire {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrUncertainPop, err)
 }
 
 func (c *Client) endpoint(count int) (string, error) {

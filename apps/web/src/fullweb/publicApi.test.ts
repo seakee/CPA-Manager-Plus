@@ -908,4 +908,28 @@ describe('canonical Full Web Public API transport', () => {
       operationResult: opResult,
     });
   });
+
+  it.each([
+    '：cpamp-admin-key',
+    'cpamp-admin-key│border',
+    'cpamp-\u200b-key',
+    'cpamp-admin-key\nextra',
+    'cpamp-admin-key\rextra',
+    'cpamp-admin-key\u0000extra',
+    '',
+  ])(
+    'classifies invalid HTTP header credential %j as 401 authentication without invoking transport',
+    async (invalidValue) => {
+      browserOrigin();
+      const transport = vi.fn<typeof fetch>();
+      const client = createPublicApiClient(() => context, transport);
+      await expect(
+        client.get('operation', { kind: 'admin', value: invalidValue })
+      ).rejects.toMatchObject({
+        kind: 'authentication',
+        status: 401,
+      });
+      expect(transport).not.toHaveBeenCalled();
+    }
+  );
 });

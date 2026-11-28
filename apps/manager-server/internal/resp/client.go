@@ -23,6 +23,13 @@ type Client struct {
 
 var ErrUnsupportedSubscribe = errors.New("RESP server does not support SUBSCRIBE")
 
+// ErrUncertainPop marks a RESP Pop failure after the LPOP/RPOP command started
+// writing to the socket without a clean protocol error frame.
+var ErrUncertainPop = errors.New("RESP pop outcome is uncertain")
+
+func IsUncertainPop(err error) bool {
+	return errors.Is(err, ErrUncertainPop)
+}
 // ErrorReply is a Redis error frame: the server answered and refused. It is
 // typed rather than formatted so a caller can tell "this credential was not
 // accepted" from "the connection broke", which is the difference between a
@@ -93,13 +100,33 @@ func (c *Client) Auth(key string) error {
 }
 
 func (c *Client) Pop(queue string, side string, count int) ([]string, error) {
+	if c == nil || c.conn == nil {
+		return nil, errors.New("RESP client is closed")
+	}
+	if c.subscribed {
+		return nil, errors.New("RESP client is in subscribe mode")
+	}
 	command := "RPOP"
 	if strings.EqualFold(side, "left") || strings.EqualFold(side, "lpop") {
 		command = "LPOP"
 	}
-	value, err := c.Do(command, queue, strconv.Itoa(count))
-	if err != nil {
+	if err := c.conn.SetDeadline(time.Now().Add(c.timeout)); err != nil {
 		return nil, err
+	}
+	n, err := c.conn.Write(encodeCommand([]string{command, queue, strconv.Itoa(count)}))
+	if err != nil {
+		if n > 0 {
+			return nil, fmt.Errorf("%w: %w", ErrUncertainPop, err)
+		}
+		return nil, err
+	}
+	value, err := c.readValue()
+	if err != nil {
+		var replyErr *ErrorReply
+		if errors.As(err, &replyErr) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: %w", ErrUncertainPop, err)
 	}
 	if value == nil {
 		return nil, nil
@@ -119,7 +146,7 @@ func (c *Client) Pop(queue string, side string, count int) ([]string, error) {
 		}
 		return result, nil
 	default:
-		return nil, fmt.Errorf("unexpected RESP pop response %T", value)
+		return nil, fmt.Errorf("%w: unexpected RESP pop response %T", ErrUncertainPop, value)
 	}
 }
 

@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"net/http"
 	"time"
 
 	collectorpkg "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
@@ -20,6 +21,11 @@ func New(manager *collectorpkg.Manager) *Service {
 func (s *Service) Start(ctx context.Context, cfg store.ManagerConfig) error {
 	s.manager.Start(ctx, RuntimeConfigFromManagerConfig(cfg))
 	return nil
+}
+func (s *Service) SetNowFunc(fn func() int64) {
+	if s != nil && s.manager != nil {
+		s.manager.SetNowFunc(fn)
+	}
 }
 
 func (s *Service) StartRuntime(ctx context.Context, cfg collectorpkg.RuntimeConfig) error {
@@ -40,6 +46,26 @@ func (s *Service) StopAndWait(ctx context.Context) error {
 	return s.manager.StopAndWait(ctx)
 }
 
+func (s *Service) CancelRuntime() func(context.Context) error {
+	if s == nil || s.manager == nil {
+		return func(context.Context) error { return nil }
+	}
+	return s.manager.CancelRuntime()
+}
+
+func (s *Service) CancelRun(runID uint64) func(context.Context) error {
+	if s == nil || s.manager == nil {
+		return func(context.Context) error { return nil }
+	}
+	return s.manager.CancelRun(runID)
+}
+
+func (s *Service) ActiveRun(runID uint64) bool {
+	if s == nil || s.manager == nil {
+		return false
+	}
+	return s.manager.ActiveRun(runID)
+}
 // SetAuthRejectionHandler installs the report of a CPA that refused the
 // management credential this Collector runs with. The Collector stops itself
 // before it reports, so the handler only records the blocker and the latch.
@@ -52,6 +78,32 @@ func (s *Service) Restart(ctx context.Context, cfg store.ManagerConfig) error {
 		return err
 	}
 	return s.Start(ctx, cfg)
+}
+
+func (s *Service) SetPreObserveSeqFunc(fn func(ctx context.Context) (int64, bool)) {
+	s.manager.SetPreObserveSeqFunc(fn)
+}
+
+func (s *Service) SetObservationCallbacks(
+	onObserved func(ctx context.Context, ev collectorpkg.ObservationEvent) error,
+	onUnreplayedDisconnect func(ctx context.Context, runID uint64, transport string),
+) {
+	s.manager.SetObservationCallbacks(onObserved, onUnreplayedDisconnect)
+}
+
+func (s *Service) SetFirstPollErrorHandler(fn func(ctx context.Context, runID uint64, transport string, err error)) {
+	s.manager.SetFirstPollErrorHandler(fn)
+}
+func (s *Service) SetRunRetentionBudget(runID uint64, budgetMS int64) {
+	if s != nil && s.manager != nil {
+		s.manager.SetRunRetentionBudget(runID, budgetMS)
+	}
+}
+
+func (s *Service) SetHTTPClient(client *http.Client) {
+	if s != nil && s.manager != nil {
+		s.manager.SetHTTPClient(client)
+	}
 }
 
 // StartCount is the identity of the running Collector, so a caller can prove a

@@ -3,6 +3,7 @@ package collector
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -21,6 +22,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/resp"
 	monitoringsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/monitoring"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	quotasnapshotsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/quotasnapshot"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
@@ -1908,4 +1910,857 @@ func TestCollectorDoesNotPopUnderTrialHoldAndQuiescesInflightBatch(t *testing.T)
 			t.Fatalf("expected zero Pop calls after QuiesceForTrialHold, got %d -> %d", popsAfterQuiesce, got)
 		}
 	})
+}
+
+func TestObservationCallbacksAcrossSubscribeAndRetainedQueueOutages(t *testing.T) {
+	t.Run("subscribe notifies on subscribe ready, reports disconnect gap, and re-observes on reconnect", func(t *testing.T) {
+		var connCount atomic.Int32
+		dropFirst := make(chan struct{})
+		var dropOnce sync.Once
+
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+
+		go func() {
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				id := connCount.Add(1)
+				go func(conn net.Conn, connID int32) {
+					defer func() { _ = conn.Close() }()
+					reader := bufio.NewReader(conn)
+					for {
+						line, err := reader.ReadString('\n')
+						if err != nil {
+							return
+						}
+						switch {
+						case strings.HasPrefix(line, "*"):
+							// Read array length args loosely for AUTH / SUBSCRIBE / PING.
+							n := 0
+							_, _ = fmt.Sscanf(line, "*%d", &n)
+							parts := make([]string, 0, n)
+							for range n {
+								_, _ = reader.ReadString('\n') // $len
+								arg, _ := reader.ReadString('\n')
+								parts = append(parts, strings.TrimSpace(arg))
+							}
+							if len(parts) == 0 {
+								continue
+							}
+							switch strings.ToUpper(parts[0]) {
+							case "AUTH":
+								_, _ = io.WriteString(conn, "+OK\r\n")
+							case "SUBSCRIBE":
+								ch := ""
+								if len(parts) > 1 {
+									ch = parts[1]
+								}
+								_, _ = fmt.Fprintf(conn, "*3\r\n$9\r\nsubscribe\r\n$%d\r\n%s\r\n:1\r\n", len(ch), ch)
+								if connID == 1 {
+									go func() {
+										<-dropFirst
+										_ = conn.Close()
+									}()
+								}
+							case "PING":
+								_, _ = io.WriteString(conn, "+PONG\r\n")
+							}
+						}
+					}
+				}(c, id)
+			}
+		}()
+
+		st := newTestStore(t)
+		cfg := testConfig(t, "subscribe")
+		cfg.PollInterval = 20 * time.Millisecond
+		manager := NewManager(cfg, st)
+
+		var clockMS atomic.Int64
+		clockMS.Store(1_760_000_000_000)
+		manager.SetNowFunc(clockMS.Load)
+
+		var mu sync.Mutex
+		var observed []ObservationEvent
+		var disconnects []string
+		manager.SetObservationCallbacks(
+			func(_ context.Context, ev ObservationEvent) error {
+				mu.Lock()
+				observed = append(observed, ev)
+				mu.Unlock()
+				return nil
+			},
+			func(_ context.Context, _ uint64, transport string) {
+				mu.Lock()
+				disconnects = append(disconnects, transport)
+				mu.Unlock()
+			},
+		)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		manager.Start(ctx, RuntimeConfig{
+			CPAUpstreamURL: "http://" + ln.Addr().String(),
+			ManagementKey:  "management-key",
+			CollectorMode:  "subscribe",
+			Queue:          "usage:queue",
+			PollInterval:   20 * time.Millisecond,
+		})
+		t.Cleanup(func() { _ = manager.StopAndWait(context.Background()) })
+
+		waitFor(t, func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return len(observed) == 1
+		})
+		mu.Lock()
+		first := observed[0]
+		mu.Unlock()
+		if first.Transport != "subscribe" || first.ObservedAtMS != 1_760_000_000_000 || first.RetainedQueue || !first.InitialRunObserve || first.ForceGapAdvance {
+			t.Fatalf("first subscribe observation = %+v, want subscribe/1760000000000/false/initial/no-gap", first)
+		}
+
+		clockMS.Store(1_760_000_005_000)
+		dropOnce.Do(func() { close(dropFirst) })
+
+		waitFor(t, func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return len(disconnects) >= 1 && len(observed) >= 2
+		})
+		mu.Lock()
+		disc := disconnects[0]
+		second := observed[1]
+		mu.Unlock()
+		if disc != "subscribe" {
+			t.Fatalf("disconnect transport = %q, want subscribe", disc)
+		}
+		if second.Transport != "subscribe" || second.ObservedAtMS != 1_760_000_005_000 || second.RetainedQueue || !second.InitialRunObserve || !second.ForceGapAdvance {
+			t.Fatalf("reconnect subscribe observation = %+v, want subscribe/1760000005000/false/initial/force-gap", second)
+		}
+	})
+
+	t.Run("http short pre-pop error keeps continuity while outage exceeding budget or uncertain 500 emits disconnect and gap", func(t *testing.T) {
+		var failDial atomic.Bool
+		var fail500 atomic.Bool
+		errServed := make(chan struct{}, 4)
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v0/management/usage-queue" {
+				http.NotFound(w, r)
+				return
+			}
+			if fail500.CompareAndSwap(true, false) {
+				http.Error(w, "post-pop server failure", http.StatusInternalServerError)
+				select {
+				case errServed <- struct{}{}:
+				default:
+				}
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `[]`)
+		}))
+		t.Cleanup(upstream.Close)
+
+		st := newTestStore(t)
+		cfg := testConfig(t, "http")
+		cfg.PollInterval = 15 * time.Millisecond
+		manager := NewManager(cfg, st)
+		baseTransport := http.DefaultTransport.(*http.Transport).Clone()
+		t.Cleanup(baseTransport.CloseIdleConnections)
+		manager.SetHTTPClient(&http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if strings.HasSuffix(req.URL.Path, "/usage-queue") && failDial.CompareAndSwap(true, false) {
+					select {
+					case errServed <- struct{}{}:
+					default:
+					}
+					return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+				}
+				return baseTransport.RoundTrip(req)
+			}),
+		})
+
+		var clockMS atomic.Int64
+		clockMS.Store(1_760_000_000_000)
+		manager.SetNowFunc(clockMS.Load)
+
+		var mu sync.Mutex
+		var observed []ObservationEvent
+		var disconnects []string
+		manager.SetObservationCallbacks(
+			func(_ context.Context, ev ObservationEvent) error {
+				mu.Lock()
+				observed = append(observed, ev)
+				mu.Unlock()
+				return nil
+			},
+			func(_ context.Context, _ uint64, transport string) {
+				mu.Lock()
+				disconnects = append(disconnects, transport)
+				mu.Unlock()
+			},
+		)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		manager.Start(ctx, RuntimeConfig{
+			CPAUpstreamURL:          upstream.URL,
+			ManagementKey:           "management-key",
+			CollectorMode:           "http",
+			PollInterval:            15 * time.Millisecond,
+			RetentionBudgetMS:       7_500,
+			RetentionBudgetVerified: true,
+		})
+		t.Cleanup(func() { _ = manager.StopAndWait(context.Background()) })
+
+		waitFor(t, func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return len(observed) == 1
+		})
+
+		// Short 5s pre-pop dial outage -> within 7.5s budget (NO gap).
+		clockMS.Store(1_760_000_005_000)
+		failDial.Store(true)
+		<-errServed
+		waitFor(t, func() bool { return manager.Status().Collector == "error" })
+		waitFor(t, func() bool { return manager.Status().Collector == "running" })
+		mu.Lock()
+		for _, ev := range observed {
+			if ev.ForceGapAdvance {
+				t.Fatalf("short 5s dial outage wrongly marked ForceGapAdvance: %+v", ev)
+			}
+		}
+		if len(disconnects) != 0 {
+			t.Fatalf("short 5s dial outage wrongly emitted gap: disconnects=%v observed=%+v", disconnects, observed)
+		}
+		mu.Unlock()
+
+		// 9s pre-pop dial outage (> 7.5s verified budget) -> emits unreplayed disconnect and ForceGapAdvance.
+		clockMS.Store(1_760_000_014_001)
+		failDial.Store(true)
+		<-errServed
+		waitFor(t, func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return len(disconnects) == 1 && len(observed) > 0 && observed[len(observed)-1].ForceGapAdvance
+		})
+		mu.Lock()
+		disc := disconnects[0]
+		reobs := observed[len(observed)-1]
+		mu.Unlock()
+		if disc != "http" || reobs.Transport != "http" || reobs.ObservedAtMS != 1_760_000_014_001 || !reobs.ForceGapAdvance {
+			t.Fatalf("outage >7.5s callbacks = disc:%q obs:%+v", disc, reobs)
+		}
+
+		// 1ms HTTP 500 error -> uncertain post-pop removal triggers disconnect & ForceGapAdvance immediately.
+		clockMS.Store(1_760_000_014_002)
+		fail500.Store(true)
+		<-errServed
+		waitFor(t, func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return len(disconnects) >= 2 && len(observed) > 0 && observed[len(observed)-1].ObservedAtMS == 1_760_000_014_002
+		})
+		mu.Lock()
+		lastObs := observed[len(observed)-1]
+		mu.Unlock()
+		if !lastObs.ForceGapAdvance {
+			t.Fatalf("500 error within 1ms did not mark ForceGapAdvance: %+v", lastObs)
+		}
+	})
+
+	t.Run("resp outage exceeding 45s emits disconnect and non-retained re-observe", func(t *testing.T) {
+		var failNextPop atomic.Bool
+		errServed := make(chan struct{}, 4)
+
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+
+		go func() {
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				go func(conn net.Conn) {
+					defer func() { _ = conn.Close() }()
+					reader := bufio.NewReader(conn)
+					for {
+						line, err := reader.ReadString('\n')
+						if err != nil {
+							return
+						}
+						if !strings.HasPrefix(line, "*") {
+							continue
+						}
+						n := 0
+						_, _ = fmt.Sscanf(line, "*%d", &n)
+						parts := make([]string, 0, n)
+						for range n {
+							_, _ = reader.ReadString('\n')
+							arg, _ := reader.ReadString('\n')
+							parts = append(parts, strings.TrimSpace(arg))
+						}
+						if len(parts) == 0 {
+							continue
+						}
+						switch strings.ToUpper(parts[0]) {
+						case "AUTH":
+							_, _ = io.WriteString(conn, "+OK\r\n")
+						case "RPOP", "LPOP":
+							if failNextPop.CompareAndSwap(true, false) {
+								_, _ = io.WriteString(conn, "-ERR temporary redis failure\r\n")
+								select {
+								case errServed <- struct{}{}:
+								default:
+								}
+								return
+							}
+							_, _ = io.WriteString(conn, "*-1\r\n")
+						}
+					}
+				}(c)
+			}
+		}()
+
+		st := newTestStore(t)
+		cfg := testConfig(t, "resp")
+		cfg.PollInterval = 15 * time.Millisecond
+		manager := NewManager(cfg, st)
+
+		var clockMS atomic.Int64
+		clockMS.Store(1_760_000_000_000)
+		manager.SetNowFunc(clockMS.Load)
+
+		var mu sync.Mutex
+		var observed []ObservationEvent
+		var disconnects []string
+		manager.SetObservationCallbacks(
+			func(_ context.Context, ev ObservationEvent) error {
+				mu.Lock()
+				observed = append(observed, ev)
+				mu.Unlock()
+				return nil
+			},
+			func(_ context.Context, _ uint64, transport string) {
+				mu.Lock()
+				disconnects = append(disconnects, transport)
+				mu.Unlock()
+			},
+		)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		manager.Start(ctx, RuntimeConfig{
+			CPAUpstreamURL:          "http://" + ln.Addr().String(),
+			ManagementKey:           "management-key",
+			CollectorMode:           "resp",
+			Queue:                   "usage:queue",
+			PopSide:                 "right",
+			PollInterval:            15 * time.Millisecond,
+			RetentionBudgetMS:       45_000,
+			RetentionBudgetVerified: true,
+		})
+
+		waitFor(t, func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return len(observed) == 1
+		})
+
+		clockMS.Store(1_760_000_050_001)
+		failNextPop.Store(true)
+		<-errServed
+		waitFor(t, func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return len(disconnects) == 1 && len(observed) > 0 && observed[len(observed)-1].ForceGapAdvance
+		})
+		mu.Lock()
+		disc := disconnects[0]
+		reobs := observed[len(observed)-1]
+		mu.Unlock()
+		if disc != "resp" || reobs.Transport != "resp" || reobs.ObservedAtMS != 1_760_000_050_001 || !reobs.ForceGapAdvance {
+			t.Fatalf("resp outage >45s callbacks = disc:%q obs:%+v", disc, reobs)
+		}
+	})
+
+	t.Run("post-pop DB ingest failure emits unreplayed disconnect and ForceGapAdvance on next poll", func(t *testing.T) {
+		var poppedOnce atomic.Bool
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v0/management/usage-queue" {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if poppedOnce.CompareAndSwap(false, true) {
+				_, _ = io.WriteString(w, `[{"timestamp":"2026-11-27T00:00:00Z","model":"m","endpoint":"POST /v1/chat/completions","api_key":"k","input_tokens":1,"output_tokens":1,"total_tokens":2}]`)
+				return
+			}
+			_, _ = io.WriteString(w, `[]`)
+		}))
+		t.Cleanup(upstream.Close)
+
+		st := newTestStore(t)
+		cfg := testConfig(t, "http")
+		cfg.PollInterval = 15 * time.Millisecond
+		manager := NewManager(cfg, st)
+
+		var clockMS atomic.Int64
+		clockMS.Store(1_760_000_000_000)
+		manager.SetNowFunc(clockMS.Load)
+
+		var mu sync.Mutex
+		var observed []ObservationEvent
+		var disconnects []string
+		manager.SetObservationCallbacks(
+			func(_ context.Context, ev ObservationEvent) error {
+				mu.Lock()
+				observed = append(observed, ev)
+				mu.Unlock()
+				return nil
+			},
+			func(_ context.Context, _ uint64, transport string) {
+				mu.Lock()
+				disconnects = append(disconnects, transport)
+				mu.Unlock()
+			},
+		)
+
+		// Close underlying SQLite store so InsertEvents fails AFTER popping items from CPA.
+		if err := st.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		manager.Start(ctx, RuntimeConfig{
+			CPAUpstreamURL: upstream.URL,
+			ManagementKey:  "management-key",
+			CollectorMode:  "http",
+			PollInterval:   15 * time.Millisecond,
+		})
+		t.Cleanup(func() { _ = manager.StopAndWait(context.Background()) })
+
+		waitFor(t, func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return len(disconnects) >= 1 && len(observed) >= 1
+		})
+		mu.Lock()
+		disc := disconnects[0]
+		recovery := observed[len(observed)-1]
+		mu.Unlock()
+		if disc != "http" || !recovery.ForceGapAdvance {
+			t.Fatalf("post-pop DB ingest failure = disc:%q recovery:%+v, want http + ForceGapAdvance=true", disc, recovery)
+		}
+	})
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func TestCollectorPreObserveSeqFailClosedAndInitialDrainGating(t *testing.T) {
+	t.Run("unreadable preObserveSeqFn refuses Pop and Subscribe without popping items", func(t *testing.T) {
+		var httpPops atomic.Int32
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v0/management/usage-queue" {
+				httpPops.Add(1)
+				_, _ = io.WriteString(w, `[]`)
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		t.Cleanup(upstream.Close)
+
+		st := newTestStore(t)
+		cfg := testConfig(t, "http")
+		cfg.PollInterval = 15 * time.Millisecond
+		manager := NewManager(cfg, st)
+
+		var seqAvailable atomic.Bool
+		manager.SetPreObserveSeqFunc(func(context.Context) (int64, bool) {
+			if seqAvailable.Load() {
+				return 0, true
+			}
+			return 0, false
+		})
+		firstErrCh := make(chan error, 1)
+		manager.SetFirstPollErrorHandler(func(_ context.Context, _ uint64, _ string, err error) {
+			select {
+			case firstErrCh <- err:
+			default:
+			}
+		})
+		observedCh := make(chan ObservationEvent, 4)
+		manager.SetObservationCallbacks(func(_ context.Context, ev ObservationEvent) error {
+			observedCh <- ev
+			return nil
+		}, nil)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		manager.Start(ctx, RuntimeConfig{
+			CPAUpstreamURL:          upstream.URL,
+			ManagementKey:           "management-key",
+			CollectorMode:           "http",
+			PollInterval:            15 * time.Millisecond,
+			RetentionBudgetMS:       45_000,
+			RetentionBudgetVerified: true,
+		})
+		t.Cleanup(func() { _ = manager.StopAndWait(context.Background()) })
+
+		select {
+		case <-firstErrCh:
+		case <-time.After(3 * time.Second):
+			t.Fatal("expected firstPollError when preObserveSeqFn fails closed")
+		}
+		if got := httpPops.Load(); got != 0 {
+			t.Fatalf("Pop called %d times while preObserveSeqFn failed closed, want 0", got)
+		}
+		select {
+		case ev := <-observedCh:
+			t.Fatalf("unexpected observation while preObserveSeqFn failed closed: %+v", ev)
+		default:
+		}
+
+		seqAvailable.Store(true)
+		select {
+		case ev := <-observedCh:
+			if !ev.PreObserveSeqSet || ev.PreObserveSeq != 0 {
+				t.Fatalf("recovered observation = %+v, want PreObserveSeqSet=true seq=0", ev)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("collector never observed after preObserveSeqFn recovered")
+		}
+	})
+
+	t.Run("holds InitialRunObserve until multi-batch retained queue drains below batchSize", func(t *testing.T) {
+		var pollNum atomic.Int32
+		var obsMu sync.Mutex
+		var observed []ObservationEvent
+		var observedPollCount int32
+
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v0/management/usage-queue" {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			n := pollNum.Add(1)
+			switch n {
+			case 1:
+				_, _ = io.WriteString(w, `[{"timestamp":"2026-11-27T00:00:01Z","model":"m","endpoint":"POST /v1/chat/completions","api_key":"k1","input_tokens":1,"output_tokens":1,"total_tokens":2},{"timestamp":"2026-11-27T00:00:02Z","model":"m","endpoint":"POST /v1/chat/completions","api_key":"k2","input_tokens":1,"output_tokens":1,"total_tokens":2}]`)
+			case 2:
+				_, _ = io.WriteString(w, `[{"timestamp":"2026-11-27T00:00:03Z","model":"m","endpoint":"POST /v1/chat/completions","api_key":"k3","input_tokens":1,"output_tokens":1,"total_tokens":2},{"timestamp":"2026-11-27T00:00:04Z","model":"m","endpoint":"POST /v1/chat/completions","api_key":"k4","input_tokens":1,"output_tokens":1,"total_tokens":2}]`)
+			case 3:
+				_, _ = io.WriteString(w, `[{"timestamp":"2026-11-27T00:00:05Z","model":"m","endpoint":"POST /v1/chat/completions","api_key":"k5","input_tokens":1,"output_tokens":1,"total_tokens":2}]`)
+			default:
+				_, _ = io.WriteString(w, `[]`)
+			}
+		}))
+		t.Cleanup(upstream.Close)
+
+		st := newTestStore(t)
+		cfg := testConfig(t, "http")
+		cfg.BatchSize = 2
+		cfg.PollInterval = 15 * time.Millisecond
+		manager := NewManager(cfg, st)
+		manager.SetPreObserveSeqFunc(func(context.Context) (int64, bool) { return 0, true })
+		manager.SetObservationCallbacks(func(_ context.Context, ev ObservationEvent) error {
+			obsMu.Lock()
+			if len(observed) == 0 {
+				observedPollCount = pollNum.Load()
+			}
+			observed = append(observed, ev)
+			obsMu.Unlock()
+			return nil
+		}, nil)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		manager.Start(ctx, RuntimeConfig{
+			CPAUpstreamURL:          upstream.URL,
+			ManagementKey:           "management-key",
+			CollectorMode:           "http",
+			BatchSize:               2,
+			PollInterval:            15 * time.Millisecond,
+			RetentionBudgetMS:       45_000,
+			RetentionBudgetVerified: true,
+		})
+		t.Cleanup(func() { _ = manager.StopAndWait(context.Background()) })
+
+		waitFor(t, func() bool {
+			obsMu.Lock()
+			defer obsMu.Unlock()
+			return len(observed) >= 1
+		})
+		if observedPollCount < 3 {
+			t.Fatalf("InitialRunObserve fired on poll %d, want >= 3 after full batches drained (< batchSize=2)", observedPollCount)
+		}
+		count, _, err := st.Counts(context.Background())
+		if err != nil || count != 5 {
+			t.Fatalf("ingested events at InitialRunObserve = (%d, %v), want 5", count, err)
+		}
+	})
+
+	t.Run("multi-batch drain preserves budget only when final batch finishes within budget", func(t *testing.T) {
+		var clockMS atomic.Int64
+		clockMS.Store(1_760_000_000_000)
+
+		var pollNum atomic.Int32
+		var obsMu sync.Mutex
+		var observed []ObservationEvent
+		var disconnects atomic.Int32
+
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v0/management/usage-queue" {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			switch pollNum.Add(1) {
+			case 1:
+				// Poll 1 at +2s pops full batch; Poll 2 finishes at +5s (still within 7.5s budget).
+				clockMS.Store(1_760_000_005_000)
+				_, _ = io.WriteString(w, `[{"timestamp":"2026-11-27T00:00:01Z","model":"m","endpoint":"POST /v1/chat/completions","api_key":"k1","input_tokens":1,"output_tokens":1,"total_tokens":2},{"timestamp":"2026-11-27T00:00:02Z","model":"m","endpoint":"POST /v1/chat/completions","api_key":"k2","input_tokens":1,"output_tokens":1,"total_tokens":2}]`)
+			case 2:
+				_, _ = io.WriteString(w, `[{"timestamp":"2026-11-27T00:00:03Z","model":"m","endpoint":"POST /v1/chat/completions","api_key":"k3","input_tokens":1,"output_tokens":1,"total_tokens":2}]`)
+			default:
+				_, _ = io.WriteString(w, `[]`)
+			}
+		}))
+		t.Cleanup(upstream.Close)
+
+		st := newTestStore(t)
+		cfg := testConfig(t, "http")
+		cfg.BatchSize = 2
+		cfg.PollInterval = 15 * time.Millisecond
+		manager := NewManager(cfg, st)
+		manager.SetNowFunc(clockMS.Load)
+		manager.SetPreObserveSeqFunc(func(context.Context) (int64, bool) { return 0, true })
+		var failedDial atomic.Bool
+		manager.SetHTTPClient(&http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if !failedDial.Swap(true) {
+					clockMS.Store(1_760_000_002_000)
+					return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+				}
+				return http.DefaultTransport.RoundTrip(req)
+			}),
+		})
+		manager.SetObservationCallbacks(func(_ context.Context, ev ObservationEvent) error {
+			obsMu.Lock()
+			observed = append(observed, ev)
+			obsMu.Unlock()
+			return nil
+		}, func(_ context.Context, _ uint64, _ string) {
+			disconnects.Add(1)
+		})
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		manager.Start(ctx, RuntimeConfig{
+			CPAUpstreamURL:          upstream.URL,
+			ManagementKey:           "management-key",
+			CollectorMode:           "http",
+			BatchSize:               2,
+			PollInterval:            15 * time.Millisecond,
+			RetentionBudgetMS:       7_500,
+			RetentionBudgetVerified: true,
+		})
+		t.Cleanup(func() { _ = manager.StopAndWait(context.Background()) })
+
+		waitFor(t, func() bool {
+			obsMu.Lock()
+			defer obsMu.Unlock()
+			return len(observed) >= 1
+		})
+		obsMu.Lock()
+		first := observed[0]
+		obsMu.Unlock()
+		if first.ForceGapAdvance || disconnects.Load() != 0 {
+			t.Fatalf("final batch within budget got ForceGapAdvance=%v disconnects=%d, want (false, 0): %+v", first.ForceGapAdvance, disconnects.Load(), first)
+		}
+		if first.ObservedAtMS != 1_760_000_005_000 {
+			t.Fatalf("ObservedAtMS = %d, want 1760000005000", first.ObservedAtMS)
+		}
+		_ = manager.StopAndWait(context.Background())
+
+		// Batch 1 starts within budget (+5s <= 7.5s) and inter-batch step is <= 7.5s (+7s),
+		// yet final < batchSize batch finishes at +12s (> 7.5s budget): must emit disconnect and ForceGapAdvance=true.
+		var exceedPoll atomic.Int32
+		var exceedClock atomic.Int64
+		exceedClock.Store(1_760_000_000_000)
+		var exceedDisconnects atomic.Int32
+		exceedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v0/management/usage-queue" {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			switch exceedPoll.Add(1) {
+			case 1:
+				exceedClock.Store(1_760_000_012_000)
+				_, _ = io.WriteString(w, `[{"timestamp":"2026-11-27T00:00:01Z","model":"m","endpoint":"POST /v1/chat/completions","api_key":"k1","input_tokens":1,"output_tokens":1,"total_tokens":2},{"timestamp":"2026-11-27T00:00:02Z","model":"m","endpoint":"POST /v1/chat/completions","api_key":"k2","input_tokens":1,"output_tokens":1,"total_tokens":2}]`)
+			case 2:
+				_, _ = io.WriteString(w, `[{"timestamp":"2026-11-27T00:00:03Z","model":"m","endpoint":"POST /v1/chat/completions","api_key":"k3","input_tokens":1,"output_tokens":1,"total_tokens":2}]`)
+			default:
+				_, _ = io.WriteString(w, `[]`)
+			}
+		}))
+		t.Cleanup(exceedServer.Close)
+
+		exceedMgr := NewManager(cfg, newTestStore(t))
+		exceedMgr.SetNowFunc(exceedClock.Load)
+		exceedMgr.SetPreObserveSeqFunc(func(context.Context) (int64, bool) { return 0, true })
+		var exceedDial atomic.Bool
+		exceedMgr.SetHTTPClient(&http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if !exceedDial.Swap(true) {
+					exceedClock.Store(1_760_000_005_000)
+					return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+				}
+				return http.DefaultTransport.RoundTrip(req)
+			}),
+		})
+		var exceedObsMu sync.Mutex
+		var exceedObserved []ObservationEvent
+		exceedMgr.SetObservationCallbacks(func(_ context.Context, ev ObservationEvent) error {
+			exceedObsMu.Lock()
+			exceedObserved = append(exceedObserved, ev)
+			exceedObsMu.Unlock()
+			return nil
+		}, func(_ context.Context, _ uint64, _ string) {
+			exceedDisconnects.Add(1)
+		})
+		exceedMgr.Start(ctx, RuntimeConfig{
+			CPAUpstreamURL:          exceedServer.URL,
+			ManagementKey:           "management-key",
+			CollectorMode:           "http",
+			BatchSize:               2,
+			PollInterval:            15 * time.Millisecond,
+			RetentionBudgetMS:       7_500,
+			RetentionBudgetVerified: true,
+		})
+		t.Cleanup(func() { _ = exceedMgr.StopAndWait(context.Background()) })
+		waitFor(t, func() bool {
+			exceedObsMu.Lock()
+			defer exceedObsMu.Unlock()
+			return exceedDisconnects.Load() >= 1 && len(exceedObserved) >= 1
+		})
+		exceedObsMu.Lock()
+		exceeded := exceedObserved[0]
+		exceedObsMu.Unlock()
+		if !exceeded.ForceGapAdvance || exceeded.OutageMS != 12_000 || exceeded.ObservedAtMS != 1_760_000_012_000 {
+			t.Fatalf("final batch >7.5s budget = %+v, want ForceGapAdvance=true OutageMS=12000 ObservedAtMS=1760000012000", exceeded)
+		}
+	})
+}
+
+func TestErrorFreeIntraRunPauseExceedingBudgetMarksUnreplayedLoss(t *testing.T) {
+	var clockMS atomic.Int64
+	clockMS.Store(1_760_000_000_000)
+
+	var polls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/management/usage-queue" {
+			http.NotFound(w, r)
+			return
+		}
+		polls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `[]`)
+	}))
+	t.Cleanup(upstream.Close)
+
+	cfg := config.Config{}
+	manager := NewManager(cfg, newTestStore(t))
+	manager.SetNowFunc(clockMS.Load)
+	manager.SetPreObserveSeqFunc(func(context.Context) (int64, bool) { return 0, true })
+
+	var mu sync.Mutex
+	var observed []ObservationEvent
+	var disconnects int
+	manager.SetObservationCallbacks(func(_ context.Context, ev ObservationEvent) error {
+		mu.Lock()
+		observed = append(observed, ev)
+		n := len(observed)
+		mu.Unlock()
+		if n == 1 {
+			// Simulate an error-free pause > RetentionBudgetMS (7.5s) before Poll 2.
+			clockMS.Store(1_760_000_010_000)
+		}
+		return nil
+	}, func(_ context.Context, _ uint64, _ string) {
+		mu.Lock()
+		disconnects++
+		mu.Unlock()
+	})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	manager.Start(ctx, RuntimeConfig{
+		CPAUpstreamURL:          upstream.URL,
+		ManagementKey:           "management-key",
+		CollectorMode:           "http",
+		BatchSize:               10,
+		PollInterval:            15 * time.Millisecond,
+		RetentionBudgetMS:       7_500,
+		RetentionBudgetVerified: true,
+	})
+	t.Cleanup(func() { _ = manager.StopAndWait(context.Background()) })
+
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return disconnects >= 1 && len(observed) >= 2
+	})
+
+	mu.Lock()
+	first := observed[0]
+	second := observed[1]
+	gotDisconnects := disconnects
+	mu.Unlock()
+
+	if !first.InitialRunObserve || first.ForceGapAdvance {
+		t.Fatalf("first observation = %+v, want InitialRunObserve=true ForceGapAdvance=false", first)
+	}
+	if gotDisconnects < 1 {
+		t.Fatalf("disconnects = %d, want >= 1", gotDisconnects)
+	}
+	if second.InitialRunObserve || !second.ForceGapAdvance || second.OutageMS != 10_000 {
+		t.Fatalf("second observation = %+v, want InitialRunObserve=false ForceGapAdvance=true OutageMS=10000", second)
+	}
+}
+
+func TestVerifiedRetentionBudgetMSGuardsHugeRetentionOverflow(t *testing.T) {
+	hugeValues := []int{
+		math.MaxInt64/3000 + 1,
+		4_000_000_000_000_000,
+		math.MaxInt,
+	}
+	for _, seconds := range hugeValues {
+		got := VerifiedRetentionBudgetMS(cpa.UsageConfig{
+			RetentionVerified:               true,
+			RedisUsageQueueRetentionSeconds: seconds,
+		})
+		if got != MaxRetainedQueueOutageMS {
+			t.Fatalf("VerifiedRetentionBudgetMS(%d) = %d, want %d", seconds, got, MaxRetainedQueueOutageMS)
+		}
+	}
 }

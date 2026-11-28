@@ -6,9 +6,11 @@ package identityusage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
@@ -26,8 +28,16 @@ const (
 	stateName = "canonical_identity_v1"
 	// collectionStartKey is the settings row recording the first durable
 	// collection instant of this installation.
-	collectionStartKey = "fresh_usage_collection_started_at_ms"
-	// maxIdentityPlaceholders bounds one batched aggregation statement.
+	collectionStartKey       = sqliterepo.FreshUsageCollectionStartedAtMSKey
+	gatewayAdmittedAtKey     = sqliterepo.FreshGatewayAdmittedAtMSKey
+	monitoringDisabledGapKey = sqliterepo.FreshUsageMonitoringDisabledGapKey
+	monitoringDisableSeqKey  = sqliterepo.FreshUsageMonitoringDisableSeqKey
+	completionDisableSeqKey  = sqliterepo.FreshUsageCompletionDisableSeqKey
+	unreplayedGapKey         = sqliterepo.FreshUsageUnreplayedGapKey
+	lastObservedAtKey        = sqliterepo.FreshUsageLastObservedAtMSKey
+	lastTransportKey         = sqliterepo.FreshUsageLastTransportKey
+	lastSourceIDKey          = sqliterepo.FreshUsageLastSourceIDKey
+	lastRetentionMSKey       = sqliterepo.FreshUsageLastRetentionMSKey
 	maxIdentityPlaceholders = 200
 	// maxSummaryTopModels bounds per-key model breakdown entries in list summaries.
 	maxSummaryTopModels = 10
@@ -861,6 +871,298 @@ func (r *repository) MarkCollectionStarted(ctx context.Context, nowMS int64) err
 		return fmt.Errorf("record usage collection start: %w", err)
 	}
 	return nil
+}
+
+func (r *repository) AdvanceCollectionStarted(ctx context.Context, nowMS int64) error {
+	if nowMS <= 0 {
+		return errors.New("invalid usage collection start")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `insert into settings(key, value, updated_at_ms) values(?, ?, ?)
+		on conflict(key) do update set
+			value = excluded.value,
+			updated_at_ms = excluded.updated_at_ms
+		where cast(settings.value as integer) <= 0 or cast(excluded.value as integer) > cast(settings.value as integer)`,
+		collectionStartKey, fmt.Sprintf("%d", nowMS), nowMS); err != nil {
+		return fmt.Errorf("advance usage collection start: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `delete from settings where key in (?, ?)`, monitoringDisabledGapKey, unreplayedGapKey); err != nil {
+		return fmt.Errorf("clear monitoring disabled gap: %w", err)
+	}
+	return tx.Commit()
+}
+
+func (r *repository) MonitoringDisabledGap(ctx context.Context) (bool, error) {
+	var raw string
+	err := r.db.QueryRowContext(ctx, `select value from settings where key = ?`, monitoringDisabledGapKey).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "0" {
+		return false, nil
+	}
+	if trimmed == "1" {
+		return true, nil
+	}
+	return true, fmt.Errorf("corrupted %s setting value", monitoringDisabledGapKey)
+}
+
+func (r *repository) RecordMonitoringDisabledGap(ctx context.Context, nowMS int64) error {
+	if nowMS <= 0 {
+		return errors.New("invalid monitoring disabled gap timestamp")
+	}
+	_, err := r.db.ExecContext(ctx, `insert into settings(key, value, updated_at_ms) values(?, '1', ?)
+		on conflict(key) do update set
+			value = '1',
+			updated_at_ms = excluded.updated_at_ms`,
+		monitoringDisabledGapKey, nowMS)
+	if err != nil {
+		return fmt.Errorf("record monitoring disabled gap: %w", err)
+	}
+	return nil
+}
+
+func isRetainedTransport(transport string) bool {
+	switch strings.ToLower(strings.TrimSpace(transport)) {
+	case "http", "resp":
+		return true
+	default:
+		return false
+	}
+}
+
+func (r *repository) RecordUnreplayedGap(ctx context.Context, nowMS int64) error {
+	if nowMS <= 0 {
+		return errors.New("invalid unreplayed gap timestamp")
+	}
+	_, err := r.db.ExecContext(ctx, `insert into settings(key, value, updated_at_ms) values(?, '1', ?)
+		on conflict(key) do update set
+			value = '1',
+			updated_at_ms = excluded.updated_at_ms`,
+		unreplayedGapKey, nowMS)
+	if err != nil {
+		return fmt.Errorf("record unreplayed usage gap: %w", err)
+	}
+	return nil
+}
+
+func (r *repository) RecordObservedCollectionStart(ctx context.Context, obs ports.ObservedCollectionStart) error {
+	if obs.ObservedAtMS <= 0 {
+		return errors.New("invalid observed collection start timestamp")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if obs.StillActive != nil && !obs.StillActive() {
+		return ports.ErrStaleObservation
+	}
+
+	rows, err := tx.QueryContext(ctx,
+		`select key, value from settings where key in (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manager_config_v1')`,
+		collectionStartKey, gatewayAdmittedAtKey, monitoringDisabledGapKey, monitoringDisableSeqKey,
+		completionDisableSeqKey, unreplayedGapKey, lastObservedAtKey, lastTransportKey,
+		lastSourceIDKey, lastRetentionMSKey,
+	)
+	if err != nil {
+		return fmt.Errorf("read usage observation state: %w", err)
+	}
+	values := make(map[string]string, 11)
+	for rows.Next() {
+		var k, v string
+		if scanErr := rows.Scan(&k, &v); scanErr != nil {
+			_ = rows.Close()
+			return scanErr
+		}
+		values[k] = v
+	}
+	if closeErr := rows.Err(); closeErr != nil {
+		_ = rows.Close()
+		return closeErr
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	parseIntSetting := func(k string) (int64, bool) {
+		raw, ok := values[k]
+		if !ok {
+			return 0, false
+		}
+		v, parseErr := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+		if parseErr != nil || v < 0 {
+			return 0, false
+		}
+		return v, true
+	}
+	disableSeq := int64(0)
+	if rawSeq, hasSeq := values[monitoringDisableSeqKey]; hasSeq {
+		parsedSeq, parseErr := strconv.ParseInt(strings.TrimSpace(rawSeq), 10, 64)
+		if parseErr != nil || parsedSeq < 0 {
+			return ports.ErrStaleObservation
+		}
+		disableSeq = parsedSeq
+	}
+	if !obs.HasDisableSeq || disableSeq != obs.ObservedDisableSeq {
+		return ports.ErrStaleObservation
+	}
+
+	enabled := true
+	if rawCfg, ok := values["manager_config_v1"]; ok && strings.TrimSpace(rawCfg) != "" {
+		var cfg model.ManagerConfig
+		if err := json.Unmarshal([]byte(rawCfg), &cfg); err != nil {
+			return fmt.Errorf("parse manager_config_v1: %w", err)
+		}
+		if cfg.Collector.Enabled != nil {
+			enabled = *cfg.Collector.Enabled
+		}
+	}
+	if !enabled {
+		return ports.ErrStaleObservation
+	}
+
+	collectingAt, _ := parseIntSetting(collectionStartKey)
+	gatewayAdmittedAtMS, hasAnchor := parseIntSetting(gatewayAdmittedAtKey)
+	completionDisableSeq, hasCompletionSeq := parseIntSetting(completionDisableSeqKey)
+	lastObservedAtMS, _ := parseIntSetting(lastObservedAtKey)
+	lastTransport := strings.TrimSpace(values[lastTransportKey])
+	sourceID := strings.TrimSpace(obs.SourceID)
+	lastSourceID := strings.TrimSpace(values[lastSourceIDKey])
+	lastRetentionMS, hasLastRetention := parseIntSetting(lastRetentionMSKey)
+	disabledGap := false
+	if rawGap, ok := values[monitoringDisabledGapKey]; ok {
+		disabledGap = strings.TrimSpace(rawGap) != "0"
+	}
+	unreplayedGap := false
+	if rawGap, ok := values[unreplayedGapKey]; ok {
+		unreplayedGap = strings.TrimSpace(rawGap) != "0"
+	}
+	hasGap := disabledGap || unreplayedGap
+	effectiveBudgetMS := int64(0)
+	if obs.RetentionBudgetMS > 0 && hasLastRetention && lastRetentionMS > 0 {
+		effectiveBudgetMS = obs.RetentionBudgetMS
+		if lastRetentionMS < effectiveBudgetMS {
+			effectiveBudgetMS = lastRetentionMS
+		}
+	}
+	retentionToPersist := int64(0)
+	if obs.RetentionBudgetMS > 0 {
+		retentionToPersist = obs.RetentionBudgetMS
+	}
+	upsertSetting := func(key, value string) error {
+		_, execErr := tx.ExecContext(ctx, `insert into settings(key, value, updated_at_ms) values(?, ?, ?)
+			on conflict(key) do update set
+				value = excluded.value,
+				updated_at_ms = excluded.updated_at_ms`,
+			key, value, obs.ObservedAtMS,
+		)
+		return execErr
+	}
+
+	// Periodic heartbeats and clean-stop flushes only advance
+	// fresh_usage_last_observed_at_ms when continuity is strictly proven:
+	// no gap, same SourceID on a retained transport, verified non-zero budget
+	// on both the prior and current observations, and elapsed <= budget.
+	if !obs.InitialRunObserve && collectingAt > 0 && !hasGap && !obs.ForceGapAdvance &&
+		obs.RetainedQueue && isRetainedTransport(obs.Transport) && isRetainedTransport(lastTransport) &&
+		sourceID != "" && lastSourceID != "" && sourceID == lastSourceID &&
+		effectiveBudgetMS > 0 && lastObservedAtMS > 0 &&
+		obs.ObservedAtMS >= lastObservedAtMS && obs.ObservedAtMS-lastObservedAtMS <= effectiveBudgetMS {
+		if obs.StillActive != nil && !obs.StillActive() {
+			return ports.ErrStaleObservation
+		}
+		nextLastObserved := obs.ObservedAtMS
+		if lastObservedAtMS > nextLastObserved {
+			nextLastObserved = lastObservedAtMS
+		}
+		if err := upsertSetting(lastObservedAtKey, strconv.FormatInt(nextLastObserved, 10)); err != nil {
+			return fmt.Errorf("update last observed usage timestamp: %w", err)
+		}
+		if transport := strings.TrimSpace(obs.Transport); transport != "" {
+			if err := upsertSetting(lastTransportKey, transport); err != nil {
+				return fmt.Errorf("update last observed usage transport: %w", err)
+			}
+		}
+		if err := upsertSetting(lastRetentionMSKey, strconv.FormatInt(retentionToPersist, 10)); err != nil {
+			return fmt.Errorf("update last observed retention budget: %w", err)
+		}
+		return tx.Commit()
+	}
+
+	var nextCollectingAt int64
+	if collectingAt <= 0 {
+		completionEligible := !hasGap && !obs.ForceGapAdvance && hasCompletionSeq && disableSeq == completionDisableSeq
+		nextCollectingAt = obs.ObservedAtMS
+		if obs.RetainedQueue && completionEligible && obs.RetentionBudgetMS > 0 && hasAnchor && gatewayAdmittedAtMS > 0 &&
+			obs.ObservedAtMS >= gatewayAdmittedAtMS && obs.ObservedAtMS-gatewayAdmittedAtMS <= obs.RetentionBudgetMS {
+			nextCollectingAt = gatewayAdmittedAtMS
+		}
+	} else {
+		canPreserveAcrossRuns := !hasGap &&
+			!obs.ForceGapAdvance &&
+			obs.RetainedQueue &&
+			isRetainedTransport(obs.Transport) &&
+			isRetainedTransport(lastTransport) &&
+			sourceID != "" &&
+			lastSourceID != "" &&
+			sourceID == lastSourceID &&
+			effectiveBudgetMS > 0 &&
+			lastObservedAtMS > 0 &&
+			obs.ObservedAtMS >= lastObservedAtMS &&
+			obs.ObservedAtMS-lastObservedAtMS <= effectiveBudgetMS
+		if canPreserveAcrossRuns {
+			nextCollectingAt = collectingAt
+		} else {
+			nextCollectingAt = obs.ObservedAtMS
+			if collectingAt > nextCollectingAt {
+				nextCollectingAt = collectingAt
+			}
+		}
+	}
+
+	if obs.StillActive != nil && !obs.StillActive() {
+		return ports.ErrStaleObservation
+	}
+
+	if nextCollectingAt != collectingAt {
+		if err := upsertSetting(collectionStartKey, strconv.FormatInt(nextCollectingAt, 10)); err != nil {
+			return fmt.Errorf("record observed usage collection start: %w", err)
+		}
+	}
+	nextLastObserved := obs.ObservedAtMS
+	if lastObservedAtMS > nextLastObserved {
+		nextLastObserved = lastObservedAtMS
+	}
+	if err := upsertSetting(lastObservedAtKey, strconv.FormatInt(nextLastObserved, 10)); err != nil {
+		return fmt.Errorf("record last observed usage timestamp: %w", err)
+	}
+	if transport := strings.TrimSpace(obs.Transport); transport != "" {
+		if err := upsertSetting(lastTransportKey, transport); err != nil {
+			return fmt.Errorf("record last observed usage transport: %w", err)
+		}
+	}
+	if err := upsertSetting(lastSourceIDKey, sourceID); err != nil {
+		return fmt.Errorf("record last observed usage source id: %w", err)
+	}
+	if err := upsertSetting(lastRetentionMSKey, strconv.FormatInt(retentionToPersist, 10)); err != nil {
+		return fmt.Errorf("record last observed usage retention budget: %w", err)
+	}
+	if hasGap {
+		if _, err := tx.ExecContext(ctx, `delete from settings where key in (?, ?)`, monitoringDisabledGapKey, unreplayedGapKey); err != nil {
+			return fmt.Errorf("clear usage gap flags: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
 // keyRangeArgs renders one bounded batch of (api_key_id, from_ms) pairs plus

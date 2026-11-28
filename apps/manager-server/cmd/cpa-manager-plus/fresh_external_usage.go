@@ -39,8 +39,10 @@ const (
 // answered an authenticated sample read; every other outcome names why nothing
 // started, and a refused start records no collection window.
 type usageStartOutcome struct {
-	Started bool
-	Reason  string
+	Started   bool
+	Reason    string
+	BudgetMS  int64
+	HasBudget bool
 }
 
 // usageRuntimeConfig resolves the Collector configuration for one CPA authority
@@ -86,15 +88,11 @@ func (a *freshApplication) usageRuntimeConfig(ctx context.Context, baseURL, mana
 	}, nil
 }
 
-// sampleUsageAuthority proves, with one authenticated management read, that the
-// credential the Collector is about to use still authenticates. The Collector
-// reports a live phase before it consumed anything, so its phase alone is not
-// evidence: this read is.
-func (a *freshApplication) sampleUsageAuthority(ctx context.Context, baseURL, managementKey string) error {
-	_, err := cpa.ObserveManagementAPI(ctx, baseURL, managementKey)
-	return err
+// sampleUsageAuthority authenticates the management credential and retrieves
+// CPA's verified usage retention configuration in one /v0/management/config read.
+func (a *freshApplication) sampleUsageAuthority(ctx context.Context, baseURL, managementKey string) (cpa.UsageConfig, error) {
+	return cpa.ObserveUsageAuthorityConfig(ctx, baseURL, managementKey)
 }
-
 // stopUsageCollection stops the Collector and clears the latched start so a
 // later attempt may run again. It is used once the credential has been replaced:
 // the refusal that latched the previous start is not a permanent property of the
@@ -125,6 +123,8 @@ func (a *freshApplication) stopUsageCollectionLocked(ctx context.Context) {
 	a.activeExternalGrant.Store(activeCollectorGrant{})
 	a.usageStarted = false
 	a.usageCollectorStarted = false
+	a.usageStartupPending.Store(false)
+	a.resetObservationStateLocked(context.Canceled)
 	a.setUsageStartReason("")
 }
 
@@ -226,7 +226,8 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 	// the version contract decides the enable write and every later write, so a
 	// CPA that does not serve it starts nothing. The refusal is the same typed
 	// code the write surfaces answer with, never an unexplained empty window.
-	switch report, err := cpa.ObserveExternalVersion(retainCtx, install.BaseURL, install.ManagementKey); {
+	var externalUsageCfg cpa.UsageConfig
+	switch report, cfg, err := cpa.ObserveExternalUsageAuthority(retainCtx, install.BaseURL, install.ManagementKey); {
 	case errors.Is(err, cpa.ErrManagementRejected):
 		return rejectExternalCredential(err)
 	case err != nil:
@@ -236,6 +237,8 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 	case report.WriteBlocked:
 		hold.finish()
 		return a.refuseExternalUsage(ctx, freshconfig.ReasonVersionUnsupported)
+	default:
+		externalUsageCfg = cfg
 	}
 	// Every authenticated management request in the startup sequence stays inside
 	// the bounded credential hold and uses the same snapshot grant so a post-200
@@ -249,6 +252,13 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 		log.Printf("Fresh external usage statistics unavailable: %v", err)
 		return usageStartOutcome{Reason: usageStartReasonExternalUnavailable}
 	case !enabled:
+		if a.usage != nil {
+			if gapErr := a.usage.RecordUnreplayedGap(ctx); gapErr != nil {
+				hold.finish()
+				log.Printf("Fresh external usage gap persistence unavailable: %v", gapErr)
+				return usageStartOutcome{Reason: usageStartReasonExternalUnavailable}
+			}
+		}
 		// The confirmation is the authorisation of one write, so it is consumed
 		// by the attempt that reads it: a later replay of this completion, or a
 		// restart, asks again instead of reusing an approval nobody renewed. It
@@ -279,6 +289,9 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 			log.Printf("Fresh external usage statistics enable was not observed: %v", err)
 			return usageStartOutcome{Reason: usageStartReasonStatisticsDisabled}
 		}
+		externalUsageCfg.HasUsageStatisticsEnabled = true
+		externalUsageCfg.UsageStatisticsEnabled = true
+		externalUsageCfg.RetentionVerified = externalUsageCfg.RetentionConfigValid
 	}
 	hold.finish()
 	// address and never to the managed destination: another CPA is another
@@ -296,12 +309,16 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 		log.Printf("Fresh external usage collection configuration unavailable: %v", err)
 		return usageStartOutcome{Reason: usageStartReasonExternalUnavailable}
 	}
+	runtimeCfg.SourceScope = externalSourceScope(install.Identity)
+	budgetMS := collector.VerifiedRetentionBudgetMS(externalUsageCfg)
 	expectedRunID := a.legacyCollector.StartCount() + 1
+	a.registerRunRetentionPendingLocked(expectedRunID)
 	a.activeExternalGrant.Store(activeCollectorGrant{
 		grant: grant,
 		runID: expectedRunID,
 	})
 	if err := a.legacyCollector.StartRuntime(a.lifecycleContext(ctx), runtimeCfg); err != nil {
+		a.failRunRetention(expectedRunID, err)
 		a.activeExternalGrant.Store(activeCollectorGrant{})
 		log.Printf("Fresh external usage collection unavailable: %v", err)
 		return usageStartOutcome{Reason: usageStartReasonCollectorFailed}
@@ -309,10 +326,11 @@ func (a *freshApplication) startExternalUsageCollector(ctx context.Context) usag
 	if hook := a.afterExternalCollectorStart; hook != nil {
 		hook()
 	}
-	if a.collectionPhase() == usageapp.PhaseStopped {
+	if a.rawCollectionPhase() == usageapp.PhaseStopped {
+		a.failRunRetention(expectedRunID, errors.New(usageStartReasonCollectorFailed))
 		return usageStartOutcome{Reason: usageStartReasonCollectorFailed}
 	}
-	return usageStartOutcome{Started: true}
+	return usageStartOutcome{Started: true, BudgetMS: budgetMS, HasBudget: true}
 }
 
 // refuseExternalUsage stops collection and reports the typed blocker. A refused
@@ -339,13 +357,14 @@ func (a *freshApplication) reportCollectorAuthRejection(runID uint64) {
 	if hook := a.beforeCollectorAuthRejectionLock; hook != nil {
 		hook(runID)
 	}
+	a.failRunObservationWaiter(runID, cpa.ErrManagementRejected)
 	a.usageStartMu.Lock()
 	defer a.usageStartMu.Unlock()
 	if a.legacyCollector != nil {
 		if runID != 0 && a.legacyCollector.StartCount() != runID {
 			return
 		}
-		if a.collectionPhase() != usageapp.PhaseStopped {
+		if a.rawCollectionPhase() != usageapp.PhaseStopped {
 			return
 		}
 	}
@@ -361,6 +380,8 @@ func (a *freshApplication) reportCollectorAuthRejection(runID uint64) {
 	}
 	a.usageCollectorStarted = false
 	a.usageStarted = false
+	a.usageStartupPending.Store(false)
+	a.resetObservationStateLocked(cpa.ErrManagementRejected)
 	a.setUsageStartReason(freshconfig.ReasonManagementRejected)
 	log.Printf("Fresh external usage collection stopped: %s", freshconfig.ReasonManagementRejected)
 }

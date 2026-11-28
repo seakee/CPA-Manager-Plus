@@ -1186,6 +1186,34 @@ func TestCompletedOperationAdmissionAdmitsAManagedCompletion(t *testing.T) {
 	}
 }
 
+func TestCompletedOperationAdmissionAdmitsManagedCompletionFromRetiredAdoptionArtifact(t *testing.T) {
+	ctx := context.Background()
+	retiredArtifact := model.RuntimeArtifactID("sha256:" + strings.Repeat("d", 64))
+	freshstrategy.WithRetiredUpgradeAdoptionArtifactsForTesting([]model.RuntimeArtifactID{retiredArtifact}, func() {
+		fixture := newCompletedOperationFixture(t)
+		fixture.binding = nil
+		fixture.verification = managedCompletionVerification
+		fixture.domainsDone = `["source_copy","cpa_config"]`
+		fixture.managedTarget = &managedCompletion{
+			mutate: mutateManagedIntent(func(intent map[string]any) {
+				intent["expectedActiveArtifactId"] = string(retiredArtifact)
+			}),
+		}
+		fixture.record(t)
+
+		assertUpgradeAdmission(t, fixture.paths.Database, UpgradeStageComplete, SurfaceFull)
+		admission, err := AdmitStartup(ctx, fixture.paths, Options{
+			UpgradeAdmission: DatabaseUpgradeAdmission{DatabasePath: fixture.paths.Database},
+		})
+		if err != nil {
+			t.Fatalf("admit Managed completion from retired adoption artifact: %v", err)
+		}
+		if err := admission.Close(); err != nil {
+			t.Fatalf("close admitted Managed completion: %v", err)
+		}
+	})
+}
+
 // TestCompletedOperationAdmissionRequiresTheManagedHandoff is the Managed half of
 // the completion check. A `complete` row proves a destination only while the
 // store still holds that destination's evidence and the Manager's own connection

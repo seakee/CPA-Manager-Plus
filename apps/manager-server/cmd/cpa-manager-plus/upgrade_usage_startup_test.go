@@ -1631,10 +1631,26 @@ func TestUpgradeStartupProofConvergesAcrossDelayedReadinessAndFencesStaleRuns(t 
 				intent["expectedActiveArtifactId"] = "sha256:" + strings.Repeat("9", 64)
 			})
 		})
-		checkManagedMut("live_runtime_artifact_mismatch", func(_ *testing.T, _ *store.Store, _ *security.Protector, rt *mockUpgradeRuntimeSupervisor) {
+		checkManagedMut("live_runtime_invalid_artifact_digest", func(_ *testing.T, _ *store.Store, _ *security.Protector, rt *mockUpgradeRuntimeSupervisor) {
+			rt.mu.Lock()
+			rt.artifact = "invalid-artifact-digest"
+			rt.mu.Unlock()
+		})
+		t.Run("live_runtime_updated_cpa_artifact_converges", func(t *testing.T) {
+			cpa, rt, _, _, _, _, _, startupCfg := setupHarness(
+				t, model.UpgradeTargetManaged, string(model.RuntimeStateReady), false, true,
+			)
 			rt.mu.Lock()
 			rt.artifact = "sha256:" + strings.Repeat("8", 64)
 			rt.mu.Unlock()
+			runCfg := collector.RuntimeConfig{
+				CPAUpstreamURL: cpa.server.URL,
+				ManagementKey:  "converge-upgrade-mgmt-secret",
+				CollectorMode:  "http",
+			}
+			if proven, err := proveUpgradeCollectionStart(context.Background(), nil, 0, startupCfg, runCfg); err != nil || !proven {
+				t.Fatalf("updated artifact proveUpgradeCollectionStart = (%v, %v), want (true, nil)", proven, err)
+			}
 		})
 		checkManagedMut("verdict_fingerprint_mismatch", func(t *testing.T, st *store.Store, _ *security.Protector, _ *mockUpgradeRuntimeSupervisor) {
 			if _, err := st.SQLDB().Exec(`update upgrade_operations set source_fingerprint_after = 'sha256:drifted' where id = 1`); err != nil {

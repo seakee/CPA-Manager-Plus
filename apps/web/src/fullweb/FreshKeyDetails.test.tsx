@@ -31,6 +31,7 @@ vi.mock('../components/ui/Modal', () => ({
       </div>
     ) : null,
 }));
+const drawerMockState = vi.hoisted(() => ({ keepMountedWhenClosed: false }));
 vi.mock('../components/ui/Drawer', () => ({
   Drawer: ({
     open,
@@ -51,7 +52,7 @@ vi.mock('../components/ui/Drawer', () => ({
     children?: ReactNode;
     footer?: ReactNode;
   }) =>
-    open ? (
+    open || drawerMockState.keepMountedWhenClosed ? (
       <div>
         <div>
           <div>{title}</div>
@@ -1495,8 +1496,45 @@ describe('Canonical key detail and rename', () => {
       k('statusPending')
     );
     expect(view()).toContain(k('adoptedOriginNote'));
+    setFullWebLanguage('zh-CN');
+    expect(k('adoptedOriginNote')).not.toContain('尚未重新校验');
+    expect(k('adoptedOriginNote')).toContain('尚未轮换');
+    setFullWebLanguage('zh-TW');
+    expect(k('adoptedOriginNote')).not.toContain('尚未重新驗證');
+    expect(k('adoptedOriginNote')).toContain('尚未輪換');
+    setFullWebLanguage('en');
+    expect(k('adoptedOriginNote')).toContain('not rotated since');
+    setFullWebLanguage('ru');
+    expect(k('adoptedOriginNote')).toContain('не ротировался');
+    setFullWebLanguage('en');
     expect(view()).not.toContain(k('basic'));
     expect(view()).not.toContain(k('privateKeyHelp'));
+  });
+
+  it('hides adoptedOriginNote once rotated in place or superseded', async () => {
+    const rotatedAdopted = {
+      ...key,
+      origin: 'adopted' as const,
+      lifecycle: 'active' as const,
+      lastRotatedAtMs: 1_700_000_123_000,
+      maskedPreview: '…bbbb',
+      runtimeState: 'effective_observed' as const,
+    };
+    const fetchRotated = vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json(rotatedAdopted));
+    await mount(fetchRotated, rotatedAdopted.id, undefined, false);
+    expect(view()).not.toContain(k('adoptedOriginNote'));
+
+    const supersededAdopted = {
+      ...key,
+      origin: 'adopted' as const,
+      lifecycle: 'superseded' as const,
+      lastRotatedAtMs: null,
+      maskedPreview: '…cccc',
+      runtimeState: 'revoked_observed' as const,
+    };
+    const fetchSuperseded = vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json(supersededAdopted));
+    await mount(fetchSuperseded, supersededAdopted.id, undefined, false);
+    expect(view()).not.toContain(k('adoptedOriginNote'));
   });
   it('renders identity in drawer header, preserves 24h KPI strip across usage window switches, and shows zero-calls series caption', async () => {
     const activeKey = { ...key, name: 'Gateway Edge', runtimeState: 'effective_observed' as const };
@@ -2811,5 +2849,739 @@ describe('Canonical key detail and rename', () => {
     });
     expect(headerCopyBtn().props.disabled).toBe(true);
     void resolveRetry;
+  });
+
+  it('auto-revalidates transient startup usage state in drawer until settled and cancels on unmount', async () => {
+    vi.useFakeTimers();
+    const adoptedKey = {
+      ...key,
+      origin: 'adopted' as const,
+      maskedPreview: '…aaaa',
+      runtimeState: 'effective_observed' as const,
+    };
+    let usageCalls = 0;
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.includes(`/api-keys/${adoptedKey.id}/usage`)) {
+        usageCalls += 1;
+        if (usageCalls === 1 || url.includes('from_ms=')) {
+          return Promise.resolve(
+            Response.json({
+              keyId: adoptedKey.id,
+              fromMs: 1_000,
+              toMs: 2_000,
+              bucketMs: 1_000,
+              coverage: {
+                state: 'unknown',
+                reason: 'collection_starting',
+                collectingSinceMs: 1_000,
+                lastProcessedEventId: 0,
+                targetEventId: 0,
+              },
+              totals: null,
+              series: [],
+            })
+          );
+        }
+        return Promise.resolve(
+          Response.json({
+            keyId: adoptedKey.id,
+            fromMs: 1_000,
+            toMs: 3_000,
+            bucketMs: 1_000,
+            coverage: {
+              state: 'complete',
+              reason: 'observed',
+              collectingSinceMs: 1_000,
+              lastProcessedEventId: 0,
+              targetEventId: 0,
+            },
+            totals: {
+              calls: 0,
+              success: 0,
+              failure: 0,
+              inputTokens: 0,
+              outputTokens: 0,
+              totalTokens: 0,
+              estimatedCostUsd: 0,
+              lastUsedAtMs: null,
+            },
+            series: [],
+          })
+        );
+      }
+      if (url.endsWith('/api-keys/access-info')) {
+        return Promise.resolve(
+          Response.json({
+            mode: 'adopt_existing',
+            managementBasePath: '/console',
+            inferenceBasePath: '/api',
+            protocols: [],
+            ready: true,
+          })
+        );
+      }
+      return Promise.resolve(Response.json(adoptedKey));
+    });
+
+    await act(async () => {
+      renderer = create(
+        <FreshKeyDetails
+          id={adoptedKey.id}
+          key={adoptedKey.id}
+          initialTab="usage"
+          client={createPublicApiClient(() => context, fetchMock)}
+          gatewayPending={false}
+          credential="admin-memory"
+          onUnauthorized={unauthorized}
+          onPending={pending}
+          onSaved={saved}
+          onClose={close}
+        />
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(usageCalls).toBe(1);
+    expect(view()).toContain(k('usageStateUnknown'));
+    expect(renderer.root.findAllByProps({ 'data-testid': 'key-usage-state' })).toHaveLength(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(800);
+    });
+    expect(usageCalls).toBe(2);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'key-usage-state' })).toHaveLength(0);
+    expect(view()).toContain('$0.00');
+    expect(view()).toContain(k('usageNoCalls'));
+    expect(view()).not.toContain(k('usageReasonCollectionStarting'));
+    // No more retries after settling.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+    expect(usageCalls).toBe(2);
+    await act(async () => {
+      renderer.root.findByProps({ id: 'key-usage-window-7d' }).props.onClick();
+    });
+    await act(async () => {
+      renderer.unmount();
+    });
+    const callsAtUnmount = usageCalls;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+    expect(usageCalls).toBe(callsAtUnmount);
+  });
+
+  it('resets transient startup usage retry budget when drawer visibility returns and cancels pending timer when hidden', async () => {
+    vi.useFakeTimers();
+    const adoptedKey = {
+      ...key,
+      origin: 'adopted' as const,
+      maskedPreview: '…aaaa',
+      runtimeState: 'effective_observed' as const,
+    };
+    let usageCalls = 0;
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.includes(`/api-keys/${adoptedKey.id}/usage`)) {
+        usageCalls += 1;
+        return Promise.resolve(
+          Response.json({
+            keyId: adoptedKey.id,
+            fromMs: 1_000,
+            toMs: 2_000,
+            bucketMs: 1_000,
+            coverage: {
+              state: 'unknown',
+              reason: 'collection_starting',
+              collectingSinceMs: 1_000,
+              lastProcessedEventId: 0,
+              targetEventId: 0,
+            },
+            totals: null,
+            series: [],
+          })
+        );
+      }
+      if (url.endsWith('/api-keys/access-info')) {
+        return Promise.resolve(
+          Response.json({
+            mode: 'adopt_existing',
+            managementBasePath: '/console',
+            inferenceBasePath: '/api',
+            protocols: [],
+            ready: true,
+          })
+        );
+      }
+      return Promise.resolve(Response.json(adoptedKey));
+    });
+
+    const renderDrawer = (visible: boolean) => (
+      <FreshKeyDetails
+        id={adoptedKey.id}
+        key={adoptedKey.id}
+        initialTab="usage"
+        visible={visible}
+        client={createPublicApiClient(() => context, fetchMock)}
+        gatewayPending={false}
+        credential="admin-memory"
+        onUnauthorized={unauthorized}
+        onPending={pending}
+        onSaved={saved}
+        onClose={close}
+      />
+    );
+
+    await act(async () => {
+      renderer = create(renderDrawer(true));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(usageCalls).toBe(1);
+
+    // Exhaust the 4-retry budget (total 1 + 4 = 5 calls), staying within 30s auto-refresh cooldown.
+    for (const delayMs of [800, 1500, 3000, 5000, 6000]) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(delayMs);
+      });
+    }
+    expect(usageCalls).toBe(5);
+
+    // Visibility returning false -> true resets the startup retry budget and schedules 800ms again.
+    await act(async () => {
+      renderer.update(renderDrawer(false));
+    });
+    await act(async () => {
+      renderer.update(renderDrawer(true));
+    });
+    const callsOnReopen = usageCalls;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(800);
+    });
+    expect(usageCalls).toBe(callsOnReopen + 1);
+
+    // Hiding before the next 1500ms retry cancels the timer cleanly.
+    await act(async () => {
+      renderer.update(renderDrawer(false));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(usageCalls).toBe(callsOnReopen + 1);
+  });
+
+  it('suppresses late 401 unauthorized callbacks after drawer hides or closes and refreshes when visibility returns', async () => {
+    const resolvers: Array<(resp: Response) => void> = [];
+    let usageCallCount = 0;
+    const adoptedKey = {
+      id: 'key-hidden-401',
+      name: 'Hidden drawer 401 test',
+      createdAt: '2026-11-26T00:00:00Z',
+      maskedPreview: '…aaaa',
+      runtimeState: 'effective_observed' as const,
+    };
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.includes(`/api-keys/${adoptedKey.id}/usage`)) {
+        usageCallCount += 1;
+        if (usageCallCount === 1) {
+          return new Promise<Response>((resolve) => {
+            resolvers.push(resolve);
+          });
+        }
+        return Promise.resolve(
+          Response.json({
+            apiKeyId: adoptedKey.id,
+            window: '24h',
+            fromMs: 1_700_000_000_000,
+            toMs: 1_700_086_400_000,
+            calls: 3,
+            inputTokens: 10,
+            outputTokens: 5,
+            totalTokens: 15,
+            costUsd: 0.01,
+            hasUnpricedModels: false,
+            coverage: { state: 'complete', reason: 'observed' },
+            buckets: [],
+            models: [],
+          })
+        );
+      }
+      if (url.endsWith('/api-keys/access-info')) {
+        return Promise.resolve(
+          Response.json({
+            mode: 'adopt_existing',
+            managementBasePath: '/console',
+            inferenceBasePath: '/api',
+            protocols: [],
+            ready: true,
+          })
+        );
+      }
+      return Promise.resolve(Response.json(adoptedKey));
+    });
+
+    const renderDrawer = (props: { open: boolean; visible: boolean }) => (
+      <FreshKeyDetails
+        id={adoptedKey.id}
+        key={adoptedKey.id}
+        initialTab="usage"
+        open={props.open}
+        visible={props.visible}
+        client={createPublicApiClient(() => context, fetchMock)}
+        gatewayPending={false}
+        credential="admin-memory"
+        onUnauthorized={unauthorized}
+        onPending={pending}
+        onSaved={saved}
+        onClose={close}
+      />
+    );
+
+    await act(async () => {
+      renderer = create(renderDrawer({ open: true, visible: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(resolvers).toHaveLength(1);
+
+    // Hiding while the initial usage request is still in-flight retires its sequence.
+    await act(async () => {
+      renderer.update(renderDrawer({ open: true, visible: false }));
+    });
+
+    // Rapidly returning to visible before the pre-hide 401 arrives must ignore the stale 401
+    // and start a fresh foreground usage read.
+    await act(async () => {
+      renderer.update(renderDrawer({ open: true, visible: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(usageCallCount).toBe(2);
+
+    await act(async () => {
+      resolvers[0]?.(new Response(null, { status: 401 }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(unauthorized).not.toHaveBeenCalled();
+  });
+
+  it('does not leak usageReadsInFlight when drawer open toggles while a usage read is pending and resets retry budget when visibility returns mid-read', async () => {
+    vi.useFakeTimers();
+    const adoptedKey = {
+      ...key,
+      origin: 'adopted' as const,
+      maskedPreview: '…aaaa',
+      runtimeState: 'effective_observed' as const,
+    };
+    let resolvePending!: (res: Response) => void;
+    let resolveMidRead!: (res: Response) => void;
+    let usageCalls = 0;
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.includes(`/api-keys/${adoptedKey.id}/usage`)) {
+        usageCalls += 1;
+        if (usageCalls === 1) {
+          return new Promise<Response>((resolve) => {
+            resolvePending = resolve;
+          });
+        }
+        if (usageCalls === 7) {
+          return new Promise<Response>((resolve) => {
+            resolveMidRead = resolve;
+          });
+        }
+        return Promise.resolve(
+          Response.json({
+            keyId: adoptedKey.id,
+            fromMs: 1_000,
+            toMs: 2_000,
+            bucketMs: 1_000,
+            coverage: {
+              state: 'unknown',
+              reason: 'collection_starting',
+              collectingSinceMs: 1_000,
+              lastProcessedEventId: 0,
+              targetEventId: 0,
+            },
+            totals: null,
+            series: [],
+          })
+        );
+      }
+      if (url.endsWith('/api-keys/access-info')) {
+        return Promise.resolve(
+          Response.json({
+            mode: 'adopt_existing',
+            managementBasePath: '/console',
+            inferenceBasePath: '/api',
+            protocols: [],
+            ready: true,
+          })
+        );
+      }
+      return Promise.resolve(Response.json(adoptedKey));
+    });
+
+    const renderDrawer = (props: { open: boolean; visible: boolean }) => (
+      <FreshKeyDetails
+        id={adoptedKey.id}
+        key={adoptedKey.id}
+        initialTab="usage"
+        open={props.open}
+        visible={props.visible}
+        client={createPublicApiClient(() => context, fetchMock)}
+        gatewayPending={false}
+        credential="admin-memory"
+        onUnauthorized={unauthorized}
+        onPending={pending}
+        onSaved={saved}
+        onClose={close}
+      />
+    );
+
+    await act(async () => {
+      renderer = create(renderDrawer({ open: true, visible: true }));
+      await Promise.resolve();
+    });
+    expect(usageCalls).toBe(1);
+
+    // Close while call #1 is in flight, let call #1 resolve while closed, then reopen.
+    await act(async () => {
+      renderer.update(renderDrawer({ open: false, visible: true }));
+    });
+    await act(async () => {
+      resolvePending(
+        Response.json({
+          keyId: adoptedKey.id,
+          fromMs: 1_000,
+          toMs: 2_000,
+          bucketMs: 1_000,
+          coverage: { state: 'unknown', reason: 'collection_starting' },
+          totals: null,
+          series: [],
+        })
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      renderer.update(renderDrawer({ open: true, visible: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(usageCalls).toBe(2);
+
+    // Exhaust the 4-retry budget (total 2 + 4 = 6).
+    for (const delayMs of [800, 1500, 3000, 5000, 6000]) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(delayMs);
+      });
+    }
+    expect(usageCalls).toBe(6);
+
+    // Start a manual refresh (#7, held pending), hide -> return visible WHILE #7 is still in flight
+    // (so usageReadsInFlight > 0 during the becameActive render), then settle #7 with collection_starting.
+    await act(async () => {
+      renderer.root.findByProps({ 'aria-label': t('keysReadDetails') }).props.onClick();
+    });
+    expect(usageCalls).toBe(7);
+    await act(async () => {
+      renderer.update(renderDrawer({ open: true, visible: false }));
+    });
+    await act(async () => {
+      renderer.update(renderDrawer({ open: true, visible: true }));
+    });
+    await act(async () => {
+      resolveMidRead(
+        Response.json({
+          keyId: adoptedKey.id,
+          fromMs: 1_000,
+          toMs: 2_000,
+          bucketMs: 1_000,
+          coverage: { state: 'unknown', reason: 'collection_starting' },
+          totals: null,
+          series: [],
+        })
+      );
+      await Promise.resolve();
+    });
+    const callsAfterMidRead = usageCalls;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(800);
+    });
+    expect(usageCalls).toBe(callsAfterMidRead + 1);
+  });
+
+  it('fences AccessInfoSummary inside FreshKeyDetails when hidden so 401 does not invoke onUnauthorized', async () => {
+    const adoptedKey = {
+      ...key,
+      origin: 'adopted' as const,
+      maskedPreview: '…aaaa',
+      runtimeState: 'effective_observed' as const,
+    };
+    let accessInfoCalls = 0;
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys/access-info')) {
+        accessInfoCalls += 1;
+        if (accessInfoCalls === 1) {
+          return Promise.resolve(new Response(null, { status: 401 }));
+        }
+        return Promise.resolve(
+          Response.json({
+            mode: 'adopt_existing',
+            managementBasePath: '/console',
+            inferenceBasePath: '/api',
+            protocols: [],
+            ready: true,
+          })
+        );
+      }
+      if (url.includes(`/api-keys/${adoptedKey.id}/usage`)) {
+        return Promise.resolve(
+          Response.json({
+            keyId: adoptedKey.id,
+            fromMs: 1_000,
+            toMs: 2_000,
+            bucketMs: 1_000,
+            coverage: { state: 'complete', reason: 'observed' },
+            totals: null,
+            series: [],
+          })
+        );
+      }
+      return Promise.resolve(Response.json(adoptedKey));
+    });
+
+    const initialInfo = {
+      mode: 'adopt_existing' as const,
+      managementBasePath: '/console',
+      inferenceBasePath: '/api',
+      protocols: [],
+      ready: true,
+    };
+    const client = createPublicApiClient(() => context, fetchMock);
+    const renderDrawer = (visible: boolean, info: typeof initialInfo | null) => (
+      <FreshKeyDetails
+        id={adoptedKey.id}
+        key={adoptedKey.id}
+        open={true}
+        visible={visible}
+        accessInfo={info}
+        client={client}
+        gatewayPending={false}
+        credential="admin-memory"
+        onUnauthorized={unauthorized}
+        onPending={pending}
+        onSaved={saved}
+        onClose={close}
+      />
+    );
+
+    drawerMockState.keepMountedWhenClosed = true;
+    try {
+      await act(async () => {
+        renderer = create(renderDrawer(true, initialInfo));
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(saved).toHaveBeenCalledWith(adoptedKey);
+      expect(view()).toContain('detail-access-info-summary');
+      expect(accessInfoCalls).toBe(0);
+
+      // Hide drawer and switch accessInfo to null so AccessInfoSummary stays mounted hidden (visible=false) and receives 401.
+      await act(async () => {
+        renderer.update(renderDrawer(false, null));
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(accessInfoCalls).toBe(1);
+      expect(unauthorized).not.toHaveBeenCalled();
+
+      // Returning to visible triggers foreground retry of access-info (#2) cleanly without false 401 logout.
+      await act(async () => {
+        renderer.update(renderDrawer(true, null));
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(view()).toContain('detail-access-info-summary');
+      expect(accessInfoCalls).toBe(2);
+      expect(unauthorized).not.toHaveBeenCalled();
+    } finally {
+      drawerMockState.keepMountedWhenClosed = false;
+    }
+  });
+
+  it('ignores retired pre-hide read() 401 across rapid visible toggles and allows foreground re-entry read()', async () => {
+    const adoptedKey = {
+      ...key,
+      origin: 'adopted' as const,
+      maskedPreview: '…aaaa',
+      runtimeState: 'effective_observed' as const,
+    };
+    let readCall = 0;
+    let resolveFirstRead!: (res: Response) => void;
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.endsWith('/api-keys/access-info')) {
+        return Promise.resolve(
+          Response.json({
+            mode: 'adopt_existing',
+            managementBasePath: '/console',
+            inferenceBasePath: '/api',
+            protocols: [],
+            ready: true,
+          })
+        );
+      }
+      if (url.includes(`/api-keys/${adoptedKey.id}/usage`)) {
+        return Promise.resolve(
+          Response.json({
+            keyId: adoptedKey.id,
+            fromMs: 1_000,
+            toMs: 2_000,
+            bucketMs: 1_000,
+            coverage: { state: 'complete', reason: 'observed' },
+            totals: null,
+            series: [],
+          })
+        );
+      }
+      readCall += 1;
+      if (readCall === 1) {
+        return new Promise<Response>((resolve) => {
+          resolveFirstRead = resolve;
+        });
+      }
+      return Promise.resolve(Response.json(adoptedKey));
+    });
+
+    const renderDrawer = (visible: boolean) => (
+      <FreshKeyDetails
+        id={adoptedKey.id}
+        key={adoptedKey.id}
+        open={true}
+        visible={visible}
+        client={createPublicApiClient(() => context, fetchMock)}
+        gatewayPending={false}
+        credential="admin-memory"
+        onUnauthorized={unauthorized}
+        onPending={pending}
+        onSaved={saved}
+        onClose={close}
+      />
+    );
+
+    await act(async () => {
+      renderer = create(renderDrawer(true));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(readCall).toBe(1);
+
+    // Rapid visible: true -> false -> true retires read() #1 and clears stale inFlight so read() #2 starts.
+    await act(async () => {
+      renderer.update(renderDrawer(false));
+    });
+    await act(async () => {
+      renderer.update(renderDrawer(true));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(readCall).toBe(2);
+    expect(saved).toHaveBeenCalledWith(adoptedKey);
+
+    // Late 401 from retired pre-hide read() #1 settling after re-show must NOT call onUnauthorized.
+    await act(async () => {
+      resolveFirstRead(new Response(null, { status: 401 }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(unauthorized).not.toHaveBeenCalled();
+  });
+
+  it('defers initialWindow usage fetch while open && !visible until visible returns', async () => {
+    const adoptedKey = {
+      ...key,
+      origin: 'adopted' as const,
+      maskedPreview: '…aaaa',
+      runtimeState: 'effective_observed' as const,
+    };
+    const usageUrls: string[] = [];
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.includes(`/api-keys/${adoptedKey.id}/usage`)) {
+        usageUrls.push(url);
+        return Promise.resolve(
+          Response.json({
+            keyId: adoptedKey.id,
+            fromMs: 1_000,
+            toMs: 2_000,
+            bucketMs: 1_000,
+            coverage: { state: 'complete', reason: 'observed' },
+            totals: null,
+            series: [],
+          })
+        );
+      }
+      if (url.endsWith('/api-keys/access-info')) {
+        return Promise.resolve(
+          Response.json({
+            mode: 'adopt_existing',
+            managementBasePath: '/console',
+            inferenceBasePath: '/api',
+            protocols: [],
+            ready: true,
+          })
+        );
+      }
+      return Promise.resolve(Response.json(adoptedKey));
+    });
+
+    const renderDrawer = (props: { visible: boolean; initialWindow: '24h' | '7d' | '30d' }) => (
+      <FreshKeyDetails
+        id={adoptedKey.id}
+        key={adoptedKey.id}
+        initialTab="usage"
+        open={true}
+        visible={props.visible}
+        initialWindow={props.initialWindow}
+        client={createPublicApiClient(() => context, fetchMock)}
+        gatewayPending={false}
+        credential="admin-memory"
+        onUnauthorized={unauthorized}
+        onPending={pending}
+        onSaved={saved}
+        onClose={close}
+      />
+    );
+
+    await act(async () => {
+      renderer = create(renderDrawer({ visible: false, initialWindow: '24h' }));
+      await Promise.resolve();
+    });
+    expect(usageUrls).toHaveLength(0);
+
+    // Changing initialWindow while hidden must not fire any request yet.
+    await act(async () => {
+      renderer.update(renderDrawer({ visible: false, initialWindow: '7d' }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(usageUrls).toHaveLength(0);
+
+    // Once visible becomes true, the updated 7d window (and 24h baseline) are fetched.
+    await act(async () => {
+      renderer.update(renderDrawer({ visible: true, initialWindow: '7d' }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(usageUrls.some((url) => url.includes('from_ms='))).toBe(true);
+    expect(usageUrls.some((url) => url.endsWith(`/api-keys/${adoptedKey.id}/usage`))).toBe(true);
   });
 });

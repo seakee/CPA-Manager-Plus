@@ -1631,7 +1631,7 @@ func verifyRollbackInstall(ctx context.Context, sourceRoot, targetRoot, bundleDi
 // missing one is not.
 func requireRecordedArchives(ctx context.Context, sourceRoot string, manifest maintenancebundle.Manifest) error {
 	for name, entry := range manifest.Entries {
-		if entry.Directory {
+		if entry.Directory || !entry.Present {
 			continue
 		}
 		switch {

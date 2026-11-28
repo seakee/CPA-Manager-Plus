@@ -2333,7 +2333,7 @@ func TestCopyInRefusesZeroByteAndSymlinkedSourceDatabases(t *testing.T) {
 			t.Fatalf("symlink usage.sqlite: %v", err)
 		}
 		target := canonicalTempDir(t)
-		err := validateSourceCompatibilitySnapshot(context.Background(), filepath.Join(symlinkRoot, databaseFileName), symlinkRoot, target, "", "")
+		_, err := validateSourceCompatibilitySnapshot(context.Background(), filepath.Join(symlinkRoot, databaseFileName), symlinkRoot, target, "", "")
 		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCode(CodeSourceSymlinked) {
 			t.Fatalf("validateSourceCompatibilitySnapshot(symlink db) = %v (code=%q/%t), want %s", err, code, ok, CodeSourceSymlinked)
 		}
@@ -2512,6 +2512,82 @@ func TestCopyInRefusesScratchInsideExternalBackupDirectory(t *testing.T) {
 		entries, readErr := os.ReadDir(bundleDir)
 		if readErr != nil || len(entries) != 0 {
 			t.Fatalf("CopyIn wrote into external BundleDir when TMPDIR=BundleDir: entries=%v err=%v", entries, readErr)
+		}
+	})
+}
+
+func TestCopyInSupportsLegacySourceWithoutUsageArchivesDirectoryAndRefusesWhenArchiveRecordsExist(t *testing.T) {
+	t.Run("never-archived 1.x source without usage-archives completes CopyIn, idempotent retry, and Reconcile", func(t *testing.T) {
+		volume := newLegacyVolume(t)
+		if err := os.RemoveAll(filepath.Join(volume.root, archivesDirName)); err != nil {
+			t.Fatalf("remove usage-archives: %v", err)
+		}
+		target := canonicalTempDir(t)
+		options := copyInOptions(volume, target)
+		options.Lock = volume.lock(t)
+
+		result, err := CopyIn(context.Background(), options)
+		if err != nil {
+			t.Fatalf("CopyIn(no usage-archives dir) = %v, want nil", err)
+		}
+		assertMigratedStore(t, result.TargetDatabase)
+		if _, statErr := os.Lstat(filepath.Join(target, archivesDirName)); !os.IsNotExist(statErr) {
+			t.Fatalf("target usage-archives unexpectedly created: err=%v", statErr)
+		}
+
+		// Idempotent second call must verify completed members without error.
+		retryResult, err := CopyIn(context.Background(), options)
+		if err != nil {
+			t.Fatalf("CopyIn retry(no usage-archives dir) = %v, want nil", err)
+		}
+		if !retryResult.AlreadyComplete {
+			t.Fatal("CopyIn retry did not report AlreadyComplete=true")
+		}
+
+		// Reconcile must also succeed end-to-end against the archive-less source.
+		targetLock, err := processlock.Acquire(result.TargetDatabase)
+		if err != nil {
+			t.Fatalf("acquire target lock: %v", err)
+		}
+		t.Cleanup(func() { _ = targetLock.Close() })
+		options.TargetLock = targetLock
+		recReport, err := Reconcile(context.Background(), options)
+		if err != nil {
+			t.Fatalf("Reconcile(no usage-archives dir) = %v, want nil", err)
+		}
+		if !recReport.Recorded || recReport.Stage != "reconcile" {
+			t.Fatalf("Reconcile(no usage-archives dir) = recorded=%t stage=%q, want recorded=true stage=reconcile", recReport.Recorded, recReport.Stage)
+		}
+	})
+
+	t.Run("1.x source with archive rows but missing usage-archives refuses before backup with CodeSourceMissing", func(t *testing.T) {
+		volume := newLegacyVolume(t)
+		db, err := sql.Open("sqlite", volume.databasePath())
+		if err != nil {
+			t.Fatalf("open legacy sqlite: %v", err)
+		}
+		if _, err := db.Exec(`insert into usage_archive_runs (id, schema_version, format, status, cutoff_timestamp_ms, target_event_id, event_count, created_at_ms, updated_at_ms)
+			values ('run-1', 1, 'gzip-jsonl-v1', 'completed', 1000, 1, 1, 1, 1)`); err != nil {
+			_ = db.Close()
+			t.Fatalf("seed usage_archive_runs: %v", err)
+		}
+		_ = db.Close()
+		if err := os.RemoveAll(filepath.Join(volume.root, archivesDirName)); err != nil {
+			t.Fatalf("remove usage-archives: %v", err)
+		}
+
+		target := canonicalTempDir(t)
+		bundleDir := filepath.Join(canonicalTempDir(t), "ext-backup")
+		options := copyInOptions(volume, target)
+		options.BundleDir = bundleDir
+		options.Lock = volume.lock(t)
+
+		_, err = CopyIn(context.Background(), options)
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCode(CodeSourceMissing) {
+			t.Fatalf("CopyIn(missing required usage-archives) = %v (code=%q/%t), want %s", err, code, ok, CodeSourceMissing)
+		}
+		if _, statErr := os.Lstat(bundleDir); !os.IsNotExist(statErr) {
+			t.Fatalf("CopyIn created backup dir on missing required usage-archives: err=%v", statErr)
 		}
 	})
 }

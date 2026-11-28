@@ -255,7 +255,9 @@ describe('Full Web / Panel Lite runtime dependency isolation', () => {
       '../services/storage/secureStorage',
       '../stores/useAuthStore',
       '../utils/constants',
+      '../utils/headerCredential',
     ]);
+    expect(runtimeImports(path.join(src, 'utils/headerCredential.ts'))).toEqual([]);
     // The shared constants module also defines legacy CPA endpoints. Only the
     // original auth-storage key belongs to this compatibility boundary.
     const parsed = ts.createSourceFile(session, readFileSync(session, 'utf8'), ts.ScriptTarget.Latest);

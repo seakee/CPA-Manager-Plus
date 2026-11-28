@@ -33,6 +33,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/fresh"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeys"
@@ -2030,4 +2031,2458 @@ func TestRestartAutoStartArmsManagedUsageCollectionWhenRuntimeBecomesReady(t *te
 			}
 		})
 	}
+}
+
+func TestAdoptExistingCompletionAlignsCollectionStartAndReportsCompleteCoverage(t *testing.T) {
+	t.Run("completion aligns collection start and settles to complete zero-call coverage", func(t *testing.T) {
+		hostCtx, stopHost := context.WithCancel(t.Context())
+		defer stopHost()
+
+		fixture := adoptionFixtureWithKeys(t, "source-client-two", "source-client-one")
+		fixture.destination.serveUsageAPI = true
+		fixture.app.cfg.CollectorMode = "http"
+		fixture.app.cfg.PollInterval = 20 * time.Millisecond
+		fixture.app.runCtx = hostCtx
+		// Adopt runtime starts Ready on this fixture.
+		fixture.runtime.status.State = model.RuntimeStateReady
+
+		if complete := fixture.complete(t); complete.Code != http.StatusOK {
+			t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+		}
+
+		keys, err := fixture.app.keys.List(hostCtx)
+		if err != nil || len(keys) != 2 {
+			t.Fatalf("keys after adopt complete = %#v %v", keys, err)
+		}
+		var startedMS, admittedMS int64
+		if err := fixture.opened.DB.QueryRow(`select cast(value as integer) from settings where key = 'fresh_usage_collection_started_at_ms'`).Scan(&startedMS); err != nil {
+			t.Fatalf("read collection start: %v", err)
+		}
+		if err := fixture.opened.DB.QueryRow(`select cast(value as integer) from settings where key = 'fresh_gateway_admitted_at_ms'`).Scan(&admittedMS); err != nil {
+			t.Fatalf("read gateway admitted at: %v", err)
+		}
+		if startedMS <= 0 || admittedMS <= 0 || startedMS > admittedMS {
+			t.Fatalf("fresh_usage_collection_started_at_ms = %d, fresh_gateway_admitted_at_ms = %d, want 0 < startedMS <= admittedMS", startedMS, admittedMS)
+		}
+
+		// Wait for Collector's first tick + projection catch-up (and >=1ms past collectingAt).
+		var summary usageapp.SummaryResponse
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			resp := gatewayRequest(t, fixture.app, http.MethodGet, "api-keys/usage-summary", "", "")
+			if resp.Code != http.StatusOK {
+				t.Fatalf("usage-summary = %d %s", resp.Code, resp.Body.String())
+			}
+			if err := json.Unmarshal(resp.Body.Bytes(), &summary); err != nil {
+				t.Fatalf("decode usage-summary: %v", err)
+			}
+			if summary.Coverage.State == "complete" {
+				break
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		if summary.Coverage.State != "complete" || summary.Coverage.Reason != "observed" {
+			t.Fatalf("adopt post-completion summary coverage = %+v, want complete/observed", summary.Coverage)
+		}
+		if len(summary.Items) != 2 {
+			t.Fatalf("summary items = %d, want 2", len(summary.Items))
+		}
+		for i, item := range summary.Items {
+			if item.Coverage.State != "complete" || item.Coverage.Reason != "observed" || item.Calls != 0 {
+				t.Fatalf("summary item[%d] = %+v, want complete/observed 0 calls", i, item)
+			}
+			if item.EstimatedCostUSD != nil && *item.EstimatedCostUSD != 0 {
+				t.Fatalf("summary item[%d].EstimatedCostUSD = %v, want nil or 0", i, *item.EstimatedCostUSD)
+			}
+		}
+
+		detResp := gatewayRequest(t, fixture.app, http.MethodGet, "api-keys/"+string(keys[0].ID)+"/usage", "", "")
+		if detResp.Code != http.StatusOK {
+			t.Fatalf("detail usage = %d %s", detResp.Code, detResp.Body.String())
+		}
+		var detail usageapp.DetailResponse
+		if err := json.Unmarshal(detResp.Body.Bytes(), &detail); err != nil {
+			t.Fatalf("decode detail usage: %v", err)
+		}
+		if detail.Coverage.State != "complete" || detail.Coverage.Reason != "observed" {
+			t.Fatalf("adopt post-completion detail coverage = %+v, want complete/observed", detail.Coverage)
+		}
+		expectedFromMS := max(startedMS, keys[0].CreatedAtMS)
+		if detail.FromMS != expectedFromMS {
+			t.Fatalf("detail.FromMS = %d, want max(startedMS=%d, key CreatedAtMS=%d) = %d", detail.FromMS, startedMS, keys[0].CreatedAtMS, expectedFromMS)
+		}
+		if detail.Totals == nil || detail.Totals.Calls != 0 || (detail.Totals.EstimatedCostUSD != nil && *detail.Totals.EstimatedCostUSD != 0) {
+			t.Fatalf("detail totals = %+v, want Calls=0 Cost=0/nil", detail.Totals)
+		}
+	})
+
+	t.Run("monitoring disabled at adoption completion stays unproven and later re-enable stays partial", func(t *testing.T) {
+		hostCtx, stopHost := context.WithCancel(t.Context())
+		defer stopHost()
+
+		fixture := adoptionFixtureWithKeys(t, "source-client-two", "source-client-one")
+		// Hold /v0/management/config off during complete so ProductComplete commits
+		// before the Collector can prove itself.
+		fixture.destination.serveUsageAPI = false
+		fixture.app.cfg.CollectorMode = "http"
+		fixture.app.cfg.PollInterval = 20 * time.Millisecond
+		fixture.app.runCtx = hostCtx
+		fixture.runtime.status.State = model.RuntimeStateReady
+
+		if complete := fixture.complete(t); complete.Code != http.StatusOK {
+			t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+		}
+		// Now disable monitoring and invoke startUsageCollectionAtCompletion with
+		// the usage endpoint ready: !enabled must refuse to start, clear
+		// pendingInitialUsageCompletion, and leave no collection start marker.
+		if _, err := fixture.app.runtimeSettings.PatchManagerCollectorEnabled(hostCtx, false); err != nil {
+			t.Fatal(err)
+		}
+		fixture.destination.serveUsageAPI = true
+		op, err := fixture.app.current(hostCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixture.app.startUsageCollection(op)
+		var count int
+		if err := fixture.opened.DB.QueryRow(`select count(*) from settings where key = 'fresh_usage_collection_started_at_ms'`).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("monitoring-disabled completion recorded %d collection start markers, want 0", count)
+		}
+
+		// Re-enable monitoring >=15ms after completion so collectingAt > FirstSeenAtMS.
+		time.Sleep(15 * time.Millisecond)
+		if resp := gatewayRequest(t, fixture.app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":true}`, "application/json"); resp.Code != http.StatusOK {
+			t.Fatalf("PATCH enabled=true = %d %s", resp.Code, resp.Body.String())
+		}
+		var summary usageapp.SummaryResponse
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			resp := gatewayRequest(t, fixture.app, http.MethodGet, "api-keys/usage-summary", "", "")
+			if resp.Code != http.StatusOK {
+				t.Fatalf("usage-summary = %d %s", resp.Code, resp.Body.String())
+			}
+			if err := json.Unmarshal(resp.Body.Bytes(), &summary); err != nil {
+				t.Fatal(err)
+			}
+			if summary.Coverage.State == "partial" || summary.Coverage.State == "complete" {
+				break
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		if summary.Coverage.State != "partial" || summary.Coverage.Reason != "window_partial" {
+			t.Fatalf("delayed re-enable coverage = %+v, want partial/window_partial", summary.Coverage)
+		}
+	})
+
+	t.Run("non-adopt strategies never opt into adopted pre-binding proof", func(t *testing.T) {
+		ctx := t.Context()
+
+		// ConnectExternal committed harness: predicate MUST be false.
+		extHarness := newExternalUsageHarness(t)
+		if extHarness.app.isAdoptedPreBindingProven(ctx) {
+			t.Fatal("isAdoptedPreBindingProven(ConnectExternal) = true, want false")
+		}
+
+		// NewManaged committed harness: predicate MUST be false.
+		managedHarness := newFreshUsageHarness(t)
+		defer managedHarness.cleanup()
+		if managedHarness.app.isAdoptedPreBindingProven(ctx) {
+			t.Fatal("isAdoptedPreBindingProven(NewManaged) = true, want false")
+		}
+
+		// Staged (uncommitted) AdoptExisting: predicate MUST be false.
+		stagedAdopt := newAdoptMigrationFixtureWithClientKeys(t, "source-client-one")
+		if stagedAdopt.app.isAdoptedPreBindingProven(ctx) {
+			t.Fatal("isAdoptedPreBindingProven(adopt staged) = true, want false")
+		}
+
+		// Upgrade (no Fresh operation record): a.current fails closed -> predicate MUST be false.
+		if _, err := stagedAdopt.opened.DB.ExecContext(ctx, `delete from settings where key = 'bootstrap_state_v1'`); err != nil {
+			t.Fatal(err)
+		}
+		if stagedAdopt.app.isAdoptedPreBindingProven(ctx) {
+			t.Fatal("isAdoptedPreBindingProven(upgrade/non-fresh) = true, want false")
+		}
+	})
+}
+
+func TestAdoptExistingAsyncReadinessPreservesInitialCompletionAlignment(t *testing.T) {
+	t.Run("runtime not ready at completion preserves initial alignment once ready", func(t *testing.T) {
+		hostCtx, stopHost := context.WithCancel(t.Context())
+		defer stopHost()
+
+		fixture := adoptionFixtureWithKeys(t, "source-client-two", "source-client-one")
+		fixture.destination.serveUsageAPI = true
+		fixture.app.cfg.CollectorMode = "http"
+		fixture.app.cfg.PollInterval = 20 * time.Millisecond
+		fixture.app.runCtx = hostCtx
+
+		baseStatus := fixture.runtime.status
+		baseStatus.State = model.RuntimeStateStarting
+		delayedRT := &delayedReadyUsageRuntime{status: baseStatus}
+		fixture.app.runtime = delayedRT
+
+		if complete := fixture.complete(t); complete.Code != http.StatusOK {
+			t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+		}
+		if fixture.app.usageCollectionStarted() {
+			t.Fatal("usage collection claimed started while runtime was still Starting")
+		}
+
+		// While runtime is still Starting and the usage waiter is armed, usage endpoints
+		// must surface retryable unknown/collection_starting rather than collection_unproven.
+		sumWhileStarting := gatewayRequest(t, fixture.app, http.MethodGet, "api-keys/usage-summary", "", "")
+		if sumWhileStarting.Code != http.StatusOK {
+			t.Fatalf("usage-summary while Starting = %d %s", sumWhileStarting.Code, sumWhileStarting.Body.String())
+		}
+		var startingSummary usageapp.SummaryResponse
+		if err := json.Unmarshal(sumWhileStarting.Body.Bytes(), &startingSummary); err != nil {
+			t.Fatal(err)
+		}
+		if startingSummary.Coverage.State != "unknown" || startingSummary.Coverage.Reason != "collection_starting" {
+			t.Fatalf("usage-summary while Starting = %+v, want unknown/collection_starting", startingSummary.Coverage)
+		}
+		keysWhileStarting, err := fixture.app.keys.List(hostCtx)
+		if err != nil || len(keysWhileStarting) != 2 {
+			t.Fatalf("keys while Starting = %#v %v", keysWhileStarting, err)
+		}
+		detWhileStarting := gatewayRequest(t, fixture.app, http.MethodGet, "api-keys/"+string(keysWhileStarting[0].ID)+"/usage", "", "")
+		if detWhileStarting.Code != http.StatusOK {
+			t.Fatalf("detail usage while Starting = %d %s", detWhileStarting.Code, detWhileStarting.Body.String())
+		}
+		var startingDetail usageapp.DetailResponse
+		if err := json.Unmarshal(detWhileStarting.Body.Bytes(), &startingDetail); err != nil {
+			t.Fatal(err)
+		}
+		if startingDetail.Coverage.State != "unknown" || startingDetail.Coverage.Reason != "collection_starting" {
+			t.Fatalf("detail usage while Starting = %+v, want unknown/collection_starting", startingDetail.Coverage)
+		}
+
+		// Simulate runtime taking a moment to transition to Ready.
+		time.Sleep(50 * time.Millisecond)
+		delayedRT.setState(model.RuntimeStateReady)
+
+		deadline := time.Now().Add(3 * time.Second)
+		for !fixture.app.usageCollectionStarted() && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if !fixture.app.usageCollectionStarted() {
+			t.Fatalf("usage collection did not start after Ready (reason=%q)", fixture.app.usageStartBlock())
+		}
+
+		keys, err := fixture.app.keys.List(hostCtx)
+		if err != nil || len(keys) != 2 {
+			t.Fatalf("keys = %#v %v", keys, err)
+		}
+		var startedMS, admittedMS int64
+		if err := fixture.opened.DB.QueryRow(`select cast(value as integer) from settings where key = 'fresh_usage_collection_started_at_ms'`).Scan(&startedMS); err != nil {
+			t.Fatal(err)
+		}
+		if err := fixture.opened.DB.QueryRow(`select cast(value as integer) from settings where key = 'fresh_gateway_admitted_at_ms'`).Scan(&admittedMS); err != nil {
+			t.Fatal(err)
+		}
+		if startedMS != admittedMS {
+			t.Fatalf("delayed Ready aligned collection start = %d, want gateway admitted at %d", startedMS, admittedMS)
+		}
+
+		var summary usageapp.SummaryResponse
+		sumDeadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(sumDeadline) {
+			resp := gatewayRequest(t, fixture.app, http.MethodGet, "api-keys/usage-summary", "", "")
+			if resp.Code != http.StatusOK {
+				t.Fatalf("usage-summary = %d %s", resp.Code, resp.Body.String())
+			}
+			if err := json.Unmarshal(resp.Body.Bytes(), &summary); err != nil {
+				t.Fatal(err)
+			}
+			if summary.Coverage.State == "complete" {
+				break
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		if summary.Coverage.State != "complete" || summary.Coverage.Reason != "observed" {
+			t.Fatalf("delayed Ready summary coverage = %+v, want complete/observed", summary.Coverage)
+		}
+	})
+
+	t.Run("disabling monitoring while waiting clears pending initial completion flag", func(t *testing.T) {
+		hostCtx, stopHost := context.WithCancel(t.Context())
+		defer stopHost()
+
+		fixture := adoptionFixtureWithKeys(t, "source-client-two", "source-client-one")
+		fixture.destination.serveUsageAPI = true
+		fixture.app.cfg.CollectorMode = "http"
+		fixture.app.cfg.PollInterval = 20 * time.Millisecond
+		fixture.app.runCtx = hostCtx
+
+		baseStatus := fixture.runtime.status
+		baseStatus.State = model.RuntimeStateStarting
+		delayedRT := &delayedReadyUsageRuntime{status: baseStatus}
+		fixture.app.runtime = delayedRT
+
+		if complete := fixture.complete(t); complete.Code != http.StatusOK {
+			t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+		}
+		var waitSummary usageapp.SummaryResponse
+		if resp := gatewayRequest(t, fixture.app, http.MethodGet, "api-keys/usage-summary", "", ""); resp.Code != http.StatusOK {
+			t.Fatalf("usage-summary while waiter armed = %d %s", resp.Code, resp.Body.String())
+		} else if err := json.Unmarshal(resp.Body.Bytes(), &waitSummary); err != nil {
+			t.Fatal(err)
+		} else if waitSummary.Coverage.State != "unknown" || waitSummary.Coverage.Reason != "collection_starting" {
+			t.Fatalf("usage-summary while waiter armed = %+v, want unknown/collection_starting", waitSummary.Coverage)
+		}
+		// Turn monitoring off while runtime is still Starting.
+		if resp := gatewayRequest(t, fixture.app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":false}`, "application/json"); resp.Code != http.StatusOK {
+			t.Fatalf("PATCH enabled=false = %d %s", resp.Code, resp.Body.String())
+		}
+		var offSummary usageapp.SummaryResponse
+		if resp := gatewayRequest(t, fixture.app, http.MethodGet, "api-keys/usage-summary", "", ""); resp.Code != http.StatusOK {
+			t.Fatalf("usage-summary after disabling while waiting = %d %s", resp.Code, resp.Body.String())
+		} else if err := json.Unmarshal(resp.Body.Bytes(), &offSummary); err != nil {
+			t.Fatal(err)
+		} else if offSummary.Coverage.State != "unknown" || offSummary.Coverage.Reason != "collection_unproven" {
+			t.Fatalf("usage-summary after disabling while waiting = %+v, want unknown/collection_unproven", offSummary.Coverage)
+		}
+		delayedRT.setState(model.RuntimeStateReady)
+		time.Sleep(30 * time.Millisecond)
+
+		// Re-enabling later must NOT inherit pendingInitialUsageCompletion.
+		if resp := gatewayRequest(t, fixture.app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":true}`, "application/json"); resp.Code != http.StatusOK {
+			t.Fatalf("PATCH enabled=true = %d %s", resp.Code, resp.Body.String())
+		}
+		var summary usageapp.SummaryResponse
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			resp := gatewayRequest(t, fixture.app, http.MethodGet, "api-keys/usage-summary", "", "")
+			if resp.Code != http.StatusOK {
+				t.Fatalf("usage-summary = %d %s", resp.Code, resp.Body.String())
+			}
+			if err := json.Unmarshal(resp.Body.Bytes(), &summary); err != nil {
+				t.Fatal(err)
+			}
+			if summary.Coverage.State == "partial" || summary.Coverage.State == "complete" {
+				break
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		if summary.Coverage.State != "partial" || summary.Coverage.Reason != "window_partial" {
+			t.Fatalf("re-enabled after cancel coverage = %+v, want partial/window_partial", summary.Coverage)
+		}
+	})
+}
+
+func TestAdoptExistingQueuedUsageEventDuringStartup(t *testing.T) {
+	hostCtx, stopHost := context.WithCancel(t.Context())
+	defer stopHost()
+
+	fixture := adoptionFixtureWithKeys(t, "source-client-one")
+	fixture.destination.serveUsageAPI = true
+	fixture.app.cfg.CollectorMode = "http"
+	fixture.app.cfg.PollInterval = 20 * time.Millisecond
+	fixture.app.runCtx = hostCtx
+	fixture.runtime.status.State = model.RuntimeStateReady
+
+	poll1Started := make(chan struct{})
+	allowPoll1 := make(chan struct{})
+	var poll1Once sync.Once
+	fixture.destination.onUsageQueuePoll = func(poll int) {
+		if poll == 1 {
+			poll1Once.Do(func() {
+				close(poll1Started)
+				<-allowPoll1
+			})
+		}
+	}
+	fixture.app.beforeCompletionUsageStart = func() {
+		ts := time.Now().UTC().Format(time.RFC3339Nano)
+		event := fmt.Sprintf(`{"timestamp":%q,"model":"gpt-test","endpoint":"POST /v1/chat/completions","api_key":"source-client-one","input_tokens":120,"output_tokens":30,"total_tokens":150}`, ts)
+		fixture.destination.usageQueueMu.Lock()
+		fixture.destination.usageQueue = append(fixture.destination.usageQueue, event)
+		fixture.destination.usageQueueMu.Unlock()
+	}
+
+	if complete := fixture.complete(t); complete.Code != http.StatusOK {
+		t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+	}
+	select {
+	case <-poll1Started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("collector never attempted initial usage-queue poll")
+	}
+
+	// While the very first poll is in-flight, usage-summary must surface unknown/collection_starting
+	// instead of falsely reporting complete with 0 calls.
+	var inflightSummary usageapp.SummaryResponse
+	if resp := gatewayRequest(t, fixture.app, http.MethodGet, "api-keys/usage-summary", "", ""); resp.Code != http.StatusOK {
+		t.Fatalf("in-flight usage-summary = %d %s", resp.Code, resp.Body.String())
+	} else if err := json.Unmarshal(resp.Body.Bytes(), &inflightSummary); err != nil {
+		t.Fatal(err)
+	}
+	if inflightSummary.Coverage.State != "unknown" || inflightSummary.Coverage.Reason != "collection_starting" {
+		t.Fatalf("in-flight usage-summary coverage = %+v, want unknown/collection_starting", inflightSummary.Coverage)
+	}
+
+	close(allowPoll1)
+
+	var summary usageapp.SummaryResponse
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		resp := gatewayRequest(t, fixture.app, http.MethodGet, "api-keys/usage-summary", "", "")
+		if resp.Code != http.StatusOK {
+			t.Fatalf("usage-summary = %d %s", resp.Code, resp.Body.String())
+		}
+		if err := json.Unmarshal(resp.Body.Bytes(), &summary); err != nil {
+			t.Fatal(err)
+		}
+		if summary.Coverage.State == "complete" && len(summary.Items) == 1 && summary.Items[0].Calls == 1 {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if summary.Coverage.State != "complete" || summary.Coverage.Reason != "observed" {
+		t.Fatalf("settled summary coverage = %+v, want complete/observed", summary.Coverage)
+	}
+	if len(summary.Items) != 1 || summary.Items[0].Calls != 1 {
+		t.Fatalf("settled summary items = %+v, want 1 item with calls=1", summary.Items)
+	}
+
+	keys, err := fixture.app.keys.List(hostCtx)
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("keys = %#v %v", keys, err)
+	}
+	var detail usageapp.DetailResponse
+	if resp := gatewayRequest(t, fixture.app, http.MethodGet, "api-keys/"+string(keys[0].ID)+"/usage", "", ""); resp.Code != http.StatusOK {
+		t.Fatalf("detail usage = %d %s", resp.Code, resp.Body.String())
+	} else if err := json.Unmarshal(resp.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.Coverage.State != "complete" || detail.Coverage.Reason != "observed" || detail.Totals == nil || detail.Totals.Calls != 1 {
+		t.Fatalf("settled detail = %+v (totals=%+v), want complete/observed calls=1", detail.Coverage, detail.Totals)
+	}
+}
+
+func TestAdoptExistingBarrierCompletionDisabledPlusConcurrentEnable(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		enableViaPatch bool
+	}{
+		{name: "concurrent PATCH enabled=true races ahead of usageStartMu", enableViaPatch: true},
+		{name: "concurrent config flip enabled=true before usageStartMu still trips seq fence", enableViaPatch: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hostCtx, stopHost := context.WithCancel(t.Context())
+			defer stopHost()
+
+			fixture := adoptionFixtureWithKeys(t, "source-client-one")
+			fixture.destination.serveUsageAPI = true
+			fixture.app.cfg.CollectorMode = "http"
+			fixture.app.cfg.PollInterval = 20 * time.Millisecond
+			fixture.app.runCtx = hostCtx
+			fixture.runtime.status.State = model.RuntimeStateReady
+
+			fixture.app.beforeCompletionUsageStart = func() {
+				if resp := gatewayRequest(t, fixture.app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":false}`, "application/json"); resp.Code != http.StatusOK {
+					t.Fatalf("disable at completion = %d %s", resp.Code, resp.Body.String())
+				}
+			}
+			var startOnce sync.Once
+			fixture.app.beforeUsageStartLock = func() {
+				startOnce.Do(func() {
+					time.Sleep(15 * time.Millisecond)
+					if tc.enableViaPatch {
+						if resp := gatewayRequest(t, fixture.app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":true}`, "application/json"); resp.Code != http.StatusOK {
+							t.Fatalf("concurrent PATCH enabled=true = %d %s", resp.Code, resp.Body.String())
+						}
+					} else {
+						if _, err := fixture.app.runtimeSettings.PatchManagerCollectorEnabled(hostCtx, true); err != nil {
+							t.Fatalf("PatchManagerCollectorEnabled(true): %v", err)
+						}
+					}
+				})
+			}
+
+			if complete := fixture.complete(t); complete.Code != http.StatusOK {
+				t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+			}
+
+			keys, err := fixture.app.keys.List(hostCtx)
+			if err != nil || len(keys) != 1 {
+				t.Fatalf("keys = %#v %v", keys, err)
+			}
+			var startedMS int64
+			if err := fixture.opened.DB.QueryRow(`select cast(value as integer) from settings where key = 'fresh_usage_collection_started_at_ms'`).Scan(&startedMS); err != nil {
+				t.Fatalf("read collection start: %v", err)
+			}
+			if startedMS <= keys[0].CreatedAtMS {
+				t.Fatalf("collection start %d was backdated <= CreatedAtMS %d despite completion disable + concurrent enable", startedMS, keys[0].CreatedAtMS)
+			}
+
+			var summary usageapp.SummaryResponse
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				resp := gatewayRequest(t, fixture.app, http.MethodGet, "api-keys/usage-summary", "", "")
+				if resp.Code != http.StatusOK {
+					t.Fatalf("usage-summary = %d %s", resp.Code, resp.Body.String())
+				}
+				if err := json.Unmarshal(resp.Body.Bytes(), &summary); err != nil {
+					t.Fatal(err)
+				}
+				if summary.Coverage.State == "partial" || summary.Coverage.State == "complete" {
+					break
+				}
+				time.Sleep(25 * time.Millisecond)
+			}
+			if summary.Coverage.State != "partial" || summary.Coverage.Reason != "window_partial" {
+				t.Fatalf("barrier(a) coverage = %+v, want partial/window_partial", summary.Coverage)
+			}
+		})
+	}
+}
+
+func TestAdoptExistingBarrierWaiterDisabledPairBeforeLock(t *testing.T) {
+	hostCtx, stopHost := context.WithCancel(t.Context())
+	defer stopHost()
+
+	fixture := adoptionFixtureWithKeys(t, "source-client-one")
+	fixture.destination.serveUsageAPI = true
+	fixture.app.cfg.CollectorMode = "http"
+	fixture.app.cfg.PollInterval = 20 * time.Millisecond
+	fixture.app.runCtx = hostCtx
+
+	baseStatus := fixture.runtime.status
+	baseStatus.State = model.RuntimeStateStarting
+	delayedRT := &delayedReadyUsageRuntime{status: baseStatus}
+	fixture.app.runtime = delayedRT
+
+	if complete := fixture.complete(t); complete.Code != http.StatusOK {
+		t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+	}
+	keys, err := fixture.app.keys.List(hostCtx)
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("keys = %#v %v", keys, err)
+	}
+
+	offPaused := make(chan struct{})
+	releaseOff := make(chan struct{})
+	offDone := make(chan struct{})
+	var offGate atomic.Bool
+	fixture.app.beforeUsageReconcileLock = func() {
+		if offGate.CompareAndSwap(false, true) {
+			close(offPaused)
+			<-releaseOff
+		}
+	}
+
+	go func() {
+		resp := gatewayRequest(t, fixture.app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":false}`, "application/json")
+		if resp.Code != http.StatusOK {
+			t.Errorf("PATCH enabled=false = %d %s", resp.Code, resp.Body.String())
+		}
+		close(offDone)
+	}()
+	<-offPaused
+
+	// While OFF is paused right before usageStartMu (with disableSeq + gap already committed),
+	// re-enable monitoring and bring runtime to Ready so the armed initial-completion waiter
+	// enters startUsageCollectionFromWaiter BEFORE OFF acquires usageStartMu.
+	time.Sleep(15 * time.Millisecond)
+	if resp := gatewayRequest(t, fixture.app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":true}`, "application/json"); resp.Code != http.StatusOK {
+		t.Fatalf("concurrent PATCH enabled=true = %d %s", resp.Code, resp.Body.String())
+	}
+	delayedRT.setState(model.RuntimeStateReady)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !fixture.app.usageCollectionStarted() && time.Now().Before(deadline) {
+		time.Sleep(15 * time.Millisecond)
+	}
+	if !fixture.app.usageCollectionStarted() {
+		close(releaseOff)
+		<-offDone
+		t.Fatalf("waiter did not start collector after Ready (reason=%q)", fixture.app.usageStartBlock())
+	}
+	close(releaseOff)
+	<-offDone
+
+	var startedMS int64
+	if err := fixture.opened.DB.QueryRow(`select cast(value as integer) from settings where key = 'fresh_usage_collection_started_at_ms'`).Scan(&startedMS); err != nil {
+		t.Fatalf("read collection start: %v", err)
+	}
+	if startedMS <= keys[0].CreatedAtMS {
+		t.Fatalf("waiter backdated collection start %d <= CreatedAtMS %d despite OFF->ON disable race", startedMS, keys[0].CreatedAtMS)
+	}
+
+	var summary usageapp.SummaryResponse
+	sumDeadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(sumDeadline) {
+		resp := gatewayRequest(t, fixture.app, http.MethodGet, "api-keys/usage-summary", "", "")
+		if resp.Code != http.StatusOK {
+			t.Fatalf("usage-summary = %d %s", resp.Code, resp.Body.String())
+		}
+		if err := json.Unmarshal(resp.Body.Bytes(), &summary); err != nil {
+			t.Fatal(err)
+		}
+		if summary.Coverage.State == "partial" || summary.Coverage.State == "complete" {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if summary.Coverage.State != "partial" || summary.Coverage.Reason != "window_partial" {
+		t.Fatalf("barrier(b) coverage = %+v, want partial/window_partial", summary.Coverage)
+	}
+}
+
+func TestAdoptExistingMonitoringGapAdvancesCollectionStartAcrossPatchAndPut(t *testing.T) {
+	hostCtx, stopHost := context.WithCancel(t.Context())
+	defer stopHost()
+
+	fixture := adoptionFixtureWithKeys(t, "source-client-one")
+	fixture.destination.serveUsageAPI = true
+	fixture.app.cfg.CollectorMode = "http"
+	fixture.app.cfg.PollInterval = 20 * time.Millisecond
+	fixture.app.runCtx = hostCtx
+	fixture.runtime.status.State = model.RuntimeStateReady
+
+	if complete := fixture.complete(t); complete.Code != http.StatusOK {
+		t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+	}
+	waitSettled := func(wantState, wantReason string) usageapp.SummaryResponse {
+		t.Helper()
+		var summary usageapp.SummaryResponse
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			resp := gatewayRequest(t, fixture.app, http.MethodGet, "api-keys/usage-summary", "", "")
+			if resp.Code != http.StatusOK {
+				t.Fatalf("usage-summary = %d %s", resp.Code, resp.Body.String())
+			}
+			if err := json.Unmarshal(resp.Body.Bytes(), &summary); err != nil {
+				t.Fatal(err)
+			}
+			if summary.Coverage.State == wantState && summary.Coverage.Reason == wantReason {
+				return summary
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for %s/%s, last=%+v", wantState, wantReason, summary.Coverage)
+		return summary
+	}
+	readStartedMS := func() int64 {
+		t.Helper()
+		var startedMS int64
+		if err := fixture.opened.DB.QueryRow(`select cast(value as integer) from settings where key = 'fresh_usage_collection_started_at_ms'`).Scan(&startedMS); err != nil {
+			t.Fatalf("read collection start: %v", err)
+		}
+		return startedMS
+	}
+
+	waitSettled("complete", "observed")
+	t0 := readStartedMS()
+
+	// 1. Turn monitoring OFF via PATCH, wait >=15ms, then ON via PATCH -> T0 must advance forward.
+	if resp := gatewayRequest(t, fixture.app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":false}`, "application/json"); resp.Code != http.StatusOK {
+		t.Fatalf("PATCH enabled=false = %d %s", resp.Code, resp.Body.String())
+	}
+	time.Sleep(20 * time.Millisecond)
+	if resp := gatewayRequest(t, fixture.app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":true}`, "application/json"); resp.Code != http.StatusOK {
+		t.Fatalf("PATCH enabled=true = %d %s", resp.Code, resp.Body.String())
+	}
+	t1 := readStartedMS()
+	if t1 <= t0 {
+		t.Fatalf("PATCH gap did not advance collection start: t0=%d t1=%d", t0, t1)
+	}
+	waitSettled("partial", "window_partial")
+
+	// 2. Turn monitoring OFF via nested PUT config, wait >=15ms, then ON via PUT -> T1 must advance forward to T2.
+	time.Sleep(20 * time.Millisecond)
+	if resp := gatewayRequest(t, fixture.app, http.MethodPut, "cpamp/usage-service/config", `{"config":{"collector":{"enabled":false}}}`, "application/json"); resp.Code != http.StatusOK {
+		t.Fatalf("PUT enabled=false = %d %s", resp.Code, resp.Body.String())
+	}
+	if fixture.app.usageCollectionStarted() {
+		t.Fatal("PUT config.collector.enabled=false left usage collection started")
+	}
+	time.Sleep(20 * time.Millisecond)
+	if resp := gatewayRequest(t, fixture.app, http.MethodPut, "cpamp/usage-service/config", `{"config":{"collector":{"enabled":true}}}`, "application/json"); resp.Code != http.StatusOK {
+		t.Fatalf("PUT enabled=true = %d %s", resp.Code, resp.Body.String())
+	}
+	t2 := readStartedMS()
+	if t2 <= t1 {
+		t.Fatalf("PUT gap did not advance collection start: t1=%d t2=%d", t1, t2)
+	}
+	waitSettled("partial", "window_partial")
+}
+
+func TestAdoptExistingRestartWithMonitoringOnPreservesCollectionStart(t *testing.T) {
+	hostCtx, stopHost := context.WithCancel(t.Context())
+	fixture := adoptionFixtureWithKeys(t, "source-client-one")
+	fixture.destination.serveUsageAPI = true
+	fixture.app.cfg.CollectorMode = "http"
+	fixture.app.cfg.PollInterval = 20 * time.Millisecond
+	fixture.app.runCtx = hostCtx
+	fixture.runtime.status.State = model.RuntimeStateReady
+
+	if complete := fixture.complete(t); complete.Code != http.StatusOK {
+		stopHost()
+		t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+	}
+	var t0 int64
+	if err := fixture.opened.DB.QueryRow(`select cast(value as integer) from settings where key = 'fresh_usage_collection_started_at_ms'`).Scan(&t0); err != nil {
+		stopHost()
+		t.Fatalf("read initial collection start: %v", err)
+	}
+
+	// Shut down first instance cleanly and wait >20ms so restart wall clock strictly exceeds T0.
+	stopHost()
+	if err := fixture.opened.Close(); err != nil {
+		t.Fatalf("close initial store: %v", err)
+	}
+	time.Sleep(25 * time.Millisecond)
+
+	hostCtx2, stopHost2 := context.WithCancel(t.Context())
+	defer stopHost2()
+	reopened, err := fresh.Open(hostCtx2, fixture.paths, fresh.OpenOptions{})
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer func() { _ = reopened.Close() }()
+
+	app2 := newFreshApplication(reopened, config.Config{
+		CollectorMode: "http",
+		PollInterval:  20 * time.Millisecond,
+	}, nil)
+	app2.runCtx = hostCtx2
+	wireAdoptManagedAuthority(app2, fixture.runtime, fixture.destination.URL())
+	record2, err := app2.store.Load(hostCtx2)
+	if err != nil {
+		t.Fatalf("load reopened store: %v", err)
+	}
+	op2 := app2.prepareCompletedStartup(hostCtx2, record2.Operation)
+	app2.startUsageCollection(op2)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !app2.usageCollectionStarted() && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !app2.usageCollectionStarted() {
+		t.Fatalf("restarted app did not start usage collection (reason=%q)", app2.usageStartBlock())
+	}
+
+	var afterRestartMS int64
+	if err := reopened.DB.QueryRow(`select cast(value as integer) from settings where key = 'fresh_usage_collection_started_at_ms'`).Scan(&afterRestartMS); err != nil {
+		t.Fatalf("read collection start after restart: %v", err)
+	}
+	if afterRestartMS != t0 {
+		t.Fatalf("normal restart altered collection start from %d to %d", t0, afterRestartMS)
+	}
+
+	var summary usageapp.SummaryResponse
+	sumDeadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(sumDeadline) {
+		resp := gatewayRequest(t, app2, http.MethodGet, "api-keys/usage-summary", "", "")
+		if resp.Code != http.StatusOK {
+			t.Fatalf("restarted usage-summary = %d %s", resp.Code, resp.Body.String())
+		}
+		if err := json.Unmarshal(resp.Body.Bytes(), &summary); err != nil {
+			t.Fatal(err)
+		}
+		if summary.Coverage.State == "complete" {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if summary.Coverage.State != "complete" || summary.Coverage.Reason != "observed" {
+		t.Fatalf("normal restart coverage = %+v, want complete/observed", summary.Coverage)
+	}
+}
+
+// dualProtoCPAServer multiplexes HTTP management/queue traffic and RESP Pub/Sub
+// on one TCP address, matching CPA's dual-protocol port in Fresh tests.
+type dualProtoCPAServer struct {
+	listener       net.Listener
+	httpHandler    http.Handler
+	httpListener   *chanNetListener
+	httpServer     *http.Server
+	mu             sync.Mutex
+	subConns       []net.Conn
+	subChannels    []string
+	subCount       atomic.Int32
+	onSubscribe    func(connID int32)
+	dropOnConnID   int32
+	dropCh         chan struct{}
+	dropOnce       sync.Once
+	subReadyCh     chan struct{}
+	subReadyOnce   sync.Once
+	secondSubCh    chan struct{}
+	rejectSubscribe atomic.Bool
+	secondSubOnce  sync.Once
+}
+
+type chanNetListener struct {
+	addr   net.Addr
+	conns  chan net.Conn
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (l *chanNetListener) Accept() (net.Conn, error) {
+	select {
+	case c, ok := <-l.conns:
+		if !ok {
+			return nil, net.ErrClosed
+		}
+		return c, nil
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+}
+func (l *chanNetListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+func (l *chanNetListener) Addr() net.Addr { return l.addr }
+
+type peekedConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *peekedConn) Read(p []byte) (int, error) { return c.reader.Read(p) }
+
+func newDualProtoCPAServer(t *testing.T, handler http.Handler) *dualProtoCPAServer {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpLn := &chanNetListener{
+		addr:   ln.Addr(),
+		conns:  make(chan net.Conn, 64),
+		closed: make(chan struct{}),
+	}
+	s := &dualProtoCPAServer{
+		listener:     ln,
+		httpHandler:  handler,
+		httpListener: httpLn,
+		dropCh:       make(chan struct{}),
+		subReadyCh:   make(chan struct{}),
+		secondSubCh:  make(chan struct{}),
+	}
+	s.httpServer = &http.Server{Handler: handler}
+	go func() { _ = s.httpServer.Serve(httpLn) }()
+	go s.acceptLoop()
+	t.Cleanup(func() {
+		_ = s.httpServer.Close()
+		_ = httpLn.Close()
+		_ = ln.Close()
+		s.mu.Lock()
+		for _, c := range s.subConns {
+			_ = c.Close()
+		}
+		s.mu.Unlock()
+	})
+	return s
+}
+
+func (s *dualProtoCPAServer) URL() string { return "http://" + s.listener.Addr().String() }
+
+func (s *dualProtoCPAServer) acceptLoop() {
+	for {
+		conn, err := s.listener.Accept()
+		if err != nil {
+			return
+		}
+		go func(c net.Conn) {
+			br := bufio.NewReader(c)
+			first, err := br.Peek(1)
+			if err != nil {
+				_ = c.Close()
+				return
+			}
+			pc := &peekedConn{Conn: c, reader: br}
+			if first[0] != '*' {
+				select {
+				case s.httpListener.conns <- pc:
+				case <-s.httpListener.closed:
+					_ = c.Close()
+				}
+				return
+			}
+			s.handleRESP(pc, br)
+		}(conn)
+	}
+}
+
+func (s *dualProtoCPAServer) handleRESP(conn net.Conn, reader *bufio.Reader) {
+	defer func() { _ = conn.Close() }()
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		if !strings.HasPrefix(line, "*") {
+			continue
+		}
+		n := 0
+		_, _ = fmt.Sscanf(strings.TrimSpace(line), "*%d", &n)
+		parts := make([]string, 0, n)
+		for range n {
+			_, err = reader.ReadString('\n')
+			if err != nil {
+				return
+			}
+			arg, err := reader.ReadString('\n')
+			if err != nil {
+				return
+			}
+			parts = append(parts, strings.TrimSpace(arg))
+		}
+		if len(parts) == 0 {
+			continue
+		}
+		switch strings.ToUpper(parts[0]) {
+		case "AUTH":
+			_, _ = io.WriteString(conn, "+OK\r\n")
+		case "PING":
+			_, _ = io.WriteString(conn, "+PONG\r\n")
+		case "RPOP", "LPOP":
+			_, _ = io.WriteString(conn, "*-1\r\n")
+		case "SUBSCRIBE":
+			ch := "usage"
+			if len(parts) > 1 {
+				ch = parts[1]
+			}
+			if s.rejectSubscribe.Load() {
+				_, _ = io.WriteString(conn, "-ERR subscribe temporarily unavailable\r\n")
+				_ = conn.Close()
+				return
+			}
+			id := s.subCount.Add(1)
+			s.mu.Lock()
+			s.subConns = append(s.subConns, conn)
+			s.subChannels = append(s.subChannels, ch)
+			s.mu.Unlock()
+			_, _ = fmt.Fprintf(conn, "*3\r\n$9\r\nsubscribe\r\n$%d\r\n%s\r\n:1\r\n", len(ch), ch)
+			s.subReadyOnce.Do(func() { close(s.subReadyCh) })
+			if id >= 2 {
+				s.secondSubOnce.Do(func() { close(s.secondSubCh) })
+			}
+			if s.onSubscribe != nil {
+				s.onSubscribe(id)
+			}
+			if s.dropOnConnID == id {
+				go func() {
+					<-s.dropCh
+					_ = conn.Close()
+				}()
+			}
+		default:
+			_, _ = io.WriteString(conn, "-ERR unsupported\r\n")
+		}
+	}
+}
+
+func (s *dualProtoCPAServer) Publish(payload string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, c := range s.subConns {
+		ch := s.subChannels[i]
+		_, _ = fmt.Fprintf(c, "*3\r\n$7\r\nmessage\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n", len(ch), ch, len(payload), payload)
+	}
+}
+
+func (s *dualProtoCPAServer) DropConn(connID int32) {
+	s.dropOnce.Do(func() { close(s.dropCh) })
+}
+
+func adoptionFixtureWithDestination(t *testing.T, makeEndpoint func(*migrationFakeCPA) string, clientKeys ...string) (*adoptMigrationFixture, string) {
+	t.Helper()
+	ctx := t.Context()
+	dir := t.TempDir()
+	paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+	paths.Config = filepath.Join(dir, "config.json")
+	opened, err := fresh.Open(ctx, paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = opened.Close() })
+	artifact := model.RuntimeArtifactID("sha256:" + strings.Repeat("a", 64))
+	runtime := &migrationRuntime{status: model.RuntimeObservedStatus{
+		Identity: "runtime", Generation: 3, ProtocolVersion: "v1", State: model.RuntimeStateReady,
+		Capabilities:          model.RuntimeCapabilities{model.RuntimeCapabilityStart, model.RuntimeCapabilityStageDestination},
+		ActiveGatewayArtifact: &model.ActiveGatewayArtifact{Engine: "cpa", ArtifactID: artifact},
+	}}
+	fixture := &adoptMigrationFixture{runtime: runtime, paths: paths, opened: opened}
+
+	source := newMigrationFakeCPA(t)
+	source.auth = migrationSourceKey
+	source.credentials["claude-source.json"] = []byte(`{"type":"claude","access_token":"` + migrationCredentialToken + `"}`)
+	source.types["claude-source.json"] = "claude"
+	source.credentials["codex-source.json"] = []byte(`{"type":"codex","access_token":"` + migrationCredentialToken + `-codex"}`)
+	source.types["codex-source.json"], source.disabled["codex-source.json"] = "codex", true
+	source.credentials["plugin-source.json"] = []byte(`{"runtime":true}`)
+	source.types["plugin-source.json"], source.runtimeOnly["plugin-source.json"] = "plugin", true
+	source.config["routing"] = map[string]any{"strategy": "round-robin", "force-model-prefix": true}
+	source.config["multimedia"] = map[string]any{"disable-image-generation": "chat"}
+	source.config["api-keys"] = map[string]any{"claude": []any{map[string]any{
+		"name": "claude-group", "keys": []any{map[string]any{"api-key": migrationProviderKeyValue}},
+	}}}
+	source.config["management"] = map[string]any{"secret-key": migrationSourceKey}
+	source.config["server"] = map[string]any{"host": "203.0.113.9", "port": json.Number("9999")}
+	sourceKeys := make([]any, 0, len(clientKeys))
+	for _, key := range clientKeys {
+		sourceKeys = append(sourceKeys, key)
+	}
+	source.config["access"] = map[string]any{"api-keys": sourceKeys}
+	source.config["plugins"] = map[string]any{"enabled": true, "dir": "/source/plugins"}
+	source.config["oauth"] = map[string]any{"auth-dir": "/source/auth"}
+	fixture.source = source
+
+	destination := newMigrationFakeCPA(t)
+	destination.serveUsageAPI = true
+	destination.refuse["unsupported.json"] = true
+	destination.config["server"] = map[string]any{"host": "0.0.0.0", "port": json.Number("8317")}
+	destination.config["plugins"] = map[string]any{"enabled": false, "dir": "/runtime/supervisor/plugins"}
+	destination.config["oauth"] = map[string]any{"auth-dir": "/runtime/supervisor/destination/auth"}
+	destination.config["config-version"] = json.Number("8")
+	destination.config["management"] = map[string]any{"allow-remote": true, "secret-key": "$2a$10$abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXY12", "disable-control-panel": true, "disable-auto-update-panel": true}
+	destination.config["observability"] = map[string]any{"logs": map[string]any{"logging-to-file": false}, "usage": map[string]any{"usage-statistics-enabled": true}}
+	destinationKeys := make([]any, 0, len(clientKeys))
+	for _, key := range clientKeys {
+		destinationKeys = append(destinationKeys, key)
+	}
+	destination.config["access"] = map[string]any{"api-keys": destinationKeys}
+	destination.authFn = func() string { return runtime.stagedKey }
+	fixture.destination = destination
+	endpoint := makeEndpoint(destination)
+
+	app := newFreshApplication(opened, config.Config{}, nil)
+	fixture.app = app
+	app.strategy = freshstrategy.New(freshstrategy.Options{
+		Runtime: runtime, Protector: opened.Protector, DestinationBaseURL: endpoint,
+		Qualification:       bootstrap.CPAQualification{ManagementGeneration: "v8", ArtifactQualified: true, RequiredProfileQualified: true},
+		QualifiedArtifactID: artifact, AdoptionResources: migratingDecisions(),
+	})
+	fixture.request = freshstrategy.Request{
+		Strategy: bootstrap.AdoptExisting, AdoptSourceClass: bootstrap.AdoptNetworkExisting,
+		BaseURL: source.URL(), ManagementKey: migrationSourceKey,
+		ExpectedRuntimeIdentity: "runtime", ExpectedRuntimeGeneration: 3, ExpectedArtifactID: artifact,
+	}
+	record, err := app.store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staged, err := app.strategy.Execute(ctx, record.Operation, fixture.request)
+	if err != nil || staged.Checkpoint.Stage != "staged" {
+		t.Fatalf("stage: %+v %v", staged, err)
+	}
+	fixture.session = installationSession(t, app)
+	record, err = app.store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err = app.store.Update(ctx, record.Operation.Identity, record.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.Strategy = staged.Checkpoint
+		r.AdoptionCiphertext = staged.AdoptionCiphertext
+		r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.InferenceTarget = "/cpamp-api"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
+		r.Operation.Routing.InferenceCommitted = true
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.record = record
+	wireAdoptManagedAuthority(app, runtime, endpoint)
+	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
+		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
+	}
+	fixture.wait()
+	if summary := fixture.reload(t).AdoptionSummary; summary == nil || !summary.Finished {
+		t.Fatalf("the migration did not record a finished run: %+v", summary)
+	}
+	return fixture, endpoint
+}
+
+func newNewManagedSubscribeFixture(t *testing.T, hostCtx context.Context, handler http.Handler, rtState model.RuntimeState, stagePreKey bool) (*fresh.Opened, *freshApplication, *delayedReadyUsageRuntime, *dualProtoCPAServer, freshkeys.Result) {
+	t.Helper()
+	dual := newDualProtoCPAServer(t, handler)
+	dir := t.TempDir()
+	paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
+	paths.Config = filepath.Join(dir, "config.json")
+	opened, err := fresh.Open(hostCtx, paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = opened.Close() })
+	app := newFreshApplication(opened, config.Config{
+		CollectorMode: "subscribe",
+		Queue:         "usage",
+		PollInterval:  20 * time.Millisecond,
+	}, nil)
+	app.runCtx = hostCtx
+	if _, err = app.store.Update(hostCtx, opened.Record.Operation.Identity, opened.Record.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.Routing.OperationID = r.Operation.Identity.OperationID
+		r.Operation.Routing.Revision = 1
+		r.Operation.Routing.Target = "/cpamp-admin"
+		r.Operation.Routing.Stage = bootstrap.PrefixCommitted
+		r.Operation.Routing.Committed = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	installManagedCheckpoint(t, app, "committed")
+	baseStatus := validInstallationRuntime()
+	baseStatus.State = rtState
+	rt := &delayedReadyUsageRuntime{status: baseStatus}
+	app.runtime = rt
+	app.managedSource = func(context.Context) (freshkeyapply.ManagedInstall, error) {
+		return freshkeyapply.ManagedInstall{
+			BaseURL:       dual.URL(),
+			ManagementKey: strings.Repeat("a", 64),
+			Strategy:      string(bootstrap.NewManaged),
+		}, nil
+	}
+	var key freshkeys.Result
+	if stagePreKey {
+		key = stageClientKey(t, app)
+	}
+	return opened, app, rt, dual, key
+}
+
+func readSettingInt64(t *testing.T, db *sql.DB, key string) (int64, bool) {
+	t.Helper()
+	var raw string
+	err := db.QueryRow(`select value from settings where key = ?`, key).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false
+	}
+	if err != nil {
+		t.Fatalf("query setting %s: %v", key, err)
+	}
+	parsed, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil {
+		t.Fatalf("parse setting %s=%q: %v", key, raw, err)
+	}
+	return parsed, true
+}
+
+func readSettingString(t *testing.T, db *sql.DB, key string) (string, bool) {
+	t.Helper()
+	var raw string
+	err := db.QueryRow(`select value from settings where key = ?`, key).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false
+	}
+	if err != nil {
+		t.Fatalf("query setting %s: %v", key, err)
+	}
+	return raw, true
+}
+
+func waitUsageSummaryCoverage(t *testing.T, app *freshApplication, wantState, wantReason string) usageapp.SummaryResponse {
+	t.Helper()
+	var summary usageapp.SummaryResponse
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		resp := gatewayRequest(t, app, http.MethodGet, "api-keys/usage-summary", "", "")
+		if resp.Code != http.StatusOK {
+			t.Fatalf("usage-summary = %d %s", resp.Code, resp.Body.String())
+		}
+		if err := json.Unmarshal(resp.Body.Bytes(), &summary); err != nil {
+			t.Fatalf("decode usage-summary: %v", err)
+		}
+		if summary.Coverage.State == wantState && (wantReason == "" || summary.Coverage.Reason == wantReason) {
+			return summary
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("usage-summary coverage = %+v, want %s/%s", summary.Coverage, wantState, wantReason)
+	return summary
+}
+
+func TestAdoptExistingAndNewManagedSubscribePreAdmissionWarmStart(t *testing.T) {
+	t.Run("AdoptExisting subscribe pre-admission warm-start achieves complete coverage and cleans up on rollback", func(t *testing.T) {
+		hostCtx, stopHost := context.WithCancel(t.Context())
+		defer stopHost()
+
+		var dual *dualProtoCPAServer
+		fixture, _ := adoptionFixtureWithDestination(t, func(dest *migrationFakeCPA) string {
+			dual = newDualProtoCPAServer(t, http.HandlerFunc(dest.serve))
+			return dual.URL()
+		}, "source-client-two", "source-client-one")
+		fixture.app.cfg.CollectorMode = "subscribe"
+		fixture.app.cfg.Queue = "usage"
+		fixture.app.cfg.PollInterval = 20 * time.Millisecond
+		fixture.app.runCtx = hostCtx
+
+		// Verify UpdateTx failure rolls back the warm-started Collector cleanly with zero SQLite pollution.
+		if _, err := fixture.opened.DB.Exec(fmt.Sprintf(`create trigger fail_adopt_complete before update on settings when new.key = '%s' begin select raise(abort, 'forced adopt update failure'); end`, freshstore.OperationKey)); err != nil {
+			t.Fatal(err)
+		}
+		badResp := fixture.complete(t)
+		if badResp.Code < 400 {
+			t.Fatalf("forced adopt complete failure = %d %s, want >= 400", badResp.Code, badResp.Body.String())
+		}
+		if _, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms"); ok {
+			t.Fatal("failed adopt/complete leaked fresh_usage_collection_started_at_ms")
+		}
+		if _, ok := readSettingInt64(t, fixture.opened.DB, "fresh_gateway_admitted_at_ms"); ok {
+			t.Fatal("failed adopt/complete leaked fresh_gateway_admitted_at_ms")
+		}
+		if fixture.app.usageCollectionStarted() || fixture.app.rawCollectionPhase() != usageapp.PhaseStopped {
+			t.Fatalf("failed adopt/complete left Collector running (started=%v phase=%s)", fixture.app.usageCollectionStarted(), fixture.app.rawCollectionPhase())
+		}
+		if _, err := fixture.opened.DB.Exec(`drop trigger fail_adopt_complete`); err != nil {
+			t.Fatal(err)
+		}
+
+		if complete := fixture.complete(t); complete.Code != http.StatusOK {
+			t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+		}
+
+		startedMS, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms")
+		if !ok || startedMS <= 0 {
+			t.Fatalf("missing fresh_usage_collection_started_at_ms")
+		}
+		admittedMS, ok := readSettingInt64(t, fixture.opened.DB, "fresh_gateway_admitted_at_ms")
+		if !ok || admittedMS <= 0 {
+			t.Fatalf("missing fresh_gateway_admitted_at_ms")
+		}
+		if startedMS > admittedMS {
+			t.Fatalf("subscribe pre-admission startedMS=%d > admittedMS=%d", startedMS, admittedMS)
+		}
+		var minFirstSeen int64
+		if err := fixture.opened.DB.QueryRow(`select min(first_seen_at_ms) from gateway_api_key_source_bindings where retired_at_ms is null`).Scan(&minFirstSeen); err != nil {
+			t.Fatal(err)
+		}
+		if startedMS > minFirstSeen {
+			t.Fatalf("subscribe pre-admission startedMS=%d > minFirstSeen=%d", startedMS, minFirstSeen)
+		}
+
+		summary := waitUsageSummaryCoverage(t, fixture.app, "complete", "observed")
+		if len(summary.Items) != 2 {
+			t.Fatalf("summary items = %d, want 2", len(summary.Items))
+		}
+		ts := time.Now().UTC().Add(10 * time.Millisecond).Format(time.RFC3339Nano)
+		dual.Publish(fmt.Sprintf(`{"timestamp":%q,"model":"gpt-test","endpoint":"POST /v1/chat/completions","api_key":"source-client-one","input_tokens":50,"output_tokens":10,"total_tokens":60}`, ts))
+
+		deadline := time.Now().Add(3 * time.Second)
+		var totalCalls int64
+		for time.Now().Before(deadline) {
+			resp := gatewayRequest(t, fixture.app, http.MethodGet, "api-keys/usage-summary", "", "")
+			_ = json.Unmarshal(resp.Body.Bytes(), &summary)
+			totalCalls = 0
+			for _, it := range summary.Items {
+				totalCalls += it.Calls
+			}
+			if totalCalls == 1 && summary.Coverage.State == "complete" {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if totalCalls != 1 || summary.Coverage.State != "complete" || summary.Coverage.Reason != "observed" {
+			t.Fatalf("subscribe post-completion summary calls=%d coverage=%+v, want 1 complete/observed", totalCalls, summary.Coverage)
+		}
+	})
+
+	t.Run("NewManaged subscribe pre-admission warm-start achieves complete coverage and cleans up on rollback", func(t *testing.T) {
+		hostCtx, stopHost := context.WithCancel(t.Context())
+		defer stopHost()
+
+		stub := usageManagementStub(t)
+		opened, app, _, dual, _ := newNewManagedSubscribeFixture(t, hostCtx, stub.Config.Handler, model.RuntimeStateReady, false)
+
+		// Simulate UpdateTx failure after warm-start via SQLite trigger on fresh_operation_v1.
+		if _, err := opened.DB.Exec(fmt.Sprintf(`create trigger fail_managed_complete before update on settings when new.key = '%s' begin select raise(abort, 'forced managed update failure'); end`, freshstore.OperationKey)); err != nil {
+			t.Fatal(err)
+		}
+		badResp := installationAPI(t, app, http.MethodPost, "complete", strategyTestAdmin)
+		if badResp.Code != http.StatusConflict {
+			t.Fatalf("bad complete = %d %s, want 409", badResp.Code, badResp.Body.String())
+		}
+		if _, err := opened.DB.Exec(`drop trigger fail_managed_complete`); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := readSettingInt64(t, opened.DB, "fresh_usage_collection_started_at_ms"); ok {
+			t.Fatal("failed NewManaged complete leaked fresh_usage_collection_started_at_ms")
+		}
+		if app.usageCollectionStarted() || app.rawCollectionPhase() != usageapp.PhaseStopped {
+			t.Fatalf("failed NewManaged complete left Collector running")
+		}
+
+		if complete := installationAPI(t, app, http.MethodPost, "complete", strategyTestAdmin); complete.Code != http.StatusOK {
+			t.Fatalf("complete = %d %s", complete.Code, complete.Body.String())
+		}
+		startedMS, ok := readSettingInt64(t, opened.DB, "fresh_usage_collection_started_at_ms")
+		if !ok || startedMS <= 0 {
+			t.Fatal("missing fresh_usage_collection_started_at_ms")
+		}
+		admittedMS, ok := readSettingInt64(t, opened.DB, "fresh_gateway_admitted_at_ms")
+		if !ok || admittedMS <= 0 {
+			t.Fatal("missing fresh_gateway_admitted_at_ms")
+		}
+		if startedMS > admittedMS {
+			t.Fatalf("NewManaged subscribe pre-admission startedMS=%d > admittedMS=%d", startedMS, admittedMS)
+		}
+		postKey := stageClientKey(t, app)
+		_ = dual
+		waitUsageSummaryCoverage(t, app, "complete", "observed")
+		detResp := gatewayRequest(t, app, http.MethodGet, "api-keys/"+string(postKey.Key.ID)+"/usage", "", "")
+		var detail usageapp.DetailResponse
+		if err := json.Unmarshal(detResp.Body.Bytes(), &detail); err != nil {
+			t.Fatal(err)
+		}
+		if detail.Coverage.State != "complete" || detail.Coverage.Reason != "observed" {
+			t.Fatalf("NewManaged subscribe post-completion key coverage = %+v, want complete/observed", detail.Coverage)
+		}
+	})
+
+	t.Run("NewManaged subscribe does not backdate over a key staged before subscribe observed", func(t *testing.T) {
+		hostCtx, stopHost := context.WithCancel(t.Context())
+		defer stopHost()
+
+		stub := usageManagementStub(t)
+		_, app, _, _, preKey := newNewManagedSubscribeFixture(t, hostCtx, stub.Config.Handler, model.RuntimeStateReady, true)
+		time.Sleep(15 * time.Millisecond)
+		if complete := installationAPI(t, app, http.MethodPost, "complete", strategyTestAdmin); complete.Code != http.StatusOK {
+			t.Fatalf("complete = %d %s", complete.Code, complete.Body.String())
+		}
+		waitUsageSummaryCoverage(t, app, "partial", "window_partial")
+		detResp := gatewayRequest(t, app, http.MethodGet, "api-keys/"+string(preKey.Key.ID)+"/usage", "", "")
+		var detail usageapp.DetailResponse
+		if err := json.Unmarshal(detResp.Body.Bytes(), &detail); err != nil {
+			t.Fatal(err)
+		}
+		if detail.Coverage.State != "partial" || detail.Coverage.Reason != "window_partial" {
+			t.Fatalf("pre-warmstart staged key under subscribe = %+v, want partial/window_partial", detail.Coverage)
+		}
+	})
+}
+
+func TestAdoptExistingAndNewManagedSubscribePostAdmissionReportsPartial(t *testing.T) {
+	t.Run("AdoptExisting subscribe post-admission startup is never backdated and stays partial/window_partial", func(t *testing.T) {
+		hostCtx, stopHost := context.WithCancel(t.Context())
+		defer stopHost()
+
+		var dual *dualProtoCPAServer
+		fixture, _ := adoptionFixtureWithDestination(t, func(dest *migrationFakeCPA) string {
+			dual = newDualProtoCPAServer(t, http.HandlerFunc(dest.serve))
+			return dual.URL()
+		}, "source-client-two", "source-client-one")
+		fixture.app.cfg.CollectorMode = "subscribe"
+		fixture.app.cfg.Queue = "usage"
+		fixture.app.cfg.PollInterval = 20 * time.Millisecond
+		fixture.app.runCtx = hostCtx
+		baseStatus := fixture.runtime.status
+		baseStatus.State = model.RuntimeStateStarting
+		delayedRT := &delayedReadyUsageRuntime{status: baseStatus}
+		fixture.app.runtime = delayedRT
+		if complete := fixture.complete(t); complete.Code != http.StatusOK {
+			t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+		}
+		admittedMS, ok := readSettingInt64(t, fixture.opened.DB, "fresh_gateway_admitted_at_ms")
+		if !ok || admittedMS <= 0 {
+			t.Fatal("missing fresh_gateway_admitted_at_ms")
+		}
+		time.Sleep(25 * time.Millisecond)
+		delayedRT.setState(model.RuntimeStateReady)
+
+		summary := waitUsageSummaryCoverage(t, fixture.app, "partial", "window_partial")
+		startedMS, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms")
+		if !ok || startedMS <= admittedMS {
+			t.Fatalf("post-admission subscribe startedMS=%d <= admittedMS=%d (must not backdate)", startedMS, admittedMS)
+		}
+		keys, _ := fixture.app.keys.List(hostCtx)
+		detResp := gatewayRequest(t, fixture.app, http.MethodGet, "api-keys/"+string(keys[0].ID)+"/usage", "", "")
+		var detail usageapp.DetailResponse
+		if err := json.Unmarshal(detResp.Body.Bytes(), &detail); err != nil {
+			t.Fatal(err)
+		}
+		if detail.Coverage.State != "partial" || detail.Coverage.Reason != "window_partial" {
+			t.Fatalf("AdoptExisting post-admission subscribe detail coverage = %+v, want partial/window_partial (summary=%+v)", detail.Coverage, summary.Coverage)
+		}
+	})
+
+	t.Run("NewManaged subscribe post-admission startup is never backdated and stays partial/window_partial", func(t *testing.T) {
+		hostCtx, stopHost := context.WithCancel(t.Context())
+		defer stopHost()
+
+		stub := usageManagementStub(t)
+		opened, app, _, dual, keys := newNewManagedSubscribeFixture(t, hostCtx, stub.Config.Handler, model.RuntimeStateReady, true)
+		dual.rejectSubscribe.Store(true)
+
+		if complete := installationAPI(t, app, http.MethodPost, "complete", strategyTestAdmin); complete.Code != http.StatusOK {
+			t.Fatalf("complete = %d %s", complete.Code, complete.Body.String())
+		}
+		admittedMS, ok := readSettingInt64(t, opened.DB, "fresh_gateway_admitted_at_ms")
+		if !ok || admittedMS <= 0 {
+			t.Fatal("missing fresh_gateway_admitted_at_ms")
+		}
+		time.Sleep(25 * time.Millisecond)
+		dual.rejectSubscribe.Store(false)
+		waitUsageSummaryCoverage(t, app, "partial", "window_partial")
+		startedMS, ok := readSettingInt64(t, opened.DB, "fresh_usage_collection_started_at_ms")
+		if !ok || startedMS <= admittedMS {
+			t.Fatalf("NewManaged post-admission subscribe startedMS=%d <= admittedMS=%d", startedMS, admittedMS)
+		}
+		detResp := gatewayRequest(t, app, http.MethodGet, "api-keys/"+string(keys.Key.ID)+"/usage", "", "")
+		var detail usageapp.DetailResponse
+		if err := json.Unmarshal(detResp.Body.Bytes(), &detail); err != nil {
+			t.Fatal(err)
+		}
+		if detail.Coverage.State != "partial" || detail.Coverage.Reason != "window_partial" {
+			t.Fatalf("NewManaged post-admission subscribe detail coverage = %+v, want partial/window_partial", detail.Coverage)
+		}
+	})
+}
+
+func TestSubscribeDisconnectAdvancesCollectionStartOnReconnect(t *testing.T) {
+	hostCtx, stopHost := context.WithCancel(t.Context())
+	defer stopHost()
+
+	var dual *dualProtoCPAServer
+	fixture, _ := adoptionFixtureWithDestination(t, func(dest *migrationFakeCPA) string {
+		dual = newDualProtoCPAServer(t, http.HandlerFunc(dest.serve))
+		dual.dropOnConnID = 1
+		return dual.URL()
+	}, "source-client-two", "source-client-one")
+	fixture.app.cfg.CollectorMode = "subscribe"
+	fixture.app.cfg.Queue = "usage"
+	fixture.app.cfg.PollInterval = 20 * time.Millisecond
+	fixture.app.runCtx = hostCtx
+	if complete := fixture.complete(t); complete.Code != http.StatusOK {
+		t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+	}
+	waitUsageSummaryCoverage(t, fixture.app, "complete", "observed")
+	t0, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms")
+	if !ok {
+		t.Fatal("missing initial fresh_usage_collection_started_at_ms")
+	}
+	admittedMS, _ := readSettingInt64(t, fixture.opened.DB, "fresh_gateway_admitted_at_ms")
+
+	time.Sleep(25 * time.Millisecond)
+	dual.DropConn(1)
+
+	select {
+	case <-dual.secondSubCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("subscribe did not reconnect after drop")
+	}
+	summary := waitUsageSummaryCoverage(t, fixture.app, "partial", "window_partial")
+	t1, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms")
+	if !ok || t1 <= t0 || t1 <= admittedMS {
+		t.Fatalf("reconnect collection start = %d, want > t0(%d) and > admittedMS(%d)", t1, t0, admittedMS)
+	}
+	if gap, hasGap := readSettingString(t, fixture.opened.DB, "fresh_usage_unreplayed_gap"); hasGap && gap == "1" {
+		t.Fatal("fresh_usage_unreplayed_gap remained set after reconnect observed")
+	}
+	_ = summary
+}
+
+type testRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f testRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func TestHTTPRetainedQueueOutageThreshold(t *testing.T) {
+	hostCtx, stopHost := context.WithCancel(t.Context())
+	defer stopHost()
+
+	var failNextDial atomic.Bool
+	var failNext500 atomic.Bool
+	errServed := make(chan struct{}, 4)
+	fixture, _ := adoptionFixtureWithDestination(t, func(dest *migrationFakeCPA) string {
+		muxSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v0/management/usage-queue" && failNext500.CompareAndSwap(true, false) {
+				http.Error(w, "post-pop server error", http.StatusInternalServerError)
+				select {
+				case errServed <- struct{}{}:
+				default:
+				}
+				return
+			}
+			dest.serve(w, r)
+		}))
+		t.Cleanup(muxSrv.Close)
+		return muxSrv.URL
+	}, "source-client-two", "source-client-one")
+	fixture.app.cfg.CollectorMode = "http"
+	fixture.app.cfg.PollInterval = 15 * time.Millisecond
+	fixture.app.runCtx = hostCtx
+	baseTransport := http.DefaultTransport.(*http.Transport).Clone()
+	t.Cleanup(baseTransport.CloseIdleConnections)
+	fixture.app.legacyCollector.SetHTTPClient(&http.Client{
+		Transport: testRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.Path, "/usage-queue") && failNextDial.CompareAndSwap(true, false) {
+				select {
+				case errServed <- struct{}{}:
+				default:
+				}
+				return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+			}
+			return baseTransport.RoundTrip(req)
+		}),
+	})
+	var clockMS atomic.Int64
+	clockMS.Store(time.Now().UnixMilli())
+	fixture.app.legacyCollector.SetNowFunc(clockMS.Load)
+	fixture.app.usage.SetClock(func() int64 { return clockMS.Load() + 1000 })
+
+	if complete := fixture.complete(t); complete.Code != http.StatusOK {
+		t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+	}
+	waitUsageSummaryCoverage(t, fixture.app, "complete", "observed")
+	t0, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms")
+	if !ok {
+		t.Fatal("missing initial collection start")
+	}
+
+	// Outage <= 45,000ms (pre-pop dial error) preserves retained queue continuity.
+	clockMS.Add(30_000)
+	failNextDial.Store(true)
+	<-errServed
+	deadline := time.Now().Add(3 * time.Second)
+	for fixture.app.rawCollectionPhase() != usageapp.PhaseError && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	for fixture.app.rawCollectionPhase() != usageapp.PhaseRunning && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	t1, _ := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms")
+	if t1 != t0 {
+		t.Fatalf("<=45s HTTP outage altered startedMS from %d to %d", t0, t1)
+	}
+	waitUsageSummaryCoverage(t, fixture.app, "complete", "observed")
+
+	// Outage > 45,000ms breaches retained queue window -> advances marker & degrades to partial/window_partial.
+	clockMS.Add(50_000)
+	failNextDial.Store(true)
+	<-errServed
+	var t2 int64
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if cur, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms"); ok && cur > t0 {
+			t2 = cur
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if t2 <= t0 {
+		t.Fatalf(">45s HTTP outage startedMS=%d <= initial=%d", t2, t0)
+	}
+	waitUsageSummaryCoverage(t, fixture.app, "partial", "window_partial")
+
+	// Uncertain HTTP 500 error advances marker even within 1ms.
+	clockMS.Add(1)
+	failNext500.Store(true)
+	<-errServed
+	var t3 int64
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if cur, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms"); ok && cur > t2 {
+			t3 = cur
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if t3 <= t2 {
+		t.Fatalf("uncertain HTTP 500 did not advance startedMS (%d <= %d)", t3, t2)
+	}
+}
+
+func TestAdoptExistingDBCommitBeforeHTTPReturnGapStillComplete(t *testing.T) {
+	hostCtx, stopHost := context.WithCancel(t.Context())
+	defer stopHost()
+
+	fixture := adoptionFixtureWithKeys(t, "source-client-two", "source-client-one")
+	fixture.destination.serveUsageAPI = true
+	fixture.app.cfg.CollectorMode = "http"
+	fixture.app.cfg.PollInterval = 15 * time.Millisecond
+	fixture.app.runCtx = hostCtx
+	baseStatus := fixture.runtime.status
+	baseStatus.State = model.RuntimeStateStarting
+	delayedRT := &delayedReadyUsageRuntime{status: baseStatus}
+	wireAdoptManagedAuthority(fixture.app, fixture.runtime, fixture.destination.URL())
+	fixture.app.runtime = delayedRT
+
+	if complete := fixture.complete(t); complete.Code != http.StatusOK {
+		t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+	}
+	admittedMS, ok := readSettingInt64(t, fixture.opened.DB, "fresh_gateway_admitted_at_ms")
+	if !ok || admittedMS <= 0 {
+		t.Fatal("missing fresh_gateway_admitted_at_ms")
+	}
+	// Simulate runtime becoming Ready shortly after UpdateTx commit (well within 45s retained queue).
+	time.Sleep(25 * time.Millisecond)
+	delayedRT.setState(model.RuntimeStateReady)
+
+	waitUsageSummaryCoverage(t, fixture.app, "complete", "observed")
+	startedMS, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms")
+	if !ok || startedMS != admittedMS {
+		t.Fatalf("HTTP retained queue alignment = %d, want gateway admitted %d", startedMS, admittedMS)
+	}
+}
+
+func TestPutUsageConfigOmittedOrNullCollectorEnabledPreservesMonitoring(t *testing.T) {
+	hostCtx, stopHost := context.WithCancel(t.Context())
+	defer stopHost()
+
+	fixture := adoptionFixtureWithKeys(t, "source-client-two", "source-client-one")
+	fixture.destination.serveUsageAPI = true
+	fixture.app.cfg.CollectorMode = "http"
+	fixture.app.cfg.PollInterval = 20 * time.Millisecond
+	fixture.app.runCtx = hostCtx
+	fixture.runtime.status.State = model.RuntimeStateReady
+	wireAdoptManagedAuthority(fixture.app, fixture.runtime, fixture.destination.URL())
+
+	if complete := fixture.complete(t); complete.Code != http.StatusOK {
+		t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+	}
+	waitUsageSummaryCoverage(t, fixture.app, "complete", "observed")
+	t0, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms")
+	if !ok {
+		t.Fatal("missing initial fresh_usage_collection_started_at_ms")
+	}
+
+	// 1. PUT with collector omitted must preserve monitoring=true and zero disabled gap.
+	putOmitted := fmt.Sprintf(`{"config":{"cpaConnection":{"cpaBaseUrl":%q}}}`, fixture.destination.URL())
+	if resp := gatewayRequest(t, fixture.app, http.MethodPut, "cpamp/usage-service/config", putOmitted, "application/json"); resp.Code != http.StatusOK {
+		t.Fatalf("PUT omitted collector = %d %s", resp.Code, resp.Body.String())
+	}
+	if _, hasGap := readSettingString(t, fixture.opened.DB, "fresh_usage_monitoring_disabled_gap"); hasGap {
+		t.Fatal("PUT omitted collector created fresh_usage_monitoring_disabled_gap")
+	}
+	if seq, hasSeq := readSettingInt64(t, fixture.opened.DB, "fresh_usage_monitoring_disable_seq"); hasSeq && seq != 0 {
+		t.Fatalf("PUT omitted collector incremented disable seq to %d", seq)
+	}
+	if t1, _ := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms"); t1 != t0 {
+		t.Fatalf("PUT omitted collector changed startedMS from %d to %d", t0, t1)
+	}
+
+	// 2. PUT with collector.enabled: null must preserve monitoring=true and zero disabled gap.
+	putNull := fmt.Sprintf(`{"config":{"cpaConnection":{"cpaBaseUrl":%q},"collector":{"enabled":null,"queue":"usage"}}}`, fixture.destination.URL())
+	if resp := gatewayRequest(t, fixture.app, http.MethodPut, "cpamp/usage-service/config", putNull, "application/json"); resp.Code != http.StatusOK {
+		t.Fatalf("PUT null collector.enabled = %d %s", resp.Code, resp.Body.String())
+	}
+	if _, hasGap := readSettingString(t, fixture.opened.DB, "fresh_usage_monitoring_disabled_gap"); hasGap {
+		t.Fatal("PUT null collector.enabled created fresh_usage_monitoring_disabled_gap")
+	}
+	if t2, _ := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms"); t2 != t0 {
+		t.Fatalf("PUT null collector.enabled changed startedMS from %d to %d", t0, t2)
+	}
+	waitUsageSummaryCoverage(t, fixture.app, "complete", "observed")
+
+	// 3. Failing PUT (invalid json / bad payload) with disabled token must NOT write gap or stop Collector.
+	badPut := gatewayRequest(t, fixture.app, http.MethodPut, "cpamp/usage-service/config", `{"config":{"collector":{"enabled":false`, "application/json")
+	if badPut.Code < 400 {
+		t.Fatalf("bad PUT = %d, want 4xx", badPut.Code)
+	}
+	if _, hasGap := readSettingString(t, fixture.opened.DB, "fresh_usage_monitoring_disabled_gap"); hasGap {
+		t.Fatal("failed PUT created fresh_usage_monitoring_disabled_gap")
+	}
+	if !fixture.app.usageCollectionStarted() || fixture.app.rawCollectionPhase() == usageapp.PhaseStopped {
+		t.Fatal("failed PUT stopped Collector")
+	}
+}
+
+func TestWaiterToCollectorHandoffRemainsCollectionStartingUntilMarkerCommits(t *testing.T) {
+	hostCtx, stopHost := context.WithCancel(t.Context())
+	defer stopHost()
+
+	fixture := adoptionFixtureWithKeys(t, "source-client-two", "source-client-one")
+	fixture.destination.serveUsageAPI = true
+	fixture.app.cfg.CollectorMode = "http"
+	fixture.app.cfg.PollInterval = 15 * time.Millisecond
+	fixture.app.runCtx = hostCtx
+	baseStatus := fixture.runtime.status
+	baseStatus.State = model.RuntimeStateStarting
+	delayedRT := &delayedReadyUsageRuntime{status: baseStatus}
+	wireAdoptManagedAuthority(fixture.app, fixture.runtime, fixture.destination.URL())
+	fixture.app.runtime = delayedRT
+
+	if complete := fixture.complete(t); complete.Code != http.StatusOK {
+		t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+	}
+	if !fixture.app.hasArmedManagedUsageRuntimeWaiter() {
+		t.Fatal("expected waiter armed before Ready")
+	}
+	waitUsageSummaryCoverage(t, fixture.app, "unknown", "collection_starting")
+
+	markerEntered := make(chan struct{})
+	releaseMarker := make(chan struct{})
+	var enterOnce sync.Once
+	fixture.app.beforeUsageMarkerCommit = func() {
+		enterOnce.Do(func() {
+			close(markerEntered)
+			<-releaseMarker
+		})
+	}
+
+	delayedRT.setState(model.RuntimeStateReady)
+	select {
+	case <-markerEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for Collector observation marker commit hook")
+	}
+
+	if _, hasMarker := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms"); hasMarker {
+		t.Fatal("collection start marker committed before hook released")
+	}
+	// Even after waiter cleared usageAwaitArmed and Collector started running,
+	// Summary and Detail MUST report collection_starting until marker commits.
+	var summary usageapp.SummaryResponse
+	sumResp := gatewayRequest(t, fixture.app, http.MethodGet, "api-keys/usage-summary", "", "")
+	if sumResp.Code != http.StatusOK {
+		t.Fatalf("handoff usage-summary = %d %s", sumResp.Code, sumResp.Body.String())
+	}
+	if err := json.Unmarshal(sumResp.Body.Bytes(), &summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary.Coverage.State != "unknown" || summary.Coverage.Reason != "collection_starting" {
+		t.Fatalf("handoff summary coverage = %+v, want unknown/collection_starting (never collection_unproven)", summary.Coverage)
+	}
+
+	keys, err := fixture.app.keys.List(hostCtx)
+	if err != nil || len(keys) == 0 {
+		t.Fatalf("keys = %#v %v", keys, err)
+	}
+	detResp := gatewayRequest(t, fixture.app, http.MethodGet, "api-keys/"+string(keys[0].ID)+"/usage", "", "")
+	if detResp.Code != http.StatusOK {
+		t.Fatalf("handoff detail = %d %s", detResp.Code, detResp.Body.String())
+	}
+	var detail usageapp.DetailResponse
+	if err := json.Unmarshal(detResp.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.Coverage.State != "unknown" || detail.Coverage.Reason != "collection_starting" {
+		t.Fatalf("handoff detail coverage = %+v, want unknown/collection_starting", detail.Coverage)
+	}
+
+	close(releaseMarker)
+	waitUsageSummaryCoverage(t, fixture.app, "complete", "observed")
+}
+
+func TestSampleUsageAuthorityFailureReleasesUsageStartMuDuringAuthRejection(t *testing.T) {
+	hostCtx, stopHost := context.WithCancel(t.Context())
+	defer stopHost()
+
+	var sampleCalls atomic.Int32
+	authRejectingCPA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v0/management/usage-queue" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		sampleCalls.Add(1)
+		http.Error(w, "temporary error", http.StatusBadGateway)
+	}))
+	defer authRejectingCPA.Close()
+
+	fixture := adoptionFixtureWithKeys(t, "source-client-two", "source-client-one")
+	fixture.app.cfg.CollectorMode = "http"
+	fixture.app.cfg.PollInterval = 5 * time.Millisecond
+	fixture.app.runCtx = hostCtx
+	fixture.runtime.status.State = model.RuntimeStateReady
+	fixture.app.managedSource = func(context.Context) (freshkeyapply.ManagedInstall, error) {
+		return freshkeyapply.ManagedInstall{
+			BaseURL:       authRejectingCPA.URL,
+			ManagementKey: strings.Repeat("a", 64),
+			Strategy:      string(bootstrap.AdoptExisting),
+		}, nil
+	}
+
+	done := make(chan warmStartUsageState, 1)
+	op, _ := fixture.app.current(hostCtx)
+	go func() {
+		done <- fixture.app.warmStartUsageCollectorBeforeCompletion(hostCtx, op)
+	}()
+
+	select {
+	case warm := <-done:
+		if warm.started || !warm.sampleErr {
+			t.Fatalf("warmStart state = %+v, want started=false sampleErr=true", warm)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("warmStartUsageCollectorBeforeCompletion deadlocked while stopping Collector that invokes reportCollectorAuthRejection")
+	}
+	if fixture.app.usageStartupPending.Load() {
+		t.Fatal("usageStartupPending remained true after sampleUsageAuthority failure")
+	}
+	if sampleCalls.Load() == 0 {
+		t.Fatal("expected sampleUsageAuthority call")
+	}
+
+	// Also verify attemptUsageStartWithWarmState when called directly (post-admission path).
+	doneStart := make(chan bool, 1)
+	go func() {
+		fixture.app.usageStartMu.Lock()
+		defer fixture.app.usageStartMu.Unlock()
+		doneStart <- fixture.app.attemptUsageStartWithWarmState(hostCtx, op, false, warmStartUsageState{})
+	}()
+	select {
+	case ok := <-doneStart:
+		if ok {
+			t.Fatal("attemptUsageStartWithWarmState = true, want false on sample error")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("attemptUsageStartWithWarmState deadlocked while stopping Collector that invokes reportCollectorAuthRejection")
+	}
+	if fixture.app.usageStartupPending.Load() {
+		t.Fatal("usageStartupPending remained true after attemptUsageStartWithWarmState sample failure")
+	}
+}
+
+func TestStaleObservationFenceRejectsDisableSeqRaceWithoutClearingDisabledGap(t *testing.T) {
+	hostCtx, stopHost := context.WithCancel(t.Context())
+	defer stopHost()
+
+	fixture := adoptionFixtureWithKeys(t, "source-client-two", "source-client-one")
+	fixture.destination.serveUsageAPI = true
+	fixture.app.cfg.CollectorMode = "http"
+	fixture.app.cfg.PollInterval = 15 * time.Millisecond
+	fixture.app.runCtx = hostCtx
+	baseStatus := fixture.runtime.status
+	baseStatus.State = model.RuntimeStateStarting
+	delayedRT := &delayedReadyUsageRuntime{status: baseStatus}
+	wireAdoptManagedAuthority(fixture.app, fixture.runtime, fixture.destination.URL())
+	fixture.app.runtime = delayedRT
+
+	if complete := fixture.complete(t); complete.Code != http.StatusOK {
+		t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+	}
+
+	obsEntered := make(chan struct{})
+	releaseObs := make(chan struct{})
+	var once sync.Once
+	fixture.app.beforeUsageMarkerCommit = func() {
+		once.Do(func() {
+			close(obsEntered)
+			<-releaseObs
+		})
+	}
+
+	delayedRT.setState(model.RuntimeStateReady)
+	select {
+	case <-obsEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for initial observation commit hook")
+	}
+
+	// While Run 1's observation (snapshotted at disable_seq=0) is paused before SQLite commit,
+	// toggle monitoring OFF (bumps disable_seq to 1, sets disabled_gap=1) and back ON without
+	// cancelling Run 1 yet — SQLite must fence Run 1's observation via ObservedDisableSeq.
+	if _, err := fixture.app.runtimeSettings.PatchManagerCollectorEnabled(hostCtx, false); err != nil {
+		t.Fatal(err)
+	}
+	fixture.app.beforeUsageMarkerCommit = nil
+	close(releaseObs)
+
+	if gap, ok := readSettingString(t, fixture.opened.DB, "fresh_usage_monitoring_disabled_gap"); !ok || gap != "1" {
+		t.Fatalf("stale seq=0 observation cleared fresh_usage_monitoring_disabled_gap (gap=%q ok=%v)", gap, ok)
+	}
+	if _, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms"); ok {
+		t.Fatal("stale seq=0 observation wrote fresh_usage_collection_started_at_ms while monitoring disabled")
+	}
+
+	// Now re-enable monitoring; the fresh run (seq=1) commits cleanly from the new instant.
+	time.Sleep(25 * time.Millisecond)
+	patchResp := gatewayRequest(t, fixture.app, http.MethodPatch, "cpamp/usage-service/config", `{"enabled":true}`, "application/json")
+	if patchResp.Code != http.StatusOK {
+		t.Fatalf("PATCH config enabled=true = %d %s", patchResp.Code, patchResp.Body.String())
+	}
+	waitUsageSummaryCoverage(t, fixture.app, "partial", "window_partial")
+}
+
+func TestSubscribeToHTTPConfigReloadAdvancesCollectionStart(t *testing.T) {
+	hostCtx, stopHost := context.WithCancel(t.Context())
+	defer stopHost()
+
+	var dual *dualProtoCPAServer
+	fixture, _ := adoptionFixtureWithDestination(t, func(dest *migrationFakeCPA) string {
+		dual = newDualProtoCPAServer(t, http.HandlerFunc(dest.serve))
+		return dual.URL()
+	}, "source-client-two", "source-client-one")
+	fixture.app.cfg.CollectorMode = "subscribe"
+	fixture.app.cfg.Queue = "usage"
+	fixture.app.cfg.PollInterval = 15 * time.Millisecond
+	fixture.app.runCtx = hostCtx
+
+	if complete := fixture.complete(t); complete.Code != http.StatusOK {
+		t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+	}
+	waitUsageSummaryCoverage(t, fixture.app, "complete", "observed")
+	t0, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms")
+	if !ok {
+		t.Fatal("missing initial subscribe collection start")
+	}
+	transport0, _ := readSettingString(t, fixture.opened.DB, "fresh_usage_last_transport")
+	if transport0 != "subscribe" {
+		t.Fatalf("last_transport = %q, want subscribe", transport0)
+	}
+
+	time.Sleep(25 * time.Millisecond)
+	// Reload collector mode from subscribe -> http via manager config PUT.
+	fixture.app.cfg.CollectorMode = "http"
+	putBody := fmt.Sprintf(`{"config":{"cpaConnection":{"cpaBaseUrl":%q},"collector":{"collectorMode":"http","pollIntervalMs":15}}}`, dual.URL())
+	putResp := gatewayRequest(t, fixture.app, http.MethodPut, "cpamp/usage-service/config", putBody, "application/json")
+	if putResp.Code != http.StatusOK {
+		t.Fatalf("PUT mode=http = %d %s", putResp.Code, putResp.Body.String())
+	}
+	var t1 int64
+	var transport1 string
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		curT, curOk := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms")
+		curTr, _ := readSettingString(t, fixture.opened.DB, "fresh_usage_last_transport")
+		if curOk && curT > t0 && curTr == "http" {
+			t1 = curT
+			transport1 = curTr
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if t1 <= t0 || transport1 != "http" {
+		t.Fatalf("subscribe -> http reload = (t1=%d <= t0=%d, transport=%q), want t1 > t0 and http", t1, t0, transport1)
+	}
+	waitUsageSummaryCoverage(t, fixture.app, "partial", "window_partial")
+}
+
+func TestUsageConfigRetentionBudgetAndUnverifiedFailClosed(t *testing.T) {
+	t.Run("honors 10s CPA retention (7500ms budget) across short and long pre-pop outages", func(t *testing.T) {
+		hostCtx, stopHost := context.WithCancel(t.Context())
+		defer stopHost()
+
+		var failNextDial atomic.Bool
+		errServed := make(chan struct{}, 4)
+		fixture, _ := adoptionFixtureWithDestination(t, func(dest *migrationFakeCPA) string {
+			muxSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v0/management/config" && r.Method == http.MethodGet {
+					w.Header().Set("Content-Type", "application/json")
+					w.Header().Set("X-CPA-Version", "v8.0.13")
+					_, _ = io.WriteString(w, `{"redis-usage-queue-retention-seconds":10}`)
+					return
+				}
+				dest.serve(w, r)
+			}))
+			t.Cleanup(muxSrv.Close)
+			return muxSrv.URL
+		}, "source-client-two", "source-client-one")
+		fixture.app.cfg.CollectorMode = "http"
+		fixture.app.cfg.PollInterval = 15 * time.Millisecond
+		fixture.app.runCtx = hostCtx
+		baseTransport := http.DefaultTransport.(*http.Transport).Clone()
+		t.Cleanup(baseTransport.CloseIdleConnections)
+		fixture.app.legacyCollector.SetHTTPClient(&http.Client{
+			Transport: testRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if strings.HasSuffix(req.URL.Path, "/usage-queue") && failNextDial.CompareAndSwap(true, false) {
+					select {
+					case errServed <- struct{}{}:
+					default:
+					}
+					return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+				}
+				return baseTransport.RoundTrip(req)
+			}),
+		})
+		var clockMS atomic.Int64
+		clockMS.Store(time.Now().UnixMilli())
+		fixture.app.legacyCollector.SetNowFunc(clockMS.Load)
+		fixture.app.usage.SetClock(func() int64 { return clockMS.Load() + 1000 })
+
+		if complete := fixture.complete(t); complete.Code != http.StatusOK {
+			t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+		}
+		waitUsageSummaryCoverage(t, fixture.app, "complete", "observed")
+		t0, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms")
+		if !ok {
+			t.Fatal("missing initial collection start")
+		}
+		budget, hasBudget := readSettingInt64(t, fixture.opened.DB, "fresh_usage_last_retention_ms")
+		if !hasBudget || budget != 7_500 {
+			t.Fatalf("fresh_usage_last_retention_ms = (%d, %v), want 7500", budget, hasBudget)
+		}
+
+		// 5,000ms outage <= 7,500ms keeps complete/observed.
+		clockMS.Add(5_000)
+		failNextDial.Store(true)
+		<-errServed
+		deadline := time.Now().Add(3 * time.Second)
+		for fixture.app.rawCollectionPhase() != usageapp.PhaseError && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		for fixture.app.rawCollectionPhase() != usageapp.PhaseRunning && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		t1, _ := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms")
+		if t1 != t0 {
+			t.Fatalf("5s outage altered startedMS from %d to %d under 7.5s budget", t0, t1)
+		}
+
+		// 9,000ms outage (> 7,500ms budget, though < 45s default) advances marker!
+		clockMS.Add(9_000)
+		failNextDial.Store(true)
+		<-errServed
+		var t2 int64
+		deadline = time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if cur, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms"); ok && cur > t0 {
+				t2 = cur
+				break
+			}
+			time.Sleep(15 * time.Millisecond)
+		}
+		if t2 <= t0 {
+			t.Fatalf("9s outage > 7.5s budget did not advance startedMS (%d <= %d)", t2, t0)
+		}
+		waitUsageSummaryCoverage(t, fixture.app, "partial", "window_partial")
+	})
+
+	t.Run("non-JSON 200 config fails closed on initial admission backfill", func(t *testing.T) {
+		hostCtx, stopHost := context.WithCancel(t.Context())
+		defer stopHost()
+
+		fixture, _ := adoptionFixtureWithDestination(t, func(dest *migrationFakeCPA) string {
+			muxSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v0/management/config" && r.Method == http.MethodGet {
+					w.Header().Set("Content-Type", "text/plain")
+					_, _ = io.WriteString(w, `not json`)
+					return
+				}
+				dest.serve(w, r)
+			}))
+			t.Cleanup(muxSrv.Close)
+			return muxSrv.URL
+		}, "source-client-two", "source-client-one")
+		fixture.app.cfg.CollectorMode = "http"
+		fixture.app.cfg.PollInterval = 15 * time.Millisecond
+		fixture.app.runCtx = hostCtx
+		baseClock := time.Now().UnixMilli()
+		var clockMS atomic.Int64
+		clockMS.Store(baseClock + 500)
+		fixture.app.legacyCollector.SetNowFunc(clockMS.Load)
+		fixture.app.usage.SetClock(func() int64 { return baseClock + 1000 })
+
+		if complete := fixture.complete(t); complete.Code != http.StatusOK {
+			t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+		}
+		waitUsageSummaryCoverage(t, fixture.app, "partial", "window_partial")
+		admittedMS, _ := readSettingInt64(t, fixture.opened.DB, "fresh_gateway_admitted_at_ms")
+		startedMS, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms")
+		if !ok || startedMS <= admittedMS {
+			t.Fatalf("unverified retention backfilled startedMS=%d to admittedMS=%d", startedMS, admittedMS)
+		}
+		budget, _ := readSettingInt64(t, fixture.opened.DB, "fresh_usage_last_retention_ms")
+		if budget != 0 {
+			t.Fatalf("fresh_usage_last_retention_ms = %d, want 0", budget)
+		}
+	})
+}
+func TestUsageSourceIdentityChangeAdvancesCollectionStart(t *testing.T) {
+	hostCtx, stopHost := context.WithCancel(t.Context())
+	defer stopHost()
+
+	var dual *dualProtoCPAServer
+	fixture, _ := adoptionFixtureWithDestination(t, func(dest *migrationFakeCPA) string {
+		dual = newDualProtoCPAServer(t, http.HandlerFunc(dest.serve))
+		return dual.URL()
+	}, "source-client-two", "source-client-one")
+	fixture.app.cfg.CollectorMode = "resp"
+	fixture.app.cfg.Queue = "usage:a"
+	fixture.app.cfg.PollInterval = 15 * time.Millisecond
+	fixture.app.runCtx = hostCtx
+
+	if complete := fixture.complete(t); complete.Code != http.StatusOK {
+		t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+	}
+	waitUsageSummaryCoverage(t, fixture.app, "complete", "observed")
+	t0, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms")
+	if !ok {
+		t.Fatal("missing initial fresh_usage_collection_started_at_ms")
+	}
+	src0, hasSrc0 := readSettingString(t, fixture.opened.DB, "fresh_usage_last_source_id")
+	if !hasSrc0 || src0 == "" {
+		t.Fatalf("missing fresh_usage_last_source_id (got %q, %v)", src0, hasSrc0)
+	}
+
+	// Change only the RESP queue ("usage:a" -> "usage:b") while keeping the same
+	// transport ("resp") and endpoint: SourceID changes so continuity resets cleanly.
+	time.Sleep(25 * time.Millisecond)
+	fixture.app.cfg.Queue = "usage:b"
+	putBody := fmt.Sprintf(`{"config":{"cpaConnection":{"cpaBaseUrl":%q},"collector":{"collectorMode":"resp","queue":"usage:b","pollIntervalMs":15}}}`, dual.URL())
+	if resp := gatewayRequest(t, fixture.app, http.MethodPut, "cpamp/usage-service/config", putBody, "application/json"); resp.Code != http.StatusOK {
+		t.Fatalf("PUT new queue = %d %s", resp.Code, resp.Body.String())
+	}
+
+	var t1 int64
+	var src1 string
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		curT, curOk := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms")
+		curSrc, _ := readSettingString(t, fixture.opened.DB, "fresh_usage_last_source_id")
+		if curOk && curT > t0 && curSrc != "" && curSrc != src0 {
+			t1 = curT
+			src1 = curSrc
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if t1 <= t0 || src1 == "" || src1 == src0 {
+		t.Fatalf("source change = (t1=%d <= t0=%d, src1=%q src0=%q)", t1, t0, src1, src0)
+	}
+	waitUsageSummaryCoverage(t, fixture.app, "partial", "window_partial")
+}
+
+func TestInitialRetainedDrainHoldsMarkerAndCorruptedDisableSeqFailsClosed(t *testing.T) {
+	t.Run("multi-batch startup drain holds collection marker until queue drains below batchSize", func(t *testing.T) {
+		hostCtx, stopHost := context.WithCancel(t.Context())
+		defer stopHost()
+
+		var pollNum atomic.Int32
+		poll1Done := make(chan struct{})
+		releasePoll2 := make(chan struct{})
+		fixture, _ := adoptionFixtureWithDestination(t, func(dest *migrationFakeCPA) string {
+			muxSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v0/management/usage-queue" && r.Method == http.MethodGet {
+					w.Header().Set("Content-Type", "application/json")
+					n := pollNum.Add(1)
+					switch n {
+					case 1:
+						_, _ = io.WriteString(w, `[{"timestamp":"2026-11-27T00:00:01Z","model":"m","endpoint":"POST /v1/chat/completions","api_key":"source-client-two","input_tokens":1,"output_tokens":1,"total_tokens":2},{"timestamp":"2026-11-27T00:00:02Z","model":"m","endpoint":"POST /v1/chat/completions","api_key":"source-client-two","input_tokens":1,"output_tokens":1,"total_tokens":2}]`)
+						close(poll1Done)
+					case 2:
+						<-releasePoll2
+						_, _ = io.WriteString(w, `[{"timestamp":"2026-11-27T00:00:03Z","model":"m","endpoint":"POST /v1/chat/completions","api_key":"source-client-two","input_tokens":1,"output_tokens":1,"total_tokens":2}]`)
+					default:
+						_, _ = io.WriteString(w, `[]`)
+					}
+					return
+				}
+				dest.serve(w, r)
+			}))
+			t.Cleanup(muxSrv.Close)
+			return muxSrv.URL
+		}, "source-client-two", "source-client-one")
+		fixture.app.cfg.CollectorMode = "http"
+		fixture.app.cfg.BatchSize = 2
+		fixture.app.cfg.PollInterval = 15 * time.Millisecond
+		fixture.app.runCtx = hostCtx
+
+		if complete := fixture.complete(t); complete.Code != http.StatusOK {
+			t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+		}
+		select {
+		case <-poll1Done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("poll 1 did not run")
+		}
+		// Give poll 1 time to finish ingesting its 2 items before checking marker is held.
+		time.Sleep(40 * time.Millisecond)
+		if startedMS, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms"); ok && startedMS > 0 {
+			t.Fatalf("fresh_usage_collection_started_at_ms=%d committed before full batch drained", startedMS)
+		}
+		if !fixture.app.usageStartupPending.Load() {
+			t.Fatal("usageStartupPending cleared while initial full-batch drain was still in progress")
+		}
+
+		close(releasePoll2)
+		waitUsageSummaryCoverage(t, fixture.app, "complete", "observed")
+		if _, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms"); !ok {
+			t.Fatal("missing fresh_usage_collection_started_at_ms after drain completed")
+		}
+	})
+
+	t.Run("corrupted monitoring_disable_seq refuses Pop until repaired", func(t *testing.T) {
+		hostCtx, stopHost := context.WithCancel(t.Context())
+		defer stopHost()
+
+		fixture := adoptionFixtureWithKeys(t, "source-client-two", "source-client-one")
+		fixture.destination.serveUsageAPI = true
+		fixture.app.cfg.CollectorMode = "http"
+		fixture.app.cfg.PollInterval = 15 * time.Millisecond
+		fixture.app.runCtx = hostCtx
+		fixture.runtime.status.State = model.RuntimeStateReady
+		wireAdoptManagedAuthority(fixture.app, fixture.runtime, fixture.destination.URL())
+
+		// Corrupt fresh_usage_monitoring_disable_seq before completion starts Collector.
+		if _, err := fixture.opened.DB.ExecContext(t.Context(),
+			`insert into settings(key, value, updated_at_ms) values('fresh_usage_monitoring_disable_seq', 'corrupted', 1)
+			 on conflict(key) do update set value='corrupted', updated_at_ms=1`); err != nil {
+			t.Fatal(err)
+		}
+		if complete := fixture.complete(t); complete.Code != http.StatusOK {
+			t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+		}
+		time.Sleep(120 * time.Millisecond)
+		fixture.destination.usageQueueMu.Lock()
+		polls := fixture.destination.usageQueuePolls
+		fixture.destination.usageQueueMu.Unlock()
+		if polls != 0 {
+			t.Fatalf("Pop called %d times with corrupted disableSeq, want 0", polls)
+		}
+		if startedMS, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms"); ok && startedMS > 0 {
+			t.Fatalf("fresh_usage_collection_started_at_ms=%d written with corrupted disableSeq", startedMS)
+		}
+
+		// Repair fresh_usage_monitoring_disable_seq -> Collector resumes polling and persists marker.
+		if _, err := fixture.opened.DB.ExecContext(t.Context(),
+			`update settings set value='0', updated_at_ms=2 where key='fresh_usage_monitoring_disable_seq'`); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(3 * time.Second)
+		var recoveredMS int64
+		for time.Now().Before(deadline) {
+			if v, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms"); ok && v > 0 {
+				recoveredMS = v
+				break
+			}
+			time.Sleep(15 * time.Millisecond)
+		}
+		if recoveredMS <= 0 {
+			t.Fatal("collector never observed after repairing fresh_usage_monitoring_disable_seq")
+		}
+	})
+}
+
+type faultOnceSettingRepo struct {
+	setting.Repository
+	failWhen func() bool
+	failErr  error
+}
+
+func (r *faultOnceSettingRepo) LoadManagerConfig(ctx context.Context) (model.ManagerConfig, bool, error) {
+	if r.failWhen != nil && r.failWhen() {
+		return model.ManagerConfig{}, false, r.failErr
+	}
+	return r.Repository.LoadManagerConfig(ctx)
+}
+
+func TestPostStartMonitoringSwitchTransientErrorStopsCollectorAndRetriesCleanly(t *testing.T) {
+	t.Run("fresh start transient post-start switch error stops run without deadlock and retry observes", func(t *testing.T) {
+		hostCtx, stopHost := context.WithCancel(t.Context())
+		defer stopHost()
+
+		var rejectQueue atomic.Bool
+		rejectQueue.Store(true)
+		release401 := make(chan struct{})
+		var releaseOnce sync.Once
+		unblock401 := func() {
+			releaseOnce.Do(func() { close(release401) })
+		}
+		t.Cleanup(unblock401)
+		fixture, _ := adoptionFixtureWithDestination(t, func(dest *migrationFakeCPA) string {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v0/management/usage-queue" && rejectQueue.Load() {
+					select {
+					case <-release401:
+					case <-r.Context().Done():
+						return
+					}
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+					return
+				}
+				dest.serve(w, r)
+			}))
+			t.Cleanup(srv.Close)
+			return srv.URL
+		}, "source-client-two", "source-client-one")
+		fixture.destination.serveUsageAPI = true
+		fixture.app.cfg.CollectorMode = "http"
+		fixture.app.cfg.PollInterval = 5 * time.Millisecond
+		if complete := fixture.complete(t); complete.Code != http.StatusOK {
+			t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+		}
+		fixture.app.runCtx = hostCtx
+		var failedOnce atomic.Bool
+		fixture.app.runtimeSettings = &faultOnceSettingRepo{
+			Repository: fixture.app.runtimeSettings,
+			failWhen: func() bool {
+				if fixture.app.legacyCollector.StartCount() == 1 && !failedOnce.Swap(true) {
+					unblock401()
+					return true
+				}
+				return false
+			},
+			failErr: errors.New("transient settings failure"),
+		}
+		op, err := fixture.app.current(hostCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		doneFirst := make(chan bool, 1)
+		go func() {
+			fixture.app.usageStartMu.Lock()
+			defer fixture.app.usageStartMu.Unlock()
+			doneFirst <- fixture.app.attemptUsageStartWithWarmState(hostCtx, op, false, warmStartUsageState{})
+		}()
+		select {
+		case ok := <-doneFirst:
+			if ok {
+				t.Fatal("first attemptUsageStartWithWarmState = true, want false on post-start switch error")
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("attemptUsageStartWithWarmState deadlocked stopping Collector on post-start switch error")
+		}
+		if fixture.app.usageCollectionStarted() || fixture.app.usageStartupPending.Load() || fixture.app.collectionPhase() != usageapp.PhaseStopped {
+			t.Fatalf("post-failure state: started=%v pending=%v phase=%s", fixture.app.usageCollectionStarted(), fixture.app.usageStartupPending.Load(), fixture.app.collectionPhase())
+		}
+
+		rejectQueue.Store(false)
+		fixture.app.startUsageCollection(op)
+		waitForCondition(t, func() bool {
+			v, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms")
+			return ok && v > 0
+		})
+	})
+
+	t.Run("warm-started collector stops when post-start switch check fails and retry observes", func(t *testing.T) {
+		hostCtx, stopHost := context.WithCancel(t.Context())
+		defer stopHost()
+
+		fixture := adoptionFixtureWithKeys(t, "source-client-two", "source-client-one")
+		fixture.destination.serveUsageAPI = true
+		fixture.app.cfg.CollectorMode = "http"
+		fixture.app.cfg.PollInterval = 10 * time.Millisecond
+		if complete := fixture.complete(t); complete.Code != http.StatusOK {
+			t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+		}
+		fixture.app.runCtx = hostCtx
+		fixture.runtime.status.State = model.RuntimeStateReady
+		wireAdoptManagedAuthority(fixture.app, fixture.runtime, fixture.destination.URL())
+		var failedOnce atomic.Bool
+		fixture.app.runtimeSettings = &faultOnceSettingRepo{
+			Repository: fixture.app.runtimeSettings,
+			failWhen: func() bool {
+				return fixture.app.legacyCollector.StartCount() == 1 && !failedOnce.Swap(true)
+			},
+			failErr: errors.New("transient post-warm-start switch error"),
+		}
+		op, err := fixture.app.current(hostCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		warm := fixture.app.warmStartUsageCollectorBeforeCompletion(hostCtx, op)
+		if !warm.started {
+			t.Fatalf("warmStart = %+v, want started=true", warm)
+		}
+		fixture.app.startUsageCollectionWithWarmState(op, warm)
+		if fixture.app.usageCollectionStarted() || fixture.app.usageStartupPending.Load() || fixture.app.collectionPhase() != usageapp.PhaseStopped {
+			t.Fatalf("after warm-start post-check failure: started=%v pending=%v phase=%s", fixture.app.usageCollectionStarted(), fixture.app.usageStartupPending.Load(), fixture.app.collectionPhase())
+		}
+		if _, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms"); ok {
+			t.Fatal("fresh_usage_collection_started_at_ms written despite failed post-start switch check")
+		}
+
+		fixture.app.startUsageCollection(op)
+		waitForCondition(t, func() bool {
+			v, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms")
+			return ok && v > 0
+		})
+	})
+}
+
+func TestManagedCPAUsageStatisticsDisabledRefusesStartupAndRecordsGap(t *testing.T) {
+	t.Run("warm start during completion refuses statistics disabled and records gap", func(t *testing.T) {
+		hostCtx, stopHost := context.WithCancel(t.Context())
+		defer stopHost()
+
+		var statsEnabled atomic.Bool
+		fixture, _ := adoptionFixtureWithDestination(t, func(dest *migrationFakeCPA) string {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v0/management/config" && r.Method == http.MethodGet {
+					w.Header().Set("Content-Type", "application/json")
+					if statsEnabled.Load() {
+						_, _ = io.WriteString(w, `{"usage-statistics-enabled":true,"redis-usage-queue-retention-seconds":60}`)
+					} else {
+						_, _ = io.WriteString(w, `{"usage-statistics-enabled":false,"redis-usage-queue-retention-seconds":60}`)
+					}
+					return
+				}
+				dest.serve(w, r)
+			}))
+			t.Cleanup(srv.Close)
+			return srv.URL
+		}, "source-client-two", "source-client-one")
+		fixture.destination.serveUsageAPI = true
+		fixture.app.cfg.CollectorMode = "http"
+		fixture.app.cfg.PollInterval = 15 * time.Millisecond
+		fixture.app.runCtx = hostCtx
+
+		if complete := fixture.complete(t); complete.Code != http.StatusOK {
+			t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+		}
+		if fixture.app.usageCollectionStarted() || fixture.app.usageStartupPending.Load() || fixture.app.collectionPhase() != usageapp.PhaseStopped {
+			t.Fatalf("state with usage-statistics-enabled=false: started=%v pending=%v phase=%s", fixture.app.usageCollectionStarted(), fixture.app.usageStartupPending.Load(), fixture.app.collectionPhase())
+		}
+		if got := fixture.app.usageStartBlock(); got != usageStartReasonStatisticsDisabled {
+			t.Fatalf("usageStartBlock = %q, want %q", got, usageStartReasonStatisticsDisabled)
+		}
+		if gap, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_unreplayed_gap"); !ok || gap != 1 {
+			t.Fatalf("fresh_usage_unreplayed_gap = (%d, %v), want (1, true)", gap, ok)
+		}
+		if _, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms"); ok {
+			t.Fatal("fresh_usage_collection_started_at_ms written while usage-statistics-enabled=false")
+		}
+
+		// Re-enabling statistics starts cleanly without backfilling to gatewayAdmittedAtMS because the gap was recorded.
+		admittedMS, ok := readSettingInt64(t, fixture.opened.DB, "fresh_gateway_admitted_at_ms")
+		if !ok || admittedMS <= 0 {
+			t.Fatalf("fresh_gateway_admitted_at_ms = (%d, %v), want positive", admittedMS, ok)
+		}
+		time.Sleep(5 * time.Millisecond)
+		statsEnabled.Store(true)
+		op, err := fixture.app.current(hostCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixture.app.startUsageCollection(op)
+		waitUsageSummaryCoverage(t, fixture.app, "partial", "window_partial")
+		startedMS, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_collection_started_at_ms")
+		if !ok || startedMS <= admittedMS {
+			t.Fatalf("collectingAt after disabled gap = (%d, %v), want > admittedMS=%d", startedMS, ok, admittedMS)
+		}
+	})
+
+	t.Run("direct attemptUsageStartWithWarmState refuses statistics disabled and records gap", func(t *testing.T) {
+		hostCtx, stopHost := context.WithCancel(t.Context())
+		defer stopHost()
+
+		fixture, _ := adoptionFixtureWithDestination(t, func(dest *migrationFakeCPA) string {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v0/management/config" && r.Method == http.MethodGet {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"usage-statistics-enabled":false,"redis-usage-queue-retention-seconds":60}`)
+					return
+				}
+				dest.serve(w, r)
+			}))
+			t.Cleanup(srv.Close)
+			return srv.URL
+		}, "source-client-two", "source-client-one")
+		fixture.destination.serveUsageAPI = true
+		fixture.app.cfg.CollectorMode = "http"
+		fixture.app.cfg.PollInterval = 15 * time.Millisecond
+		if complete := fixture.complete(t); complete.Code != http.StatusOK {
+			t.Fatalf("adopt complete = %d %s", complete.Code, complete.Body.String())
+		}
+		fixture.app.runCtx = hostCtx
+		op, err := fixture.app.current(hostCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixture.app.startUsageCollection(op)
+		if fixture.app.usageCollectionStarted() || fixture.app.usageStartupPending.Load() || fixture.app.collectionPhase() != usageapp.PhaseStopped {
+			t.Fatalf("direct start state with stats disabled: started=%v pending=%v phase=%s", fixture.app.usageCollectionStarted(), fixture.app.usageStartupPending.Load(), fixture.app.collectionPhase())
+		}
+		if got := fixture.app.usageStartBlock(); got != usageStartReasonStatisticsDisabled {
+			t.Fatalf("usageStartBlock = %q, want %q", got, usageStartReasonStatisticsDisabled)
+		}
+		if gap, ok := readSettingInt64(t, fixture.opened.DB, "fresh_usage_unreplayed_gap"); !ok || gap != 1 {
+			t.Fatalf("fresh_usage_unreplayed_gap = (%d, %v), want (1, true)", gap, ok)
+		}
+	})
 }

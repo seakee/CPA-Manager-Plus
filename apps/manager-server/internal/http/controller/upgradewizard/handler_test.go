@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,6 +25,7 @@ import (
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
@@ -184,6 +186,17 @@ func TestPreflightServesAReport(t *testing.T) {
 		}
 		if report.Fingerprint != "" && !strings.HasSuffix(report.Fingerprint, "…") && len(report.Fingerprint) > 12 {
 			t.Fatalf("fingerprint is not abbreviated: %q", report.Fingerprint)
+		}
+		wantArtifactID, qErr := freshstrategy.QualifiedUpgradeAdoptionArtifactID()
+		if qErr != nil {
+			t.Fatalf("QualifiedUpgradeAdoptionArtifactID() error = %v", qErr)
+		}
+		wantAbbrev := abbreviateArtifactID(string(wantArtifactID))
+		if wantAbbrev == "" || report.QualifiedCPAArtifactID != wantAbbrev {
+			t.Fatalf("preflight qualifiedCpaArtifactId = %q, want %q", report.QualifiedCPAArtifactID, wantAbbrev)
+		}
+		if regexp.MustCompile(`[0-9a-f]{64}`).MatchString(body) {
+			t.Fatalf("preflight body published a full 64-hex digest: %s", body)
 		}
 	}
 }
@@ -1537,6 +1550,14 @@ func TestScrubbersKeepHostPathsOut(t *testing.T) {
 	}
 	if got := abbreviate("0123456789abcdef"); got != "0123456789ab…" {
 		t.Fatalf("abbreviate = %q", got)
+	}
+	if got := abbreviateArtifactID("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"); got != "sha256:0123456789ab…" {
+		t.Fatalf("abbreviateArtifactID valid = %q", got)
+	}
+	for _, bad := range []string{"", "sha256:short", "sha256:0123456789ABcdef0123456789abcdef0123456789abcdef0123456789abcdef", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"} {
+		if got := abbreviateArtifactID(bad); got != "" {
+			t.Fatalf("abbreviateArtifactID(%q) = %q, want empty", bad, got)
+		}
 	}
 }
 

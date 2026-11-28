@@ -448,4 +448,17 @@ describe('accepted CPA update HTTP contract', () => {
       code: 'invalid_request',
     });
   });
+
+  it.each(['：non-latin1', 'bad\x01ctrl', 'bad\x7fdel'])(
+    'classifies invalid header credential %j as unauthorized context_changed without sending an Axios request',
+    async (badKey) => {
+      await expect(
+        cpaUpdateApi.status({ base: 'https://manager.test', key: badKey })
+      ).rejects.toMatchObject({
+        kind: 'context_changed',
+        code: 'unauthorized',
+      });
+      expect(request).not.toHaveBeenCalled();
+    }
+  );
 });

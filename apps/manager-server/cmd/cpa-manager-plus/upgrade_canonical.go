@@ -64,8 +64,14 @@ type upgradeCanonicalServer struct {
 	configService      *upgradeConfigService
 	runtimeLifecycleMu runtimeLifecycleMutex
 	pluginCapability   *pluginCapabilityProbe
-	reconcileMu        sync.Mutex
-	bgWG               sync.WaitGroup
+	reconcileMu                sync.Mutex
+	managedCollectorWaitMu        sync.Mutex
+	managedCollectorWaitID        uint64
+	managedCollectorWaitCancel    context.CancelFunc
+	managedCollectorPollEvery     time.Duration
+	managedCollectorWaitBudget    time.Duration
+	testManagedCollectorWaitCheck func() error
+	bgWG                          sync.WaitGroup
 }
 
 func failClosedUpgradeHandler(code string) http.Handler {

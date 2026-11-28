@@ -395,9 +395,14 @@ func (a *freshApplication) adoptComplete(w http.ResponseWriter, r *http.Request,
 	// The gateway reported no plugin support while completion was pending, and
 	// that answer may be cached; the completed install has to be probed afresh.
 	a.pluginCapability.reprove(r.Context())
-	// Completion is the moment the install-derived CPA authority exists, so the
-	// same idempotent startup path as a resumed install runs now.
-	a.startUsageCollection(decision.next.Operation)
+	if hook := a.beforeCompletionUsageStart; hook != nil {
+		hook()
+	}
+	// Completion is the moment the install-derived CPA authority exists, and for
+	// AdoptExisting the destination instance was staged fresh with zero
+	// pre-adoption history, so initial completion aligns collection start to the
+	// gateway admission boundary when Collector queue replay covers it.
+	a.finishCompletionUsageCollection(r.Context(), decision.next.Operation, decision.warmState)
 	writeFreshJSON(w, decision.next.Operation)
 }
 
@@ -407,6 +412,7 @@ func (a *freshApplication) adoptComplete(w http.ResponseWriter, r *http.Request,
 // without a code is a bare HTTP refusal.
 type adoptCompletion struct {
 	next      freshstore.Record
+	warmState warmStartUsageState
 	status    int
 	code      string
 	retryable int
@@ -486,15 +492,17 @@ func (a *freshApplication) decideAdoptionCompletion(ctx context.Context, op boot
 	// conflict (a retired key, a foreign journal, a stale continuation or a
 	// moved revision) or storage failure rolls back the whole transaction so no
 	// incomplete adoption ever exposes adopted keys or write authority.
+	updater, ok := a.store.(freshstore.TransactionalUpdater)
+	if !ok {
+		return adoptCompletion{status: http.StatusServiceUnavailable, code: "adopt_installation_unavailable"}
+	}
+	warmState := a.warmStartUsageCollectorBeforeCompletion(ctx, current.Operation)
 	prepared, err := a.keyApply.PrepareAdoption(ctx, destinationKeys)
 	if err != nil {
+		a.rollbackWarmStartUsageCollector(ctx, warmState)
 		if errors.Is(err, freshkeyapply.ErrAdoptionConflict) || errors.Is(err, freshkeyapply.ErrGeneration) {
 			return adoptCompletion{status: http.StatusConflict, code: "adopt_installation_conflict"}
 		}
-		return adoptCompletion{status: http.StatusServiceUnavailable, code: "adopt_installation_unavailable"}
-	}
-	updater, ok := a.store.(freshstore.TransactionalUpdater)
-	if !ok {
 		return adoptCompletion{status: http.StatusServiceUnavailable, code: "adopt_installation_unavailable"}
 	}
 	next, err := updater.UpdateTx(ctx, op.Identity, record.Operation.Revision, func(record *freshstore.Record, tx *sql.Tx) error {
@@ -526,6 +534,7 @@ func (a *freshApplication) decideAdoptionCompletion(ctx context.Context, op boot
 		return nil
 	})
 	if err != nil {
+		a.rollbackWarmStartUsageCollector(ctx, warmState)
 		switch {
 		case errors.Is(err, errAdoptMigrationRunChanged):
 			return adoptCompletion{status: http.StatusConflict, code: adoptMigrationRunChanged}
@@ -537,7 +546,7 @@ func (a *freshApplication) decideAdoptionCompletion(ctx context.Context, op boot
 			return adoptCompletion{status: http.StatusServiceUnavailable, code: "adopt_installation_unavailable"}
 		}
 	}
-	return adoptCompletion{next: next}
+	return adoptCompletion{next: next, warmState: warmState}
 }
 
 // reconcileCompletedAdoption ensures a completed Managed Adopt installation

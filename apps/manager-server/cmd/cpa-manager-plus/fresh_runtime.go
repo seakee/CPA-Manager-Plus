@@ -1485,6 +1485,39 @@ func (c freshRuntimeClientAdapter) ObserveUpdateOperation(ctx context.Context, r
 	return client.ObserveUpdateOperation(ctx, request)
 }
 
+type freshBaselineArtifactAdapter struct {
+	app *freshApplication
+}
+
+func (c freshBaselineArtifactAdapter) Status(ctx context.Context) (runtimeservice.ArtifactStatus, error) {
+	if c.app == nil || c.app.artifact == nil || c.app.effectiveRuntimeMode(ctx) != model.RuntimeModeEmbedded {
+		return runtimeservice.ArtifactStatus{}, errEmbeddedRuntimeDisabled
+	}
+	return c.app.artifact.Status(ctx)
+}
+
+func (c freshBaselineArtifactAdapter) AdoptBundledBaseline(ctx context.Context, expectedActiveArtifactID string) (runtimeservice.ArtifactStatus, error) {
+	if c.app == nil || c.app.artifact == nil || c.app.effectiveRuntimeMode(ctx) != model.RuntimeModeEmbedded {
+		return runtimeservice.ArtifactStatus{}, errEmbeddedRuntimeDisabled
+	}
+	unlock, err := c.app.runtimeLifecycleMu.Lock(ctx)
+	if err != nil {
+		return runtimeservice.ArtifactStatus{}, err
+	}
+	if c.app.effectiveRuntimeMode(ctx) != model.RuntimeModeEmbedded || c.app.artifact == nil {
+		unlock()
+		return runtimeservice.ArtifactStatus{}, errEmbeddedRuntimeDisabled
+	}
+	status, adoptErr := c.app.artifact.AdoptBundledBaseline(ctx, expectedActiveArtifactID)
+	unlock()
+	if adoptErr == nil {
+		if op, opErr := c.app.current(context.WithoutCancel(ctx)); opErr == nil && op.ProductComplete {
+			c.app.reconcileUsageMonitoring(context.WithoutCancel(ctx), op, false)
+		}
+	}
+	return status, adoptErr
+}
+
 // refreshRuntimeOperations resolves abandoned journal entries from one
 // observation and returns the resulting journal. The observation and the journal
 // read both happen outside the journal mutex; only the merge and write are

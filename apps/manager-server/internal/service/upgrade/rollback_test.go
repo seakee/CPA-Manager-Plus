@@ -2147,3 +2147,30 @@ func TestPrepareAndRecordRollbackRefuseScratchInsideExternalBackupDirectory(t *t
 		assertTreeUnchanged(t, "external backup after RecordRollback TMPDIR", backupBefore, fingerprintTree(t, extBackup))
 	})
 }
+
+func TestVerifyRollbackInstallAllowsNewArchivesDirWhenBackupRecordedNoArchives(t *testing.T) {
+	volume := newLegacyVolume(t)
+	if err := os.RemoveAll(filepath.Join(volume.root, archivesDirName)); err != nil {
+		t.Fatalf("remove usage-archives: %v", err)
+	}
+	targetRoot := canonicalTempDir(t)
+	options := copyInOptions(volume, targetRoot)
+	lock := volume.lock(t)
+	options.Lock = lock
+	if _, err := CopyIn(context.Background(), options); err != nil {
+		_ = lock.Close()
+		t.Fatalf("CopyIn(no usage-archives): %v", err)
+	}
+	_ = lock.Close()
+
+	recorded, found, err := ReadRecord(context.Background(), filepath.Join(targetRoot, databaseFileName))
+	if err != nil || !found {
+		t.Fatalf("ReadRecord: found=%t err=%v", found, err)
+	}
+	// Simulate restarted 1.x Manager lazily creating usage-archives/ after rollback.
+	writeFixtureTree(t, filepath.Join(volume.root, archivesDirName, "2026-11", "segment-000001.jsonl"), "{\"segment\":1}\n")
+
+	if err := verifyRollbackInstall(context.Background(), volume.root, targetRoot, DefaultBundleDirectory(targetRoot), "", recorded); err != nil {
+		t.Fatalf("verifyRollbackInstall after 1.x created usage-archives/ = %v, want nil", err)
+	}
+}

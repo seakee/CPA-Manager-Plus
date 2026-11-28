@@ -32,6 +32,8 @@ package freshstrategy
 
 import (
 	"slices"
+	"sync"
+	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
@@ -82,6 +84,95 @@ func QualifiedUpgradeAdoptionDecisions() ([]bootstrap.AdoptionResourceDecision, 
 func QualifiedUpgradeAdoptionArtifactID() (model.RuntimeArtifactID, error) {
 	artifact, _, err := qualifiedUpgradeAdoptionAuthority()
 	return artifact, err
+}
+
+// retiredUpgradeAdoptionArtifacts lists canonical v8 CPA artifacts that an
+// earlier accepted CPAMP v2 release's `consumer.json` proved for 1.x -> v2
+// Managed imports. When `consumer.json` is renewed to a newer bundled CPA
+// baseline, retaining the prior release's qualified `artifactId` here keeps
+// already-completed Managed installations admitted across CPAMP slot updates
+// and image upgrades without permitting new imports to stage onto retired
+// artifacts.
+var retiredUpgradeAdoptionArtifacts = []model.RuntimeArtifactID{
+	"sha256:e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7",
+}
+
+var (
+	retiredUpgradeAdoptionArtifactsMu       sync.RWMutex
+	retiredUpgradeAdoptionArtifactsOverride []model.RuntimeArtifactID
+)
+
+// WithRetiredUpgradeAdoptionArtifactsForTesting overrides the retired adoption
+// artifact lineage within a Go test so completed-store admission can be verified
+// against simulated historical CPAMP baselines without mutating `consumer.json`.
+func WithRetiredUpgradeAdoptionArtifactsForTesting(retired []model.RuntimeArtifactID, fn func()) {
+	if !testing.Testing() {
+		panic("freshstrategy: WithRetiredUpgradeAdoptionArtifactsForTesting called outside go test")
+	}
+	cloned := slices.Clone(retired)
+	if cloned == nil {
+		cloned = []model.RuntimeArtifactID{}
+	}
+	retiredUpgradeAdoptionArtifactsMu.Lock()
+	prev := retiredUpgradeAdoptionArtifactsOverride
+	retiredUpgradeAdoptionArtifactsOverride = cloned
+	retiredUpgradeAdoptionArtifactsMu.Unlock()
+	defer func() {
+		retiredUpgradeAdoptionArtifactsMu.Lock()
+		retiredUpgradeAdoptionArtifactsOverride = prev
+		retiredUpgradeAdoptionArtifactsMu.Unlock()
+	}()
+	fn()
+}
+
+func activeRetiredUpgradeAdoptionArtifacts() []model.RuntimeArtifactID {
+	retiredUpgradeAdoptionArtifactsMu.RLock()
+	override := retiredUpgradeAdoptionArtifactsOverride
+	retiredUpgradeAdoptionArtifactsMu.RUnlock()
+	if override != nil {
+		return override
+	}
+	return retiredUpgradeAdoptionArtifacts
+}
+
+// AdmittedCompletedUpgradeAdoptionArtifactID reports whether candidate names an
+// artifact a completed 1.x -> v2 Managed import could legitimately have recorded:
+// either this binary's current `QualifiedUpgradeAdoptionArtifactID()` or an
+// earlier accepted release's retired adoption artifact. New or unfinished imports
+// must still call `QualifiedUpgradeAdoptionArtifactID()` directly.
+func AdmittedCompletedUpgradeAdoptionArtifactID(candidate model.RuntimeArtifactID) (bool, error) {
+	consumers, err := loadProductionQualification(productionEvidence)
+	if err != nil {
+		return false, errProductionQualification
+	}
+	return admittedCompletedUpgradeAdoptionArtifactIDFrom(
+		consumers,
+		activeRetiredUpgradeAdoptionArtifacts(),
+		candidate,
+	)
+}
+
+func admittedCompletedUpgradeAdoptionArtifactIDFrom(
+	consumers map[consumerKey]qualifiedConsumer,
+	retired []model.RuntimeArtifactID,
+	candidate model.RuntimeArtifactID,
+) (bool, error) {
+	current, _, err := qualifiedUpgradeAdoptionAuthorityFrom(consumers)
+	if err != nil {
+		return false, err
+	}
+	for _, item := range retired {
+		if !item.IsValid() {
+			return false, errProductionQualification
+		}
+	}
+	if !candidate.IsValid() {
+		return false, nil
+	}
+	if candidate == current || slices.Contains(retired, candidate) {
+		return true, nil
+	}
+	return false, nil
 }
 
 // qualifiedUpgradeAdoption is the decisions half of the single derivation, for

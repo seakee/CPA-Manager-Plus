@@ -4,7 +4,7 @@ const en = {
   installerOrigin: 'Installer',
   adoptedOrigin: 'Adopted',
   adoptedOriginNote:
-    'Keys marked as adopted were already in use on the source CPA when this installation took it over and have not been re-verified yet.',
+    'Imported from the source CPA during adoption and not rotated since; replace it anytime to isolate legacy clients.',
   copyKey: 'Copy key',
   keyCopied: 'Key copied. It was not stored in this browser.',
   keyCopyFailed: 'Clipboard unavailable. Try copying the key again.',
@@ -422,7 +422,7 @@ const zh: typeof en = {
   installerOrigin: '安装生成的密钥',
   adoptedOrigin: '接管时带来的密钥',
   adoptedOriginNote:
-    '标记为“接管”的密钥在接管时就已在源 CPA 上使用，当前尚未重新校验。',
+    '该密钥由源 CPA 接管迁入并继续沿用，自接管后尚未轮换；如需隔离旧客户端可随时执行替换。',
   copyKey: '复制密钥',
   keyCopied: '密钥已复制，未保存在此浏览器中。',
   keyCopyFailed: '剪贴板不可用，请重试复制密钥。',
@@ -820,7 +820,7 @@ const tw: typeof en = {
   installerOrigin: '安裝產生的金鑰',
   adoptedOrigin: '接管時帶來的金鑰',
   adoptedOriginNote:
-    '標記為「接管」的金鑰在接管時就已在來源 CPA 上使用，目前尚未重新驗證。',
+    '該金鑰由來源 CPA 接管遷入並繼續沿用，自接管後尚未輪換；如需隔離舊用戶端可隨時執行替換。',
   copyKey: '複製金鑰',
   keyCopied: '金鑰已複製，未儲存在此瀏覽器中。',
   keyCopyFailed: '剪貼簿無法使用，請重試複製金鑰。',
@@ -1218,7 +1218,7 @@ const ru: typeof en = {
   installerOrigin: 'Ключ установки',
   adoptedOrigin: 'Ключ принятого CPA',
   adoptedOriginNote:
-    'Ключи с пометкой «принятый» уже использовались в исходном CPA на момент переноса и ещё не перепроверялись.',
+    'Этот ключ перенесён из исходного CPA при принятии под управление и с тех пор не ротировался; при необходимости замените его, чтобы изолировать старые клиенты.',
   copyKey: 'Скопировать ключ',
   keyCopied: 'Ключ скопирован. В этом браузере он не сохранён.',
   keyCopyFailed: 'Буфер обмена недоступен. Попробуйте скопировать ключ ещё раз.',

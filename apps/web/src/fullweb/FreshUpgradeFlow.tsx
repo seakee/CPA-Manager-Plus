@@ -30,7 +30,7 @@ import {
 import { FreshArtifactStep } from './FreshArtifactStep';
 import type { ArtifactTransportLike } from './freshArtifact';
 import { FullWebIcon } from './FullWebIcon';
-import { PublicApiError, type PublicApiClient } from './publicApi';
+import { isValidExactHeaderCredentialValue, PublicApiError, type PublicApiClient } from './publicApi';
 import { readRoutingContext } from './routingContext';
 // Recorded operations and worker observations are authoritative; accepted jobs
 // never advance a local stage or imply that the unique verification gate passed.
@@ -49,6 +49,13 @@ function formatPreflightSourceVersion(
     return `${t('checkPending', language)} (${report.expectedVersion})`;
   }
   return t('preflightUnknown', language);
+}
+
+function formatPreflightCpaBaseline(artifactId: string): string {
+  if (artifactId.startsWith('sha256:') && artifactId.length > 19) {
+    return `sha256:${artifactId.slice(7, 19)}…`;
+  }
+  return artifactId;
 }
 
 export type UpgradeWizardResource =
@@ -173,6 +180,7 @@ export interface UpgradePreflight {
   // not passed.
   pendingDeclaration: boolean;
   expectedVersion: string;
+  qualifiedCpaArtifactId?: string;
 }
 
 export interface UpgradeStatus {
@@ -410,6 +418,16 @@ export function parseUpgradePreflight(value: unknown): UpgradePreflight | null {
   } else if (expectedVersion !== '') {
     return null;
   }
+  let qualifiedCpaArtifactId = '';
+  if (document.qualifiedCpaArtifactId !== undefined) {
+    if (
+      typeof document.qualifiedCpaArtifactId !== 'string' ||
+      !/^sha256:[0-9a-f]{12}(?:…|[0-9a-f]{52})$/.test(document.qualifiedCpaArtifactId)
+    ) {
+      return null;
+    }
+    qualifiedCpaArtifactId = document.qualifiedCpaArtifactId;
+  }
   return {
     sourceKind: text(document.sourceKind),
     sourceVersion: text(document.sourceVersion),
@@ -428,6 +446,7 @@ export function parseUpgradePreflight(value: unknown): UpgradePreflight | null {
     ready: document.ready,
     pendingDeclaration,
     expectedVersion,
+    ...(qualifiedCpaArtifactId ? { qualifiedCpaArtifactId } : {}),
   };
 }
 
@@ -576,6 +595,9 @@ function createUpgradeWizardRequest(
     }
     const key = resource === 'bootstrap/identity' ? '' : credential();
     if (!key && resource !== 'bootstrap/identity') throw new UpgradeWizardError('authentication');
+    if (resource !== 'bootstrap/identity' && !isValidExactHeaderCredentialValue(key)) {
+      throw new UpgradeWizardError('authentication', '', 401);
+    }
     const controller = new AbortController();
     const abort = () => controller.abort();
     signal.addEventListener('abort', abort);
@@ -1709,6 +1731,22 @@ export function FreshUpgradeFlow({
                     {preflightReport.fingerprint || t('preflightUnknown', language)}
                   </dd>
                 </div>
+                {preflightReport.qualifiedCpaArtifactId && (
+                  <div>
+                    <dt>{t('preflightCpaBaseline', language)}</dt>
+                    <dd
+                      className="upgrade-fact-mono"
+                      data-testid="upgrade-preflight-cpa-baseline"
+                      title={
+                        preflightReport.qualifiedCpaArtifactId.endsWith('…')
+                          ? undefined
+                          : preflightReport.qualifiedCpaArtifactId
+                      }
+                    >
+                      {formatPreflightCpaBaseline(preflightReport.qualifiedCpaArtifactId)}
+                    </dd>
+                  </div>
+                )}
               </dl>
               {preflightReport.pendingDeclaration && (
                 <div
@@ -2515,24 +2553,55 @@ export function FreshUpgradeFlow({
             !canonicalConfirmed &&
             ((resultAccessInfo && !resultAccessInfo.ready) || (!resultAccessInfo && executionAvailable))
         );
+        const consolePrefix =
+          resultAccessInfo?.managementBasePath ||
+          record?.routing?.controlBasePath ||
+          '';
+        const fallbackAccessMode: AccessMode =
+          record?.targetMode === 'external' ? 'connect_external' : 'migrate_legacy';
+        const fallbackInferencePrefix =
+          fallbackAccessMode === 'connect_external'
+            ? ''
+            : isCanonicalPrefix(record?.routing?.inferenceBasePath)
+              ? record!.routing!.inferenceBasePath
+              : '';
         const canonicalPendingTarget = Boolean(
           isCleanComplete &&
             canonicalConfirmed &&
-            resultAccessInfo &&
-            !resultAccessInfo.ready
+            ((resultAccessInfo && !resultAccessInfo.ready) ||
+              (!resultAccessInfo && isCanonicalPrefix(consolePrefix)))
         );
         const canonicalPendingExternal = Boolean(
           canonicalPendingTarget &&
-            (resultAccessInfo?.mode === 'connect_external' ||
-              resultAccessInfo?.code === 'external_target_unavailable')
+            (resultAccessInfo
+              ? resultAccessInfo.mode === 'connect_external' ||
+                resultAccessInfo.code === 'external_target_unavailable'
+              : fallbackAccessMode === 'connect_external')
         );
         const canonicalPendingGateway = Boolean(
           canonicalPendingTarget && !canonicalPendingExternal
         );
-        const consolePrefix =
-          resultAccessInfo?.managementBasePath ||
-          (canonicalConfirmed ? record?.routing?.controlBasePath : '') ||
-          '';
+        const displayedResultAccessInfo: AccessInfo | undefined =
+          resultAccessInfo ??
+          (isCleanComplete && isCanonicalPrefix(consolePrefix)
+            ? {
+                mode: fallbackAccessMode,
+                managementBasePath: consolePrefix,
+                inferenceBasePath: fallbackInferencePrefix,
+                ...(fallbackAccessMode === 'connect_external' && effectiveExternalBaseUrl
+                  ? { externalBaseUrl: effectiveExternalBaseUrl }
+                  : {}),
+                protocols: [],
+                ready: false,
+                code: canonicalConfirmed
+                  ? fallbackAccessMode === 'connect_external'
+                    ? 'external_target_unavailable'
+                    : 'gateway_pending'
+                  : record?.routing?.existingPrefixesPreserved
+                    ? 'routing_unavailable'
+                    : 'upgrade_restart_required',
+              }
+            : undefined);
         const sourceSummary = record
           ? [formatSourceKind(record.sourceKind, language), record.sourceVersion]
               .filter(Boolean)
@@ -2662,16 +2731,16 @@ export function FreshUpgradeFlow({
                     )}
                   </>
                 )}
-                {isCleanComplete && resultAccessInfo && (
+                {isCleanComplete && displayedResultAccessInfo && (
                   <div className="upgrade-result-access-wrap" data-testid="upgrade-result-access">
-                    {resultAccessInfo.ready ? (
+                    {displayedResultAccessInfo.ready ? (
                       <p className="upgrade-sr-only" data-testid="upgrade-access-active">
                         {t('resultAccessActive', language)}
                       </p>
                     ) : (
                       !canonicalConfirmed &&
-                      (resultAccessInfo.code === 'upgrade_restart_required' ||
-                        !resultAccessInfo.code) && (
+                      (displayedResultAccessInfo.code === 'upgrade_restart_required' ||
+                        !displayedResultAccessInfo.code) && (
                         <p className="upgrade-sr-only" data-testid="upgrade-access-pending-restart">
                           {t('resultAccessPendingRestart', language)}
                         </p>
@@ -2683,18 +2752,27 @@ export function FreshUpgradeFlow({
                         {e('gatewayWaiting', language)}
                       </p>
                     )}
-                    <AccessInfoSummary
-                      client={FAIL_CLOSED_ACCESS_CLIENT}
-                      auth={{ kind: 'admin', value: '' }}
-                      info={resultAccessInfo}
-                      defaultProtocolsCollapsed
-                      completionRecovery
-                      pendingRestart={
-                        !canonicalConfirmed &&
-                        !resultAccessInfo.ready &&
-                        resultAccessInfo.code === 'upgrade_restart_required'
+                    <div
+                      data-testid={
+                        isCanonicalPrefix(consolePrefix)
+                          ? 'upgrade-result-console-banner'
+                          : undefined
                       }
-                    />
+                    >
+                      <AccessInfoSummary
+                        client={FAIL_CLOSED_ACCESS_CLIENT}
+                        auth={{ kind: 'admin', value: '' }}
+                        info={displayedResultAccessInfo}
+                        origin={previewOrigin || undefined}
+                        defaultProtocolsCollapsed
+                        completionRecovery
+                        pendingRestart={
+                          !canonicalConfirmed &&
+                          !displayedResultAccessInfo.ready &&
+                          displayedResultAccessInfo.code === 'upgrade_restart_required'
+                        }
+                      />
+                    </div>
                   </div>
                 )}
               </>

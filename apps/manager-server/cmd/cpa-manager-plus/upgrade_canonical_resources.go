@@ -71,6 +71,7 @@ type upgradeCanonicalDependencies struct {
 	Workspace       *upgradeKeyWorkspace
 	Protector       *security.Protector
 	Runtime         runtimeservice.RuntimeClient
+	Artifact        *runtimeservice.ArtifactClient
 	CollectorWorker *worker.CollectorWorker
 	DesiredStateOut *runtimeservice.DesiredStateStore
 	Startup         *startupHTTPHandler
@@ -114,12 +115,15 @@ func (u *upgradeCanonicalServer) initCanonicalResources(
 	var artifactClient *runtimeservice.ArtifactClient
 	if u.targetMode == model.UpgradeTargetManaged {
 		runtimeClient = deps.Runtime
+		artifactClient = deps.Artifact
 		if cfg.EmbeddedRuntimeConfigured() {
 			tokenSource := runtimeservice.NewFileRuntimeTokenSource(cfg.RuntimeTokenFile)
 			if runtimeClient == nil {
 				runtimeClient = runtimeservice.NewEmbeddedClientWithTokenSource(cfg.RuntimeURL, tokenSource)
 			}
-			artifactClient = runtimeservice.NewArtifactClientWithTokenSource(cfg.RuntimeURL, tokenSource)
+			if artifactClient == nil {
+				artifactClient = runtimeservice.NewArtifactClientWithTokenSource(cfg.RuntimeURL, tokenSource)
+			}
 		}
 	}
 	workspace := deps.Workspace
@@ -169,16 +173,20 @@ func (u *upgradeCanonicalServer) initCanonicalResources(
 		return install.BaseURL, install.ManagementKey, nil
 	})
 	if u.appCtx != nil && u.db != nil {
-		u.appCtx.CPAUpdateService = cpaupdateservice.New(
+		svc := cpaupdateservice.New(
 			upgradeCPAUpdateStore{owner: u},
 			upgradeRuntimeClientAdapter{owner: u},
 			u.runtimeModeFor(u.targetMode),
-		).WithArtifactClient(artifactClient).WithModeResolver(func() model.RuntimeMode {
+		).WithModeResolver(func() model.RuntimeMode {
 			return u.effectiveRuntimeMode(context.Background())
 		}).WithProductCompleteProbe(func(ctx context.Context) (bool, error) {
 			op, err := u.loadCurrentOp(ctx)
 			return op.Stage == model.UpgradeStageComplete, err
 		})
+		if artifactClient != nil {
+			svc = svc.WithArtifactClient(upgradeBaselineArtifactAdapter{owner: u})
+		}
+		u.appCtx.CPAUpdateService = svc
 	}
 	u.configService = &upgradeConfigService{owner: u}
 	u.pluginCapability = newPluginCapabilityProbeWithContext(ctx, pluginCapabilityTTL, pluginCapabilityProbeTimeout, u.probePluginCapable)
@@ -3295,7 +3303,7 @@ func (u *upgradeCanonicalServer) serveRuntimeStatus(w http.ResponseWriter, r *ht
 		writeFreshJSON(w, freshRuntimeUnknownResponse("embedded", "runtime_unavailable", u.runtimeJournal))
 		return
 	}
-	_, _ = u.refreshUpgradeRuntimeOperations(r.Context(), &observed)
+	_, _ = u.refreshUpgradeRuntimeOperations(r.Context(), &observed, true)
 	gateway := freshRuntimeGatewayStatus(observed)
 	resp := freshRuntimeStatusResponse{
 		Mode:       "embedded",
@@ -3537,8 +3545,12 @@ func (c upgradeRuntimeClientAdapter) Start(
 	if err != nil {
 		return model.RuntimeOperationResult{}, err
 	}
-	defer unlock()
-	return client.Start(ctx, request)
+	res, startErr := client.Start(ctx, request)
+	unlock()
+	if startErr == nil && c.owner != nil {
+		c.owner.reconcileCollectorBestEffort(context.WithoutCancel(ctx))
+	}
+	return res, startErr
 }
 
 func (c upgradeRuntimeClientAdapter) Stop(
@@ -3549,8 +3561,12 @@ func (c upgradeRuntimeClientAdapter) Stop(
 	if err != nil {
 		return model.RuntimeOperationResult{}, err
 	}
-	defer unlock()
-	return client.Stop(ctx, request)
+	res, stopErr := client.Stop(ctx, request)
+	unlock()
+	if stopErr == nil && c.owner != nil {
+		c.owner.reconcileCollectorBestEffort(context.WithoutCancel(ctx))
+	}
+	return res, stopErr
 }
 
 func (c upgradeRuntimeClientAdapter) Restart(
@@ -3561,8 +3577,12 @@ func (c upgradeRuntimeClientAdapter) Restart(
 	if err != nil {
 		return model.RuntimeOperationResult{}, err
 	}
-	defer unlock()
-	return client.Restart(ctx, request)
+	res, restartErr := client.Restart(ctx, request)
+	unlock()
+	if restartErr == nil && c.owner != nil {
+		c.owner.reconcileCollectorBestEffort(context.WithoutCancel(ctx))
+	}
+	return res, restartErr
 }
 
 func (c upgradeRuntimeClientAdapter) PrepareUpdate(
@@ -3601,8 +3621,12 @@ func (c upgradeRuntimeClientAdapter) ActivateUpdate(
 	if err != nil {
 		return model.RuntimeOperationResult{}, err
 	}
-	defer unlock()
-	return client.ActivateUpdate(ctx, request)
+	res, actErr := client.ActivateUpdate(ctx, request)
+	unlock()
+	if actErr == nil && c.owner != nil {
+		c.owner.reconcileCollectorBestEffort(context.WithoutCancel(ctx))
+	}
+	return res, actErr
 }
 
 func (c upgradeRuntimeClientAdapter) ObserveUpdateOperation(
@@ -3662,6 +3686,52 @@ func (f fencedUpgradeArtifactRuntime) Upload(ctx context.Context, body io.Reader
 	return client.Upload(ctx, body, contentLength)
 }
 
+func (f fencedUpgradeArtifactRuntime) AdoptBundledBaseline(ctx context.Context, expectedActiveArtifactID string) (runtimeservice.ArtifactStatus, error) {
+	return (upgradeBaselineArtifactAdapter{owner: f.owner}).AdoptBundledBaseline(ctx, expectedActiveArtifactID)
+}
+
+type upgradeBaselineArtifactAdapter struct {
+	owner *upgradeCanonicalServer
+}
+
+func (a upgradeBaselineArtifactAdapter) Status(ctx context.Context) (runtimeservice.ArtifactStatus, error) {
+	if a.owner == nil || a.owner.artifact == nil || a.owner.effectiveRuntimeMode(ctx) != model.RuntimeModeEmbedded {
+		return runtimeservice.ArtifactStatus{}, errEmbeddedRuntimeDisabled
+	}
+	if _, _, err := a.owner.loadVerifiedManagedDestination(ctx); err != nil {
+		return runtimeservice.ArtifactStatus{}, err
+	}
+	return a.owner.artifact.Status(ctx)
+}
+
+func (a upgradeBaselineArtifactAdapter) AdoptBundledBaseline(ctx context.Context, expectedActiveArtifactID string) (runtimeservice.ArtifactStatus, error) {
+	if a.owner == nil || a.owner.artifact == nil {
+		return runtimeservice.ArtifactStatus{}, errEmbeddedRuntimeDisabled
+	}
+	rec, _, err := a.owner.loadVerifiedManagedDestination(ctx)
+	if err != nil {
+		return runtimeservice.ArtifactStatus{}, err
+	}
+	_, unlock, err := (upgradeRuntimeClientAdapter{owner: a.owner}).enterManagedLifecycleMutation(
+		ctx,
+		rec.Intent.ExpectedRuntimeIdentity,
+		false,
+	)
+	if err != nil {
+		return runtimeservice.ArtifactStatus{}, err
+	}
+	if a.owner.artifact == nil {
+		unlock()
+		return runtimeservice.ArtifactStatus{}, errEmbeddedRuntimeDisabled
+	}
+	status, adoptErr := a.owner.artifact.AdoptBundledBaseline(ctx, expectedActiveArtifactID)
+	unlock()
+	if adoptErr == nil {
+		a.owner.reconcileCollectorBestEffort(context.WithoutCancel(ctx))
+	}
+	return status, adoptErr
+}
+
 func (u *upgradeCanonicalServer) serveRuntimeArtifact(w http.ResponseWriter, r *http.Request, resource string) {
 	var client artifactproxy.ArtifactRuntime
 	if u.targetMode == model.UpgradeTargetManaged && u.artifact != nil {
@@ -3713,7 +3783,7 @@ func (u *upgradeCanonicalServer) serveRuntimeOperations(w http.ResponseWriter, r
 		freshRuntimeOperationError(w, http.StatusConflict, "runtime_mutation_unsupported")
 		return
 	}
-	data, err := u.refreshUpgradeRuntimeOperations(r.Context(), obsPtr)
+	data, err := u.refreshUpgradeRuntimeOperations(r.Context(), obsPtr, true)
 	if err != nil {
 		if errors.Is(err, errUpgradeManagedRuntimeUnavailable) {
 			freshRuntimeOperationError(w, http.StatusServiceUnavailable, "runtime_unavailable")
@@ -3746,6 +3816,7 @@ func (u *upgradeCanonicalServer) serveRuntimeOperations(w http.ResponseWriter, r
 func (u *upgradeCanonicalServer) refreshUpgradeRuntimeOperations(
 	ctx context.Context,
 	observed *model.RuntimeObservedStatus,
+	reconcileOnResolve bool,
 ) (freshRuntimeJournalData, error) {
 	var expectedIdentity model.RuntimeIdentity
 	if u.targetMode == model.UpgradeTargetManaged {
@@ -3791,12 +3862,13 @@ func (u *upgradeCanonicalServer) refreshUpgradeRuntimeOperations(
 		return data, nil
 	}
 	u.runtimeJournal.mu.Lock()
-	defer u.runtimeJournal.mu.Unlock()
 	latest, err := u.runtimeJournal.load(ctx)
 	if err != nil {
+		u.runtimeJournal.mu.Unlock()
 		return data, err
 	}
 	applied := false
+	reconcileAfterUnlock := false
 	for requestID, transition := range transitions {
 		stored, found := latest.Operations[requestID]
 		if !found || stored.State != transition[0].State || !stored.UpdatedAt.Equal(transition[0].UpdatedAt) {
@@ -3804,11 +3876,19 @@ func (u *upgradeCanonicalServer) refreshUpgradeRuntimeOperations(
 		}
 		latest.Operations[requestID] = transition[1]
 		applied = true
+		if transition[1].State == freshRuntimeStateSucceeded {
+			reconcileAfterUnlock = true
+		}
 	}
 	if applied {
 		if err := u.runtimeJournal.save(ctx, latest); err != nil {
+			u.runtimeJournal.mu.Unlock()
 			return data, err
 		}
+	}
+	u.runtimeJournal.mu.Unlock()
+	if reconcileOnResolve && reconcileAfterUnlock {
+		u.reconcileCollectorBestEffort(context.WithoutCancel(ctx))
 	}
 	return latest, nil
 }
@@ -3850,17 +3930,19 @@ func (u *upgradeCanonicalServer) submitUpgradeRuntimeOperation(w http.ResponseWr
 		freshRuntimeOperationError(w, http.StatusServiceUnavailable, "runtime_unavailable")
 		return
 	}
-	unlockLifecycle, lockErr := u.runtimeLifecycleMu.Lock(r.Context())
+	rawUnlockLifecycle, lockErr := u.runtimeLifecycleMu.Lock(r.Context())
 	if lockErr != nil {
 		freshRuntimeOperationError(w, http.StatusServiceUnavailable, "runtime_unreachable")
 		return
 	}
+	var unlockOnce sync.Once
+	unlockLifecycle := func() { unlockOnce.Do(rawUnlockLifecycle) }
 	defer unlockLifecycle()
 	if _, _, err := u.db.LoadEmbeddedRuntimeDesiredState(r.Context()); err != nil {
 		freshRuntimeOperationError(w, http.StatusServiceUnavailable, "desired_lifecycle_unavailable")
 		return
 	}
-	rec, observed, obsErr := u.observeVerifiedManagedRuntime(r.Context())
+	_, observed, obsErr := u.observeVerifiedManagedRuntime(r.Context())
 	switch {
 	case errors.Is(obsErr, errUpgradeManagedRuntimeUnavailable):
 		freshRuntimeOperationError(w, http.StatusServiceUnavailable, "runtime_unavailable")
@@ -3879,7 +3961,7 @@ func (u *upgradeCanonicalServer) submitUpgradeRuntimeOperation(w http.ResponseWr
 		freshRuntimeOperationError(w, http.StatusConflict, "capability_not_supported")
 		return
 	}
-	if _, err := u.refreshUpgradeRuntimeOperations(r.Context(), &observed); err != nil {
+	if _, err := u.refreshUpgradeRuntimeOperations(r.Context(), &observed, false); err != nil {
 		freshRuntimeOperationError(w, http.StatusServiceUnavailable, "operation_journal_unavailable")
 		return
 	}
@@ -3927,12 +4009,8 @@ func (u *upgradeCanonicalServer) submitUpgradeRuntimeOperation(w http.ResponseWr
 
 	var expectedArtifact model.RuntimeArtifactID
 	opType := model.RuntimeOperationType(req.Action)
-	if opType == model.RuntimeOperationStart {
-		if observed.ActiveGatewayArtifact != nil {
-			expectedArtifact = observed.ActiveGatewayArtifact.ArtifactID
-		} else {
-			expectedArtifact = rec.Intent.ExpectedActiveArtifactID
-		}
+	if opType == model.RuntimeOperationStart && observed.ActiveGatewayArtifact != nil {
+		expectedArtifact = observed.ActiveGatewayArtifact.ArtifactID
 	}
 	mutCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), freshRuntimeMutationBudget)
 	defer cancel()
@@ -3973,6 +4051,8 @@ func (u *upgradeCanonicalServer) submitUpgradeRuntimeOperation(w http.ResponseWr
 		_, _ = u.db.SetEmbeddedRuntimeDesiredLifecycle(mutCtx, desired)
 		candidate.UpdatedAt = time.Now().UTC()
 		_ = u.saveUpgradeRuntimeOperationEntry(mutCtx, candidate)
+		unlockLifecycle()
+		u.reconcileCollectorBestEffort(context.WithoutCancel(r.Context()))
 		writeFreshJSON(w, candidate.response())
 		return
 	}
@@ -4001,6 +4081,10 @@ func (u *upgradeCanonicalServer) submitUpgradeRuntimeOperation(w http.ResponseWr
 	}
 	candidate.UpdatedAt = time.Now().UTC()
 	_ = u.saveUpgradeRuntimeOperationEntry(mutCtx, candidate)
+	unlockLifecycle()
+	if mutRes.State != model.RuntimeOperationFailed {
+		u.reconcileCollectorBestEffort(context.WithoutCancel(r.Context()))
+	}
 	writeFreshJSON(w, candidate.response())
 }
 
@@ -5407,6 +5491,9 @@ func (u *upgradeCanonicalServer) healManagedStoredConnectionLocked(
 func (u *upgradeCanonicalServer) reconcileCollectorBestEffort(ctx context.Context) {
 	if err := u.reconcileCollector(ctx); err != nil {
 		log.Printf("[upgrade-canonical] collector reconciliation skipped: %v", err)
+		if u != nil && u.targetMode == model.UpgradeTargetManaged && !errors.Is(err, freshkeyapply.ErrUnavailable) {
+			u.armManagedCollectorWaiter()
+		}
 	}
 }
 
@@ -5458,6 +5545,7 @@ func (u *upgradeCanonicalServer) reconcileCollectorWithProbe(ctx context.Context
 					_ = u.healManagedStoredConnectionLocked(ctx, &latestCfg, latestOK, rec, secret)
 				}
 			}
+			u.cancelManagedCollectorWaiter()
 			u.appCtx.Collector.Stop()
 			u.reconcileMu.Unlock()
 			return nil
@@ -5483,6 +5571,7 @@ func (u *upgradeCanonicalServer) reconcileCollectorWithProbe(ctx context.Context
 				_ = u.healManagedStoredConnectionLocked(ctx, &mgrCfg, mgrOK, rec, secret)
 			}
 		}
+		u.cancelManagedCollectorWaiter()
 		u.appCtx.Collector.Stop()
 		return nil
 	}
@@ -5577,28 +5666,56 @@ func (u *upgradeCanonicalServer) reconcileCollectorWithProbe(ctx context.Context
 		externalCredDigest = credDigest
 	case model.UpgradeTargetManaged:
 		if u.workspace == nil || u.runtime == nil {
+			u.cancelManagedCollectorWaiter()
+			u.appCtx.Collector.Stop()
+			return nil
+		}
+		if desired, hasDesired, desiredErr := u.db.LoadEmbeddedRuntimeDesiredState(ctx); desiredErr == nil &&
+			hasDesired && desired.DesiredLifecycle == model.EmbeddedRuntimeDesiredStopped {
+			u.cancelManagedCollectorWaiter()
 			u.appCtx.Collector.Stop()
 			return nil
 		}
 		rec, secret, err := u.workspace.loadManagedDestination(ctx)
 		if err != nil {
 			u.appCtx.Collector.Stop()
+			if errors.Is(err, freshkeyapply.ErrUnavailable) {
+				u.cancelManagedCollectorWaiter()
+			} else {
+				u.armManagedCollectorWaiter()
+			}
 			return err
 		}
-		if _, _, _, err := verifyUpgradeManagedLiveRuntime(ctx, u.runtime, rec); err != nil {
+		obs, obsErr := u.runtime.Status(ctx)
+		if obsErr != nil {
 			u.appCtx.Collector.Stop()
+			u.armManagedCollectorWaiter()
+			return nil
+		}
+		if _, _, _, liveErr := verifyUpgradeManagedLiveRuntimeStatus(rec, obs); liveErr != nil {
+			u.appCtx.Collector.Stop()
+			if obs.Identity == rec.Intent.ExpectedRuntimeIdentity {
+				u.armManagedCollectorWaiter()
+			} else {
+				u.cancelManagedCollectorWaiter()
+			}
 			return nil
 		}
 		if err := u.healManagedStoredConnectionLocked(ctx, &mgrCfg, mgrOK, rec, secret); err != nil {
+			u.armManagedCollectorWaiter()
 			return err
 		}
 	default:
+		u.cancelManagedCollectorWaiter()
 		u.appCtx.Collector.Stop()
 		return nil
 	}
 
 	rtCfg := collectorsvc.RuntimeConfigFromManagerConfigWithFallback(mgrCfg, u.appCtx.Config)
 	if activeCfg, active := u.appCtx.Collector.ActiveRuntimeConfig(); active && activeCfg == rtCfg {
+		if u.targetMode == model.UpgradeTargetManaged {
+			u.cancelManagedCollectorWaiter()
+		}
 		return nil
 	}
 	collectorCtx := u.hostCtx
@@ -5623,5 +5740,150 @@ func (u *upgradeCanonicalServer) reconcileCollectorWithProbe(ctx context.Context
 		return nil
 	}
 	u.appCtx.Collector.Start(collectorCtx, rtCfg)
+	u.cancelManagedCollectorWaiter()
 	return nil
+}
+
+const defaultUpgradeManagedCollectorWaitBudget = 2 * time.Minute
+
+func (u *upgradeCanonicalServer) cancelManagedCollectorWaiter() {
+	if u == nil {
+		return
+	}
+	u.managedCollectorWaitMu.Lock()
+	defer u.managedCollectorWaitMu.Unlock()
+	u.managedCollectorWaitID++
+	if u.managedCollectorWaitCancel != nil {
+		u.managedCollectorWaitCancel()
+		u.managedCollectorWaitCancel = nil
+	}
+}
+
+func (u *upgradeCanonicalServer) releaseManagedCollectorWaiter(waiterID uint64) {
+	if u == nil {
+		return
+	}
+	u.managedCollectorWaitMu.Lock()
+	defer u.managedCollectorWaitMu.Unlock()
+	if u.managedCollectorWaitID == waiterID {
+		u.managedCollectorWaitCancel = nil
+	}
+}
+
+func (u *upgradeCanonicalServer) managedWaiterUpgradeTerminal(ctx context.Context) (terminal bool, transientErr bool) {
+	if u == nil || u.db == nil || u.db.SQLDB() == nil {
+		return true, false
+	}
+	if u.testManagedCollectorWaitCheck != nil {
+		if err := u.testManagedCollectorWaitCheck(); err != nil {
+			return false, true
+		}
+	}
+	loaded, ev, ok, err := loadVerifiedCompletedUpgradeOperation(ctx, upgradeoperation.New(u.db.SQLDB()))
+	if err != nil {
+		return false, true
+	}
+	if !ok || loaded.Stage != model.UpgradeStageComplete ||
+		ev.TargetMode != u.targetMode ||
+		strings.TrimSpace(ev.SourceFingerprint) != u.sourceFingerprint ||
+		validateCompletedUpgradeRoutingRow(loaded, u.targetMode) != nil {
+		return true, false
+	}
+	u.syncOp(loaded)
+	return false, false
+}
+
+func (u *upgradeCanonicalServer) armManagedCollectorWaiter() {
+	if u == nil || u.targetMode != model.UpgradeTargetManaged ||
+		u.appCtx == nil || u.appCtx.Collector == nil ||
+		u.runtime == nil || u.workspace == nil ||
+		u.hostCtx == nil || u.hostCtx.Err() != nil {
+		return
+	}
+	u.managedCollectorWaitMu.Lock()
+	if u.managedCollectorWaitCancel != nil {
+		u.managedCollectorWaitMu.Unlock()
+		return
+	}
+	budget := u.managedCollectorWaitBudget
+	if budget <= 0 {
+		budget = defaultUpgradeManagedCollectorWaitBudget
+	}
+	waitCtx, cancel := context.WithTimeout(u.hostCtx, budget)
+	u.managedCollectorWaitID++
+	waiterID := u.managedCollectorWaitID
+	u.managedCollectorWaitCancel = cancel
+	u.managedCollectorWaitMu.Unlock()
+
+	u.bgWG.Add(1)
+	go func() {
+		defer u.bgWG.Done()
+		u.awaitManagedRuntimeForCollector(waitCtx, cancel, waiterID)
+	}()
+}
+
+func (u *upgradeCanonicalServer) awaitManagedRuntimeForCollector(
+	ctx context.Context,
+	selfCancel context.CancelFunc,
+	waiterID uint64,
+) {
+	defer selfCancel()
+	defer u.releaseManagedCollectorWaiter(waiterID)
+	pollEvery := u.managedCollectorPollEvery
+	if pollEvery <= 0 {
+		pollEvery = freshRuntimeReadinessInterval
+	}
+	ticker := time.NewTicker(pollEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if terminal, transient := u.managedWaiterUpgradeTerminal(ctx); terminal {
+			return
+		} else if transient {
+			continue
+		}
+		if mgrCfg, mgrOK, err := u.db.LoadManagerConfig(ctx); err != nil {
+			continue
+		} else if mgrOK && !collectorsvc.ManagerCollectorEnabled(mgrCfg) {
+			return
+		}
+		if desired, hasDesired, err := u.db.LoadEmbeddedRuntimeDesiredState(ctx); err != nil {
+			continue
+		} else if hasDesired && desired.DesiredLifecycle == model.EmbeddedRuntimeDesiredStopped {
+			return
+		}
+		rec, _, err := u.workspace.loadManagedDestination(ctx)
+		if err != nil {
+			if errors.Is(err, freshkeyapply.ErrUnavailable) {
+				return
+			}
+			continue
+		}
+		obs, obsErr := u.runtime.Status(ctx)
+		if obsErr != nil {
+			continue
+		}
+		if obs.Identity != rec.Intent.ExpectedRuntimeIdentity {
+			return
+		}
+		if _, _, _, liveErr := verifyUpgradeManagedLiveRuntimeStatus(rec, obs); liveErr != nil {
+			continue
+		}
+		if recErr := u.reconcileCollector(ctx); recErr != nil {
+			if errors.Is(recErr, freshkeyapply.ErrUnavailable) {
+				return
+			}
+			continue
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if _, active := u.appCtx.Collector.ActiveRuntimeConfig(); active {
+			return
+		}
+	}
 }
